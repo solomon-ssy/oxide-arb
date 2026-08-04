@@ -7,7 +7,8 @@ use quant_pivot_models::{
         api::{DriftReportListQuery, FeedbackCycleListQuery},
         pagination::{PageRequest, Paginated},
         quant::{
-            DriftReportInfo, FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
+            DriftReportInfo, FeedbackCoordinatorFaultInfo, FeedbackCoordinatorFaultReason,
+            FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
             FeedbackOutboxEntry, FeedbackQueueSnapshot, FeedbackStageEventInfo,
             FeedbackTriggerEventInfo, GovernedFeedbackCancellation, GovernedFeedbackTrigger,
             NewDriftReport, NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent,
@@ -66,11 +67,26 @@ pub enum FeedbackCycleCasOutcome {
     AlreadyApplied(FeedbackCycleInfo),
 }
 
-/// Whether a claim started a queued cycle or recovered an expired lease.
+/// Outcome of an idempotent coordinator-fault append.
+#[derive(Debug, Clone)]
+pub enum FeedbackCoordinatorFaultWriteOutcome {
+    Inserted(FeedbackCoordinatorFaultInfo),
+    AlreadyPresent(FeedbackCoordinatorFaultInfo),
+}
+
+/// Atomic result of quarantining one corrupted coordinator cycle.
+#[derive(Debug, Clone)]
+pub struct FeedbackCoordinatorQuarantine {
+    pub cycle: FeedbackCycleCasOutcome,
+    pub fault: FeedbackCoordinatorFaultWriteOutcome,
+}
+
+/// Why a coordinator claim acquired the cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedbackCycleClaimMode {
     Started,
     LeaseRecovered,
+    StageResumed,
 }
 
 /// Unowned generation precondition used by governed cancellation.
@@ -209,6 +225,27 @@ pub trait FeedbackCycleRepository: FeedbackOutboxRepository {
         &self,
         lease: FeedbackCycleLeaseGuard,
     ) -> Result<FeedbackCycleInfo, StorageError>;
+
+    /// Persist a future stage-resume boundary and release the exact live lease.
+    async fn defer_cycle(
+        &self,
+        lease: FeedbackCycleLeaseGuard,
+        resume_after: DateTime<Utc>,
+    ) -> Result<FeedbackCycleInfo, StorageError>;
+
+    /// Atomically append independent WORM corruption evidence, clear the
+    /// exact live lease, and terminalize the cycle as quarantined.
+    async fn quarantine_cycle(
+        &self,
+        lease: FeedbackCycleLeaseGuard,
+        reason: FeedbackCoordinatorFaultReason,
+    ) -> Result<FeedbackCoordinatorQuarantine, StorageError>;
+
+    /// Read the immutable corruption evidence for one quarantined cycle.
+    async fn find_coordinator_fault(
+        &self,
+        cycle_id: &FeedbackCycleId,
+    ) -> Result<Option<FeedbackCoordinatorFaultInfo>, StorageError>;
 
     /// Atomically record governed cancellation evidence and mutate the cycle.
     ///

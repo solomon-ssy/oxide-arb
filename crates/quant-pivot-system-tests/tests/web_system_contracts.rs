@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::{SinkExt, StreamExt};
+use quant_pivot_models::domain::api::FeedbackCycleTriggerRequest;
 use quant_pivot_system_tests::{
     production_stack::{ProductionStack, ProductionStackFixture},
     stack::BOOTSTRAP_ADMIN_PASSWORD,
@@ -355,6 +356,7 @@ impl FeedbackSocket {
 
 #[tokio::test]
 async fn production_web_boundary_end() -> Result<()> {
+    assert_feedback_fixture_shapes()?;
     let mut stack = ProductionStack::start(ProductionStackFixture::GovernedFeedback).await?;
     let artifacts = stack.run_dir().display().to_string();
     let result = Box::pin(exercise_web_boundary(&mut stack)).await;
@@ -368,6 +370,45 @@ async fn production_web_boundary_end() -> Result<()> {
         bail!("production web system contract failed; artifacts={artifacts}: {error:#}");
     }
     Box::pin(stack.stop(true)).await
+}
+
+fn feedback_trigger_body(profile_id: &str, reason: &str, idempotency_key: &str) -> Value {
+    json!({
+        "profile_id": profile_id,
+        "evaluation_mode": "conditional",
+        "idempotency_key": idempotency_key,
+        "parent_cycle_id": null,
+        "reason": reason,
+    })
+}
+
+fn assert_feedback_fixture_shapes() -> Result<()> {
+    for body in [
+        feedback_trigger_body(
+            "crypto_price_15m",
+            "operator_retrain",
+            "web-feedback-valid-shape",
+        ),
+        feedback_trigger_body(
+            "missing_profile",
+            "operator_retrain",
+            "web-feedback-missing-profile",
+        ),
+        feedback_trigger_body(
+            "weather_forecast_24h",
+            "w4_e03_operator_retrain",
+            "web-feedback-ws-replay",
+        ),
+    ] {
+        serde_json::from_value::<FeedbackCycleTriggerRequest>(body)
+            .context("feedback trigger system-test fixture no longer matches the wire DTO")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn feedback_fixture_shapes() {
+    assert_feedback_fixture_shapes().expect("feedback trigger fixtures match the wire DTO");
 }
 
 async fn exercise_web_boundary(stack: &mut ProductionStack) -> Result<()> {
@@ -885,10 +926,11 @@ async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -
                 "/api/research/feedback-cycles",
                 viewer,
                 acting_role,
-                json!({
-                    "profile_id": "crypto_price_15m",
-                    "reason": "operator_retrain",
-                }),
+                feedback_trigger_body(
+                    "crypto_price_15m",
+                    "operator_retrain",
+                    "web-feedback-viewer-denied",
+                ),
             )
             .await?,
             StatusCode::FORBIDDEN,
@@ -907,10 +949,11 @@ async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -
         api.post(
             "/api/research/feedback-cycles",
             Some(admin),
-            json!({
-                "profile_id": "crypto_price_15m",
-                "reason": "Invalid reason",
-            }),
+            feedback_trigger_body(
+                "crypto_price_15m",
+                "Invalid reason",
+                "web-feedback-invalid-reason",
+            ),
         )
         .await?,
         StatusCode::BAD_REQUEST,
@@ -921,10 +964,11 @@ async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -
         api.post(
             "/api/research/feedback-cycles",
             Some(admin),
-            json!({
-                "profile_id": "missing_profile",
-                "reason": "operator_retrain",
-            }),
+            feedback_trigger_body(
+                "missing_profile",
+                "operator_retrain",
+                "web-feedback-missing-profile",
+            ),
         )
         .await?,
         StatusCode::NOT_FOUND,
@@ -936,10 +980,11 @@ async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -
             "/api/research/feedback-cycles",
             admin,
             "super_admin",
-            json!({
-                "profile_id": "crypto_price_15m",
-                "reason": "operator_retrain",
-            }),
+            feedback_trigger_body(
+                "crypto_price_15m",
+                "operator_retrain",
+                "web-feedback-missing-route",
+            ),
         )
         .await?,
         StatusCode::CONFLICT,
@@ -1144,10 +1189,11 @@ async fn assert_feedback_live(
             "/api/research/feedback-cycles",
             &admin.access_token,
             "super_admin",
-            json!({
-                "profile_id": "weather_forecast_24h",
-                "reason": "w4_e03_drifted_reason",
-            }),
+            feedback_trigger_body(
+                "weather_forecast_24h",
+                "w4_e03_drifted_reason",
+                "web-feedback-ws-distinct",
+            ),
         )
         .await?,
         StatusCode::ACCEPTED,
@@ -1361,10 +1407,7 @@ async fn trigger_feedback(api: &ApiClient, admin: &str, reason: &str) -> Result<
             "/api/research/feedback-cycles",
             admin,
             "super_admin",
-            json!({
-                "profile_id": "weather_forecast_24h",
-                "reason": reason,
-            }),
+            feedback_trigger_body("weather_forecast_24h", reason, "web-feedback-ws-replay"),
         )
         .await?,
         StatusCode::ACCEPTED,

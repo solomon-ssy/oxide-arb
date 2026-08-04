@@ -475,6 +475,11 @@ poll_secs = 3
 # Bounded automatic crash-recovery re-queues before a job is quarantined to
 # failed (poison-pill guard). Default: 3.
 max_recovery_attempts = 3
+# Typed transient execution failures are retried durably with capped
+# exponential backoff. Configuration, authorization, and invariant failures
+# remain terminal. Defaults: 2 / 60 seconds.
+execution_retry_initial_secs = 2
+execution_retry_max_secs = 60
 # Hard cap on the deterministic historical spine (selection x instants): a
 # dry-run plan beyond this flags hard_cap_exceeded; a build fails closed.
 # Default: 2000000.
@@ -500,6 +505,26 @@ feedback_alert_dedupe_secs = 900
 # explicitly re-queued for the next epoch. Keep short: a build restarts from
 # scratch on re-lease, so draining only lets near-complete work finish. Default: 3.
 shutdown_drain_secs = 3
+
+[quant.research_jobs.feature_parity_compute]
+# Mandatory bounded replay envelope. Omitting this table or setting any field
+# to zero fails startup validation. Replay pages execute on the governed
+# offline pool so ClickHouse decoding and deterministic reconstruction cannot
+# starve Tokio request/heartbeat workers.
+page_size = 100
+max_concurrency = 1
+max_working_set_bytes = 4294967296
+deadline_secs = 1800
+
+[quant.research_jobs.feedback_attribution_compute]
+# Mandatory bounded materialization envelope. Omitting this table or setting
+# any field to zero fails startup validation; there is no implicit production
+# fallback. Concurrency bounds asynchronous group build/object-store/database
+# I/O; CPU kernels remain exclusive inside the process-wide ComputeExecutor.
+page_size = 250
+max_concurrency = 4
+max_working_set_bytes = 536870912
+deadline_secs = 1800
 
 [quant.account]
 # Purpose: Polymarket funder address for keyless Data API position reads
@@ -543,6 +568,8 @@ max_pending_loads = 64
 max_concurrent_loads = 4
 # End-to-end cold-load deadline in milliseconds. Default: 60000.
 load_timeout_ms = 60000
+# Total resident-memory reservation for route-owned shadow candidates.
+max_total_shadow_model_bytes = 2147483648
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
@@ -721,6 +748,13 @@ cors_allowed_origins = []
 serve_static_ui = false
 # Purpose: directory of the built SPA assets. Default: "static/ui".
 static_ui_dir = "static/ui"
+
+[web.password_crypto]
+# Purpose: bound admitted Argon2 operations (one executes on the isolated
+# security CPU pool; the remainder are a bounded queue). Default: 8.
+max_in_flight = 8
+# Purpose: end-to-end queue + Argon2 deadline. Default: 15000 ms.
+deadline_ms = 15000
 
 [web.jwt]
 # Purpose: Base64URL-no-pad 32-byte HS256 signing-key source.

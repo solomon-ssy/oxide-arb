@@ -22,29 +22,89 @@ use quant_pivot_models::{
         TemperatureUnit, WeatherContractFinalizationPolicy, WeatherTemperatureStatistic,
     },
 };
-use regex::{Match, Regex};
+use regex::{Error as RegexError, Match, Regex};
 use rust_decimal::Decimal;
 use url::Url;
 
 use super::extractor::{ExtractedCandidate, SubjectExtractor};
 
-static BETWEEN_BAND: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?i)between\s+(-?\d+)\s*[-–]\s*(-?\d+)\s*°?\s*([FC])\b").ok());
-static OPEN_BAND: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"(?i)(-?\d+)\s*°?\s*([FC])\s+or\s+(higher|above|lower|below)\b").ok()
-});
-static EXACT_BAND: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?i)\bbe\s+(-?\d+)\s*°?\s*([FC])\s+on\b").ok());
-static TEMPERATURE_STATISTIC: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(highest|lowest)\s+temperature\b").ok());
-static QUESTION_DATE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?i)\bon\s+([a-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?\b").ok());
-static SETTLEMENT_URL: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static BETWEEN_BAND: LazyLock<Result<Regex, RegexError>> =
+    LazyLock::new(|| Regex::new(r"(?i)between\s+(-?\d+)\s*[-–]\s*(-?\d+)\s*°?\s*([FC])\b"));
+static OPEN_BAND: LazyLock<Result<Regex, RegexError>> =
+    LazyLock::new(|| Regex::new(r"(?i)(-?\d+)\s*°?\s*([FC])\s+or\s+(higher|above|lower|below)\b"));
+static EXACT_BAND: LazyLock<Result<Regex, RegexError>> =
+    LazyLock::new(|| Regex::new(r"(?i)\bbe\s+(-?\d+)\s*°?\s*([FC])\s+on\b"));
+static TEMPERATURE_STATISTIC: LazyLock<Result<Regex, RegexError>> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(highest|lowest)\s+temperature\b"));
+static QUESTION_DATE: LazyLock<Result<Regex, RegexError>> =
+    LazyLock::new(|| Regex::new(r"(?i)\bon\s+([a-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?\b"));
+static SETTLEMENT_URL: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"https://(?:(?:www\.)?wunderground\.com/history/daily/[^\s)]+/[A-Za-z]{4}|www\.weather\.gov/wrh/timeseries\?site=[A-Za-z]{4})",
     )
-    .ok()
 });
+
+#[derive(Debug, Clone, Copy)]
+struct WeatherDailyRegexes {
+    between_band: &'static Regex,
+    open_band: &'static Regex,
+    exact_band: &'static Regex,
+    temperature_statistic: &'static Regex,
+    question_date: &'static Regex,
+    settlement_url: &'static Regex,
+}
+
+impl WeatherDailyRegexes {
+    fn load() -> QuantResult<Self> {
+        let regexes = Self {
+            between_band: required_regex(&BETWEEN_BAND, "between_band")?,
+            open_band: required_regex(&OPEN_BAND, "open_band")?,
+            exact_band: required_regex(&EXACT_BAND, "exact_band")?,
+            temperature_statistic: required_regex(&TEMPERATURE_STATISTIC, "temperature_statistic")?,
+            question_date: required_regex(&QUESTION_DATE, "question_date")?,
+            settlement_url: required_regex(&SETTLEMENT_URL, "settlement_url")?,
+        };
+        regexes.validate_golden()?;
+        Ok(regexes)
+    }
+
+    fn validate_golden(&self) -> QuantResult<()> {
+        for (name, regex, sample) in [
+            ("between_band", self.between_band, "between 82-83°F"),
+            ("open_band", self.open_band, "65°F or below"),
+            ("exact_band", self.exact_band, "be 84°F on"),
+            (
+                "temperature_statistic",
+                self.temperature_statistic,
+                "highest temperature",
+            ),
+            ("question_date", self.question_date, "on July 11, 2026"),
+            (
+                "settlement_url",
+                self.settlement_url,
+                "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA",
+            ),
+        ] {
+            if !regex.is_match(sample) {
+                return Err(QuantError::config(format!(
+                    "built-in daily Weather parser golden sample `{name}` no longer matches"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn required_regex(
+    compiled: &'static Result<Regex, RegexError>,
+    name: &'static str,
+) -> QuantResult<&'static Regex> {
+    compiled.as_ref().map_err(|error| {
+        QuantError::config(format!(
+            "built-in daily Weather parser regex `{name}` failed to compile: {error}"
+        ))
+    })
+}
 
 /// Immutable exact-station registry available to this deployment. Profiles
 /// are source-binding data, not a city→airport guess table.
@@ -173,12 +233,21 @@ pub fn weather_station_profile_hash(
 /// minimum temperature sibling groups.
 pub struct WeatherDailyTemperatureExtractor {
     stations: WeatherStationRegistry,
+    regexes: WeatherDailyRegexes,
 }
 
 impl WeatherDailyTemperatureExtractor {
-    #[must_use]
-    pub const fn new(stations: WeatherStationRegistry) -> Self {
-        Self { stations }
+    /// Validate all built-in expressions and bind the station registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed boot configuration failure when a built-in parser
+    /// expression cannot compile.
+    pub fn try_new(stations: WeatherStationRegistry) -> QuantResult<Self> {
+        Ok(Self {
+            stations,
+            regexes: WeatherDailyRegexes::load()?,
+        })
     }
 }
 
@@ -189,7 +258,7 @@ impl SubjectExtractor for WeatherDailyTemperatureExtractor {
 
     fn extract(&self, metadata: &LinkageSourceMetadata) -> QuantResult<Option<ExtractedCandidate>> {
         let Some((temperature_statistic, statistic_span)) =
-            parse_temperature_statistic(&metadata.question)
+            parse_temperature_statistic(&metadata.question, &self.regexes)
         else {
             return Ok(None);
         };
@@ -197,7 +266,7 @@ impl SubjectExtractor for WeatherDailyTemperatureExtractor {
             return Ok(None);
         };
         let Some((description_statistic, description_statistic_span)) =
-            parse_temperature_statistic(description)
+            parse_temperature_statistic(description, &self.regexes)
         else {
             return Ok(None);
         };
@@ -211,10 +280,7 @@ impl SubjectExtractor for WeatherDailyTemperatureExtractor {
         else {
             return Ok(None);
         };
-        let Some(url_match) = SETTLEMENT_URL
-            .as_ref()
-            .and_then(|regex| regex.find(description))
-        else {
+        let Some(url_match) = self.regexes.settlement_url.find(description) else {
             return Ok(None);
         };
         let settlement_rule_url = url_match.as_str().trim_end_matches('.').to_owned();
@@ -227,10 +293,10 @@ impl SubjectExtractor for WeatherDailyTemperatureExtractor {
         if profile.timezone.parse::<Tz>().is_err() {
             return Ok(None);
         }
-        let Some((band, unit, band_span)) = parse_band(&metadata.question) else {
+        let Some((band, unit, band_span)) = parse_band(&metadata.question, &self.regexes) else {
             return Ok(None);
         };
-        let Some((local_date, date_span)) = parse_local_date(metadata) else {
+        let Some((local_date, date_span)) = parse_local_date(metadata, &self.regexes) else {
             return Ok(None);
         };
         let station_registry_hash = self.stations.registry_hash()?;
@@ -360,8 +426,9 @@ fn grounding_spans(
 
 fn parse_temperature_statistic(
     question: &str,
+    regexes: &WeatherDailyRegexes,
 ) -> Option<(WeatherTemperatureStatistic, (usize, usize))> {
-    let captures = TEMPERATURE_STATISTIC.as_ref()?.captures(question)?;
+    let captures = regexes.temperature_statistic.captures(question)?;
     let full = captures.get(0)?;
     let statistic = match captures.get(1)?.as_str().to_ascii_lowercase().as_str() {
         "highest" => WeatherTemperatureStatistic::Maximum,
@@ -409,11 +476,11 @@ fn station_from_url(value: &str) -> Option<IcaoStation> {
     IcaoStation::parse(station).ok()
 }
 
-fn parse_band(question: &str) -> Option<(TemperatureBand, TemperatureUnit, (usize, usize))> {
-    if let Some(captures) = BETWEEN_BAND
-        .as_ref()
-        .and_then(|regex| regex.captures(question))
-    {
+fn parse_band(
+    question: &str,
+    regexes: &WeatherDailyRegexes,
+) -> Option<(TemperatureBand, TemperatureUnit, (usize, usize))> {
+    if let Some(captures) = regexes.between_band.captures(question) {
         let full = captures.get(0)?;
         let lower = captures.get(1)?.as_str().parse::<Decimal>().ok()?;
         let upper = captures.get(2)?.as_str().parse::<Decimal>().ok()?;
@@ -426,10 +493,7 @@ fn parse_band(question: &str) -> Option<(TemperatureBand, TemperatureUnit, (usiz
             .is_valid()
             .then_some((band, unit, (full.start(), full.end())));
     }
-    if let Some(captures) = OPEN_BAND
-        .as_ref()
-        .and_then(|regex| regex.captures(question))
-    {
+    if let Some(captures) = regexes.open_band.captures(question) {
         let full = captures.get(0)?;
         let bound = captures.get(1)?.as_str().parse::<Decimal>().ok()?;
         let unit = parse_unit(captures.get(2)?.as_str())?;
@@ -447,7 +511,7 @@ fn parse_band(question: &str) -> Option<(TemperatureBand, TemperatureUnit, (usiz
         };
         return Some((band, unit, (full.start(), full.end())));
     }
-    let captures = EXACT_BAND.as_ref()?.captures(question)?;
+    let captures = regexes.exact_band.captures(question)?;
     let value_match = captures.get(1)?;
     let unit_match = captures.get(2)?;
     let value = value_match.as_str().parse::<Decimal>().ok()?;
@@ -469,8 +533,11 @@ fn parse_unit(value: &str) -> Option<TemperatureUnit> {
     }
 }
 
-fn parse_local_date(metadata: &LinkageSourceMetadata) -> Option<(NaiveDate, (usize, usize))> {
-    let captures = QUESTION_DATE.as_ref()?.captures(&metadata.question)?;
+fn parse_local_date(
+    metadata: &LinkageSourceMetadata,
+    regexes: &WeatherDailyRegexes,
+) -> Option<(NaiveDate, (usize, usize))> {
+    let captures = regexes.question_date.captures(&metadata.question)?;
     let full = captures.get(0)?;
     let month = month_number(captures.get(1)?.as_str())?;
     let day = captures.get(2)?.as_str().parse::<u32>().ok()?;
@@ -624,7 +691,7 @@ pub fn validate_weather_decision_group(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::LazyLock};
 
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
@@ -634,12 +701,19 @@ mod tests {
             IcaoStation, MarketId, WeatherContractFinalizationPolicy, WeatherTemperatureStatistic,
         },
     };
+    use regex::{Error as RegexError, Regex};
     use rust_decimal_macros::dec;
 
     use super::{
         SubjectExtractor, WeatherDailyTemperatureExtractor, WeatherDecisionGroupMember,
-        WeatherStationRegistry, validate_weather_decision_group,
+        WeatherStationRegistry, required_regex, validate_weather_decision_group,
     };
+
+    static INVALID_REGEX: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
+        let mut pattern = String::with_capacity(1);
+        pattern.push('(');
+        Regex::new(&pattern)
+    });
 
     fn station_profile() -> WeatherStationProfileConfig {
         WeatherStationProfileConfig {
@@ -653,15 +727,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn regex_boot_fails() {
+        assert!(required_regex(&INVALID_REGEX, "invalid_test").is_err());
+    }
+
     impl WeatherDailyTemperatureExtractor {
         fn test_fixture() -> Self {
-            Self::new(
+            Self::try_new(
                 WeatherStationRegistry::try_new(BTreeMap::from([(
                     "KLGA".to_owned(),
                     station_profile(),
                 )]))
                 .expect("station registry"),
             )
+            .expect("built-in daily Weather parser")
         }
     }
 
@@ -753,7 +833,9 @@ mod tests {
 
     #[test]
     fn unknown_station_fails_closed() {
-        let extractor = WeatherDailyTemperatureExtractor::new(WeatherStationRegistry::default());
+        let extractor =
+            WeatherDailyTemperatureExtractor::try_new(WeatherStationRegistry::default())
+                .expect("built-in daily Weather parser");
         assert!(
             extractor
                 .extract(&metadata(
@@ -767,7 +849,7 @@ mod tests {
 
     #[test]
     fn resolves_noaa_timeseries_parameter() {
-        let extractor = WeatherDailyTemperatureExtractor::new(
+        let extractor = WeatherDailyTemperatureExtractor::try_new(
             WeatherStationRegistry::try_new(BTreeMap::from([(
                 "LTFM".to_owned(),
                 WeatherStationProfileConfig {
@@ -781,7 +863,8 @@ mod tests {
                 },
             )]))
             .expect("station registry"),
-        );
+        )
+        .expect("built-in daily Weather parser");
         let metadata = LinkageSourceMetadata {
             market_id: MarketId::new("istanbul-temperature"),
             slug: "highest-temperature-in-istanbul-on-july-18".to_owned(),

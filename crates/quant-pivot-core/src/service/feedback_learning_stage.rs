@@ -10,9 +10,10 @@ use quant_pivot_models::{
             RunCpcvBacktestRequest, TrainModelRequest,
         },
         ports::{
-            FeedbackCalibrationCommand, FeedbackCalibrationJobParams, FeedbackCandidateRecipe,
-            FeedbackCpcvCommand, FeedbackCpcvJobParams, FeedbackDatasetBuildCommand,
-            FeedbackDatasetRole, FeedbackDatasetSealJobParams, FeedbackLearningStageArtifactRef,
+            FeedbackCalibrationCommand, FeedbackCalibrationJobParams, FeedbackCandidateFamily,
+            FeedbackCandidateRecipe, FeedbackCpcvCommand, FeedbackCpcvJobParams,
+            FeedbackDatasetBuildCommand, FeedbackDatasetRole, FeedbackDatasetSealJobParams,
+            FeedbackLearningStageArtifactRef, FeedbackRecipeResourceBudget,
             FeedbackTrainingCommand, FeedbackTrainingJobParams, GovernanceActor,
             ModelCalibrationFitJobParams,
         },
@@ -24,6 +25,7 @@ use quant_pivot_models::{
     enums::quant::{
         DatasetPurpose, FeedbackStage, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
     },
+    hashing::CanonicalDigest,
     types::{
         BacktestPathSetId, ContentHash, FeedbackCycleId, FeedbackLearningStageArtifactId,
         ModelRunId, ModelVersionId, ResearchJobParams, RoleCode,
@@ -38,7 +40,9 @@ use quant_pivot_research::{
     },
 };
 
-use crate::service::feedback_coordinator::FeedbackStageSuccess;
+use crate::service::{
+    feedback_coordinator::FeedbackStageSuccess, feedback_recipe_stage::FeedbackRecipeStageAdapter,
+};
 
 const TRAIN_REASON: &str = "feedback_candidate_training";
 const CALIBRATION_REASON: &str = "feedback_candidate_calibration";
@@ -58,6 +62,7 @@ struct LearningJobExpectation {
 pub struct FeedbackLearningStageDeps {
     pub jobs: Arc<dyn ResearchJobRepository>,
     pub artifacts: Arc<dyn ArtifactStore>,
+    pub recipes: Arc<FeedbackRecipeStageAdapter>,
     pub max_recovery_attempts: i32,
 }
 
@@ -65,6 +70,7 @@ pub struct FeedbackLearningStageDeps {
 pub struct FeedbackLearningStageAdapter {
     jobs: Arc<dyn ResearchJobRepository>,
     artifacts: Arc<dyn ArtifactStore>,
+    recipes: Arc<FeedbackRecipeStageAdapter>,
     max_recovery_attempts: i32,
 }
 
@@ -78,6 +84,7 @@ impl FeedbackLearningStageAdapter {
         Ok(Self {
             jobs: deps.jobs,
             artifacts: deps.artifacts,
+            recipes: deps.recipes,
             max_recovery_attempts: deps.max_recovery_attempts,
         })
     }
@@ -90,8 +97,9 @@ impl FeedbackLearningStageAdapter {
     ) -> QuantResult<NewResearchJob> {
         match identity.feedback_stage() {
             FeedbackStage::DatasetSeal => {
-                let params = Self::dataset_params(cycle)?;
-                self.prepare_dataset_seal(cycle, identity, params)
+                let family = self.family(cycle).await?;
+                let params = Self::dataset_params(cycle, &family)?;
+                self.prepare_dataset_seal(cycle, identity, params, &family)
             }
             FeedbackStage::Training => {
                 let params = self.training_params(cycle).await?;
@@ -117,6 +125,7 @@ impl FeedbackLearningStageAdapter {
         cycle: &FeedbackCycleInfo,
         identity: FeedbackStageJobIdentity,
         params: FeedbackDatasetSealJobParams,
+        family: &FeedbackCandidateFamily,
     ) -> QuantResult<NewResearchJob> {
         params.validate()?;
         Self::require_identity(cycle, identity, FeedbackStage::DatasetSeal)?;
@@ -125,8 +134,9 @@ impl FeedbackLearningStageAdapter {
             params.feedback_cycle_id,
             params.cycle_idempotency_hash,
             params.candidate_family_hash,
+            family.candidate_family_hash(),
         )?;
-        Self::require_dataset_family(cycle, &params)?;
+        Self::require_dataset_family(family, &params)?;
         self.bind_job(identity, ResearchJobParams::FeedbackDatasetSeal(params))
     }
 
@@ -137,6 +147,7 @@ impl FeedbackLearningStageAdapter {
         identity: FeedbackStageJobIdentity,
         params: FeedbackTrainingJobParams,
     ) -> QuantResult<NewResearchJob> {
+        let family = self.family(cycle).await?;
         params.validate()?;
         Self::require_identity(cycle, identity, FeedbackStage::Training)?;
         Self::require_cycle(
@@ -144,9 +155,10 @@ impl FeedbackLearningStageAdapter {
             params.feedback_cycle_id,
             params.cycle_idempotency_hash,
             params.candidate_family_hash,
+            family.candidate_family_hash(),
         )?;
-        Self::require_training_family(cycle, &params)?;
-        let predecessor = self.require_predecessor(cycle, &params.previous).await?;
+        Self::require_training_family(&family, &params)?;
+        let predecessor = self.verify_reference(cycle, &params.previous).await?;
         Self::require_training_predecessor(&params, &predecessor)?;
         self.bind_job(identity, ResearchJobParams::FeedbackTraining(params))
     }
@@ -158,6 +170,7 @@ impl FeedbackLearningStageAdapter {
         identity: FeedbackStageJobIdentity,
         params: FeedbackCalibrationJobParams,
     ) -> QuantResult<NewResearchJob> {
+        let family = self.family(cycle).await?;
         params.validate()?;
         Self::require_identity(cycle, identity, FeedbackStage::Calibration)?;
         Self::require_cycle(
@@ -165,9 +178,10 @@ impl FeedbackLearningStageAdapter {
             params.feedback_cycle_id,
             params.cycle_idempotency_hash,
             params.candidate_family_hash,
+            family.candidate_family_hash(),
         )?;
-        Self::require_calibration_family(cycle, &params)?;
-        let predecessor = self.require_predecessor(cycle, &params.previous).await?;
+        Self::require_calibration_family(&family, &params)?;
+        let predecessor = self.verify_reference(cycle, &params.previous).await?;
         Self::require_calibration_predecessor(&params, &predecessor)?;
         self.bind_job(identity, ResearchJobParams::FeedbackCalibration(params))
     }
@@ -179,6 +193,7 @@ impl FeedbackLearningStageAdapter {
         identity: FeedbackStageJobIdentity,
         params: FeedbackCpcvJobParams,
     ) -> QuantResult<NewResearchJob> {
+        let family = self.family(cycle).await?;
         params.validate()?;
         Self::require_identity(cycle, identity, FeedbackStage::Cpcv)?;
         Self::require_cycle(
@@ -186,9 +201,10 @@ impl FeedbackLearningStageAdapter {
             params.feedback_cycle_id,
             params.cycle_idempotency_hash,
             params.candidate_family_hash,
+            family.candidate_family_hash(),
         )?;
-        Self::require_cpcv_family(cycle, &params)?;
-        let predecessor = self.require_predecessor(cycle, &params.previous).await?;
+        Self::require_cpcv_family(&family, &params)?;
+        let predecessor = self.verify_reference(cycle, &params.previous).await?;
         Self::require_cpcv_predecessor(&params, &predecessor)?;
         self.bind_job(identity, ResearchJobParams::FeedbackCpcv(params))
     }
@@ -229,19 +245,23 @@ impl FeedbackLearningStageAdapter {
         self.succeeded(cycle, job, FeedbackStage::Cpcv).await
     }
 
-    /// Revalidate one exact learning-stage object and its complete predecessor chain.
-    pub async fn verify_reference(
+    pub(crate) async fn family(
         &self,
         cycle: &FeedbackCycleInfo,
-        reference: &FeedbackLearningStageArtifactRef,
-    ) -> QuantResult<FeedbackLearningStageArtifact> {
-        self.require_predecessor(cycle, reference).await
+    ) -> QuantResult<FeedbackCandidateFamily> {
+        self.recipes
+            .load_plan(cycle)
+            .await?
+            .artifact
+            .candidate_family()
+            .cloned()
+            .ok_or_else(|| Self::invalid("learning stage cannot follow a RecipePlan NoAction"))
     }
 
     fn dataset_params(
         cycle: &FeedbackCycleInfo,
+        family: &FeedbackCandidateFamily,
     ) -> Result<FeedbackDatasetSealJobParams, FeedbackError> {
-        let family = &cycle.candidate_family;
         let mut commands = Vec::with_capacity(family.candidates().len() * 2 + 1);
         commands.extend(
             family
@@ -251,6 +271,7 @@ impl FeedbackLearningStageAdapter {
                     role: FeedbackDatasetRole::CandidateTraining {
                         candidate_recipe_hash: candidate.candidate_recipe_hash(),
                     },
+                    resource_budget: candidate.resource_budget(),
                     request: candidate.training().clone(),
                 }),
         );
@@ -262,17 +283,19 @@ impl FeedbackLearningStageAdapter {
                     role: FeedbackDatasetRole::CandidateCalibration {
                         candidate_recipe_hash: candidate.candidate_recipe_hash(),
                     },
+                    resource_budget: candidate.resource_budget(),
                     request: candidate.calibration().clone(),
                 }),
         );
         commands.push(FeedbackDatasetBuildCommand {
             role: FeedbackDatasetRole::SharedEvaluation,
+            resource_budget: Self::aggregate_budget(family)?,
             request: family.shared_evaluation().clone(),
         });
         FeedbackDatasetSealJobParams::try_new(
             cycle.feedback_cycle_id,
             cycle.idempotency_hash,
-            cycle.candidate_family_hash,
+            family.candidate_family_hash(),
             commands,
         )
     }
@@ -281,15 +304,16 @@ impl FeedbackLearningStageAdapter {
         &self,
         cycle: &FeedbackCycleInfo,
     ) -> QuantResult<FeedbackTrainingJobParams> {
+        let family = self.family(cycle).await?;
         let (previous, _) = self.predecessor(cycle, FeedbackStage::DatasetSeal).await?;
-        let commands = cycle
-            .candidate_family
+        let commands = family
             .candidates()
             .iter()
             .map(|candidate| {
                 let recipe_hash = candidate.candidate_recipe_hash();
                 FeedbackTrainingCommand {
                     candidate_recipe_hash: recipe_hash,
+                    resource_budget: candidate.resource_budget(),
                     params: ModelTrainJobParams {
                         model_version_id: ModelVersionId::from_feedback_candidate(
                             cycle.feedback_cycle_id,
@@ -311,7 +335,7 @@ impl FeedbackLearningStageAdapter {
         FeedbackTrainingJobParams::try_new(
             cycle.feedback_cycle_id,
             cycle.idempotency_hash,
-            cycle.candidate_family_hash,
+            family.candidate_family_hash(),
             previous,
             commands,
         )
@@ -322,6 +346,7 @@ impl FeedbackLearningStageAdapter {
         &self,
         cycle: &FeedbackCycleInfo,
     ) -> QuantResult<FeedbackCalibrationJobParams> {
+        let family = self.family(cycle).await?;
         let (previous, artifact) = self.predecessor(cycle, FeedbackStage::Training).await?;
         let FeedbackLearningStageResults::Training(results) = &artifact.results else {
             return Err(Self::invalid(
@@ -329,11 +354,12 @@ impl FeedbackLearningStageAdapter {
             ));
         };
         let mut commands = Vec::with_capacity(results.len());
-        for candidate in cycle.candidate_family.candidates() {
+        for candidate in family.candidates() {
             let recipe_hash = candidate.candidate_recipe_hash();
             let trained = Self::training_result(results, recipe_hash)?;
             commands.push(FeedbackCalibrationCommand {
                 candidate_recipe_hash: recipe_hash,
+                resource_budget: candidate.resource_budget(),
                 params: ModelCalibrationFitJobParams {
                     model_run_id: ModelRunId::from_feedback_stage(
                         cycle.feedback_cycle_id,
@@ -355,7 +381,7 @@ impl FeedbackLearningStageAdapter {
         FeedbackCalibrationJobParams::try_new(
             cycle.feedback_cycle_id,
             cycle.idempotency_hash,
-            cycle.candidate_family_hash,
+            family.candidate_family_hash(),
             previous,
             commands,
         )
@@ -363,6 +389,7 @@ impl FeedbackLearningStageAdapter {
     }
 
     async fn cpcv_params(&self, cycle: &FeedbackCycleInfo) -> QuantResult<FeedbackCpcvJobParams> {
+        let family = self.family(cycle).await?;
         let (previous, artifact) = self.predecessor(cycle, FeedbackStage::Calibration).await?;
         let FeedbackLearningStageResults::Calibration(results) = &artifact.results else {
             return Err(Self::invalid(
@@ -379,12 +406,13 @@ impl FeedbackLearningStageAdapter {
             else {
                 continue;
             };
-            let candidate = cycle
-                .candidate_family
+            let candidate = family
                 .candidate(*candidate_recipe_hash)
                 .ok_or_else(|| Self::invalid("calibrated candidate left the frozen family"))?;
             commands.push(FeedbackCpcvCommand {
                 candidate_recipe_hash: *candidate_recipe_hash,
+                resource_budget: candidate.resource_budget(),
+                cpcv_spec: candidate.cpcv_spec().clone(),
                 params: CpcvBacktestJobParams {
                     model_version_id: *calibrated_model_version_id,
                     model_run_id: ModelRunId::from_feedback_stage(
@@ -407,7 +435,7 @@ impl FeedbackLearningStageAdapter {
         FeedbackCpcvJobParams::try_new(
             cycle.feedback_cycle_id,
             cycle.idempotency_hash,
-            cycle.candidate_family_hash,
+            family.candidate_family_hash(),
             previous,
             commands,
         )
@@ -457,7 +485,8 @@ impl FeedbackLearningStageAdapter {
         ))
     }
 
-    async fn require_predecessor(
+    /// Revalidate one exact learning-stage object and its complete predecessor chain.
+    pub async fn verify_reference(
         &self,
         cycle: &FeedbackCycleInfo,
         reference: &FeedbackLearningStageArtifactRef,
@@ -483,7 +512,7 @@ impl FeedbackLearningStageAdapter {
             }
             match artifact.previous {
                 Some(previous) => expected = previous,
-                None if artifact.stage() == FeedbackStage::DatasetSeal => {
+                None if artifact.results.stage() == FeedbackStage::DatasetSeal => {
                     return immediate.ok_or_else(|| {
                         Self::invalid(
                             "learning-stage predecessor chain lost its immediate artifact",
@@ -508,13 +537,15 @@ impl FeedbackLearningStageAdapter {
         job: &ResearchJobInfo,
         stage: FeedbackStage,
     ) -> QuantResult<(FeedbackLearningStageArtifact, ResearchJobArtifactRef)> {
-        Self::require_family_params(cycle, &job.params_json)?;
+        let family = self.family(cycle).await?;
+        Self::require_family_params(&family, &job.params_json)?;
         let expectation = Self::job_expectation(job, stage)?;
         Self::require_cycle(
             cycle,
             expectation.feedback_cycle_id,
             expectation.cycle_idempotency_hash,
             expectation.candidate_family_hash,
+            family.candidate_family_hash(),
         )?;
         let result =
             Self::require_result(cycle, job, stage, expectation.kind, expectation.artifact_id)?;
@@ -522,11 +553,11 @@ impl FeedbackLearningStageAdapter {
         let cycle_id_matches = artifact.feedback_cycle_id == cycle.feedback_cycle_id;
         let cycle_hash_matches = artifact.cycle_idempotency_hash == cycle.idempotency_hash;
         let candidate_family_matches =
-            artifact.candidate_family_hash == cycle.candidate_family_hash;
+            artifact.candidate_family_hash == family.candidate_family_hash();
         let cycle_identity_matches =
             cycle_id_matches && cycle_hash_matches && candidate_family_matches;
         if !cycle_identity_matches
-            || artifact.stage() != stage
+            || artifact.results.stage() != stage
             || artifact.artifact_id != expectation.artifact_id
             || artifact.input_hash != expectation.input_hash
             || artifact.previous != expectation.previous
@@ -544,7 +575,7 @@ impl FeedbackLearningStageAdapter {
         result: &ResearchJobArtifactRef,
     ) -> QuantResult<FeedbackLearningStageArtifact> {
         let bytes = self.artifacts.get(&result.uri).await?;
-        if FeedbackLearningStageCodec::bytes_hash(&bytes) != result.content_hash {
+        if CanonicalDigest::content_hash_bytes(&bytes) != result.content_hash {
             return Err(Self::invalid(
                 "learning-stage object bytes differ from their terminal hash",
             ));
@@ -626,10 +657,11 @@ impl FeedbackLearningStageAdapter {
         feedback_cycle_id: FeedbackCycleId,
         cycle_idempotency_hash: ContentHash,
         candidate_family_hash: ContentHash,
+        expected_family_hash: ContentHash,
     ) -> QuantResult<()> {
         if feedback_cycle_id != cycle.feedback_cycle_id
             || cycle_idempotency_hash != cycle.idempotency_hash
-            || candidate_family_hash != cycle.candidate_family_hash
+            || candidate_family_hash != expected_family_hash
         {
             return Err(Self::invalid(
                 "learning-stage params differ from their feedback cycle or candidate family",
@@ -639,10 +671,10 @@ impl FeedbackLearningStageAdapter {
     }
 
     fn require_dataset_family(
-        cycle: &FeedbackCycleInfo,
+        family: &FeedbackCandidateFamily,
         params: &FeedbackDatasetSealJobParams,
     ) -> QuantResult<()> {
-        let family = &cycle.candidate_family;
+        let shared_budget = Self::aggregate_budget(family)?;
         let expected_count = family
             .candidates()
             .len()
@@ -660,17 +692,19 @@ impl FeedbackLearningStageAdapter {
                     candidate_recipe_hash,
                 } => family
                     .candidate(candidate_recipe_hash)
-                    .map(FeedbackCandidateRecipe::training),
+                    .map(|candidate| (candidate.training(), candidate.resource_budget())),
                 FeedbackDatasetRole::CandidateCalibration {
                     candidate_recipe_hash,
                 } => family
                     .candidate(candidate_recipe_hash)
-                    .map(FeedbackCandidateRecipe::calibration),
-                FeedbackDatasetRole::SharedEvaluation => Some(family.shared_evaluation()),
+                    .map(|candidate| (candidate.calibration(), candidate.resource_budget())),
+                FeedbackDatasetRole::SharedEvaluation => {
+                    Some((family.shared_evaluation(), shared_budget))
+                }
             };
-            if expected != Some(&command.request) {
+            if expected != Some((&command.request, command.resource_budget)) {
                 return Err(Self::invalid(
-                    "DatasetSeal command differs from its frozen candidate-family Dataset plan",
+                    "DatasetSeal command or budget differs from its frozen candidate family",
                 ));
             }
         }
@@ -678,10 +712,10 @@ impl FeedbackLearningStageAdapter {
     }
 
     fn require_training_family(
-        cycle: &FeedbackCycleInfo,
+        family: &FeedbackCandidateFamily,
         params: &FeedbackTrainingJobParams,
     ) -> QuantResult<()> {
-        let candidates = cycle.candidate_family.candidates();
+        let candidates = family.candidates();
         if params.commands.len() != candidates.len()
             || params
                 .commands
@@ -689,6 +723,7 @@ impl FeedbackLearningStageAdapter {
                 .zip(candidates)
                 .any(|(command, candidate)| {
                     command.candidate_recipe_hash != candidate.candidate_recipe_hash()
+                        || command.resource_budget != candidate.resource_budget()
                         || command.params.request.training_dataset_id
                             != candidate.training().training_dataset_id
                 })
@@ -701,10 +736,10 @@ impl FeedbackLearningStageAdapter {
     }
 
     fn require_calibration_family(
-        cycle: &FeedbackCycleInfo,
+        family: &FeedbackCandidateFamily,
         params: &FeedbackCalibrationJobParams,
     ) -> QuantResult<()> {
-        let candidates = cycle.candidate_family.candidates();
+        let candidates = family.candidates();
         if params.commands.len() != candidates.len()
             || params
                 .commands
@@ -712,6 +747,7 @@ impl FeedbackLearningStageAdapter {
                 .zip(candidates)
                 .any(|(command, candidate)| {
                     command.candidate_recipe_hash != candidate.candidate_recipe_hash()
+                        || command.resource_budget != candidate.resource_budget()
                         || command.params.request.calibration_dataset_id
                             != candidate.calibration().training_dataset_id
                         || command.params.request.method != candidate.calibration_method()
@@ -728,16 +764,16 @@ impl FeedbackLearningStageAdapter {
     }
 
     fn require_cpcv_family(
-        cycle: &FeedbackCycleInfo,
+        family: &FeedbackCandidateFamily,
         params: &FeedbackCpcvJobParams,
     ) -> QuantResult<()> {
         if params.commands.iter().any(|command| {
-            cycle
-                .candidate_family
+            family
                 .candidate(command.candidate_recipe_hash)
                 .is_none_or(|candidate| {
-                    command.params.request.training_dataset_id
-                        != candidate.training().training_dataset_id
+                    command.resource_budget != candidate.resource_budget()
+                        || command.params.request.training_dataset_id
+                            != candidate.training().training_dataset_id
                         || command.params.request.decision_policy_snapshot_id
                             != candidate.decision_policy_snapshot_id()
                 })
@@ -747,6 +783,30 @@ impl FeedbackLearningStageAdapter {
             ));
         }
         Ok(())
+    }
+
+    fn aggregate_budget(
+        family: &FeedbackCandidateFamily,
+    ) -> Result<FeedbackRecipeResourceBudget, FeedbackError> {
+        let mut candidates = family.candidates().iter();
+        let mut aggregate = candidates
+            .next()
+            .map(FeedbackCandidateRecipe::resource_budget)
+            .ok_or_else(|| FeedbackError::InvalidJobContract {
+                detail: "candidate family has no resource budget".to_owned(),
+            })?;
+        for budget in candidates.map(FeedbackCandidateRecipe::resource_budget) {
+            aggregate.max_concurrency = aggregate.max_concurrency.max(budget.max_concurrency);
+            aggregate.max_working_set_bytes = aggregate
+                .max_working_set_bytes
+                .max(budget.max_working_set_bytes);
+            aggregate.max_resident_model_bytes = aggregate
+                .max_resident_model_bytes
+                .max(budget.max_resident_model_bytes);
+            aggregate.deadline_secs = aggregate.deadline_secs.max(budget.deadline_secs);
+        }
+        aggregate.validate()?;
+        Ok(aggregate)
     }
 
     fn require_training_predecessor(
@@ -840,20 +900,20 @@ impl FeedbackLearningStageAdapter {
     }
 
     fn require_family_params(
-        cycle: &FeedbackCycleInfo,
+        family: &FeedbackCandidateFamily,
         params: &ResearchJobParams,
     ) -> QuantResult<()> {
         match params {
             ResearchJobParams::FeedbackDatasetSeal(params) => {
-                Self::require_dataset_family(cycle, params)
+                Self::require_dataset_family(family, params)
             }
             ResearchJobParams::FeedbackTraining(params) => {
-                Self::require_training_family(cycle, params)
+                Self::require_training_family(family, params)
             }
             ResearchJobParams::FeedbackCalibration(params) => {
-                Self::require_calibration_family(cycle, params)
+                Self::require_calibration_family(family, params)
             }
-            ResearchJobParams::FeedbackCpcv(params) => Self::require_cpcv_family(cycle, params),
+            ResearchJobParams::FeedbackCpcv(params) => Self::require_cpcv_family(family, params),
             _ => Err(Self::invalid(
                 "learning-stage job lost its candidate-family params",
             )),

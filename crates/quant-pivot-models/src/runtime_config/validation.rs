@@ -17,7 +17,7 @@ use super::{
     validate_schedule_cadence,
 };
 use crate::{
-    enums::{common::MarketCategory, factor::FactorNormalization},
+    enums::factor::FactorNormalization,
     runtime_config::{FeatureFamily, PerFactorNormalization},
     types::{CalibrationArtifactId, stable_name::FactorName},
 };
@@ -96,33 +96,84 @@ fn validate_selection(config: &DecisionPolicySnapshot, report: &mut ConfigValida
 }
 
 fn validate_data_quality(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
-    if config.recommendation.data_quality.max_book_age_ms == 0 {
+    let data_quality = &config.recommendation.data_quality;
+    if data_quality.max_book_age_ms == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "data_quality.max_book_age_ms",
             detail: "must be greater than zero".to_owned(),
         });
     }
-    if config.recommendation.data_quality.max_ingest_lag_ms == 0 {
+    if data_quality.max_ingest_lag_ms == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "data_quality.max_ingest_lag_ms",
             detail: "must be greater than zero".to_owned(),
         });
     }
-    if config
-        .recommendation
-        .data_quality
-        .max_feature_bucket_age_secs
-        == 0
-    {
+    if data_quality.max_feature_bucket_age_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "data_quality.max_feature_bucket_age_secs",
             detail: "must be greater than zero".to_owned(),
         });
     }
-    if config.recommendation.data_quality.max_stale_book_ratio_bps > 10_000 {
+    if data_quality.max_trade_tape_age_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "data_quality.max_trade_tape_age_secs",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
+    if data_quality.max_domain_observation_age_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "data_quality.max_domain_observation_age_secs",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
+    if data_quality.max_stale_book_ratio_bps > 10_000 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "data_quality.max_stale_book_ratio_bps",
             detail: "must be <= 10000 (100%)".to_owned(),
+        });
+    }
+    let Some(knowledge_lag_secs) = config.pit_knowledge_lag_secs() else {
+        return;
+    };
+    let required_book_age_ms = knowledge_lag_secs.checked_mul(1_000);
+    if required_book_age_ms.is_none_or(|minimum| data_quality.max_book_age_ms < minimum) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "data_quality.max_book_age_ms",
+            detail: format!(
+                "must be at least the canonical PIT knowledge lag ({knowledge_lag_secs}s)"
+            ),
+        });
+    }
+    for (field, ceiling) in [
+        (
+            "data_quality.max_feature_bucket_age_secs",
+            data_quality.max_feature_bucket_age_secs,
+        ),
+        (
+            "data_quality.max_trade_tape_age_secs",
+            data_quality.max_trade_tape_age_secs,
+        ),
+    ] {
+        if ceiling < knowledge_lag_secs {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field,
+                detail: format!(
+                    "must be at least the canonical PIT knowledge lag ({knowledge_lag_secs}s)"
+                ),
+            });
+        }
+    }
+    let domain = &config.profile_artifacts.domain.definition;
+    let domain_lag_secs = knowledge_lag_secs
+        .max(domain.crypto.availability_lag_secs)
+        .max(domain.weather.availability_lag_secs);
+    if data_quality.max_domain_observation_age_secs < domain_lag_secs {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "data_quality.max_domain_observation_age_secs",
+            detail: format!(
+                "must be at least the largest governed domain availability lag ({domain_lag_secs}s)"
+            ),
         });
     }
 }
@@ -767,41 +818,31 @@ fn validate_model(config: &DecisionPolicySnapshot, report: &mut ConfigValidation
             detail: error.to_string(),
         });
     }
-    if config
-        .model_routing
-        .model
-        .category_model_pointers
-        .keys()
-        .any(|category| !matches!(category, MarketCategory::Crypto | MarketCategory::Weather))
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "model.category_model_pointers",
-            detail: "only Crypto and Weather own category-specific Buy model routes; every \
-                     other category belongs to the explicit pooled route"
-                .to_owned(),
-        });
+    for (buy_route, binding) in &config.model_routing.model.buy_routes {
+        if binding.champion.generation == 0
+            || binding.shadow.as_ref().is_some_and(|shadow| {
+                shadow.generation == 0
+                    || shadow.model_version_id == binding.champion.model_version_id
+                    || shadow.generation <= binding.champion.generation
+            })
+        {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "model.buy_routes",
+                detail: format!(
+                    "{buy_route:?} must have positive, distinct and monotonically ordered \
+                     champion/shadow generations"
+                ),
+            });
+        }
     }
     if !selection.enabled_categories.is_empty()
         && let Ok(route) = route
-        && config.model_routing.model.active_pointer(route).is_err()
+        && config.model_routing.model.champion(route).is_err()
     {
-        let (field, detail) = match route {
-            BuyModelRoute::Pooled => (
-                "model.active_model_version_id",
-                "an explicit pooled report requires the pooled active model pointer".to_owned(),
-            ),
-            BuyModelRoute::Crypto => (
-                "model.category_model_pointers",
-                "enabled vertical Crypto requires its exact category model pointer".to_owned(),
-            ),
-            BuyModelRoute::Weather => (
-                "model.category_model_pointers",
-                "enabled vertical Weather requires its exact category model pointer".to_owned(),
-            ),
-        };
-        report
-            .errors
-            .push(ConfigValidationError::InvalidValue { field, detail });
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "model.buy_routes",
+            detail: format!("enabled report route {route:?} requires its exact champion binding"),
+        });
     }
     unit_ratio(
         "model.min_model_confidence",
@@ -864,8 +905,8 @@ fn validate_quality_gate(config: &DecisionPolicySnapshot, report: &mut ConfigVal
         report,
     );
     unit_ratio(
-        "quality_gate.min_shadow_overlap_stability",
-        &gate.min_shadow_overlap_stability,
+        "quality_gate.min_shadow_decision_overlap",
+        &gate.min_shadow_decision_overlap,
         report,
     );
     unit_ratio(
@@ -1398,6 +1439,23 @@ fn validate_cpcv_purge(validation: &ResearchValidationConfig, report: &mut Confi
             detail: "must be in 1..n_groups".to_owned(),
         });
     }
+    if validation.gates.min_cpcv_paths < 21 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.gates.min_cpcv_paths",
+            detail: "must be >= 21 complete reconstructed paths".to_owned(),
+        });
+    }
+    if let Ok(path_count) = cpcv.expected_path_count()
+        && path_count < u64::from(validation.gates.min_cpcv_paths)
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.cpcv",
+            detail: format!(
+                "N={}, k={} reconstructs only {path_count} complete paths, below gates.min_cpcv_paths={}",
+                cpcv.n_groups, cpcv.k_test, validation.gates.min_cpcv_paths
+            ),
+        });
+    }
 }
 
 fn validate_research_validation_trials(
@@ -1586,16 +1644,33 @@ fn non_empty_numbers(field: &'static str, values: &[u64], report: &mut ConfigVal
 mod tests {
     use std::collections::BTreeMap;
 
+    use chrono::Utc;
+
     use super::{BuyModelRoute, ConfigValidationError, DecisionPolicySnapshot};
     use crate::{
         enums::{common::MarketCategory, factor::FactorFamily},
         runtime_config::{
-            DecimalValue, FeatureFamily, MAX_REPORT_TOP_N, OutcomeReconciliationPolicy,
-            POLICY_RESOURCE_SCHEMA_VERSION, ReportScheduleConfig, ScheduleCadence,
-            wire::ModelVersionRef,
+            BuyRouteBinding, DecimalValue, FeatureFamily, MAX_REPORT_TOP_N, ModelBinding,
+            ModelBindingSource, OutcomeReconciliationPolicy, POLICY_RESOURCE_SCHEMA_VERSION,
+            ReportScheduleConfig, ScheduleCadence,
         },
-        types::{CalibrationArtifactId, ModelVersionId},
+        types::{CalibrationArtifactId, ModelVersionId, PolicyBundleGeneration},
     };
+
+    impl BuyRouteBinding {
+        fn bootstrap_fixture(model_version_id: ModelVersionId) -> Self {
+            Self {
+                champion: ModelBinding::new(
+                    model_version_id,
+                    ModelBindingSource::Bootstrap,
+                    Utc::now(),
+                    PolicyBundleGeneration::FIRST,
+                    1,
+                ),
+                shadow: None,
+            }
+        }
+    }
 
     #[test]
     fn default_runtime_config_valid() {
@@ -1604,14 +1679,91 @@ mod tests {
     }
 
     #[test]
+    fn default_cpcv_reconstructs_paths() {
+        let validation = &DecisionPolicySnapshot::default()
+            .profile_artifacts
+            .research_method
+            .research
+            .validation;
+        assert_eq!(
+            validation
+                .cpcv
+                .expected_path_count()
+                .expect("default CPCV path count"),
+            21
+        );
+        assert_eq!(
+            validation
+                .cpcv
+                .expected_combination_count()
+                .expect("default CPCV combination count"),
+            56
+        );
+    }
+
+    #[test]
+    fn seven_path_methodology_fails() {
+        let mut config = DecisionPolicySnapshot::default();
+        config
+            .profile_artifacts
+            .research_method
+            .research
+            .validation
+            .cpcv
+            .k_test = 2;
+        let report = config.validate_runtime_config();
+        assert!(report.errors.iter().any(|error| matches!(
+            error,
+            ConfigValidationError::InvalidValue {
+                field: "research.validation.cpcv",
+                detail,
+            } if detail.contains("only 7 complete paths")
+        )));
+    }
+
+    #[test]
+    fn freshness_bounds_cover_lags() {
+        let mut config = DecisionPolicySnapshot::default();
+        config.recommendation.data_quality.max_book_age_ms = 9_999;
+        config
+            .recommendation
+            .data_quality
+            .max_feature_bucket_age_secs = 9;
+        config.recommendation.data_quality.max_trade_tape_age_secs = 9;
+        config
+            .recommendation
+            .data_quality
+            .max_domain_observation_age_secs = 299;
+
+        let report = config.validate_runtime_config();
+        for field in [
+            "data_quality.max_book_age_ms",
+            "data_quality.max_feature_bucket_age_secs",
+            "data_quality.max_trade_tape_age_secs",
+            "data_quality.max_domain_observation_age_secs",
+        ] {
+            assert!(report.errors.iter().any(|error| matches!(
+                error,
+                ConfigValidationError::InvalidValue {
+                    field: actual,
+                    ..
+                } if *actual == field
+            )));
+        }
+    }
+
+    #[test]
     fn model_routes_fail_closed() {
-        let generic = ModelVersionRef::new(ModelVersionId::from_v7());
-        let weather = ModelVersionRef::new(ModelVersionId::from_v7());
+        let generic = ModelVersionId::from_v7();
+        let weather = ModelVersionId::from_v7();
         assert!(BuyModelRoute::try_from(Some(MarketCategory::Sports)).is_err());
 
         let mut missing = DecisionPolicySnapshot::default();
         missing.recommendation.selection.enabled_categories = vec![MarketCategory::Weather];
-        missing.model_routing.model.active_model_version_id = Some(generic.clone());
+        missing.model_routing.model.buy_routes.insert(
+            BuyModelRoute::Pooled,
+            BuyRouteBinding::bootstrap_fixture(generic),
+        );
         assert!(
             missing
                 .validate_runtime_config()
@@ -1621,7 +1773,7 @@ mod tests {
                     matches!(
                         error,
                         ConfigValidationError::InvalidValue {
-                            field: "model.category_model_pointers",
+                            field: "model.buy_routes",
                             ..
                         }
                     )
@@ -1631,9 +1783,16 @@ mod tests {
         let mut mixed = DecisionPolicySnapshot::default();
         mixed.recommendation.selection.enabled_categories =
             vec![MarketCategory::Weather, MarketCategory::Sports];
-        mixed.model_routing.model.active_model_version_id = Some(generic.clone());
-        mixed.model_routing.model.category_model_pointers =
-            BTreeMap::from([(MarketCategory::Weather, weather.clone())]);
+        mixed.model_routing.model.buy_routes = BTreeMap::from([
+            (
+                BuyModelRoute::Pooled,
+                BuyRouteBinding::bootstrap_fixture(generic),
+            ),
+            (
+                BuyModelRoute::Weather,
+                BuyRouteBinding::bootstrap_fixture(weather),
+            ),
+        ]);
         assert!(mixed.validate_runtime_config().errors.iter().any(|error| {
             matches!(
                 error,
@@ -1644,13 +1803,20 @@ mod tests {
             )
         }));
 
-        let mut invalid_key = DecisionPolicySnapshot::default();
-        invalid_key.recommendation.selection.enabled_categories = vec![MarketCategory::Sports];
-        invalid_key.model_routing.model.active_model_version_id = Some(generic.clone());
-        invalid_key.model_routing.model.category_model_pointers =
-            BTreeMap::from([(MarketCategory::Sports, weather.clone())]);
+        let mut invalid_generation = DecisionPolicySnapshot::default();
+        invalid_generation
+            .recommendation
+            .selection
+            .enabled_categories = vec![MarketCategory::Sports];
+        let mut invalid_binding = BuyRouteBinding::bootstrap_fixture(generic);
+        invalid_binding.champion.generation = 0;
+        invalid_generation
+            .model_routing
+            .model
+            .buy_routes
+            .insert(BuyModelRoute::Pooled, invalid_binding);
         assert!(
-            invalid_key
+            invalid_generation
                 .validate_runtime_config()
                 .errors
                 .iter()
@@ -1658,7 +1824,7 @@ mod tests {
                     matches!(
                         error,
                         ConfigValidationError::InvalidValue {
-                            field: "model.category_model_pointers",
+                            field: "model.buy_routes",
                             ..
                         }
                     )
@@ -1667,13 +1833,18 @@ mod tests {
 
         let mut pooled = DecisionPolicySnapshot::default();
         pooled.recommendation.selection.enabled_categories = vec![MarketCategory::Sports];
-        pooled.model_routing.model.active_model_version_id = Some(generic);
+        pooled.model_routing.model.buy_routes.insert(
+            BuyModelRoute::Pooled,
+            BuyRouteBinding::bootstrap_fixture(generic),
+        );
         assert!(!pooled.validate_runtime_config().has_errors());
 
         let mut exact_vertical = DecisionPolicySnapshot::default();
         exact_vertical.recommendation.selection.enabled_categories = vec![MarketCategory::Weather];
-        exact_vertical.model_routing.model.category_model_pointers =
-            BTreeMap::from([(MarketCategory::Weather, weather)]);
+        exact_vertical.model_routing.model.buy_routes.insert(
+            BuyModelRoute::Weather,
+            BuyRouteBinding::bootstrap_fixture(weather),
+        );
         assert!(!exact_vertical.validate_runtime_config().has_errors());
     }
 

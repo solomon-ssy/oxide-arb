@@ -12,7 +12,9 @@ use quant_pivot_models::{
         FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus, ResearchJobKind,
         ResearchJobStatus,
     },
-    types::{ContentHash, FeatureParityRunId, ResearchJobId, ResearchJobParams, RoleCode},
+    types::{
+        ContentHash, DiagnosticCode, FeatureParityRunId, ResearchJobId, ResearchJobParams, RoleCode,
+    },
 };
 use quant_pivot_repository::{
     postgres::PgFeatureParityRepository,
@@ -230,6 +232,50 @@ pub async fn full_window_unique_active() {
             .run_id,
         recovery.run_id
     );
+}
+
+pub async fn failure_opens_latch_atomically() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgFeatureParityRepository::new(pool.connection().clone());
+    let window_end = Utc::now();
+    let run = repo
+        .create_run(queued_run(window_end - Duration::hours(1), window_end))
+        .await
+        .expect("create integrity-failure run");
+    repo.mark_running(&run.run_id)
+        .await
+        .expect("mark integrity-failure run running");
+
+    let failure_detail = "serving evidence completion missed its frozen deadline";
+    let failed = repo
+        .complete_run(
+            &run.run_id,
+            CompleteFeatureParityRun {
+                status: FeatureParityRunStatus::Failed,
+                total_count: 1,
+                compared_count: 0,
+                matched_count: 0,
+                mismatched_count: 0,
+                pending_materialization_count: 1,
+                feature_contract_hash: Some(hash('a')),
+                transform_hash: None,
+                failure_code: Some(DiagnosticCode::new("materialization_timeout")),
+                failure_detail: Some(failure_detail.to_owned()),
+            },
+        )
+        .await
+        .expect("fail run and open latch atomically");
+    assert_eq!(failed.status, FeatureParityRunStatus::Failed);
+    assert!(failed.containment_completed_at.is_none());
+
+    let latch = repo
+        .current_state()
+        .await
+        .expect("read atomic integrity latch")
+        .expect("failed completion opens the latch");
+    assert_eq!(latch.state, FeatureParityLatchState::Open);
+    assert_eq!(latch.cause_run_id, Some(run.run_id));
+    assert_eq!(latch.reason, failure_detail);
 }
 
 pub async fn recovery_cover_open_clear() {

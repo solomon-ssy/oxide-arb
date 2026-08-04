@@ -13,11 +13,15 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
+use quant_pivot_error::{
+    QuantError, QuantResult, infra::InfraError, research::ResearchError, storage::StorageError,
+};
 use quant_pivot_models::{
     clickhouse::{
         QuantFeatureEventRow, QuantModelInputEventRow, QuantServingEvidenceCompletionRow,
     },
+    config::FeatureParityComputeConfig,
     domain::{
         data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
         quant::{
@@ -58,18 +62,20 @@ use quant_pivot_research::{
     },
     hashing::ResearchHasher,
     model::{
-        ModelInputAuditRow, ModelRuntimeMetrics, ModelRuntimeOutput, SignalCandidate,
-        canonical_business_prediction_hash,
+        ModelCalibrationScore, ModelInputAuditRow, ModelRuntimeMetrics, ModelRuntimeOutput,
+        SignalCandidate, canonical_business_prediction_hash, finalize_candidates,
     },
     selection::{
         ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelectionSnapshot,
-        MarketSelector, ModelFeatureRequirements, SelectedMarket,
+        MarketSelector, SelectedMarket,
     },
 };
 use serde::Serialize;
+use tokio::{runtime::Handle, sync::Semaphore};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    observability::serving_evidence::verify_completion,
+    observability::serving_evidence::{ModelInputEvidenceBatch, verify_completion},
     pit::platform::ch_historical::DurablePitSource,
     prefetch::{
         historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
@@ -87,13 +93,13 @@ use crate::{
             CrossSectionRequest, ReplayCaptureKey, ReplayConfig, ReplayCrossSection,
             ReplayFactorMode, materialize_cross_section,
         },
-        model_runner::{AlignedFeatureCrossSection, project_model_input_rows},
         model_serving_generation::{
             ModelServingGenerationRequest, ModelServingGenerationStore, ModelServingRouteSnapshot,
         },
     },
 };
 /// Process-lifetime dependencies of the production parity source.
+#[derive(Clone)]
 pub struct DurableFeatureParityDeps {
     pub parity: Arc<dyn FeatureParityRepository>,
     pub model_runs: Arc<dyn ModelRunRepository>,
@@ -110,11 +116,16 @@ pub struct DurableFeatureParityDeps {
     pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     pub linkages: Arc<dyn MarketLinkageRepository>,
     pub calibration_artifacts: Arc<dyn CalibrationArtifactRepository>,
+    pub compute: Arc<ComputeExecutor>,
+    pub compute_budget: FeatureParityComputeConfig,
 }
 
 /// Replays successful serving runs from durable PIT data and frozen artifacts.
+#[derive(Clone)]
 pub struct DurableFeatureParitySource {
     deps: DurableFeatureParityDeps,
+    compute_memory: OfflineMemory,
+    compute_slots: Arc<Semaphore>,
 }
 
 struct DurableReplayEvidence {
@@ -227,9 +238,30 @@ struct CandidateSubjects {
 }
 
 impl DurableFeatureParitySource {
-    #[must_use]
-    pub const fn new(deps: DurableFeatureParityDeps) -> Self {
-        Self { deps }
+    pub fn try_new(deps: DurableFeatureParityDeps) -> QuantResult<Self> {
+        let budget = deps.compute_budget;
+        if !(1..=1_000).contains(&budget.page_size)
+            || budget.max_concurrency != 1
+            || !(1_048_576..=10_737_418_240).contains(&budget.max_working_set_bytes)
+            || !(1..=86_400).contains(&budget.deadline_secs)
+        {
+            return Err(InfraError::Misconfigured {
+                detail:
+                    "feature parity page size, concurrency, working set, or deadline is invalid"
+                        .to_owned(),
+            }
+            .into());
+        }
+        let working_set = usize::try_from(budget.max_working_set_bytes).map_err(|error| {
+            InfraError::Misconfigured {
+                detail: format!("feature parity working-set bytes do not fit usize: {error}"),
+            }
+        })?;
+        Ok(Self {
+            compute_memory: OfflineMemory::try_bytes(working_set)?,
+            compute_slots: Arc::new(Semaphore::new(budget.max_concurrency)),
+            deps,
+        })
     }
 }
 
@@ -268,20 +300,106 @@ impl FeatureParityReplaySource for DurableFeatureParitySource {
 
     async fn replay(
         &self,
-        _parity_run: &FeatureParityRunInfo,
+        parity_run: &FeatureParityRunInfo,
         candidates: &[FeatureParityCandidate],
+        cancel: &CancellationToken,
     ) -> QuantResult<FeatureParityReplayAttempt> {
-        let run_ids = unique_run_ids(candidates);
-        let evidence = self.load_replay_evidence(&run_ids).await?;
-        let mut attempt = self.replay_candidate_groups(candidates, &evidence).await?;
-        let report_attempt = self.replay_report_candidate_groups(candidates).await?;
-        attempt.comparisons.extend(report_attempt.comparisons);
-        attempt.pending.extend(report_attempt.pending);
-        Ok(attempt)
+        let bounded_cancel = cancel.child_token();
+        let replay = self.replay_governed(parity_run, candidates, &bounded_cancel);
+        tokio::time::timeout(
+            Duration::from_secs(self.deps.compute_budget.deadline_secs),
+            replay,
+        )
+        .await
+        .unwrap_or_else(|_| {
+            bounded_cancel.cancel();
+            Err(ResearchError::ComputeDeadlineExceeded {
+                operation: "feature_parity_replay",
+                deadline_secs: self.deps.compute_budget.deadline_secs,
+            }
+            .into())
+        })
     }
 }
 
 impl DurableFeatureParitySource {
+    async fn replay_governed(
+        &self,
+        parity_run: &FeatureParityRunInfo,
+        candidates: &[FeatureParityCandidate],
+        cancel: &CancellationToken,
+    ) -> QuantResult<FeatureParityReplayAttempt> {
+        let permit = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err(ResearchError::Cancelled {
+                    detail: "cancelled while waiting for feature parity compute capacity"
+                        .to_owned(),
+                }
+                .into());
+            }
+            permit = Arc::clone(&self.compute_slots).acquire_owned() => {
+                permit.map_err(|_| InfraError::ComputeExecution {
+                    detail: "feature parity compute semaphore closed".to_owned(),
+                })?
+            }
+        };
+        let source = self.clone();
+        let parity_run = parity_run.clone();
+        let candidates = candidates.to_vec();
+        let work_cancel = cancel.clone();
+        let runtime = Handle::current();
+        self.deps
+            .compute
+            .run_offline_cancellable(self.compute_memory, cancel, move || {
+                let _permit = permit;
+                runtime.block_on(async move {
+                    tokio::select! {
+                        biased;
+                        () = work_cancel.cancelled() => Err(ResearchError::Cancelled {
+                            detail: format!(
+                                "feature parity replay {} cancelled inside governed compute",
+                                parity_run.run_id
+                            ),
+                        }
+                        .into()),
+                        result = source.replay_pages(&candidates, &work_cancel) => result,
+                    }
+                })
+            })
+            .await
+    }
+
+    async fn replay_pages(
+        &self,
+        candidates: &[FeatureParityCandidate],
+        cancel: &CancellationToken,
+    ) -> QuantResult<FeatureParityReplayAttempt> {
+        let page_size = usize::try_from(self.deps.compute_budget.page_size).map_err(|error| {
+            InfraError::Misconfigured {
+                detail: format!("feature parity page size does not fit usize: {error}"),
+            }
+        })?;
+        let mut combined = FeatureParityReplayAttempt::default();
+        for page in candidates.chunks(page_size) {
+            if cancel.is_cancelled() {
+                return Err(ResearchError::Cancelled {
+                    detail: "feature parity replay cancelled between bounded pages".to_owned(),
+                }
+                .into());
+            }
+            let run_ids = unique_run_ids(page);
+            let evidence = self.load_replay_evidence(&run_ids).await?;
+            let mut attempt = self.replay_candidate_groups(page, &evidence).await?;
+            let report_attempt = self.replay_report_candidate_groups(page).await?;
+            attempt.comparisons.extend(report_attempt.comparisons);
+            attempt.pending.extend(report_attempt.pending);
+            combined.comparisons.extend(attempt.comparisons);
+            combined.pending.extend(attempt.pending);
+        }
+        Ok(combined)
+    }
+
     async fn frozen_candidates(
         &self,
         run: &FeatureParityRunInfo,
@@ -1210,6 +1328,7 @@ impl DurableFeatureParitySource {
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.deps.fact_read),
             Arc::clone(&self.deps.catalog),
+            Arc::clone(&self.deps.clob_market_info),
             Arc::clone(&self.deps.linkages),
             Arc::clone(&self.deps.calibration_artifacts),
             Duration::from_millis(
@@ -1290,16 +1409,24 @@ impl DurableFeatureParitySource {
             &config.profile_artifacts.features.definition,
             &config.profile_artifacts.domain.definition,
         )?;
-        let factor_engine = FactorEngine::new(
+        let serving = self.replay_serving(context).await?;
+        let factor_engine = FactorEngine::for_model_scope(
             &config.profile_artifacts.scoring.definition,
             &config.profile_artifacts.features.definition,
             &config.profile_artifacts.domain.definition,
+            serving.active_version().category_scope,
             bias_table.clone(),
         );
         let bias_table_hash = bias_table.as_ref().map(|table| table.content_hash);
-        let (model_requirements, serving) = self
-            .replay_model_requirements(context, &builder, &factor_engine, bias_table_hash)
-            .await?;
+        let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
+        let factor_plane = factor_engine.serving_plane()?;
+        verify_replay_contract(
+            serving.active_version(),
+            feature_schema_hash,
+            factor_plane,
+            bias_table_hash,
+        )?;
+        let model_requirements = serving.model_requirements();
         let durable_pit = Arc::new(DurablePitSource::new(
             Arc::clone(&self.deps.fact_read),
             Arc::clone(&self.deps.catalog),
@@ -1338,13 +1465,10 @@ impl DurableFeatureParitySource {
         })
     }
 
-    async fn replay_model_requirements(
+    async fn replay_serving(
         &self,
         context: &ReplayRunContext,
-        builder: &ConfiguredFeatureBuilder,
-        factor_engine: &FactorEngine,
-        bias_table_hash: Option<ContentHash>,
-    ) -> QuantResult<(ModelFeatureRequirements, ModelServingRouteSnapshot)> {
+    ) -> QuantResult<ModelServingRouteSnapshot> {
         let serving = self
             .deps
             .serving_generations
@@ -1354,22 +1478,14 @@ impl DurableFeatureParitySource {
                 snapshot: &context.config,
             })
             .await?;
-        if serving.active_model_version_id() != context.model_version_id {
+        if serving.champion_model_version_id() != context.model_version_id {
             return Err(determinism(format!(
                 "frozen exact route model {} differs from serving subject model {}",
-                serving.active_model_version_id(),
+                serving.champion_model_version_id(),
                 context.model_version_id,
             )));
         }
-        let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
-        let factor_plane = factor_engine.serving_plane()?;
-        verify_replay_contract(
-            serving.active_version(),
-            feature_schema_hash,
-            factor_plane,
-            bias_table_hash,
-        )?;
-        Ok((serving.model_requirements(), serving))
+        Ok(serving)
     }
 
     async fn replay_run(
@@ -1497,7 +1613,7 @@ impl DurableFeatureParitySource {
             .iter()
             .map(|vector| (vector.market_id.clone(), vector))
             .collect::<HashMap<_, _>>();
-        let version_id = request.serving.active_model_version_id();
+        let version_id = request.serving.champion_model_version_id();
         let mut market_ids = BTreeSet::new();
         for row in request.online_inputs {
             if row.model_version_id != version_id {
@@ -1660,11 +1776,15 @@ fn resolve_route_inputs(
 
 fn finish_replayed_model_output(
     request: &ModelRouteReplayRequest<'_>,
-    candidates: Vec<SignalCandidate>,
+    mut candidates: Vec<SignalCandidate>,
     input_audit: Vec<ModelInputAuditRow>,
     factor_outcomes: Vec<MarketFactorOutcome>,
 ) -> QuantResult<ReplayedModelOutput> {
+    finalize_candidates(&mut candidates)?;
+    let calibration_scores = candidates.iter().map(ModelCalibrationScore::from).collect();
     let runtime_output = ModelRuntimeOutput {
+        calibration_scores,
+        rank_scores: Vec::new(),
         candidates,
         runtime_metrics: ModelRuntimeMetrics {
             markets_scored: 0,
@@ -1676,7 +1796,6 @@ fn finish_replayed_model_output(
     let input_rows = project_replay_rows(
         &request.run.model_run_id,
         request.boundary,
-        request.markets,
         request.vectors,
         request.vector_binding,
         &runtime_output.input_audit,
@@ -1691,7 +1810,6 @@ fn finish_replayed_model_output(
 fn project_replay_rows(
     model_run_id: &ModelRunId,
     boundary: &DecisionBoundary,
-    markets: &[SelectedMarket],
     vectors: &[FeatureVector],
     vector_binding: &HashMap<MarketId, FeatureVectorId>,
     audit: &[ModelInputAuditRow],
@@ -1707,15 +1825,9 @@ fn project_replay_rows(
                 })
         })
         .collect::<QuantResult<Vec<_>>>()?;
-    let aligned = AlignedFeatureCrossSection {
-        markets: markets.to_vec(),
-        vectors: Arc::from(vectors),
-        vector_ids,
-    };
-    project_model_input_rows(
+    ModelInputEvidenceBatch::try_new(vectors, &vector_ids)?.project(
         model_run_id,
         boundary,
-        &aligned,
         audit,
         boundary.decision_at().timestamp_millis(),
     )
@@ -1744,10 +1856,12 @@ impl FactorProjection {
             market_id: value.market_id.to_string(),
             factor_definition_id: value.factor_definition_id.to_string(),
             state: value.value_state.to_string(),
-            raw_value: value.raw_value.map(|value| value.to_string()),
-            normalized_score: value.normalized_score.map(|value| value.to_string()),
+            raw_value: value.raw_value.map(|value| value.normalize().to_string()),
+            normalized_score: value
+                .normalized_score
+                .map(|value| value.normalized().to_string()),
             normalization_source: value.normalization_source.map(|value| value.to_string()),
-            confidence: value.confidence.to_string(),
+            confidence: value.confidence.normalized().to_string(),
         }
     }
 
@@ -1756,12 +1870,14 @@ impl FactorProjection {
             market_id: market_id.to_string(),
             factor_definition_id: value.definition_id.to_string(),
             state: value.value_state().to_string(),
-            raw_value: value.raw_value.map(|raw| raw.to_string()),
-            normalized_score: value.normalized_score().map(|score| score.to_string()),
+            raw_value: value.raw_value.map(|raw| raw.normalize().to_string()),
+            normalized_score: value
+                .normalized_score()
+                .map(|score| score.normalized().to_string()),
             normalization_source: value
                 .normalization_source()
                 .map(|source| source.to_string()),
-            confidence: value.confidence.to_string(),
+            confidence: value.confidence.normalized().to_string(),
         }
     }
 }
@@ -1809,8 +1925,12 @@ fn selection_comparisons(
             category: row.category.to_string(),
             primary_token_id: row.primary_token_id.to_string(),
             secondary_token_id: row.secondary_token_id.as_ref().map(ToString::to_string),
-            liquidity_usd: row.liquidity_usd.map(|value| value.to_string()),
-            volume_24h_usd: row.volume_24h_usd.map(|value| value.to_string()),
+            liquidity_usd: row
+                .liquidity_usd
+                .map(|value| value.normalized().to_string()),
+            volume_24h_usd: row
+                .volume_24h_usd
+                .map(|value| value.normalized().to_string()),
         })
         .collect::<Vec<_>>();
     online_projection_members.sort();
@@ -1823,8 +1943,12 @@ fn selection_comparisons(
             category: row.category.to_string(),
             primary_token_id: row.primary_token_id.to_string(),
             secondary_token_id: row.secondary_token_id.as_ref().map(ToString::to_string),
-            liquidity_usd: row.liquidity_usd.map(|value| value.to_string()),
-            volume_24h_usd: row.volume_24h_usd.map(|value| value.to_string()),
+            liquidity_usd: row
+                .liquidity_usd
+                .map(|value| value.normalized().to_string()),
+            volume_24h_usd: row
+                .volume_24h_usd
+                .map(|value| value.normalized().to_string()),
         })
         .collect::<Vec<_>>();
     replay_members.sort();
@@ -3153,8 +3277,12 @@ fn verify_replay_contract(
         || (&bindings.factors.plane == factor_plane && bound_bias_hash == bias_table_hash);
     if bindings.schemas.feature_schema_hash != feature_schema_hash || !factor_plane_matches {
         return Err(determinism(format!(
-            "model {} serving contract differs from the exact replay feature/factor/bias plane",
-            version.model_version_id
+            "model {} serving contract differs from exact replay: feature schema bound={} replay={}; factor plane bound={} replay={}; bias table bound={bound_bias_hash:?} replay={bias_table_hash:?}",
+            version.model_version_id,
+            bindings.schemas.feature_schema_hash,
+            feature_schema_hash,
+            bindings.factors.plane.factor_schema_hash(),
+            factor_plane.factor_schema_hash(),
         )));
     }
     Ok(())
@@ -3173,9 +3301,11 @@ mod tests {
         domain::quant::{MarketSelectionMemberInfo, ReportDataQualitySnapshotInfo},
         enums::{
             common::MarketCategory,
+            factor::FactorFamily,
             market::MarketStatus,
             quant::{RecommendationReportStatus, ReportKind},
         },
+        runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
         types::{
             EventId, FeatureParityDetailSource, FeatureVectorId, ReportDataQualityTokens,
             TokenDataQualityRecord, TokenId, Usd,
@@ -3184,9 +3314,9 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{
-        DataQualityStatus, EmptyReportReason, FeatureParityCandidate, FeatureParityComparison,
-        FeatureParityEvidence, FeatureParityStage, FeatureParitySubject, MarketId, ModelRunId,
-        PreInferenceStageCeiling, RecommendationReportId, pending_completion,
+        DataQualityStatus, EmptyReportReason, FactorEngine, FeatureParityCandidate,
+        FeatureParityComparison, FeatureParityEvidence, FeatureParityStage, FeatureParitySubject,
+        MarketId, ModelRunId, PreInferenceStageCeiling, RecommendationReportId, pending_completion,
         representative_candidate, select_comparisons, validate_pre_inference_evidence,
     };
     use crate::test_fixtures::report_fixtures;
@@ -3303,6 +3433,36 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn replay_uses_route_scope() {
+        let factors = FactorsConfig::default();
+        let features = FeaturesConfig::default();
+        let domain = DomainConfig::default();
+        let scoped_engine = FactorEngine::for_model_scope(
+            &factors,
+            &features,
+            &domain,
+            Some(MarketCategory::Weather),
+            None,
+        );
+        let scoped = scoped_engine
+            .serving_plane()
+            .expect("weather replay factor plane");
+        let unscoped_engine = FactorEngine::new(&factors, &features, &domain, None);
+        let unscoped = unscoped_engine
+            .serving_plane()
+            .expect("unscoped factor plane");
+        let families = scoped
+            .definitions()
+            .iter()
+            .map(|definition| definition.definition().family)
+            .collect::<Vec<_>>();
+
+        assert!(families.contains(&FactorFamily::DomainWeather));
+        assert!(!families.contains(&FactorFamily::DomainCrypto));
+        assert_ne!(scoped.factor_schema_hash(), unscoped.factor_schema_hash());
     }
 
     #[test]

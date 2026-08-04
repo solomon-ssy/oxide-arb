@@ -714,10 +714,11 @@ fn linkage_tier0_matches_tier1() {
 
     // Cross-check against the full layered resolver: it must reach the exact
     // same subject Tier 0 produced directly.
-    let resolver = LayeredResolver::deterministic(
+    let resolver = LayeredResolver::try_deterministic(
         WeatherStationRegistry::default(),
         &WeatherVerticalBindingsConfig::default(),
-    );
+    )
+    .expect("deterministic resolver");
     let resolution = resolver.resolve(&meta, Utc::now()).expect("resolve");
     assert_eq!(resolution.resolver_tier, ResolverTier::Tier0Slug);
     let LinkageOutcome::Resolved(binding) = resolution.outcome else {
@@ -735,10 +736,11 @@ fn linkage_tier0_matches_tier1() {
 
 #[test]
 fn linkage_grounding_rejects_source() {
-    let resolver = LayeredResolver::deterministic(
+    let resolver = LayeredResolver::try_deterministic(
         WeatherStationRegistry::default(),
         &WeatherVerticalBindingsConfig::default(),
-    );
+    )
+    .expect("deterministic resolver");
     let bad = resolver
         .resolve(&metadata("totally-unknown-market-slug"), Utc::now())
         .expect("resolve");

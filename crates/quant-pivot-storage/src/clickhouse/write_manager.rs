@@ -21,6 +21,12 @@ use tracing::{error, warn};
 /// Maximum insert attempts (initial + retries) before a batch is surfaced as an error.
 const MAX_INSERT_ATTEMPTS: u32 = 3;
 
+#[derive(Clone, Copy)]
+enum ChInsertMode {
+    Synchronous,
+    AcknowledgedAsync,
+}
+
 /// Metrics specific to `ClickHouse` write operations.
 pub struct ChWriteMetrics {
     pub rows_written: IntCounterVec,
@@ -135,7 +141,8 @@ impl ChWriteManager {
     where
         T: RowOwned + RowWrite + Send + Sync,
     {
-        self.write_borrowed_mode(client, table, rows, false).await
+        self.write_borrowed_mode(client, table, rows, ChInsertMode::Synchronous)
+            .await
     }
 
     /// Persist a borrowed batch through acknowledged `ClickHouse` async inserts.
@@ -148,7 +155,8 @@ impl ChWriteManager {
     where
         T: RowOwned + RowWrite + Send + Sync,
     {
-        self.write_borrowed_mode(client, table, rows, true).await
+        self.write_borrowed_mode(client, table, rows, ChInsertMode::AcknowledgedAsync)
+            .await
     }
 
     async fn write_borrowed_mode<T>(
@@ -156,7 +164,7 @@ impl ChWriteManager {
         client: &Client,
         table: &'static str,
         rows: &[T],
-        async_insert: bool,
+        mode: ChInsertMode,
     ) -> Result<(), StorageError>
     where
         T: RowOwned + RowWrite + Send + Sync,
@@ -170,7 +178,7 @@ impl ChWriteManager {
         for attempt in 0..MAX_INSERT_ATTEMPTS {
             let start = Instant::now();
             let permit = self.acquire_write_permit().await?;
-            let result = Self::insert_rows(client, table, rows, None, async_insert).await;
+            let result = Self::insert_rows(client, table, rows, None, mode).await;
             drop(permit);
 
             match result {
@@ -224,8 +232,14 @@ impl ChWriteManager {
         for attempt in 0..MAX_INSERT_ATTEMPTS {
             let start = Instant::now();
             let permit = self.acquire_write_permit().await?;
-            let result =
-                Self::insert_rows(client, table, &rows, Some(deduplication_token), false).await;
+            let result = Self::insert_rows(
+                client,
+                table,
+                &rows,
+                Some(deduplication_token),
+                ChInsertMode::Synchronous,
+            )
+            .await;
             drop(permit);
             match result {
                 Ok(()) => {
@@ -262,7 +276,7 @@ impl ChWriteManager {
         table: &str,
         rows: &[T],
         deduplication_token: Option<&str>,
-        async_insert: bool,
+        mode: ChInsertMode,
     ) -> Result<(), StorageError>
     where
         T: RowOwned + RowWrite + Send + Sync,
@@ -271,13 +285,17 @@ impl ChWriteManager {
         if let Some(token) = deduplication_token {
             insert = insert.with_setting("insert_deduplication_token", token);
         }
-        if async_insert {
-            insert = insert
+        insert = match mode {
+            // ClickHouse 26.3 enabled async inserts by default. The application
+            // contract must therefore select the mode explicitly instead of
+            // inheriting a server-version or user-profile default.
+            ChInsertMode::Synchronous => insert.with_setting("async_insert", "0"),
+            ChInsertMode::AcknowledgedAsync => insert
                 .with_setting("async_insert", "1")
                 .with_setting("async_insert_deduplicate", "1")
                 .with_setting("wait_for_async_insert", "1")
-                .with_setting("async_insert_busy_timeout_ms", "100");
-        }
+                .with_setting("async_insert_busy_timeout_ms", "100"),
+        };
         for row in rows {
             insert.write(row).await?;
         }

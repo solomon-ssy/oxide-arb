@@ -1510,7 +1510,7 @@ async fn feature_window_not_stale() {
 async fn feature_stale_rejects_market() {
     let as_of = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let token = TokenId::new("tok-stale");
-    // 10s old > the 5s default `max_book_age_ms`.
+    // 10s old > this contract's explicit 5s `max_book_age_ms`.
     let stale_ts = as_of - ChronoDuration::seconds(10);
     let engine = MemoryPitEngine {
         books: vec![BookSnapshotAt {
@@ -1536,6 +1536,10 @@ async fn feature_stale_rejects_market() {
     let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
     let window = MarketWindowSnapshot::empty(token.clone(), as_of, as_of);
     let trade_tape = TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
+    let data_quality = DataQualityConfig {
+        max_book_age_ms: 5_000,
+        ..DataQualityConfig::default()
+    };
     let vector = builder
         .build(FeatureBuildInput {
             market: &market,
@@ -1546,7 +1550,7 @@ async fn feature_stale_rejects_market() {
             trade_tape: &trade_tape,
             domain: None,
             config: &config,
-            data_quality: &DataQualityConfig::default(),
+            data_quality: &data_quality,
         })
         .await
         .expect("build");

@@ -266,8 +266,12 @@ impl From<QuantError> for WebError {
             QuantError::Infra(ref infra) => match infra {
                 InfraError::MetricsRegistration { .. }
                 | InfraError::ChannelClosed { .. }
-                | InfraError::ChannelTimeout { .. } => {
+                | InfraError::ChannelTimeout { .. }
+                | InfraError::ComputeDeadline { .. } => {
                     Self::ServiceUnavailable("service temporarily unavailable".to_owned())
+                }
+                InfraError::ComputeCapacity { .. } => {
+                    Self::TooManyRequests("service capacity reached".to_owned())
                 }
                 InfraError::ServerBind { .. }
                 | InfraError::ServerRuntime { .. }
@@ -330,6 +334,7 @@ mod tests {
         control::{ControlError, RuntimeApplyStage},
         execution::ExecutionError,
         feedback::FeedbackError,
+        infra::InfraError,
         rbac::RbacError,
         research::ResearchError,
         storage::{
@@ -429,6 +434,26 @@ mod tests {
             reason: "book snapshot stale".to_owned(),
         }));
         assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn compute_capacity_maps_429() {
+        let web = WebError::from(QuantError::from(InfraError::ComputeCapacity {
+            subsystem: "password crypto",
+            limit: 8,
+        }));
+        assert_eq!(web.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(web.client_message(), "service capacity reached");
+    }
+
+    #[test]
+    fn compute_deadline_maps_503() {
+        let web = WebError::from(QuantError::from(InfraError::ComputeDeadline {
+            subsystem: "password crypto",
+            deadline_ms: 15_000,
+        }));
+        assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(web.client_message(), "service temporarily unavailable");
     }
 
     #[test]

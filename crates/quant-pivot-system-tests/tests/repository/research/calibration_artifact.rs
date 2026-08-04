@@ -113,7 +113,7 @@ fn fixture_reliability() -> ReliabilityReport {
             mean_predicted: Probability::new(dec!(0.5)),
             empirical_frequency: Probability::new(dec!(0.5)),
             wilson_ci: (Probability::new(dec!(0.2)), Probability::new(dec!(0.8))),
-            mean_adverse_excursion_bps: Some(dec!(15)),
+            mean_adverse_excursion_bps: Some(dec!(-15)),
         }],
         brier_score: dec!(0.25),
         log_loss: dec!(0.7),

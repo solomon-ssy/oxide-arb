@@ -630,7 +630,7 @@ impl MenuTree {
 
     /// Feedback-cycle observability and governed retraining workbench.
     fn build_research_feedback(&mut self, research: &MenuId) {
-        self.page(PageSpec {
+        let feedback = self.page(PageSpec {
             parent: research,
             name: "research-feedback",
             title: "page.menu.researchFeedback",
@@ -639,6 +639,24 @@ impl MenuTree {
             permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
             icon: "lucide:refresh-cw",
         });
+        self.button(
+            &feedback,
+            "publication:authorize",
+            "Authorize Candidate",
+            perm(ResourceType::Publication, Operation::Authorize),
+        );
+        self.button(
+            &feedback,
+            "publication:activate",
+            "Activate Candidate",
+            perm(ResourceType::Publication, Operation::Activate),
+        );
+        self.button(
+            &feedback,
+            "publication:reject",
+            "Reject Candidate",
+            perm(ResourceType::Publication, Operation::Reject),
+        );
     }
 }
 

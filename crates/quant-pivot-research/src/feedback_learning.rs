@@ -266,11 +266,6 @@ impl FeedbackLearningStageArtifact {
         }
     }
 
-    #[must_use]
-    pub const fn stage(&self) -> FeedbackStage {
-        self.results.stage()
-    }
-
     pub fn reference(
         &self,
         job_id: ResearchJobId,
@@ -279,7 +274,7 @@ impl FeedbackLearningStageArtifact {
         self.validate()?;
         Ok(FeedbackLearningStageArtifactRef {
             feedback_cycle_id: self.feedback_cycle_id,
-            stage: self.stage(),
+            stage: self.results.stage(),
             job_id,
             artifact_id: self.artifact_id,
             input_hash: self.input_hash,
@@ -322,11 +317,6 @@ impl FeedbackLearningStageCodec {
             .into());
         }
         Ok(artifact)
-    }
-
-    #[must_use]
-    pub fn bytes_hash(bytes: &[u8]) -> ContentHash {
-        CanonicalDigest::content_hash_bytes(bytes)
     }
 
     pub fn schema_hash() -> QuantResult<ContentHash> {

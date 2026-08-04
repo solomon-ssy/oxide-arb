@@ -140,6 +140,7 @@ impl PgModelRouteBootstrapRepository {
         transaction: &DatabaseTransaction,
         guard: &ActivationGuardModel,
         preflight: &ModelRouteBootstrapPreflight,
+        database_now: DateTime<Utc>,
     ) -> Result<(ActivePolicyBundle, ModelBootstrapPolicyProjection), RouteBootstrapCommitError>
     {
         let bundle = PgPolicyRepository::load_current_bundle_from(transaction)
@@ -166,6 +167,7 @@ impl PgModelRouteBootstrapRepository {
             &bundle,
             manifest.route(),
             manifest.model_version_id(),
+            database_now,
         )?;
         if projection.non_route_policy_hash() != preflight.non_route_policy_hash() {
             return Err(Self::conflict(
@@ -890,6 +892,7 @@ impl PgModelRouteBootstrapRepository {
             &previous,
             record.route().route,
             record.route().model_version_id,
+            activation.activated_at,
         )?;
         projection.validate_candidate(&committed.snapshot)?;
         if previous
@@ -1054,15 +1057,16 @@ impl ModelRouteBootstrapRepository for PgModelRouteBootstrapRepository {
             return Ok(resolved.commit);
         }
         Self::lock_runtime(&transaction, command.preflight()).await?;
+        let database_now = primitives::statement_timestamp(&transaction).await?;
         let (bundle, projection) =
-            Self::current_projection(&transaction, &guard, command.preflight()).await?;
+            Self::current_projection(&transaction, &guard, command.preflight(), database_now)
+                .await?;
         Self::lock_parity(&transaction, command.preflight()).await?;
         let (model_row, model) = Self::lock_model(&transaction, command.preflight()).await?;
         Self::lock_dataset(&transaction, command.preflight(), &model).await?;
         Self::lock_validation(&transaction, command.preflight(), &model).await?;
         Self::lock_calibration(&transaction, &model).await?;
         Self::verify_parity(&transaction, command.preflight(), &model_row).await?;
-        let database_now = primitives::statement_timestamp(&transaction).await?;
         let rows = Self::build_rows(
             &command,
             &authorized,

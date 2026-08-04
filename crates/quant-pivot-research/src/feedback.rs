@@ -39,6 +39,9 @@ const POPULATION_BIN_COUNT: usize = 10;
 const POPULATION_SMOOTHING: Decimal = Decimal::from_parts(5, 0, 0, false, 1);
 const KS_SERIES_TERMS: u32 = 100;
 const SERIES_EPSILON: Decimal = Decimal::from_parts(1, 0, 0, false, 18);
+// exp(-42) is below SERIES_EPSILON. Later terms have strictly more-negative
+// exponents, so truncating here is the governed series tolerance, not an error.
+const KS_EXP_CUTOFF: Decimal = Decimal::from_parts(42, 0, 0, true, 0);
 const COVERAGE_SCHEMA_DOMAIN: &str = "quant-pivot/feedback-coverage-schema";
 const DRIFT_SCHEMA_DOMAIN: &str = "quant-pivot/feedback-drift-schema";
 
@@ -308,7 +311,6 @@ impl FeedbackCoverageArtifact {
             && self.profile_ref == *self.evaluation_window.profile_ref()
             && self.feedback_policy_hash == policy_hash
             && self.feedback_policy_hash == self.cycle_key.feedback_policy_hash()
-            && self.capability_registry_hashes == *self.cycle_key.capability_registry_hashes()
             && self.champion_model_version_id == self.cycle_key.champion_model_version_id()
             && self.champion_serving_contract_hash
                 == self.cycle_key.champion_serving_contract_hash()
@@ -1633,9 +1635,12 @@ fn ks_asymptotic_p(statistic: Decimal, left: usize, right: usize) -> QuantResult
     for ordinal in 1..=KS_SERIES_TERMS {
         let ordinal_decimal = Decimal::from(ordinal);
         let exponent = -Decimal::TWO * ordinal_decimal * ordinal_decimal * lambda_sq;
+        if exponent <= KS_EXP_CUTOFF {
+            break;
+        }
         let term = exponent
             .checked_exp()
-            .ok_or_else(|| methodology("KS asymptotic series overflowed"))?;
+            .ok_or_else(|| methodology("KS exponential failed within the supported range"))?;
         if ordinal % 2 == 0 {
             series -= term;
         } else {

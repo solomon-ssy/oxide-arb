@@ -5,25 +5,27 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 pub(crate) use quant_pivot_models::{
     enums::{
         common::MarketCategory,
         model::ModelFamily,
-        quant::{DataQualityStatus, ModelWeightSource},
+        quant::{DataQualityStatus, ModelWeightSource, OutcomeSide},
     },
     runtime_config::FactorCrossSectionConfig,
     types::{
-        ContentHash, MarketId, ModelRunId, ModelVersionId, Price, TokenId, Usd,
+        ContentHash, MarketId, ModelRunId, ModelVersionId, Price, Probability, TokenId, Usd,
         factor::FactorServingPlane,
     },
 };
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    factors::{FactorValue, FrozenReferenceQuantiles},
+    factors::{FactorValue, FrozenReferenceQuantiles, NormalizedFactor},
     features::{FeatureCell, FeatureName, NullReason},
     model::signal::SignalCandidate,
+    training::LabelName,
 };
 
 /// Per-market context the scorer needs beyond the factor vector.
@@ -74,6 +76,76 @@ pub struct FactorInferenceTable {
     pub decision_at: DateTime<Utc>,
     /// Per-market factor rows.
     pub rows: Vec<FactorInferenceRow>,
+}
+
+/// Immutable model/transform identity stamped onto weighted input evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeightedInputAuditContract {
+    pub model_version_id: ModelVersionId,
+    pub input_contract_hash: ContentHash,
+    pub transform_hash: ContentHash,
+    pub training_input_hash: ContentHash,
+}
+
+impl FactorInferenceTable {
+    /// Project the exact normalized factor inputs consumed by the weighted
+    /// runtime. Historical serving fixtures and live inference share this one
+    /// projection so their durable evidence cannot drift.
+    pub fn weighted_input_audit(
+        &self,
+        contract: WeightedInputAuditContract,
+    ) -> QuantResult<Vec<ModelInputAuditRow>> {
+        let row_count = self
+            .rows
+            .iter()
+            .try_fold(0usize, |count, row| count.checked_add(row.factors.len()))
+            .ok_or_else(|| ResearchError::Inference {
+                detail: "weighted model-input audit row count overflow".to_owned(),
+            })?;
+        let mut audit = Vec::with_capacity(row_count);
+        for row in &self.rows {
+            for factor in &row.factors {
+                let (raw_state, score) = match &factor.normalization {
+                    NormalizedFactor::Scored { score, .. } => {
+                        (ModelInputAuditState::Scored, Some(score.inner()))
+                    }
+                    NormalizedFactor::MissingInput => (ModelInputAuditState::MissingInput, None),
+                    NormalizedFactor::NotApplicable => (ModelInputAuditState::NotApplicable, None),
+                    NormalizedFactor::Indeterminate { .. } => {
+                        (ModelInputAuditState::Indeterminate, None)
+                    }
+                };
+                let encoded_value_bits = score
+                    .map(|value| {
+                        value
+                            .to_f64()
+                            .filter(|value| value.is_finite())
+                            .ok_or_else(|| ResearchError::Inference {
+                                detail: format!(
+                                    "weighted factor `{}` normalized score cannot be represented as finite f64",
+                                    factor.name
+                                ),
+                            })
+                            .map(f64::to_bits)
+                    })
+                    .transpose()?;
+                audit.push(ModelInputAuditRow {
+                    model_version_id: contract.model_version_id,
+                    model_family: ModelFamily::WeightedFactor,
+                    market_id: row.market_id.clone(),
+                    raw_input_name: factor.name.to_string(),
+                    raw_state,
+                    raw_value: factor.raw_value.map(|value| value.to_string()),
+                    encoded_column: format!("{}.normalized_score", factor.name),
+                    encoded_value_bits,
+                    input_contract_hash: contract.input_contract_hash,
+                    transform_hash: contract.transform_hash,
+                    training_input_hash: contract.training_input_hash,
+                });
+            }
+        }
+        Ok(audit)
+    }
 }
 
 /// One market's dense feature row for matrix inference.
@@ -210,9 +282,71 @@ pub struct ModelInputAuditRow {
     pub training_input_hash: ContentHash,
 }
 
+/// One calibration-admissible model score before decision deadband, ranking,
+/// `TopN`, portfolio allocation, or execution economics.
+///
+/// The score is bound to the outcome token whose realized payout is the
+/// calibration target. Keeping this population separate from emitted
+/// [`SignalCandidate`]s prevents a decision gate from censoring probability
+/// calibration evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCalibrationScore {
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub outcome_side: OutcomeSide,
+    pub composite_score: Probability,
+    pub prediction_horizon_secs: u64,
+}
+
+impl From<&SignalCandidate> for ModelCalibrationScore {
+    fn from(candidate: &SignalCandidate) -> Self {
+        Self {
+            market_id: candidate.market_id.clone(),
+            token_id: candidate.token_id.clone(),
+            outcome_side: candidate.outcome_side,
+            composite_score: candidate.composite_score,
+            prediction_horizon_secs: candidate.suggested_horizon_secs,
+        }
+    }
+}
+
+/// Exact supervised target whose realized value is comparable with a model's
+/// canonical ranking output.
+///
+/// The binding is carried with every score so a replay cannot accidentally
+/// compare a signed canonical-YES prediction with the selected side's payout,
+/// or compare a forward-return regressor with a settlement label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRankTarget {
+    pub label_name: LabelName,
+    pub label_horizon_secs: u64,
+}
+
+/// One allocation-independent ranking prediction in the estimator's canonical
+/// supervised-target space.
+///
+/// Unlike [`ModelCalibrationScore`], `score` is deliberately not constrained to
+/// `[0, 1]`: weighted-factor models emit signed canonical-YES alpha and
+/// classical regressors emit their raw target-unit prediction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRankScore {
+    pub market_id: MarketId,
+    /// Canonical token bound to the training row, never the side selected for a
+    /// downstream buy decision.
+    pub token_id: TokenId,
+    pub score: Decimal,
+    pub target: ModelRankTarget,
+}
+
 /// Output of a model runtime's batch inference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRuntimeOutput {
+    /// Complete calibration-admissible score population. This is intentionally
+    /// upstream of the decision deadband represented by `candidates`.
+    pub calibration_scores: Vec<ModelCalibrationScore>,
+    /// Complete canonical ranking-score population. Rank-quality validation
+    /// consumes only this field and the exactly matching frozen target labels.
+    pub rank_scores: Vec<ModelRankScore>,
     /// Emitted candidates (pre-portfolio).
     pub candidates: Vec<SignalCandidate>,
     /// Runtime metrics for the batch.

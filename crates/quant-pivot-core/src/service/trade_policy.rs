@@ -399,16 +399,18 @@ impl TradePolicyService {
             })?;
         let config = version.snapshot;
         let route = BuyModelRoute::try_from(profile.spec.category)?;
-        let model_reference = config.model_routing.model.active_pointer(route).map_err(
-            |error| ResearchError::ValidationMethodology {
+        let model_binding = config
+            .model_routing
+            .model
+            .champion(route)
+            .map_err(|error| ResearchError::ValidationMethodology {
                 detail: format!(
-                    "runtime config {version_id} has no exact {route:?} model pointer for profile \
+                    "runtime config {version_id} has no exact {route:?} model binding for profile \
                      {}: {error}",
                     profile.profile_ref.id
                 ),
-            },
-        )?;
-        let model_version_id = model_reference.id;
+            })?;
+        let model_version_id = model_binding.model_version_id;
         let model_version = self
             .model_registry
             .find_model_version(&model_version_id)
@@ -880,7 +882,7 @@ impl TradePolicyService {
             ]
             .into_iter()
             .all(|kind| kinds.contains(&kind));
-        let fee_model = !frozen.clob_market_info.is_empty()
+        let fee_model = !frozen.prefetched.clob_market_info.is_empty()
             && kinds.contains(&SourceSliceObjectKind::ClobMarketInfo);
         SourceSlicePreflight {
             verified: true,
@@ -2523,6 +2525,7 @@ fn build_fit_artifact_payload(
     let fee_model_hash = CanonicalDigest::content_hash_json(
         &data
             .frozen_source
+            .prefetched
             .clob_market_info
             .iter()
             .map(|version| &version.payload_hash)

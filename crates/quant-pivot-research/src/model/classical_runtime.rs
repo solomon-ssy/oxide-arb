@@ -37,14 +37,14 @@ use crate::{
         },
         classical::{CLASSICAL_CRATE_VERSION, SmartcoreModel},
         runtime::{
-            InferenceMatrix, InferenceMatrixRow, MarketInferenceContext, ModelInputAuditRow,
-            ModelInputAuditState, ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput,
-            QuantModelRuntime,
+            InferenceMatrix, InferenceMatrixRow, MarketInferenceContext, ModelCalibrationScore,
+            ModelInputAuditRow, ModelInputAuditState, ModelRankScore, ModelRankTarget,
+            ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput, QuantModelRuntime,
         },
         signal::{ModelExplanation, SignalCandidate, SignalWarning},
     },
     precision::RESEARCH_DECIMAL_SCALE,
-    training::model_input_cell,
+    training::{RETURN_TO_HORIZON, TOKEN_PAYOUT_RATIO, model_input_cell},
 };
 /// A long binary outcome token can lose at most its full cost basis.
 const MAX_LONG_DOWNSIDE_BPS: i64 = 10_000;
@@ -515,6 +515,8 @@ impl QuantModelRuntime for ClassicalRuntime {
 
         if matrix.rows.is_empty() {
             return Ok(ModelRuntimeOutput {
+                calibration_scores: Vec::new(),
+                rank_scores: Vec::new(),
                 candidates: Vec::new(),
                 runtime_metrics: ModelRuntimeMetrics {
                     markets_scored: 0,
@@ -546,11 +548,31 @@ impl QuantModelRuntime for ClassicalRuntime {
         })?;
         let predictions = self.model.predict(&dense)?;
 
+        let mut calibration_scores = Vec::new();
+        let mut rank_scores = Vec::with_capacity(predictions.len());
         let mut candidates = Vec::new();
         for (row, prediction) in matrix.rows.iter().zip(predictions) {
+            let raw_prediction = f64_to_decimal(prediction)?;
+            let target = match self.payload.output_semantics {
+                ClassicalOutputSemantics::ForwardReturnBps => ModelRankTarget {
+                    label_name: RETURN_TO_HORIZON,
+                    label_horizon_secs: self.header.prediction_horizon_secs(),
+                },
+                ClassicalOutputSemantics::FullPayoutProbability => ModelRankTarget {
+                    label_name: TOKEN_PAYOUT_RATIO,
+                    label_horizon_secs: 0,
+                },
+            };
+            rank_scores.push(ModelRankScore {
+                market_id: row.market_id.clone(),
+                token_id: row.token_id.clone(),
+                score: raw_prediction,
+                target,
+            });
             if let Some(candidate) =
                 self.candidate(prediction, row, &matrix.model_run_id, matrix.decision_at)?
             {
+                calibration_scores.push(ModelCalibrationScore::from(&candidate));
                 candidates.push(candidate);
             }
         }
@@ -578,6 +600,8 @@ impl QuantModelRuntime for ClassicalRuntime {
                 }
             })?;
         Ok(ModelRuntimeOutput {
+            calibration_scores,
+            rank_scores,
             candidates,
             runtime_metrics: ModelRuntimeMetrics {
                 markets_scored,

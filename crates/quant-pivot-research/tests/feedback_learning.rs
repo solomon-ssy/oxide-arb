@@ -4,6 +4,7 @@ use quant_pivot_models::{
         quant::ResearchJobArtifactRef,
     },
     enums::quant::{DatasetPurpose, FeedbackStage},
+    hashing::CanonicalDigest,
     types::{
         ArtifactUri, ContentHash, FeedbackCycleId, FeedbackLearningStageArtifactId, ModelRunId,
         ModelVersionId, ResearchJobId, TrainingDatasetId,
@@ -90,18 +91,23 @@ fn dataset_artifact() -> FeedbackLearningStageArtifact {
     .expect("canonical DatasetSeal artifact must be valid")
 }
 
-fn dataset_reference(artifact: &FeedbackLearningStageArtifact) -> FeedbackLearningStageArtifactRef {
-    let bytes =
-        FeedbackLearningStageCodec::encode(artifact).expect("DatasetSeal artifact must encode");
-    artifact
-        .reference(
+trait FeedbackLearningFixtureExt {
+    fn dataset_reference(&self) -> FeedbackLearningStageArtifactRef;
+}
+
+impl FeedbackLearningFixtureExt for FeedbackLearningStageArtifact {
+    fn dataset_reference(&self) -> FeedbackLearningStageArtifactRef {
+        let bytes =
+            FeedbackLearningStageCodec::encode(self).expect("DatasetSeal artifact must encode");
+        self.reference(
             ResearchJobId::from_v7(),
             ResearchJobArtifactRef {
                 uri: artifact_uri("dataset-stage.json"),
-                content_hash: FeedbackLearningStageCodec::bytes_hash(&bytes),
+                content_hash: CanonicalDigest::content_hash_bytes(&bytes),
             },
         )
         .expect("DatasetSeal reference must be valid")
+    }
 }
 
 #[test]
@@ -194,7 +200,7 @@ fn predecessor_tamper_is_rejected() {
         dataset.cycle_idempotency_hash,
         dataset.candidate_family_hash,
         content_hash(43),
-        Some(dataset_reference(&dataset)),
+        Some(dataset.dataset_reference()),
         training_results,
     )
     .expect("exact predecessor must produce a valid Training artifact");
@@ -250,7 +256,7 @@ fn output_drift_is_rejected() {
             dataset.cycle_idempotency_hash,
             dataset.candidate_family_hash,
             content_hash(43),
-            Some(dataset_reference(&dataset)),
+            Some(dataset.dataset_reference()),
             FeedbackLearningStageResults::Training(training_results),
         )
         .is_err()

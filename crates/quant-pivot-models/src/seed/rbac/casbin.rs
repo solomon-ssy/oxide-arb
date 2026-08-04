@@ -168,6 +168,9 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::Materialization, Operation::Create),
         (ResourceType::Replay, Operation::Create),
         (ResourceType::Publication, Operation::Publish),
+        (ResourceType::Publication, Operation::Authorize),
+        (ResourceType::Publication, Operation::Activate),
+        (ResourceType::Publication, Operation::Reject),
         (ResourceType::Publication, Operation::Rollback),
         (ResourceType::Publication, Operation::Retire),
         // Risk owners revoke published reports (money-risk authority).

@@ -249,6 +249,12 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
+        name: "trg_quant_feedback_coordinator_fault_append_only",
+        table: "quant_feedback_coordinator_fault",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
         name: "trg_quant_feedback_event_outbox_guard",
         table: "quant_feedback_event_outbox",
         events: TriggerEvents::DeleteOrUpdate,
@@ -259,6 +265,18 @@ const TRIGGERS: &[TriggerSpec] = &[
         table: "quant_feedback_promotion_permit",
         events: TriggerEvents::DeleteOrUpdate,
         program: TriggerProgram::GuardPromotionPermit,
+    },
+    TriggerSpec {
+        name: "trg_quant_feedback_recipe_template_append_only",
+        table: "quant_feedback_recipe_template",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_model_route_shadow_binding_guard",
+        table: "quant_model_route_shadow_binding",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::GuardModelRouteShadowBinding,
     },
     TriggerSpec {
         name: "trg_quant_feedback_stage_event_append_only",
@@ -409,6 +427,12 @@ const TRIGGERS: &[TriggerSpec] = &[
         table: "quant_resolution_observation_projection",
         events: TriggerEvents::Update,
         program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_resolution_remediation_append_only",
+        table: "quant_resolution_projection_remediation",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
         name: "trg_quant_report_fact_delivery_updated_at",

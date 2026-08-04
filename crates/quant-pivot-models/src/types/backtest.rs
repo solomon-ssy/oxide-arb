@@ -21,7 +21,7 @@ use crate::{
     },
 };
 
-const CPCV_EVIDENCE_SCHEMA_VERSION: u32 = 1;
+const CPCV_EVIDENCE_SCHEMA_VERSION: u32 = 2;
 /// Fixed decimal precision used by deterministic backtest/comparison metrics.
 pub const BACKTEST_METRIC_SCALE: u32 = 12;
 
@@ -129,12 +129,24 @@ impl CpcvMethodologyBinding {
     }
 }
 
-/// Semantic role of one trained artifact in the frozen CPCV evidence ledger.
+/// Semantic identity of one trained estimator in the frozen CPCV evidence
+/// ledger.
+///
+/// A validation combination is not identified by its training-row hash:
+/// purge/embargo can legitimately produce equal training sets for distinct
+/// held-out combinations. Its immutable identity therefore binds the
+/// deterministic combination index and exact held-out partition/group sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
-pub enum CpcvFoldRole {
+pub enum CpcvEstimatorIdentity {
     /// One purged/embargoed CPCV combination.
-    Validation,
+    Validation {
+        combination_index: u32,
+        test_partitions_hash: ContentHash,
+        test_partition_count: u64,
+        test_groups_hash: ContentHash,
+        test_group_count: u64,
+    },
     /// One governed full-window hyperparameter trial.
     Trial { trial_id: u32 },
 }
@@ -143,7 +155,7 @@ pub enum CpcvFoldRole {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CpcvFoldArtifact {
-    pub role: CpcvFoldRole,
+    pub identity: CpcvEstimatorIdentity,
     pub training_groups_hash: ContentHash,
     pub training_group_count: u64,
     pub model_artifact_hash: ContentHash,
@@ -171,23 +183,51 @@ impl CpcvFoldArtifacts {
         if self.0.is_empty() {
             return Err(CpcvEvidenceError::EmptyFoldArtifacts);
         }
+        let mut expected_validation_index = 0u32;
+        let mut expected_trial_id = 0u32;
         for artifact in &self.0 {
             if artifact.training_group_count == 0 {
                 return Err(CpcvEvidenceError::EmptyTrainingGroups {
-                    role: artifact.role,
+                    identity: artifact.identity,
                 });
+            }
+            match artifact.identity {
+                CpcvEstimatorIdentity::Validation {
+                    combination_index,
+                    test_partition_count,
+                    test_group_count,
+                    ..
+                } => {
+                    if test_partition_count == 0 || test_group_count == 0 {
+                        return Err(CpcvEvidenceError::EmptyTestGroups {
+                            identity: artifact.identity,
+                        });
+                    }
+                    if combination_index != expected_validation_index {
+                        return Err(CpcvEvidenceError::NonCanonicalValidationIndex {
+                            expected: expected_validation_index,
+                            actual: combination_index,
+                        });
+                    }
+                    expected_validation_index = expected_validation_index
+                        .checked_add(1)
+                        .ok_or(CpcvEvidenceError::FoldIdentityOverflow { kind: "validation" })?;
+                }
+                CpcvEstimatorIdentity::Trial { trial_id } => {
+                    if trial_id != expected_trial_id {
+                        return Err(CpcvEvidenceError::NonCanonicalTrialId {
+                            expected: expected_trial_id,
+                            actual: trial_id,
+                        });
+                    }
+                    expected_trial_id = expected_trial_id
+                        .checked_add(1)
+                        .ok_or(CpcvEvidenceError::FoldIdentityOverflow { kind: "trial" })?;
+                }
             }
         }
         if self.0.windows(2).any(|window| window[0] >= window[1]) {
             return Err(CpcvEvidenceError::NonCanonicalFoldArtifacts);
-        }
-        if let Some(window) = self.0.windows(2).find(|window| {
-            window[0].role == window[1].role
-                && window[0].training_groups_hash == window[1].training_groups_hash
-        }) {
-            return Err(CpcvEvidenceError::DuplicateFoldArtifact {
-                role: window[0].role,
-            });
         }
         Ok(())
     }
@@ -196,7 +236,9 @@ impl CpcvFoldArtifacts {
     pub fn validation_count(&self) -> usize {
         self.0
             .iter()
-            .filter(|artifact| artifact.role == CpcvFoldRole::Validation)
+            .filter(|artifact| {
+                matches!(artifact.identity, CpcvEstimatorIdentity::Validation { .. })
+            })
             .count()
     }
 
@@ -204,7 +246,7 @@ impl CpcvFoldArtifacts {
     pub fn trial_count(&self) -> usize {
         self.0
             .iter()
-            .filter(|artifact| matches!(artifact.role, CpcvFoldRole::Trial { .. }))
+            .filter(|artifact| matches!(artifact.identity, CpcvEstimatorIdentity::Trial { .. }))
             .count()
     }
 }
@@ -232,12 +274,18 @@ pub enum CpcvEvidenceError {
     UnsupportedVersion { expected: u32, actual: u32 },
     #[error("CPCV fold-artifact ledger must not be empty")]
     EmptyFoldArtifacts,
-    #[error("CPCV {role:?} artifact has no training groups")]
-    EmptyTrainingGroups { role: CpcvFoldRole },
+    #[error("CPCV {identity:?} artifact has no training groups")]
+    EmptyTrainingGroups { identity: CpcvEstimatorIdentity },
+    #[error("CPCV {identity:?} validation artifact has no held-out partitions or groups")]
+    EmptyTestGroups { identity: CpcvEstimatorIdentity },
     #[error("CPCV fold-artifact ledger must be strictly sorted and duplicate-free")]
     NonCanonicalFoldArtifacts,
-    #[error("CPCV fold-artifact ledger repeats semantic key {role:?}")]
-    DuplicateFoldArtifact { role: CpcvFoldRole },
+    #[error("CPCV validation identities must be contiguous: expected {expected}, got {actual}")]
+    NonCanonicalValidationIndex { expected: u32, actual: u32 },
+    #[error("CPCV trial identities must be contiguous: expected {expected}, got {actual}")]
+    NonCanonicalTrialId { expected: u32, actual: u32 },
+    #[error("CPCV {kind} identity sequence overflowed u32")]
+    FoldIdentityOverflow { kind: &'static str },
 }
 
 const fn validate_evidence_version(actual: u32) -> Result<(), CpcvEvidenceError> {
@@ -370,6 +418,7 @@ pub struct SharpeDistribution {
     pub max: Decimal,
     pub median_max_drawdown: Option<Decimal>,
     pub median_tail_loss: Option<Decimal>,
+    pub median_turnover: Option<Decimal>,
     pub baseline_uplift: Option<Decimal>,
 }
 
@@ -383,6 +432,7 @@ pub struct BacktestPath {
     pub rank_ic: Decimal,
     pub max_drawdown: Decimal,
     pub tail_loss: Decimal,
+    pub turnover: Option<Decimal>,
 }
 
 /// Complete reconstructed CPCV paths persisted atomically.
@@ -480,7 +530,7 @@ mod tests {
     use rust_decimal_macros::dec;
     use serde_json::json;
 
-    use super::{CpcvFoldArtifact, CpcvFoldArtifacts, CpcvFoldRole, ExpectedVsRealized};
+    use super::{CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts, ExpectedVsRealized};
     use crate::types::ContentHash;
 
     fn hash(seed: char) -> ContentHash {
@@ -508,18 +558,59 @@ mod tests {
         assert!(serde_json::from_value::<ExpectedVsRealized>(missing).is_err());
     }
 
-    #[test]
-    fn ledger_rejects_duplicate_key() {
-        let artifact = |model_artifact_hash| CpcvFoldArtifact {
-            role: CpcvFoldRole::Validation,
+    fn validation_identity(combination_index: u32, held_out_seed: char) -> CpcvEstimatorIdentity {
+        CpcvEstimatorIdentity::Validation {
+            combination_index,
+            test_partitions_hash: hash(held_out_seed),
+            test_partition_count: 2,
+            test_groups_hash: hash(held_out_seed),
+            test_group_count: 16,
+        }
+    }
+
+    fn fold_artifact(
+        identity: CpcvEstimatorIdentity,
+        model_artifact_hash: ContentHash,
+    ) -> CpcvFoldArtifact {
+        CpcvFoldArtifact {
+            identity,
             training_groups_hash: hash('a'),
             training_group_count: 2,
             model_artifact_hash,
             serving_contract_hash: hash('c'),
             model_payload_hash: hash('d'),
-        };
+        }
+    }
+
+    #[test]
+    fn ledger_accepts_equal_models() {
+        let model_hash = hash('e');
+        let ledger = CpcvFoldArtifacts::try_new(vec![
+            fold_artifact(validation_identity(0, '1'), model_hash),
+            fold_artifact(validation_identity(1, '2'), model_hash),
+        ])
+        .expect("distinct fold identities may produce equal model bytes");
+        assert_eq!(ledger.validation_count(), 2);
+    }
+
+    #[test]
+    fn ledger_rejects_duplicate_identity() {
         assert!(
-            CpcvFoldArtifacts::try_new(vec![artifact(hash('e')), artifact(hash('f'))]).is_err()
+            CpcvFoldArtifacts::try_new(vec![
+                fold_artifact(validation_identity(0, '1'), hash('e')),
+                fold_artifact(validation_identity(0, '1'), hash('f')),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ledger_rejects_identity_gap() {
+        assert!(
+            CpcvFoldArtifacts::try_new(vec![
+                fold_artifact(validation_identity(1, '2'), hash('e'),)
+            ])
+            .is_err()
         );
     }
 }

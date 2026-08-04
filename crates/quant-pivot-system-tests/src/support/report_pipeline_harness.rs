@@ -86,9 +86,10 @@ use quant_pivot_models::{
         rbac::ResourceType,
     },
     runtime_config::{
-        DecimalValue, DecisionPolicySnapshot, DomainConfig, FactorCrossSectionConfig,
-        FactorsConfig, FeaturesConfig, ModelConfig, ModelVersionRef, PortfolioBudget,
-        PortfolioConfig, PortfolioConstraints, ReportsConfig, SelectionConfig,
+        BuyModelRoute, BuyRouteBinding, DecimalValue, DecisionPolicySnapshot, DomainConfig,
+        FactorCrossSectionConfig, FactorsConfig, FeaturesConfig, ModelBinding, ModelBindingSource,
+        ModelConfig, PortfolioBudget, PortfolioConfig, PortfolioConstraints, ReportsConfig,
+        SelectionConfig,
     },
     types::{
         AccountPositions, BasisAlertId, ConditionTruth, ContentHash, DecisionPolicySnapshotId,
@@ -96,12 +97,13 @@ use quant_pivot_models::{
         EntryConditionPlan, EventId, EvmAddress, ExecutionAccountId, ExposureBreakdown,
         FeatureParityStateId, IcaoStation, MarketId, MarketLinkageId, MarketSelectionId,
         ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        OperationDetailDocument, OperationLogId, PortfolioConstraintsSnapshot,
-        PortfolioOptimizerMeta, PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
-        RecommendationId, RecommendationReportId, RecommendationTradePlan, ReportDataQualityTokens,
-        ResearchProfileRef, ResolverVersion, RoleCode, SchemaVersion, SelectionExclusionSummary,
-        Shares, TemperatureBand, TemperatureUnit, TokenId, TrainingDatasetId, Usd,
-        WeatherContractFinalizationPolicy, WeatherTemperatureStatistic, WorkerId,
+        OperationDetailDocument, OperationLogId, PolicyBundleGeneration,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioRejectedSummary,
+        PortfolioRiskBudget, Price, Probability, RecommendationId, RecommendationReportId,
+        RecommendationTradePlan, ReportDataQualityTokens, ResearchProfileRef, ResolverVersion,
+        RoleCode, SchemaVersion, SelectionExclusionSummary, Shares, TemperatureBand,
+        TemperatureUnit, TokenId, TrainingDatasetId, Usd, WeatherContractFinalizationPolicy,
+        WeatherTemperatureStatistic, WorkerId,
         domain_capability::{DomainMeasurementUnit, WeatherVariable},
         factor::FactorServingPlane,
         model_lineage::ModelVersionDerivation,
@@ -1284,7 +1286,7 @@ fn calibration_artifact_loader(db: &DatabaseConnection) -> Arc<dyn CalibrationAr
     ))
 }
 
-async fn build_model_runner(
+pub(crate) async fn build_model_runner(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
 ) -> Arc<ModelRunner> {
@@ -1802,17 +1804,41 @@ fn runtime_config_for_pipeline(
         selection.enabled_categories.as_slice(),
         [MarketCategory::Crypto | MarketCategory::Weather]
     );
+    let bound_at = Utc::now();
+    let mut buy_routes = BTreeMap::from([(
+        BuyModelRoute::Weather,
+        BuyRouteBinding {
+            champion: ModelBinding::new(
+                *weather_model_version_id,
+                ModelBindingSource::Bootstrap,
+                bound_at,
+                PolicyBundleGeneration::FIRST,
+                1,
+            ),
+            shadow: None,
+        },
+    )]);
+    if pooled_route {
+        buy_routes.insert(
+            BuyModelRoute::Pooled,
+            BuyRouteBinding {
+                champion: ModelBinding::new(
+                    *generic_model_version_id,
+                    ModelBindingSource::Bootstrap,
+                    bound_at,
+                    PolicyBundleGeneration::FIRST,
+                    1,
+                ),
+                shadow: None,
+            },
+        );
+    }
     let mut config = DecisionPolicySnapshot::default();
     config.recommendation.selection = selection;
     config.profile_artifacts.scoring.definition = factors.clone();
     config.profile_artifacts.features.definition = features.clone();
     config.model_routing.model = ModelConfig {
-        active_model_version_id: pooled_route
-            .then(|| ModelVersionRef::new(*generic_model_version_id)),
-        category_model_pointers: BTreeMap::from([(
-            MarketCategory::Weather,
-            ModelVersionRef::new(*weather_model_version_id),
-        )]),
+        buy_routes,
         min_model_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
         candidate_score_floor: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
         ..ModelConfig::default()

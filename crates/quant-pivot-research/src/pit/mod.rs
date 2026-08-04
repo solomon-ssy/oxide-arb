@@ -6,7 +6,11 @@
 //! catalog ledger. The in-memory [`MaterializedPitEngine`] serves a pre-fetched
 //! immutable window so dataset construction never performs per-row I/O.
 
-use std::{collections::HashMap, fmt::Display, sync::Arc};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    fmt::Display,
+    sync::Arc,
+};
 mod materialized;
 
 use async_trait::async_trait;
@@ -157,17 +161,77 @@ pub fn resolve_catalog_snapshot(
     snapshot: &CatalogSnapshotInfo,
     boundary: &DecisionBoundary,
 ) -> QuantResult<ResolvedMarketSnapshot> {
-    validate_catalog_visibility(snapshot, boundary)?;
-    let market: MarketRegistryInfo = decode_catalog_payload(
-        "market",
-        &snapshot.market.market_change_id,
-        snapshot.market.payload.clone().into_inner(),
-    )?;
+    validate_market_visibility(snapshot, boundary)?;
+    let event = resolve_event_catalog(snapshot, boundary)?;
+    resolve_market_catalog(snapshot, boundary, &event)
+}
+
+/// Decode a transactionally consistent catalog batch while resolving each
+/// immutable event revision and membership set exactly once.
+///
+/// `CatalogSnapshotInfo` intentionally shares event/member storage across all
+/// markets linked to the same event revision. This resolver preserves that
+/// ownership boundary and prevents candidate enumeration from doing quadratic
+/// JSON decoding and membership hashing for large multi-market events.
+pub fn resolve_catalog_snapshots(
+    snapshots: &[CatalogSnapshotInfo],
+    boundary: &DecisionBoundary,
+) -> QuantResult<Vec<ResolvedMarketSnapshot>> {
+    let mut events = HashMap::<CatalogEventChangeId, ResolvedEventCatalog>::new();
+    let mut resolved = Vec::with_capacity(snapshots.len());
+    for snapshot in snapshots {
+        validate_market_visibility(snapshot, boundary)?;
+        let event_change_id = snapshot.event.event_change_id;
+        let event = match events.entry(event_change_id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(resolve_event_catalog(snapshot, boundary)?),
+        };
+        resolved.push(resolve_market_catalog(snapshot, boundary, event)?);
+    }
+    Ok(resolved)
+}
+
+struct ResolvedEventCatalog {
+    event: Arc<EventRegistryInfo>,
+    membership_hash: ContentHash,
+    neg_risk_leg_set: NegRiskLegSet,
+}
+
+fn resolve_event_catalog(
+    snapshot: &CatalogSnapshotInfo,
+    boundary: &DecisionBoundary,
+) -> QuantResult<ResolvedEventCatalog> {
+    validate_event_visibility(snapshot, boundary)?;
     let event: EventRegistryInfo = decode_catalog_payload(
         "event",
         &snapshot.event.event_change_id,
         snapshot.event.payload.clone().into_inner(),
     )?;
+    let membership_hash = catalog_membership_hash(
+        &snapshot.event.event_change_id,
+        &event,
+        &snapshot.event_markets,
+    )?;
+    let members = decode_event_members(&snapshot.event_markets)?;
+    let neg_risk_leg_set = event_leg_set(&event, &members);
+    Ok(ResolvedEventCatalog {
+        event: Arc::new(event),
+        membership_hash,
+        neg_risk_leg_set,
+    })
+}
+
+fn resolve_market_catalog(
+    snapshot: &CatalogSnapshotInfo,
+    boundary: &DecisionBoundary,
+    resolved_event: &ResolvedEventCatalog,
+) -> QuantResult<ResolvedMarketSnapshot> {
+    let market: MarketRegistryInfo = decode_catalog_payload(
+        "market",
+        &snapshot.market.market_change_id,
+        snapshot.market.payload.clone().into_inner(),
+    )?;
+    let event = resolved_event.event.as_ref();
     if snapshot.market.event_change_id != snapshot.event.event_change_id
         || market.event_id != event.event_id
         || snapshot.market.event_id != event.event_id
@@ -193,14 +257,6 @@ pub fn resolve_catalog_snapshot(
         }
         .into());
     }
-
-    let membership_hash = catalog_membership_hash(
-        &snapshot.event.event_change_id,
-        &event,
-        &snapshot.event_markets,
-    )?;
-    let members = decode_event_members(&snapshot.event_markets)?;
-    let neg_risk_leg_set = event_leg_set(&event, &members);
     let context = MarketContextAt {
         market_id: market.market_id.clone(),
         effective_at: snapshot.market.source_effective_at,
@@ -215,15 +271,15 @@ pub fn resolve_catalog_snapshot(
     Ok(ResolvedMarketSnapshot {
         boundary: boundary.clone(),
         market: Arc::new(market),
-        event: Arc::new(event),
+        event: Arc::clone(&resolved_event.event),
         context,
-        neg_risk_leg_set,
+        neg_risk_leg_set: resolved_event.neg_risk_leg_set.clone(),
         catalog_sync_batch_id: snapshot.market.catalog_sync_batch_id,
         market_change_id: snapshot.market.market_change_id,
         event_change_id: snapshot.event.event_change_id,
         market_content_hash: snapshot.market.content_hash,
         event_content_hash: snapshot.event.content_hash,
-        membership_hash,
+        membership_hash: resolved_event.membership_hash,
         market_timestamp_quality: snapshot.market.source_timestamp_quality,
         event_timestamp_quality: snapshot.event.source_timestamp_quality,
         market_effective_at: snapshot.market.source_effective_at,
@@ -233,7 +289,7 @@ pub fn resolve_catalog_snapshot(
     })
 }
 
-fn validate_catalog_visibility(
+fn validate_market_visibility(
     snapshot: &CatalogSnapshotInfo,
     boundary: &DecisionBoundary,
 ) -> QuantResult<()> {
@@ -256,6 +312,18 @@ fn validate_catalog_visibility(
         }
         .into());
     }
+    Ok(())
+}
+
+fn validate_event_visibility(
+    snapshot: &CatalogSnapshotInfo,
+    boundary: &DecisionBoundary,
+) -> QuantResult<()> {
+    let source_cutoff = boundary.cutoff_for(DecisionSource::Catalog);
+    let decision_at = boundary.decision_at();
+    let visible = |effective_at: DateTime<Utc>, available_at: DateTime<Utc>| {
+        effective_at <= source_cutoff && available_at <= decision_at
+    };
     if !visible(
         snapshot.event.source_effective_at,
         snapshot.event.available_at,

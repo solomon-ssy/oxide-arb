@@ -47,8 +47,9 @@ use quant_pivot_models::{
     types::{CalibrationArtifactId, MarketId, PayoutRatio, ResearchJobProgress, TokenId},
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, CatalogLedgerRepository, MarketLinkageRepository,
-    MarketRepository, PolicyRepository, QuantFactReadRepository, TrainingDatasetRepository,
+    CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
+    MarketLinkageRepository, MarketRepository, PolicyRepository, QuantFactReadRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     features::ResolvedBook,
@@ -150,6 +151,7 @@ struct SettledMarket {
 pub struct BiasTableFitService {
     fact_read: Arc<dyn QuantFactReadRepository>,
     catalog_repo: Arc<dyn CatalogLedgerRepository>,
+    clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     market_repo: Arc<dyn MarketRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
@@ -157,26 +159,31 @@ pub struct BiasTableFitService {
     training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
 }
 
+/// Persistence ports required by the bias-table fitter.
+pub struct BiasTableFitServiceDeps {
+    pub fact_read: Arc<dyn QuantFactReadRepository>,
+    pub catalog_repo: Arc<dyn CatalogLedgerRepository>,
+    pub clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
+    pub market_repo: Arc<dyn MarketRepository>,
+    pub linkage_repo: Arc<dyn MarketLinkageRepository>,
+    pub calibration_repo: Arc<dyn CalibrationArtifactRepository>,
+    pub runtime_config_repo: Arc<dyn PolicyRepository>,
+    pub training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
+}
+
 impl BiasTableFitService {
     /// Wire the fitter from its persistence ports.
     #[must_use]
-    pub const fn new(
-        fact_read: Arc<dyn QuantFactReadRepository>,
-        catalog_repo: Arc<dyn CatalogLedgerRepository>,
-        market_repo: Arc<dyn MarketRepository>,
-        linkage_repo: Arc<dyn MarketLinkageRepository>,
-        calibration_repo: Arc<dyn CalibrationArtifactRepository>,
-        runtime_config_repo: Arc<dyn PolicyRepository>,
-        training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
-    ) -> Self {
+    pub fn new(deps: BiasTableFitServiceDeps) -> Self {
         Self {
-            fact_read,
-            catalog_repo,
-            market_repo,
-            linkage_repo,
-            calibration_repo,
-            runtime_config_repo,
-            training_dataset_repo,
+            fact_read: deps.fact_read,
+            catalog_repo: deps.catalog_repo,
+            clob_market_info_repo: deps.clob_market_info_repo,
+            market_repo: deps.market_repo,
+            linkage_repo: deps.linkage_repo,
+            calibration_repo: deps.calibration_repo,
+            runtime_config_repo: deps.runtime_config_repo,
+            training_dataset_repo: deps.training_dataset_repo,
         }
     }
 
@@ -358,6 +365,7 @@ impl BiasTableFitService {
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.fact_read),
             Arc::clone(&self.catalog_repo),
+            Arc::clone(&self.clob_market_info_repo),
             Arc::clone(&self.linkage_repo),
             Arc::clone(&self.calibration_repo),
             max_book_staleness,

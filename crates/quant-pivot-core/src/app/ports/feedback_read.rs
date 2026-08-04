@@ -19,12 +19,15 @@ use quant_pivot_models::{
             FeedbackStageEventView, FeedbackTriggerEventView, FeedbackTruthOperationsView,
         },
         pagination::{PageRequest, Paginated},
-        ports::{FeedbackReadPort, ResearchReadinessPort},
+        ports::{
+            FeedbackActivationReadPort, FeedbackReadPort, ResearchReadinessPort,
+            ShadowBindingLifecycle,
+        },
         quant::{FeedbackCycleInfo, FeedbackStageEventInfo},
     },
     enums::quant::{
         AttributionArtifactKind, FeedbackCycleStatus, FeedbackDecision, FeedbackStage,
-        FeedbackStageEventKind,
+        FeedbackStageEventKind, ShadowBindingStatus,
     },
     types::{
         ArtifactUri, ContentHash, FeedbackCycleId, ResearchProfileArtifact,
@@ -33,7 +36,8 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     ExecutionAttemptOutcomeRepository, FeedbackCycleRepository, FeedbackSchedulerRepository,
-    RecommendationExecutionRollupRepository, ResolutionObservationRepository,
+    ModelRouteShadowBindingRepository, RecommendationExecutionRollupRepository,
+    ResolutionObservationRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -53,7 +57,9 @@ pub struct CoreFeedbackReadDeps {
     pub resolutions: Arc<dyn ResolutionObservationRepository>,
     pub attempts: Arc<dyn ExecutionAttemptOutcomeRepository>,
     pub rollups: Arc<dyn RecommendationExecutionRollupRepository>,
+    pub shadow_bindings: Arc<dyn ModelRouteShadowBindingRepository>,
     pub decisions: Arc<FeedbackDecisionStageAdapter>,
+    pub activations: Arc<dyn FeedbackActivationReadPort>,
 }
 
 pub struct CoreFeedbackReadPort {
@@ -64,7 +70,9 @@ pub struct CoreFeedbackReadPort {
     resolutions: Arc<dyn ResolutionObservationRepository>,
     attempts: Arc<dyn ExecutionAttemptOutcomeRepository>,
     rollups: Arc<dyn RecommendationExecutionRollupRepository>,
+    shadow_bindings: Arc<dyn ModelRouteShadowBindingRepository>,
     decisions: Arc<FeedbackDecisionStageAdapter>,
+    activations: Arc<dyn FeedbackActivationReadPort>,
 }
 
 impl CoreFeedbackReadPort {
@@ -78,7 +86,9 @@ impl CoreFeedbackReadPort {
             resolutions: deps.resolutions,
             attempts: deps.attempts,
             rollups: deps.rollups,
+            shadow_bindings: deps.shadow_bindings,
             decisions: deps.decisions,
+            activations: deps.activations,
         }
     }
 
@@ -93,19 +103,43 @@ impl CoreFeedbackReadPort {
 
     fn candidate_ready_view(
         evidence: &PromotionDecisionEvidence,
+        lifecycle: &ShadowBindingLifecycle,
     ) -> QuantResult<FeedbackCandidateReadyView> {
+        if lifecycle.binding_id != evidence.shadow_binding.artifact_id
+            || lifecycle.feedback_cycle_id != evidence.cycle.feedback_cycle_id
+            || lifecycle.route != evidence.shadow_binding.route
+            || lifecycle.binding_generation != evidence.shadow_binding.binding_generation
+            || lifecycle.champion_model_version_id
+                != evidence.shadow_binding.champion_model_version_id
+            || lifecycle.candidate_model_version_id
+                != evidence.shadow_binding.candidate_model_version_id
+            || lifecycle.committed_policy_generation
+                != evidence.shadow_binding.committed_policy_generation
+            || lifecycle.bound_at != evidence.shadow_binding.bound_at
+        {
+            return Err(FeedbackError::InvalidCycleState {
+                detail: "shadow-binding lifecycle differs from CandidateReady evidence".to_owned(),
+            }
+            .into());
+        }
         let mut prediction_explanation_count = 0_u64;
-        let mut decision_counterfactual_count = 0_u64;
-        let mut outcome_association_count = 0_u64;
+        let mut decision_intervention_replay_count = 0_u64;
+        let mut resolution_outcome_association_count = 0_u64;
+        let mut execution_outcome_association_count = 0_u64;
         let mut execution_trajectory_count = 0_u64;
         let mut policy_counterfactual_count = 0_u64;
-        for artifact in &evidence.dag.attribution_plan.produced {
+        for artifact in &evidence.dag.attribution_manifest.produced {
             let count = match artifact.artifact_kind {
                 AttributionArtifactKind::PredictionExplanation => &mut prediction_explanation_count,
-                AttributionArtifactKind::DecisionCounterfactual => {
-                    &mut decision_counterfactual_count
+                AttributionArtifactKind::DecisionInterventionReplay => {
+                    &mut decision_intervention_replay_count
                 }
-                AttributionArtifactKind::OutcomeAssociation => &mut outcome_association_count,
+                AttributionArtifactKind::ResolutionOutcomeAssociation => {
+                    &mut resolution_outcome_association_count
+                }
+                AttributionArtifactKind::ExecutionOutcomeAssociation => {
+                    &mut execution_outcome_association_count
+                }
                 AttributionArtifactKind::ExecutionTrajectory => &mut execution_trajectory_count,
                 AttributionArtifactKind::PolicyCounterfactualOutcome => {
                     &mut policy_counterfactual_count
@@ -120,11 +154,12 @@ impl CoreFeedbackReadPort {
         let contract = &evidence.shadow_contract;
         let comparison = &evidence.comparison;
         let shadow = &evidence.shadow;
-        let proposed_route_generation = contract
-            .policy_bundle_generation()
-            .checked_next()
-            .map_err(|error| FeedbackError::InvalidCycleState {
-                detail: format!("candidate route generation overflowed: {error}"),
+        let current_route_generation = evidence.shadow_binding.binding_generation;
+        let proposed_route_generation =
+            current_route_generation.checked_add(1).ok_or_else(|| {
+                FeedbackError::InvalidCycleState {
+                    detail: "candidate route generation overflowed".to_owned(),
+                }
             })?;
         Ok(FeedbackCandidateReadyView {
             quality_gate: (&evidence.dag.quality_gate_report).into(),
@@ -142,11 +177,15 @@ impl CoreFeedbackReadPort {
             shadow: FeedbackCandidateShadowView {
                 observed: shadow.observed,
                 required: contract.minimum_observations(),
-                observed_window_secs: shadow.observed_window_secs,
+                served_window_secs: shadow.served_window_secs,
                 required_window_secs: contract.required_window_secs(),
-                mean_topn_overlap: shadow.mean_topn_overlap.inner().normalize().to_string(),
-                minimum_topn_overlap: contract
-                    .minimum_topn_overlap()
+                mean_topn_decision_overlap: shadow
+                    .mean_topn_decision_overlap
+                    .inner()
+                    .normalize()
+                    .to_string(),
+                minimum_topn_decision_overlap: contract
+                    .minimum_topn_decision_overlap()
                     .inner()
                     .normalize()
                     .to_string(),
@@ -154,19 +193,30 @@ impl CoreFeedbackReadPort {
             },
             attribution: FeedbackAttributionSummaryView {
                 prior_cycle_use_count: Self::evidence_count(
-                    evidence.dag.attribution_plan.uses.len(),
+                    evidence.dag.attribution_manifest.uses.len(),
                     "attribution prior-cycle use count",
                 )?,
                 prediction_explanation_count,
-                decision_counterfactual_count,
-                outcome_association_count,
+                decision_intervention_replay_count,
+                resolution_outcome_association_count,
+                execution_outcome_association_count,
                 execution_trajectory_count,
                 policy_counterfactual_count,
-                use_set_hash: evidence.dag.attribution_plan.use_set_hash,
-                produced_set_hash: evidence.dag.attribution_plan.produced_set_hash,
+                use_set_hash: evidence.dag.attribution_manifest.use_set_hash,
+                produced_set_hash: evidence.dag.attribution_manifest.produced_set_hash,
             },
             route_diff: FeedbackRouteDiffView {
-                current_route_generation: contract.policy_bundle_generation(),
+                route: evidence.shadow_binding.route,
+                shadow_binding_id: evidence.shadow_binding.artifact_id,
+                shadow_bound_at: evidence.shadow_binding.bound_at,
+                shadow_binding_generation: evidence.shadow_binding.binding_generation,
+                shadow_binding_status: lifecycle.status,
+                shadow_lifecycle_generation: lifecycle.lifecycle_generation,
+                shadow_terminated_at: lifecycle.terminated_at,
+                shadow_termination_policy_activation_id: lifecycle.termination_policy_activation_id,
+                shadow_termination_reason_code: lifecycle.termination_reason_code.clone(),
+                current_policy_generation: evidence.shadow_binding.committed_policy_generation,
+                current_route_generation,
                 proposed_route_generation,
                 champion_model_version_id: contract.champion_model_version_id(),
                 candidate_model_version_id: contract.candidate_model_version_id(),
@@ -330,9 +380,10 @@ impl CoreFeedbackReadPort {
 impl FeedbackReadPort for CoreFeedbackReadPort {
     async fn overview(&self) -> QuantResult<FeedbackOverviewView> {
         let truth_observed_at = self.cycles.database_time().await?;
-        let (queue, resolution, attempts, rollups) = tokio::try_join!(
+        let (queue, resolution, resolution_attention, attempts, rollups) = tokio::try_join!(
             self.cycles.queue_snapshot(),
             self.resolutions.barrier(truth_observed_at),
+            self.resolutions.list_attention(50),
             self.attempts.barrier(truth_observed_at),
             self.rollups.barrier(truth_observed_at),
         )?;
@@ -361,9 +412,12 @@ impl FeedbackReadPort for CoreFeedbackReadPort {
             truth_operations: FeedbackTruthOperationsView {
                 observed_at: truth_observed_at,
                 resolution_unresolved_count: resolution.unresolved_count,
+                resolution_mapping_blocked_count: resolution.mapping_blocked_count,
                 resolution_quarantined_count: resolution.quarantined_count,
+                resolution_excluded_count: resolution.excluded_count,
                 resolution_oldest_unresolved_at: resolution.oldest_unresolved_at,
-                resolution_verified_through: resolution.verified_through,
+                resolution_terminal_through: resolution.terminal_through,
+                resolution_attention,
                 execution_attempt_unsealed_count: attempts.eligible_unsealed_count,
                 execution_attempt_sealed_through: attempts.sealed_through,
                 recommendation_rollup_unsealed_count: rollups.eligible_unsealed_count,
@@ -422,14 +476,77 @@ impl FeedbackReadPort for CoreFeedbackReadPort {
             self.cycles.list_evaluation_uses(cycle_id),
         )?;
         let coverage = self.load_coverage(&cycle, &timeline).await?;
-        let candidate_ready = if cycle.status == FeedbackCycleStatus::Succeeded
-            && cycle.decision == Some(FeedbackDecision::CandidateReady)
-        {
+        let candidate_context = if cycle.status == FeedbackCycleStatus::Succeeded
+            && matches!(
+                cycle.decision,
+                Some(FeedbackDecision::CandidateReady | FeedbackDecision::Promoted)
+            ) {
             let evidence = self
                 .decisions
-                .promotion_evidence(&cycle.feedback_cycle_id)
+                .candidate_evidence(&cycle.feedback_cycle_id)
                 .await?;
-            Some(Self::candidate_ready_view(&evidence)?)
+            let lifecycle = self
+                .shadow_bindings
+                .find_lifecycle(&evidence.shadow_binding.artifact_id)
+                .await?
+                .ok_or_else(|| FeedbackError::InvalidCycleState {
+                    detail: format!(
+                        "candidate-evidence cycle {} has no shadow-binding lifecycle",
+                        cycle.feedback_cycle_id
+                    ),
+                })?;
+            Some((evidence, lifecycle))
+        } else {
+            None
+        };
+        let candidate_ready = candidate_context
+            .as_ref()
+            .map(|(evidence, lifecycle)| Self::candidate_ready_view(evidence, lifecycle))
+            .transpose()?;
+        let activation_receipt = if cycle.status == FeedbackCycleStatus::Succeeded
+            && cycle.decision == Some(FeedbackDecision::Promoted)
+        {
+            let (_, lifecycle) =
+                candidate_context
+                    .as_ref()
+                    .ok_or_else(|| FeedbackError::InvalidCycleState {
+                        detail: format!(
+                            "Promoted cycle {} has no candidate evidence",
+                            cycle.feedback_cycle_id
+                        ),
+                    })?;
+            let receipt = self
+                .activations
+                .get_cycle_activation(cycle.feedback_cycle_id)
+                .await?
+                .ok_or_else(|| FeedbackError::InvalidCycleState {
+                    detail: format!(
+                        "Promoted cycle {} activation receipt is missing",
+                        cycle.feedback_cycle_id
+                    ),
+                })?;
+            if lifecycle.feedback_cycle_id != cycle.feedback_cycle_id
+                || lifecycle.status != ShadowBindingStatus::Promoted
+                || receipt.feedback_cycle_id != cycle.feedback_cycle_id
+                || receipt.route != lifecycle.route
+                || receipt.previous_model_version_id != lifecycle.champion_model_version_id
+                || receipt.activated_model_version_id != lifecycle.candidate_model_version_id
+                || receipt.rollback_target.route != lifecycle.route
+                || receipt.rollback_target.restored_model_version_id
+                    != lifecycle.champion_model_version_id
+                || receipt.rollback_target.activated_model_version_id
+                    != lifecycle.candidate_model_version_id
+                || !receipt.rollback_target.shadow_cleared
+            {
+                return Err(FeedbackError::InvalidCycleState {
+                    detail: format!(
+                        "Promoted cycle {} activation receipt differs from shadow lifecycle",
+                        cycle.feedback_cycle_id
+                    ),
+                }
+                .into());
+            }
+            Some(receipt)
         } else {
             None
         };
@@ -445,6 +562,7 @@ impl FeedbackReadPort for CoreFeedbackReadPort {
                 .collect(),
             coverage,
             candidate_ready,
+            activation_receipt,
             drift_reports: drift_reports.into_iter().map(Into::into).collect(),
             evaluation_uses: evaluation_uses
                 .into_iter()

@@ -7,8 +7,8 @@ expression: revoked_report()
   "profile_id": "weather_forecast_24h",
   "profile_ref": {
     "id": "weather_forecast_24h",
-    "version": 3,
-    "content_hash": "blake3:0dca50a71b5630ce844dfcfb55bec134c6d65e954d2a7b948807c97d53bafdc3"
+    "version": 4,
+    "content_hash": "blake3:c906d7676bb12b6a75a261c518224efd7391ffbc1bcbad471ec5ccf8baf90c10"
   },
   "report_kind": "top_n",
   "decision_at": "2023-11-14T22:11:20Z",

@@ -25,6 +25,7 @@ mod feature;
 mod feature_parity;
 mod feedback_cohort;
 mod feedback_cycle;
+mod feedback_recipe;
 mod feedback_scheduler;
 mod governance_audit;
 mod market_linkage;
@@ -33,6 +34,7 @@ mod model_candidate_manifest;
 mod model_registry;
 mod model_route_bootstrap;
 mod model_route_promotion;
+mod model_route_shadow_binding;
 mod order_intent;
 mod portfolio_plan;
 mod position;
@@ -83,11 +85,13 @@ pub use feature_parity::{
 };
 pub use feedback_cohort::FeedbackCohortRepository;
 pub use feedback_cycle::{
-    DriftReportWriteOutcome, FeedbackCycleCasOutcome, FeedbackCycleClaim, FeedbackCycleClaimMode,
-    FeedbackCycleGeneration, FeedbackCycleLeaseGuard, FeedbackCycleRepository,
-    FeedbackCycleWriteOutcome, FeedbackEvaluationWriteOutcome, FeedbackOutboxRepository,
-    FeedbackStageWriteOutcome, FeedbackTriggerCommit, FeedbackTriggerWriteOutcome,
+    DriftReportWriteOutcome, FeedbackCoordinatorFaultWriteOutcome, FeedbackCoordinatorQuarantine,
+    FeedbackCycleCasOutcome, FeedbackCycleClaim, FeedbackCycleClaimMode, FeedbackCycleGeneration,
+    FeedbackCycleLeaseGuard, FeedbackCycleRepository, FeedbackCycleWriteOutcome,
+    FeedbackEvaluationWriteOutcome, FeedbackOutboxRepository, FeedbackStageWriteOutcome,
+    FeedbackTriggerCommit, FeedbackTriggerWriteOutcome,
 };
+pub use feedback_recipe::{FeedbackRecipeTemplateRepository, FeedbackRecipeTemplateWriteOutcome};
 pub use feedback_scheduler::FeedbackSchedulerRepository;
 pub use governance_audit::ModelGovernanceAuditRepository;
 pub use market_linkage::MarketLinkageRepository;
@@ -101,6 +105,11 @@ pub use model_route_bootstrap::{
 };
 pub use model_route_promotion::{
     ModelRoutePromotionCommit, ModelRoutePromotionOutcome, ModelRoutePromotionRepository,
+};
+pub use model_route_shadow_binding::{
+    ModelRouteShadowBindingRepository, ShadowBindingCancelCommit, ShadowBindingCancelOutcome,
+    ShadowBindingCommit, ShadowBindingCommitOutcome, ShadowBindingRejectCommit,
+    ShadowBindingRejectOutcome,
 };
 pub use order_intent::OrderIntentRepository;
 pub use portfolio_plan::PortfolioPlanRepository;
@@ -117,12 +126,13 @@ pub use reconciliation::ReconciliationRepository;
 pub use report_run::ReportRunRepository;
 pub use research_job::{
     KindRunningCount, ReclaimOutcome, ResearchJobEnqueueOutcome, ResearchJobRepository,
+    ResearchJobRetryOutcome,
 };
 pub use research_readiness::{ResearchReadinessEvidenceRepository, ShadowLatencyObservation};
 pub use reserved_capital::ReservedCapitalRepository;
 pub use resolution_observation::ResolutionObservationRepository;
 pub use selection::MarketSelectionRepository;
-pub use shadow_comparison::ShadowComparisonRepository;
+pub use shadow_comparison::{ShadowComparisonRepository, ShadowComparisonWriteOutcome};
 pub use source_slice::SourceSliceRepository;
 pub use trade_policy::TradePolicyRepository;
 pub use trade_tape_block_cursor::TradeTapeBlockCursorRepository;

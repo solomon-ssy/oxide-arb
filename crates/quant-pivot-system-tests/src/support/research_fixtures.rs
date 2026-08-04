@@ -726,15 +726,39 @@ struct ReplaySourceContext<'a> {
     event_at: DateTime<Utc>,
     event_at_ms: i64,
     available_at_ms: i64,
+    downside_at: DateTime<Utc>,
+    downside_at_ms: i64,
     scope: String,
     no_token_id: TokenId,
 }
 
 impl<'a> ReplaySourceContext<'a> {
-    fn try_new(index: usize, example: &'a TrainingExample) -> QuantResult<Self> {
+    fn try_new(
+        index: usize,
+        example: &'a TrainingExample,
+        downside_horizon_secs: u64,
+        source_window_end: DateTime<Utc>,
+    ) -> QuantResult<Self> {
         let decision_at = example.decision_at();
         let event_at = example.decision_boundary.cutoff_for(DecisionSource::Book);
         let available_at_ms = decision_at.timestamp_millis();
+        let downside_horizon_secs =
+            i64::try_from(downside_horizon_secs).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("replayable Source Slice downside horizon overflow: {error}"),
+            })?;
+        let downside_at = decision_at
+            .checked_add_signed(Duration::seconds(downside_horizon_secs))
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "replayable Source Slice downside timestamp overflow".to_owned(),
+            })?;
+        if downside_at > source_window_end {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "replayable Source Slice ends at {source_window_end} before the downside horizon {downside_at}"
+                ),
+            }
+            .into());
+        }
         let market_id = &example.market_id;
         let token_id = &example.token_id;
         let no_token_id = example
@@ -765,6 +789,8 @@ impl<'a> ReplaySourceContext<'a> {
             event_at,
             event_at_ms: event_at.timestamp_millis(),
             available_at_ms,
+            downside_at,
+            downside_at_ms: downside_at.timestamp_millis(),
             scope: format!("{market_id}:{token_id}:{available_at_ms}"),
             no_token_id,
         })
@@ -772,8 +798,15 @@ impl<'a> ReplaySourceContext<'a> {
 }
 
 impl ReplayableSourceRecords {
-    fn push(&mut self, index: usize, example: &TrainingExample) -> QuantResult<()> {
-        let context = ReplaySourceContext::try_new(index, example)?;
+    fn push(
+        &mut self,
+        index: usize,
+        example: &TrainingExample,
+        downside_horizon_secs: u64,
+        source_window_end: DateTime<Utc>,
+    ) -> QuantResult<()> {
+        let context =
+            ReplaySourceContext::try_new(index, example, downside_horizon_secs, source_window_end)?;
         self.push_catalog(&context)?;
         self.push_book(&context)?;
         self.push_market_info(&context)?;
@@ -986,6 +1019,27 @@ impl ReplayableSourceRecords {
             context.decision_at,
             &microstructure,
         )?);
+        let terminal = BookMicrostructureRow {
+            bucket_time: context.downside_at_ms,
+            best_bid_open: Some(ChPrice::from(Price::new(dec!(0.48)))),
+            best_bid_high: Some(ChPrice::from(Price::new(dec!(0.49)))),
+            best_bid_low: Some(ChPrice::from(Price::new(dec!(0.48)))),
+            best_bid_close: Some(ChPrice::from(Price::new(dec!(0.48)))),
+            best_ask_open: Some(ChPrice::from(Price::new(dec!(0.50)))),
+            best_ask_high: Some(ChPrice::from(Price::new(dec!(0.51)))),
+            best_ask_low: Some(ChPrice::from(Price::new(dec!(0.50)))),
+            best_ask_close: Some(ChPrice::from(Price::new(dec!(0.50)))),
+            mid_price_open: Some(ChPrice::from(Price::new(dec!(0.49)))),
+            mid_price_close: Some(ChPrice::from(Price::new(dec!(0.49)))),
+            available_at: context.downside_at_ms,
+            ..microstructure
+        };
+        self.microstructure.push(source_record(
+            format!("microstructure:{token_id}:{}", context.downside_at_ms),
+            context.downside_at,
+            context.downside_at,
+            &terminal,
+        )?);
         Ok(())
     }
 
@@ -1106,7 +1160,11 @@ impl ReplayableSourceRecords {
     }
 }
 
-fn replayable_source_records(examples: &[TrainingExample]) -> QuantResult<ReplayableSourceRecords> {
+fn replayable_source_records(
+    examples: &[TrainingExample],
+    downside_horizon_secs: u64,
+    source_window_end: DateTime<Utc>,
+) -> QuantResult<ReplayableSourceRecords> {
     let mut unique = BTreeMap::new();
     for example in examples {
         unique
@@ -1115,7 +1173,7 @@ fn replayable_source_records(examples: &[TrainingExample]) -> QuantResult<Replay
     }
     let mut records = ReplayableSourceRecords::default();
     for (index, example) in unique.into_values().enumerate() {
-        records.push(index, example)?;
+        records.push(index, example, downside_horizon_secs, source_window_end)?;
     }
     Ok(records)
 }
@@ -1161,28 +1219,18 @@ async fn persist_replayable_objects(
         )
         .await?,
     ];
-    let weather_required = profile
-        .required_sources_contains(ResearchProfileDataSource::AviationWeather)
-        || profile.required_sources_contains(ResearchProfileDataSource::GefsEnsemble);
-    if weather_required {
-        for kind in [
-            SourceSliceObjectKind::MarketLinkage,
-            SourceSliceObjectKind::DomainObservation,
-            SourceSliceObjectKind::WeatherObservation,
-            SourceSliceObjectKind::WeatherForecast,
-        ] {
+    let required = SourceSliceManifest::required_object_kinds(profile);
+    for kind in [
+        SourceSliceObjectKind::MarketLinkage,
+        SourceSliceObjectKind::DomainObservation,
+        SourceSliceObjectKind::CryptoPriceReport,
+        SourceSliceObjectKind::WeatherObservation,
+        SourceSliceObjectKind::WeatherForecast,
+        SourceSliceObjectKind::CalibrationReference,
+    ] {
+        if required.contains(&kind) {
             objects.push(persist_source_object(store, kind, Vec::new()).await?);
         }
-    }
-    if profile.required_sources_contains(ResearchProfileDataSource::GhcnhCalibration) {
-        objects.push(
-            persist_source_object(
-                store,
-                SourceSliceObjectKind::CalibrationReference,
-                Vec::new(),
-            )
-            .await?,
-        );
     }
     objects.sort_by(|left, right| {
         (left.kind, left.uri.as_str()).cmp(&(right.kind, right.uri.as_str()))
@@ -1303,7 +1351,11 @@ pub async fn persist_replayable_source_slice(
         .map_err(|detail| ResearchError::DatasetBuild {
             detail: format!("fixture ResearchProfile resolution failed: {detail}"),
         })?;
-    let records = replayable_source_records(examples)?;
+    let records = replayable_source_records(
+        examples,
+        profile.spec.target_horizon_secs,
+        fixture.window_end,
+    )?;
     let objects = persist_replayable_objects(store, records, &profile).await?;
     let manifest = replayable_manifest(&fixture, &profile, examples.len(), objects)?;
     store_source_manifest(store, manifest).await
@@ -1401,24 +1453,11 @@ pub async fn seed_dataset_source(
         .map_err(|error| ResearchError::DatasetBuild {
             detail: error.to_string(),
         })?;
-    let kinds = [
-        SourceSliceObjectKind::CatalogMarket,
-        SourceSliceObjectKind::CatalogEvent,
-        SourceSliceObjectKind::ClobMarketInfo,
-        SourceSliceObjectKind::L2Ledger,
-        SourceSliceObjectKind::L2Session,
-        SourceSliceObjectKind::L2Gap,
-        SourceSliceObjectKind::BookMicrostructure,
-        SourceSliceObjectKind::TradeTape,
-        SourceSliceObjectKind::MarketLinkage,
-        SourceSliceObjectKind::DomainObservation,
-        SourceSliceObjectKind::CryptoPriceReport,
-        SourceSliceObjectKind::WeatherObservation,
-        SourceSliceObjectKind::WeatherForecast,
-        SourceSliceObjectKind::CalibrationReference,
-        SourceSliceObjectKind::Resolution,
-    ];
-    let mut objects = kinds
+    let profile = input
+        .profile_ref
+        .resolve_builtin_research_profile()
+        .map_err(|detail| ResearchError::DatasetBuild { detail })?;
+    let mut objects = SourceSliceManifest::required_object_kinds(&profile)
         .into_iter()
         .enumerate()
         .map(|(index, kind)| {

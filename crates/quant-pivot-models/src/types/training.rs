@@ -35,12 +35,17 @@ pub const DATASET_SOURCE_LINEAGE_FORMAT_VERSION: u32 = 1;
 pub const DATASET_COHORT_MANIFEST_FORMAT_VERSION: u32 = 1;
 /// Immutable included-row artifact version for a `ModelLearning` cohort.
 pub const MODEL_LEARNING_COHORT_FORMAT_VERSION: u32 = 1;
+/// Immutable included-row artifact version for a complete scored-serving cohort.
+pub const MODEL_SCORE_COHORT_FORMAT_VERSION: u32 = 1;
 
 const DATASET_MANIFEST_HASH_DOMAIN: &str = "quant-pivot.dataset-manifest";
 const DATASET_SOURCE_SCHEMA_HASH_DOMAIN: &str = "quant-pivot.dataset-source-schema";
 const MODEL_LEARNING_COHORT_HASH_DOMAIN: &str = "quant-pivot.model-learning-cohort";
 const MODEL_LEARNING_COHORT_ROW_HASH_DOMAIN: &str = "quant-pivot.model-learning-cohort-row";
 const MODEL_LEARNING_COHORT_SCHEMA_HASH_DOMAIN: &str = "quant-pivot.model-learning-cohort-schema";
+const MODEL_SCORE_COHORT_HASH_DOMAIN: &str = "quant-pivot.model-score-cohort";
+const MODEL_SCORE_COHORT_ROW_HASH_DOMAIN: &str = "quant-pivot.model-score-cohort-row";
+const MODEL_SCORE_COHORT_SCHEMA_HASH_DOMAIN: &str = "quant-pivot.model-score-cohort-schema";
 
 /// Stable validation failures for immutable dataset lineage.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -105,6 +110,12 @@ pub enum DatasetManifestContractError {
     InvalidModelLearningRow,
     #[error("model-learning cohort artifact counts do not match its rows")]
     ModelLearningArtifactCountMismatch,
+    #[error("model-score cohort rows are not strictly ordered and unique")]
+    NonCanonicalModelScoreRows,
+    #[error("model-score cohort row identity or serving lineage is invalid")]
+    InvalidModelScoreRow,
+    #[error("model-score cohort artifact counts do not match its rows")]
+    ModelScoreArtifactCountMismatch,
     #[error("dataset factor serving plane is invalid: {detail}")]
     InvalidFactorPlane { detail: String },
     #[error("dataset model family and factor serving plane disagree")]
@@ -665,6 +676,273 @@ impl ModelLearningCohortArtifact {
     }
 }
 
+/// One resolved sample from the complete population that reached model scoring.
+///
+/// Unlike [`ModelLearningCohortRow`], this row is deliberately independent of
+/// recommendation publication. Its lineage proves that the feature vector was
+/// admitted by a completed serving run and conserved by the report funnel, so
+/// abstentions remain part of the training population.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewModelScoreCohortRow {
+    pub recommendation_report_id: RecommendationReportId,
+    pub category: MarketCategory,
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub model_token_id: TokenId,
+    pub decision_at: DateTime<Utc>,
+    pub serving_evidence_available_at: DateTime<Utc>,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub market_selection_id: MarketSelectionId,
+    pub feature_vector_id: FeatureVectorId,
+    pub model_run_id: ModelRunId,
+    pub model_version_id: ModelVersionId,
+    pub model_family: ModelFamily,
+    pub factor_definition_versions: Vec<FactorDefinitionId>,
+    pub book_snapshot_ref: BookSnapshotRef,
+    pub data_quality_snapshot_id: ReportDataQualitySnapshotId,
+    pub resolution: FeedbackResolutionEvidence,
+    pub model_token_payout_ratio: PayoutRatio,
+    pub serving_completion_hash: ContentHash,
+    pub model_input_rows_hash: ContentHash,
+    pub input_contract_hash: ContentHash,
+    pub transform_hash: ContentHash,
+    pub training_input_hash: ContentHash,
+    pub funnel_row_hash: ContentHash,
+}
+
+/// Immutable scored-serving sample and its complete prediction-to-label lineage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelScoreCohortRow {
+    pub example_id: TrainingExampleId,
+    pub recommendation_report_id: RecommendationReportId,
+    pub category: MarketCategory,
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub model_token_id: TokenId,
+    pub decision_at: DateTime<Utc>,
+    pub serving_evidence_available_at: DateTime<Utc>,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub market_selection_id: MarketSelectionId,
+    pub feature_vector_id: FeatureVectorId,
+    pub model_run_id: ModelRunId,
+    pub model_version_id: ModelVersionId,
+    pub model_family: ModelFamily,
+    pub factor_definition_versions: Vec<FactorDefinitionId>,
+    pub book_snapshot_ref: BookSnapshotRef,
+    pub data_quality_snapshot_id: ReportDataQualitySnapshotId,
+    pub resolution: FeedbackResolutionEvidence,
+    pub model_token_payout_ratio: PayoutRatio,
+    pub serving_completion_hash: ContentHash,
+    pub model_input_rows_hash: ContentHash,
+    pub input_contract_hash: ContentHash,
+    pub transform_hash: ContentHash,
+    pub training_input_hash: ContentHash,
+    pub funnel_row_hash: ContentHash,
+}
+
+impl ModelScoreCohortRow {
+    pub fn try_seal(row: NewModelScoreCohortRow) -> Result<Self, DatasetManifestContractError> {
+        let example_id = Self::derive_example_id(&row)?;
+        let sealed = Self {
+            example_id,
+            recommendation_report_id: row.recommendation_report_id,
+            category: row.category,
+            market_id: row.market_id,
+            event_id: row.event_id,
+            model_token_id: row.model_token_id,
+            decision_at: row.decision_at,
+            serving_evidence_available_at: row.serving_evidence_available_at,
+            decision_policy_snapshot_id: row.decision_policy_snapshot_id,
+            market_selection_id: row.market_selection_id,
+            feature_vector_id: row.feature_vector_id,
+            model_run_id: row.model_run_id,
+            model_version_id: row.model_version_id,
+            model_family: row.model_family,
+            factor_definition_versions: row.factor_definition_versions,
+            book_snapshot_ref: row.book_snapshot_ref,
+            data_quality_snapshot_id: row.data_quality_snapshot_id,
+            resolution: row.resolution,
+            model_token_payout_ratio: row.model_token_payout_ratio,
+            serving_completion_hash: row.serving_completion_hash,
+            model_input_rows_hash: row.model_input_rows_hash,
+            input_contract_hash: row.input_contract_hash,
+            transform_hash: row.transform_hash,
+            training_input_hash: row.training_input_hash,
+            funnel_row_hash: row.funnel_row_hash,
+        };
+        sealed.validate()?;
+        Ok(sealed)
+    }
+
+    pub fn expected_example_id(&self) -> Result<TrainingExampleId, DatasetManifestContractError> {
+        Self::derive_example_id(&NewModelScoreCohortRow {
+            recommendation_report_id: self.recommendation_report_id,
+            category: self.category,
+            market_id: self.market_id.clone(),
+            event_id: self.event_id.clone(),
+            model_token_id: self.model_token_id.clone(),
+            decision_at: self.decision_at,
+            serving_evidence_available_at: self.serving_evidence_available_at,
+            decision_policy_snapshot_id: self.decision_policy_snapshot_id,
+            market_selection_id: self.market_selection_id,
+            feature_vector_id: self.feature_vector_id,
+            model_run_id: self.model_run_id,
+            model_version_id: self.model_version_id,
+            model_family: self.model_family,
+            factor_definition_versions: self.factor_definition_versions.clone(),
+            book_snapshot_ref: self.book_snapshot_ref.clone(),
+            data_quality_snapshot_id: self.data_quality_snapshot_id,
+            resolution: self.resolution.clone(),
+            model_token_payout_ratio: self.model_token_payout_ratio,
+            serving_completion_hash: self.serving_completion_hash,
+            model_input_rows_hash: self.model_input_rows_hash,
+            input_contract_hash: self.input_contract_hash,
+            transform_hash: self.transform_hash,
+            training_input_hash: self.training_input_hash,
+            funnel_row_hash: self.funnel_row_hash,
+        })
+    }
+
+    fn derive_example_id(
+        row: &NewModelScoreCohortRow,
+    ) -> Result<TrainingExampleId, DatasetManifestContractError> {
+        #[derive(Serialize)]
+        struct ExampleIdentity<'a> {
+            recommendation_report_id: RecommendationReportId,
+            feature_vector_id: FeatureVectorId,
+            model_run_id: ModelRunId,
+            model_version_id: ModelVersionId,
+            model_token_id: &'a TokenId,
+            resolution_hash: ContentHash,
+            serving_completion_hash: ContentHash,
+            funnel_row_hash: ContentHash,
+        }
+
+        let hash = CanonicalDigest::content_hash_typed(
+            MODEL_SCORE_COHORT_ROW_HASH_DOMAIN,
+            MODEL_SCORE_COHORT_FORMAT_VERSION,
+            &ExampleIdentity {
+                recommendation_report_id: row.recommendation_report_id,
+                feature_vector_id: row.feature_vector_id,
+                model_run_id: row.model_run_id,
+                model_version_id: row.model_version_id,
+                model_token_id: &row.model_token_id,
+                resolution_hash: row.resolution.outcome_hash,
+                serving_completion_hash: row.serving_completion_hash,
+                funnel_row_hash: row.funnel_row_hash,
+            },
+        )
+        .map_err(|_| DatasetManifestContractError::InvalidModelScoreRow)?;
+        Ok(TrainingExampleId::from_content_hash(&hash))
+    }
+
+    pub fn validate(&self) -> Result<(), DatasetManifestContractError> {
+        if self.example_id != self.expected_example_id()?
+            || self
+                .factor_definition_versions
+                .windows(2)
+                .any(|pair| pair[0].as_uuid() >= pair[1].as_uuid())
+            || self.decision_at > self.serving_evidence_available_at
+            || self.serving_evidence_available_at >= self.resolution.resolved_at
+            || self.resolution.resolved_at > self.resolution.available_at
+            || self.model_token_payout_ratio != self.resolution.token_payout_ratio
+        {
+            return Err(DatasetManifestContractError::InvalidModelScoreRow);
+        }
+        Ok(())
+    }
+}
+
+/// Canonical complete-scoring cohort sealed before Dataset materialization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelScoreCohortArtifact {
+    pub format_version: u32,
+    pub window: FeedbackCohortWindow,
+    pub counts: DatasetCohortCounts,
+    pub rows: Vec<ModelScoreCohortRow>,
+}
+
+impl ModelScoreCohortArtifact {
+    pub fn validate(&self) -> Result<(), DatasetManifestContractError> {
+        if self.format_version != MODEL_SCORE_COHORT_FORMAT_VERSION {
+            return Err(DatasetManifestContractError::UnsupportedFormat {
+                contract: "model-score cohort artifact",
+                expected: MODEL_SCORE_COHORT_FORMAT_VERSION,
+                actual: self.format_version,
+            });
+        }
+        self.counts.validate()?;
+        if self.counts.included_count()
+            != u64::try_from(self.rows.len())
+                .map_err(|_| DatasetManifestContractError::ModelScoreArtifactCountMismatch)?
+            || self.counts.eligible_count() != self.counts.included_count()
+        {
+            return Err(DatasetManifestContractError::ModelScoreArtifactCountMismatch);
+        }
+        if self.rows.windows(2).any(|pair| {
+            (
+                pair[0].serving_evidence_available_at,
+                pair[0].recommendation_report_id.as_uuid(),
+                pair[0].feature_vector_id.as_uuid(),
+            ) >= (
+                pair[1].serving_evidence_available_at,
+                pair[1].recommendation_report_id.as_uuid(),
+                pair[1].feature_vector_id.as_uuid(),
+            )
+        }) {
+            return Err(DatasetManifestContractError::NonCanonicalModelScoreRows);
+        }
+        self.rows.iter().try_for_each(ModelScoreCohortRow::validate)
+    }
+
+    pub fn source_hash(&self) -> Result<ContentHash, DatasetManifestContractError> {
+        self.validate()?;
+        CanonicalDigest::content_hash_typed(
+            MODEL_SCORE_COHORT_HASH_DOMAIN,
+            MODEL_SCORE_COHORT_FORMAT_VERSION,
+            self,
+        )
+        .map_err(|_| DatasetManifestContractError::InvalidModelScoreRow)
+    }
+
+    pub fn schema_hash() -> Result<ContentHash, DatasetManifestContractError> {
+        CanonicalDigest::content_hash_typed(
+            MODEL_SCORE_COHORT_SCHEMA_HASH_DOMAIN,
+            MODEL_SCORE_COHORT_FORMAT_VERSION,
+            &[
+                "example_id",
+                "recommendation_report_id",
+                "category",
+                "market_id",
+                "event_id",
+                "model_token_id",
+                "decision_at",
+                "serving_evidence_available_at",
+                "decision_policy_snapshot_id",
+                "market_selection_id",
+                "feature_vector_id",
+                "model_run_id",
+                "model_version_id",
+                "model_family",
+                "factor_definition_versions",
+                "book_snapshot_ref",
+                "data_quality_snapshot_id",
+                "resolution",
+                "model_token_payout_ratio",
+                "serving_completion_hash",
+                "model_input_rows_hash",
+                "input_contract_hash",
+                "transform_hash",
+                "training_input_hash",
+                "funnel_row_hash",
+            ],
+        )
+        .map_err(|_| DatasetManifestContractError::InvalidModelScoreRow)
+    }
+}
+
 /// Content-addressed sealed rows consumed by one dataset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -939,9 +1217,13 @@ impl TryFrom<DatasetManifestDocument> for DatasetManifest {
 #[serde(rename_all = "snake_case")]
 pub enum TrainingSampleSource {
     HistoricalPit,
-    /// Exact immutable feature/factor rows that produced a published
-    /// recommendation, joined to a later WORM resolution outcome.
-    RecommendationFeedback,
+    /// Exact immutable feature/factor rows from the complete population that
+    /// reached model scoring, joined to later WORM resolution truth. This
+    /// includes recommendation abstentions by construction.
+    ModelScoreFeedback,
+    /// Published recommendation outcomes used for coverage and drift
+    /// diagnostics. This selective population is never a training Dataset.
+    PublishedDecisionDiagnostic,
     /// Per-tick hold-vs-exit decision points sampled along a closed/settled
     /// lot's life for Sell-scorer training. Anchored on position-lot
     /// timelines rather than a uniform market grid.

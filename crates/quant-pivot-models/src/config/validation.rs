@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use super::{
     DeployConfig, DomainSourcesConfig, MAX_TRADE_TAPE_RECONCILIATION_ROWS, PolygonRpcEndpoint,
-    TornadoRegionScopeConfig, WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
+    ResearchJobsConfig, TornadoRegionScopeConfig, WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
     WeatherHistoricalBindingKind,
 };
 use crate::{
@@ -212,6 +212,7 @@ fn validate_research_jobs(deploy: &DeployConfig, report: &mut ConfigValidationRe
             });
         }
     }
+    validate_compute_budget(jobs, report);
     if jobs.feedback_cycle_concurrency == 0
         || jobs.feedback_cycle_concurrency > jobs.global_concurrency
     {
@@ -245,6 +246,16 @@ fn validate_research_jobs(deploy: &DeployConfig, report: &mut ConfigValidationRe
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "quant.research_jobs.max_recovery_attempts",
             detail: "must be between 0 and 32 inclusive".to_owned(),
+        });
+    }
+    if jobs.execution_retry_initial_secs == 0
+        || jobs.execution_retry_initial_secs > jobs.execution_retry_max_secs
+        || jobs.execution_retry_max_secs > 3_600
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.execution_retry",
+            detail: "initial delay must be positive, no greater than max delay, and max delay must be <= 3600 seconds"
+                .to_owned(),
         });
     }
     if jobs.max_spine_samples == 0 || jobs.max_spine_samples > 100_000_000 {
@@ -294,6 +305,59 @@ fn validate_research_jobs(deploy: &DeployConfig, report: &mut ConfigValidationRe
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "quant.research_jobs.shutdown_drain_secs",
             detail: "must be between 1 and 3 seconds inclusive".to_owned(),
+        });
+    }
+}
+
+fn validate_compute_budget(jobs: &ResearchJobsConfig, report: &mut ConfigValidationReport) {
+    let parity = jobs.feature_parity_compute;
+    if !(1..=1_000).contains(&parity.page_size) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feature_parity_compute.page_size",
+            detail: "must be between 1 and 1000 subjects inclusive".to_owned(),
+        });
+    }
+    if parity.max_concurrency != 1 || parity.max_concurrency > jobs.feature_parity_concurrency {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feature_parity_compute.max_concurrency",
+            detail: "must be exactly one and no greater than feature_parity_concurrency".to_owned(),
+        });
+    }
+    if !(1_048_576..=10_737_418_240).contains(&parity.max_working_set_bytes) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feature_parity_compute.max_working_set_bytes",
+            detail: "must be between 1 MiB and the 10 GiB process offline-memory budget".to_owned(),
+        });
+    }
+    if !(1..=86_400).contains(&parity.deadline_secs) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feature_parity_compute.deadline_secs",
+            detail: "must be between 1 second and 24 hours inclusive".to_owned(),
+        });
+    }
+    let attribution = jobs.feedback_attribution_compute;
+    if !(1..=1_000).contains(&attribution.page_size) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feedback_attribution_compute.page_size",
+            detail: "must be between 1 and 1000 rows inclusive".to_owned(),
+        });
+    }
+    if !(1..=32).contains(&attribution.max_concurrency) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feedback_attribution_compute.max_concurrency",
+            detail: "must be between 1 and 32 in-flight attribution groups inclusive".to_owned(),
+        });
+    }
+    if !(1_048_576..=10_737_418_240).contains(&attribution.max_working_set_bytes) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feedback_attribution_compute.max_working_set_bytes",
+            detail: "must be between 1 MiB and the 10 GiB process offline-memory budget".to_owned(),
+        });
+    }
+    if !(1..=86_400).contains(&attribution.deadline_secs) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feedback_attribution_compute.deadline_secs",
+            detail: "must be between 1 second and 24 hours inclusive".to_owned(),
         });
     }
 }
@@ -358,9 +422,28 @@ fn validate_model_serving_registry(deploy: &DeployConfig, report: &mut ConfigVal
             detail: "must be between 1000 and 300000 ms inclusive".to_owned(),
         });
     }
+    if !(67_108_864..=1_099_511_627_776).contains(&registry.max_total_shadow_model_bytes) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.model_serving_registry.max_total_shadow_model_bytes",
+            detail: "must be between 64 MiB and 1 TiB inclusive".to_owned(),
+        });
+    }
 }
 
 fn validate_web(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
+    let password_crypto = &deploy.web.password_crypto;
+    if !(1..=64).contains(&password_crypto.max_in_flight) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "web.password_crypto.max_in_flight",
+            detail: "must be between 1 and 64 inclusive".to_owned(),
+        });
+    }
+    if !(1_000..=60_000).contains(&password_crypto.deadline_ms) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "web.password_crypto.deadline_ms",
+            detail: "must be between 1000 and 60000 ms inclusive".to_owned(),
+        });
+    }
     let jwt = &deploy.web.jwt;
     if jwt.issuer.trim().is_empty() || jwt.audience.trim().is_empty() {
         report.errors.push(ConfigValidationError::InvalidValue {
@@ -1045,6 +1128,14 @@ mod tests {
         jobs.feedback_alert_timeout_secs = 0;
         jobs.feedback_alert_dedupe_secs = 0;
         jobs.shutdown_drain_secs = 5;
+        jobs.feature_parity_compute.page_size = 0;
+        jobs.feature_parity_compute.max_concurrency = 0;
+        jobs.feature_parity_compute.max_working_set_bytes = 0;
+        jobs.feature_parity_compute.deadline_secs = 0;
+        jobs.feedback_attribution_compute.page_size = 0;
+        jobs.feedback_attribution_compute.max_concurrency = 0;
+        jobs.feedback_attribution_compute.max_working_set_bytes = 0;
+        jobs.feedback_attribution_compute.deadline_secs = 0;
 
         let report = deploy.validate_deploy_common();
         for field in [
@@ -1055,6 +1146,14 @@ mod tests {
             "feedback_alert_timeout_secs",
             "feedback_alert_dedupe_secs",
             "shutdown_drain_secs",
+            "feature_parity_compute.page_size",
+            "feature_parity_compute.max_concurrency",
+            "feature_parity_compute.max_working_set_bytes",
+            "feature_parity_compute.deadline_secs",
+            "feedback_attribution_compute.page_size",
+            "feedback_attribution_compute.max_concurrency",
+            "feedback_attribution_compute.max_working_set_bytes",
+            "feedback_attribution_compute.deadline_secs",
         ] {
             assert!(
                 report
@@ -1184,6 +1283,28 @@ mod tests {
         let mut deploy = DeployConfig::default();
         deploy.polymarket.chain_id = 1;
         assert!(deploy.validate_deploy_common().has_errors());
+    }
+
+    #[test]
+    fn password_crypto_budget_fatal() {
+        for (max_in_flight, deadline_ms, field) in [
+            (0, 15_000, "max_in_flight"),
+            (8, 999, "deadline_ms"),
+            (65, 15_000, "max_in_flight"),
+            (8, 60_001, "deadline_ms"),
+        ] {
+            let mut deploy = DeployConfig::default();
+            deploy.web.password_crypto.max_in_flight = max_in_flight;
+            deploy.web.password_crypto.deadline_ms = deadline_ms;
+            let report = deploy.validate_deploy_common();
+            assert!(report.has_errors());
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .any(|error| error.to_string().contains(field))
+            );
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ use super::artifacts::PredictionContribution;
 const MAX_TREE_SHAP_RESIDUAL: Decimal = Decimal::from_parts(1, 0, 0, false, 12);
 const MAX_TREE_PREDICTION_RESIDUAL: Decimal = Decimal::from_parts(1, 0, 0, false, 10);
 const TREE_ENSEMBLE_HASH_DOMAIN: &str = "quant-pivot/tree-ensemble-spec";
-const TREE_ENSEMBLE_HASH_VERSION: u32 = 1;
+const TREE_ENSEMBLE_HASH_VERSION: u32 = 2;
 
 fn invalid(detail: impl Into<String>) -> QuantError {
     ResearchError::InvalidModelArtifact {
@@ -67,6 +67,28 @@ pub struct DecisionTreeSpec {
     pub nodes: Vec<TreeNode>,
 }
 
+/// Inclusive training-partition support for one model-ready feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TreeInputSupport {
+    pub minimum: Decimal,
+    pub maximum: Decimal,
+}
+
+impl TreeInputSupport {
+    pub fn try_new(minimum: Decimal, maximum: Decimal) -> QuantResult<Self> {
+        if minimum > maximum {
+            return Err(invalid("TreeSHAP input support minimum exceeds maximum"));
+        }
+        Ok(Self { minimum, maximum })
+    }
+
+    #[must_use]
+    pub fn contains(self, value: Decimal) -> bool {
+        (self.minimum..=self.maximum).contains(&value)
+    }
+}
+
 /// Portable GBDT representation required by the explanation quality gate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +97,7 @@ pub struct TreeEnsembleSpec {
     pub input_contract_hash: ContentHash,
     pub background_distribution_hash: ContentHash,
     pub feature_names: Vec<String>,
+    pub feature_supports: Vec<TreeInputSupport>,
     pub base_value: Decimal,
     pub trees: Vec<DecisionTreeSpec>,
 }
@@ -100,9 +123,12 @@ impl TreeEnsembleSpec {
     }
 
     fn validate_shape(&self) -> QuantResult<()> {
-        if self.feature_names.is_empty() || self.trees.is_empty() {
+        if self.feature_names.is_empty()
+            || self.feature_supports.len() != self.feature_names.len()
+            || self.trees.is_empty()
+        {
             return Err(invalid(
-                "TreeSHAP requires non-empty trees and exactly aligned model inputs",
+                "TreeSHAP requires non-empty trees and aligned feature support",
             ));
         }
         let names = self
@@ -116,6 +142,9 @@ impl TreeEnsembleSpec {
             return Err(invalid(
                 "TreeSHAP feature names must be non-empty and unique",
             ));
+        }
+        for support in &self.feature_supports {
+            TreeInputSupport::try_new(support.minimum, support.maximum)?;
         }
         for tree in &self.trees {
             validate_tree(tree, self.feature_names.len())?;
@@ -635,8 +664,8 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{
-        DecisionTreeSpec, MissingBranch, TreeEnsembleInput, TreeEnsembleSpec, TreeNode,
-        TreeShapExplainer, TreeShapModelContract,
+        DecisionTreeSpec, MissingBranch, TreeEnsembleInput, TreeEnsembleSpec, TreeInputSupport,
+        TreeNode, TreeShapExplainer, TreeShapModelContract,
     };
 
     fn hash(seed: &str) -> ContentHash {
@@ -650,6 +679,10 @@ mod tests {
                 input_contract_hash: hash("input"),
                 background_distribution_hash: hash("background"),
                 feature_names: vec!["temperature".to_owned()],
+                feature_supports: vec![TreeInputSupport {
+                    minimum: dec!(-1),
+                    maximum: dec!(1),
+                }],
                 base_value: dec!(0.1),
                 trees: vec![DecisionTreeSpec {
                     nodes: vec![
@@ -732,6 +765,10 @@ mod tests {
             input_contract_hash: hash("input"),
             background_distribution_hash: hash("background"),
             feature_names: vec!["x".to_owned()],
+            feature_supports: vec![TreeInputSupport {
+                minimum: dec!(-1),
+                maximum: dec!(1),
+            }],
             base_value: Decimal::ZERO,
             trees: vec![DecisionTreeSpec {
                 nodes: vec![

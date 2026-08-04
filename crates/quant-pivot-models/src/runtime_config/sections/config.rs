@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, iter};
 
+use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -12,14 +13,20 @@ use crate::{
         factor::{FactorFamily, FactorNormalization},
         quant::CalibrationMethod,
     },
-    runtime_config::wire::{
-        CapitalPolicy, CorrelationConfig, DecimalValue, EntryOrderPolicy, ExecutionBreakerConfig,
-        ExitMonitorPolicy, FeatureFamily, FeatureStalenessPolicy, KillSwitchPolicy,
-        MissingFactorPolicy, ModelVersionRef, NeutralizeDimension, PortfolioOptimizerConfig,
-        RankLossKind, ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence,
-        SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
+    runtime_config::{
+        BuyModelRoute,
+        wire::{
+            CapitalPolicy, CorrelationConfig, DecimalValue, EntryOrderPolicy,
+            ExecutionBreakerConfig, ExitMonitorPolicy, FeatureFamily, FeatureStalenessPolicy,
+            KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef, NeutralizeDimension,
+            PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy, ReportDeliveryPolicy,
+            ScheduleCadence, SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
+        },
     },
-    types::{ReportScheduleId, SchemaVersion, Usd},
+    types::{
+        FeedbackCycleId, ModelVersionId, PolicyBundleGeneration, ReportScheduleId, SchemaVersion,
+        Usd,
+    },
 };
 
 /// Market selection selection policy.
@@ -95,7 +102,11 @@ pub struct DataQualityConfig {
 impl Default for DataQualityConfig {
     fn default() -> Self {
         Self {
-            max_book_age_ms: 5_000,
+            // The default serving boundary intentionally withholds the newest
+            // ten seconds of source data. The freshness ceiling therefore has
+            // to exceed that PIT lag or every canonical book is stale by
+            // construction before the feature plane sees it.
+            max_book_age_ms: 15_000,
             max_ingest_lag_ms: 10_000,
             max_feature_bucket_age_secs: 30,
             max_trade_tape_age_secs: 300,
@@ -791,30 +802,66 @@ impl Default for ModelCalibrationConfig {
     }
 }
 
-/// Active and shadow model references.
+/// Immutable provenance of one route-owned model binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "source_kind", deny_unknown_fields)]
+pub enum ModelBindingSource {
+    /// Explicit first-champion governance transaction.
+    Bootstrap,
+    /// Feedback cycle that trained and bound the model.
+    Feedback { feedback_cycle_id: FeedbackCycleId },
+}
+
+/// One role binding inside a Buy route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelBinding {
+    pub model_version_id: ModelVersionId,
+    pub source: ModelBindingSource,
+    pub bound_at: DateTime<Utc>,
+    pub config_revision: PolicyBundleGeneration,
+    pub generation: u64,
+}
+
+impl ModelBinding {
+    #[must_use]
+    pub const fn new(
+        model_version_id: ModelVersionId,
+        source: ModelBindingSource,
+        bound_at: DateTime<Utc>,
+        config_revision: PolicyBundleGeneration,
+        generation: u64,
+    ) -> Self {
+        Self {
+            model_version_id,
+            source,
+            bound_at,
+            config_revision,
+            generation,
+        }
+    }
+}
+
+/// Champion plus the optional challenger bound to one exact Buy route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BuyRouteBinding {
+    pub champion: ModelBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<ModelBinding>,
+}
+
+/// Route-owned Buy models and independent Sell model reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
-    /// Champion model for the explicit pooled Buy route.
-    ///
-    /// This route may score only non-Crypto/non-Weather report scopes. It is
-    /// not a fallback for a missing vertical route.
-    pub active_model_version_id: Option<ModelVersionRef>,
-    /// Shadow model version id.
-    pub shadow_model_version_id: Option<ModelVersionRef>,
+    /// Exact Buy-side bindings. A missing route fails closed and never falls
+    /// back to another route.
+    pub buy_routes: BTreeMap<BuyModelRoute, BuyRouteBinding>,
     /// Champion Sell-side hold-vs-exit scorer version. The
     /// opportunistic-Sell exit evaluator loads this; a distinct pointer from
-    /// `active_model_version_id` so Buy and Sell models are governed separately.
+    /// Buy routes so Buy and Sell models are governed separately.
     pub active_exit_model_version_id: Option<ModelVersionRef>,
-    /// Category-specific Buy-side model pointers (`ModelRouting`).
-    ///
-    /// Only Crypto and Weather may appear here. An enabled vertical must be the
-    /// sole category in its report and must have its exact pointer; missing,
-    /// unloadable or mis-scoped routes fail before selection.
-    /// Non-vertical categories use the explicit pooled
-    /// `active_model_version_id`. Governed exactly like the pooled/shadow
-    /// pointers.
-    pub category_model_pointers: BTreeMap<MarketCategory, ModelVersionRef>,
     /// Minimum model confidence.
     pub min_model_confidence: DecimalValue,
     /// Minimum candidate score to enter portfolio pruning.
@@ -828,10 +875,8 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            active_model_version_id: None,
-            shadow_model_version_id: None,
+            buy_routes: BTreeMap::new(),
             active_exit_model_version_id: None,
-            category_model_pointers: BTreeMap::new(),
             min_model_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
             candidate_score_floor: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
             shadow_diff_threshold: DecimalValue::new(rust_decimal_macros::dec!(0.10)),
@@ -897,8 +942,8 @@ pub struct QualityGateConfig {
     pub max_drawdown: DecimalValue,
     /// Minimum liquidity-exit feasibility in `[0, 1]` (auto-execution gate).
     pub min_liquidity_exit_feasibility: DecimalValue,
-    /// Minimum shadow overlap stability in `[0, 1]` (route-promotion gate).
-    pub min_shadow_overlap_stability: DecimalValue,
+    /// Minimum signed `TopN` decision overlap in `[0, 1]` (route-promotion gate).
+    pub min_shadow_decision_overlap: DecimalValue,
     /// Maximum (soft) per-category sample concentration in `[0, 1]`.
     pub max_category_concentration: DecimalValue,
     /// Minimum shadow comparison window (seconds) required before publish.
@@ -915,7 +960,7 @@ impl Default for QualityGateConfig {
             min_materialization_coverage: DecimalValue::new(rust_decimal_macros::dec!(0.95)),
             max_drawdown: DecimalValue::new(rust_decimal_macros::dec!(0.30)),
             min_liquidity_exit_feasibility: DecimalValue::new(rust_decimal_macros::dec!(0.90)),
-            min_shadow_overlap_stability: DecimalValue::new(rust_decimal_macros::dec!(0.60)),
+            min_shadow_decision_overlap: DecimalValue::new(rust_decimal_macros::dec!(0.60)),
             max_category_concentration: DecimalValue::new(rust_decimal_macros::dec!(0.60)),
             required_shadow_window_secs: 86_400,
             sell: SellQualityGateConfig::default(),
@@ -1304,8 +1349,45 @@ impl Default for ResearchValidationCpcvConfig {
     fn default() -> Self {
         Self {
             n_groups: 8,
-            k_test: 2,
+            k_test: 3,
         }
+    }
+}
+
+impl ResearchValidationCpcvConfig {
+    /// Number of complete full-timeline CPCV paths,
+    /// `phi(N, k) = C(N - 1, k - 1)`.
+    pub fn expected_path_count(&self) -> Result<u64, String> {
+        let n = self
+            .n_groups
+            .checked_sub(1)
+            .ok_or_else(|| "cpcv.n_groups must be positive".to_owned())?;
+        let k = self
+            .k_test
+            .checked_sub(1)
+            .ok_or_else(|| "cpcv.k_test must be positive".to_owned())?;
+        Self::binomial(n, k)
+    }
+
+    /// Number of purge/train/evaluate combinations, `C(N, k)`.
+    pub fn expected_combination_count(&self) -> Result<u64, String> {
+        Self::binomial(self.n_groups, self.k_test)
+    }
+
+    fn binomial(n: u32, k: u32) -> Result<u64, String> {
+        if k > n {
+            return Err(format!("cannot compute C({n}, {k}) with k > n"));
+        }
+        let n = u64::from(n);
+        let k = u64::from(k).min(n - u64::from(k));
+        let mut value: u128 = 1;
+        for index in 0..k {
+            value = value
+                .checked_mul(u128::from(n - index))
+                .ok_or_else(|| format!("C({n}, {k}) overflowed u128"))?
+                / u128::from(index + 1);
+        }
+        u64::try_from(value).map_err(|error| format!("C({n}, {k})={value} exceeds u64: {error}"))
     }
 }
 
@@ -1382,6 +1464,9 @@ impl Default for ResearchValidationPboConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchValidationGatesConfig {
+    /// Minimum number of complete, reconstructed CPCV paths (hard gate).
+    /// This is deliberately distinct from `C(N, k)` fold combinations.
+    pub min_cpcv_paths: u32,
     /// Minimum CPCV path-set median rank IC (hard gate; replaces the deleted
     /// single-path `quality_gate.min_rank_ic` soft threshold).
     pub rank_ic_min: DecimalValue,
@@ -1404,6 +1489,7 @@ pub struct ResearchValidationGatesConfig {
 impl Default for ResearchValidationGatesConfig {
     fn default() -> Self {
         Self {
+            min_cpcv_paths: 21,
             rank_ic_min: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
             dsr_significance: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
             max_pbo: DecimalValue::new(rust_decimal_macros::dec!(0.5)),

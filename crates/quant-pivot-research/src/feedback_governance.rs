@@ -1,9 +1,9 @@
-//! Canonical codecs for feedback truth, attribution-plan, and validation artifacts.
+//! Canonical codecs for feedback truth, attribution-manifest, and validation artifacts.
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::ports::{
-        FeedbackAttributionPlanArtifact, FeedbackTruthFreezeArtifact, FeedbackValidationArtifact,
+        FeedbackAttributionManifest, FeedbackTruthFreezeArtifact, FeedbackValidationArtifact,
     },
     hashing::CanonicalDigest,
     types::ContentHash,
@@ -25,13 +25,13 @@ impl FeedbackGovernanceCodec {
         Ok(artifact)
     }
 
-    pub fn encode_attribution(artifact: &FeedbackAttributionPlanArtifact) -> QuantResult<Vec<u8>> {
+    pub fn encode_attribution(artifact: &FeedbackAttributionManifest) -> QuantResult<Vec<u8>> {
         artifact.validate()?;
         Self::encode(artifact)
     }
 
-    pub fn decode_attribution(bytes: &[u8]) -> QuantResult<FeedbackAttributionPlanArtifact> {
-        let artifact: FeedbackAttributionPlanArtifact = Self::decode(bytes, "attribution-plan")?;
+    pub fn decode_attribution(bytes: &[u8]) -> QuantResult<FeedbackAttributionManifest> {
+        let artifact: FeedbackAttributionManifest = Self::decode(bytes, "attribution-manifest")?;
         artifact.validate()?;
         Ok(artifact)
     }

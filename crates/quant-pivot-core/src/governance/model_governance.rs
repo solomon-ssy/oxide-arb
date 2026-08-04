@@ -757,19 +757,21 @@ impl ModelGovernanceService {
             .required_shadow_window_secs;
         let thresholds =
             thresholds_from_config(&config.profile_artifacts.research_method.model_promotion);
+        let sell_thresholds =
+            sell_thresholds_from_config(&config.profile_artifacts.research_method.model_promotion);
+        let model_family = Self::model_family_for_version(version);
+
+        let serving_preimage = self.deps.serving_preimages.load(version).await?;
         let validation_thresholds = validation_thresholds_from_config(
-            &config
+            &serving_preimage
+                .policy_snapshot()
+                .snapshot
                 .profile_artifacts
                 .research_method
                 .research
                 .validation
                 .gates,
         );
-        let sell_thresholds =
-            sell_thresholds_from_config(&config.profile_artifacts.research_method.model_promotion);
-        let model_family = Self::model_family_for_version(version);
-
-        let serving_preimage = self.deps.serving_preimages.load(version).await?;
         let artifact = serving_preimage.artifact();
         let serving_contract = version.verified_serving_contract().map_err(|error| {
             GovernanceError::IllegalTransition {
@@ -831,7 +833,7 @@ impl ModelGovernanceService {
                 id: dataset_id.to_string(),
             })?;
         let leakage = self.rescan_leakage(&dataset_info).await?;
-        let path_set = if intent.requires_backtest() {
+        let path_set = if intent.requires_validation_evidence() {
             match candidate_evidence {
                 Some(evidence) => self.candidate_path_set(version, evidence).await?,
                 None => None,
@@ -839,7 +841,7 @@ impl ModelGovernanceService {
         } else {
             None
         };
-        let shadow_stability = if intent.requires_shadow_stability() {
+        let shadow_decision_stability = if intent.requires_shadow_stability() {
             let (stability, _) = self
                 .shadow_stability(&version.model_version_id, required_window)
                 .await?;
@@ -855,7 +857,7 @@ impl ModelGovernanceService {
             backtest,
             dataset,
             leakage,
-            shadow_stability,
+            shadow_decision_stability,
             thresholds,
             validation_thresholds,
             path_set,
@@ -940,7 +942,7 @@ impl ModelGovernanceService {
             }
             .into());
         }
-        Ok(Some(path_set_gate_input(&info)))
+        Ok(Some(path_set_gate_input(&info)?))
     }
 
     /// Resolve the dataset coverage backing a model version (the gate's
@@ -985,7 +987,7 @@ fn effective_stability(
     if observed_secs < required_window_secs {
         return None;
     }
-    Some(summary.mean_topn_overlap)
+    Some(summary.mean_topn_decision_overlap)
 }
 
 const fn parse_threshold(value: &Decimal, _field: &str) -> Decimal {
@@ -1027,9 +1029,9 @@ const fn thresholds_from_config(config: &QualityGateConfig) -> QualityGateThresh
             &config.min_liquidity_exit_feasibility.value,
             "min_liquidity_exit_feasibility",
         ),
-        min_shadow_overlap_stability: parse_threshold(
-            &config.min_shadow_overlap_stability.value,
-            "min_shadow_overlap_stability",
+        min_shadow_decision_overlap: parse_threshold(
+            &config.min_shadow_decision_overlap.value,
+            "min_shadow_decision_overlap",
         ),
         max_category_concentration: parse_threshold(
             &config.max_category_concentration.value,
@@ -1039,10 +1041,11 @@ const fn thresholds_from_config(config: &QualityGateConfig) -> QualityGateThresh
 }
 
 /// Assemble [`ValidationGateThresholds`] from `research.validation.gates`.
-const fn validation_thresholds_from_config(
+fn validation_thresholds_from_config(
     config: &ResearchValidationGatesConfig,
 ) -> ValidationGateThresholds {
     ValidationGateThresholds {
+        min_cpcv_paths: u64::from(config.min_cpcv_paths),
         rank_ic_min: parse_threshold(
             &config.rank_ic_min.value,
             "research.validation.gates.rank_ic_min",
@@ -1063,19 +1066,37 @@ const fn validation_thresholds_from_config(
     }
 }
 
-const fn path_set_gate_input(info: &BacktestPathSetInfo) -> CpcvPathSetGateInput {
+fn path_set_gate_input(info: &BacktestPathSetInfo) -> QuantResult<CpcvPathSetGateInput> {
     let distribution = info.sharpe_distribution;
-    CpcvPathSetGateInput {
+    let path_count =
+        u64::try_from(info.path_count).map_err(|error| GovernanceError::IllegalTransition {
+            detail: format!(
+                "CPCV path set {} has invalid path_count {}: {error}",
+                info.path_set_id, info.path_count
+            ),
+        })?;
+    let combination_count = u64::try_from(info.combination_count).map_err(|error| {
+        GovernanceError::IllegalTransition {
+            detail: format!(
+                "CPCV path set {} has invalid combination_count {}: {error}",
+                info.path_set_id, info.combination_count
+            ),
+        }
+    })?;
+    Ok(CpcvPathSetGateInput {
+        path_count,
+        combination_count,
         median_rank_ic: info.median_rank_ic,
         deflated_sharpe: info.deflated_sharpe,
         pbo: info.pbo,
         min_track_record_length_secs: info.min_track_record_length_secs,
         median_max_drawdown: distribution.median_max_drawdown,
         median_tail_loss: distribution.median_tail_loss,
+        median_turnover: distribution.median_turnover,
         baseline_uplift: distribution.baseline_uplift,
         window_start: Some(info.window_start),
         window_end: Some(info.window_end),
-    }
+    })
 }
 
 /// Assemble sell-side [`SellQualityGateThresholds`] from the governed config section.
@@ -1145,8 +1166,9 @@ mod path_set_gate_input_tests {
             BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
             TrainingDatasetId,
             backtest::{
-                BacktestPaths, CpcvFoldArtifact, CpcvFoldArtifacts, CpcvFoldCalibrationPolicy,
-                CpcvFoldRole, CpcvMethodologyBinding, CpcvPathSetSubject, SharpeDistribution,
+                BacktestPaths, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
+                CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
+                SharpeDistribution,
             },
         },
     };
@@ -1178,7 +1200,13 @@ mod path_set_gate_input_tests {
             ),
             fold_artifacts: CpcvFoldArtifacts::try_new(vec![
                 CpcvFoldArtifact {
-                    role: CpcvFoldRole::Validation,
+                    identity: CpcvEstimatorIdentity::Validation {
+                        combination_index: 0,
+                        test_partitions_hash: hash(),
+                        test_partition_count: 1,
+                        test_groups_hash: hash(),
+                        test_group_count: 1,
+                    },
                     training_groups_hash: hash(),
                     training_group_count: 1,
                     model_artifact_hash: hash(),
@@ -1186,7 +1214,7 @@ mod path_set_gate_input_tests {
                     model_payload_hash: hash(),
                 },
                 CpcvFoldArtifact {
-                    role: CpcvFoldRole::Trial { trial_id: 0 },
+                    identity: CpcvEstimatorIdentity::Trial { trial_id: 0 },
                     training_groups_hash: ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
                         .expect("trial hash"),
                     training_group_count: 1,
@@ -1223,9 +1251,12 @@ mod path_set_gate_input_tests {
             max: dec!(1),
             median_max_drawdown: Some(dec!(0.1)),
             median_tail_loss: Some(dec!(-0.005)),
+            median_turnover: Some(dec!(0.2)),
             baseline_uplift: Some(dec!(0.001)),
         });
-        let gate = path_set_gate_input(&info);
+        let gate = path_set_gate_input(&info).expect("valid CPCV count projection");
+        assert_eq!(gate.path_count, 3);
+        assert_eq!(gate.combination_count, 6);
         assert_eq!(gate.median_max_drawdown, Some(dec!(0.1)));
         assert_eq!(gate.median_tail_loss, Some(dec!(-0.005)));
         assert_eq!(gate.baseline_uplift, Some(dec!(0.001)));

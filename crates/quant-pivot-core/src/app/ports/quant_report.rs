@@ -908,7 +908,7 @@ fn funnel_market_view(
         model_run_id: row.model_run_id,
         market_id: row.market_id,
         event_id: row.event_id,
-        token_id: row.token_id,
+        primary_token_id: row.primary_token_id,
         terminal_stage,
         primary_reason,
         secondary_diagnostics,

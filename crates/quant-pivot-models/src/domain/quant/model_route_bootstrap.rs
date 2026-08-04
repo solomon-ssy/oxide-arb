@@ -13,8 +13,8 @@ use crate::{
     enums::{model::ModelFamily, quant::QuantRuntimeMode},
     hashing::CanonicalDigest,
     runtime_config::{
-        ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, DecisionPolicySnapshotDocument,
-        ModelVersionRef,
+        ActivePolicyBundle, BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot,
+        DecisionPolicySnapshotDocument, ModelBinding, ModelBindingSource,
     },
     types::{
         AuditEventId, BacktestPathSetId, BacktestReportId, CalibrationArtifactId, ContentHash,
@@ -422,6 +422,7 @@ impl ModelBootstrapPolicyProjection {
         bundle: &ActivePolicyBundle,
         route: BuyModelRoute,
         model_version_id: ModelVersionId,
+        bound_at: DateTime<Utc>,
     ) -> Result<Self, FeedbackError> {
         let actual_hash = bundle
             .snapshot
@@ -437,27 +438,21 @@ impl ModelBootstrapPolicyProjection {
             ));
         }
         let model = &bundle.snapshot.model_routing.model;
-        if model.active_pointer(route).is_ok() {
+        if model.champion(route).is_ok() {
             return Err(invalid_bootstrap(
                 "bootstrap target already has a champion route",
             ));
         }
-        let already_referenced = model
-            .active_model_version_id
+        let already_referenced = model.buy_routes.values().any(|binding| {
+            binding.champion.model_version_id == model_version_id
+                || binding
+                    .shadow
+                    .as_ref()
+                    .is_some_and(|shadow| shadow.model_version_id == model_version_id)
+        }) || model
+            .active_exit_model_version_id
             .as_ref()
-            .is_some_and(|reference| reference.id == model_version_id)
-            || model
-                .shadow_model_version_id
-                .as_ref()
-                .is_some_and(|reference| reference.id == model_version_id)
-            || model
-                .active_exit_model_version_id
-                .as_ref()
-                .is_some_and(|reference| reference.id == model_version_id)
-            || model
-                .category_model_pointers
-                .values()
-                .any(|reference| reference.id == model_version_id);
+            .is_some_and(|reference| reference.id == model_version_id);
         if already_referenced {
             return Err(invalid_bootstrap(
                 "bootstrap candidate is already referenced by another serving route",
@@ -465,24 +460,23 @@ impl ModelBootstrapPolicyProjection {
         }
         let non_route_policy_hash = Self::project_hash(&bundle.snapshot, route)?;
         let mut prospective_snapshot = bundle.snapshot.clone();
-        match route {
-            BuyModelRoute::Pooled => {
-                prospective_snapshot
-                    .model_routing
-                    .model
-                    .active_model_version_id = Some(ModelVersionRef::new(model_version_id));
-            }
-            BuyModelRoute::Crypto | BuyModelRoute::Weather => {
-                let category = route.category().ok_or_else(|| {
-                    invalid_bootstrap("vertical bootstrap route lost its category")
-                })?;
-                prospective_snapshot
-                    .model_routing
-                    .model
-                    .category_model_pointers
-                    .insert(category, ModelVersionRef::new(model_version_id));
-            }
-        }
+        let config_revision = bundle
+            .generation
+            .checked_next()
+            .map_err(|error| invalid_bootstrap(error.to_string()))?;
+        prospective_snapshot.model_routing.model.buy_routes.insert(
+            route,
+            BuyRouteBinding {
+                champion: ModelBinding::new(
+                    model_version_id,
+                    ModelBindingSource::Bootstrap,
+                    bound_at,
+                    config_revision,
+                    1,
+                ),
+                shadow: None,
+            },
+        );
         if Self::project_hash(&prospective_snapshot, route)? != non_route_policy_hash {
             return Err(invalid_bootstrap(
                 "bootstrap projection changed policy outside the target Buy route",
@@ -503,21 +497,7 @@ impl ModelBootstrapPolicyProjection {
         let mut document = snapshot
             .persistence_document()
             .map_err(|error| invalid_bootstrap(error.to_string()))?;
-        match route {
-            BuyModelRoute::Pooled => {
-                document.model_routing.model.active_model_version_id = None;
-            }
-            BuyModelRoute::Crypto | BuyModelRoute::Weather => {
-                let category = route.category().ok_or_else(|| {
-                    invalid_bootstrap("vertical bootstrap route lost its category")
-                })?;
-                document
-                    .model_routing
-                    .model
-                    .category_model_pointers
-                    .remove(&category);
-            }
-        }
+        document.model_routing.model.buy_routes.remove(&route);
         document.revisions.model_routing = None;
         CanonicalDigest::content_hash_typed(
             BOOTSTRAP_NON_ROUTE_DOMAIN,
@@ -535,12 +515,13 @@ impl ModelBootstrapPolicyProjection {
         &self,
         candidate: &DecisionPolicySnapshot,
     ) -> Result<(), FeedbackError> {
-        let pointer = candidate
+        let binding = candidate
             .model_routing
             .model
-            .active_pointer(self.route)
+            .route_binding(self.route)
             .map_err(|error| invalid_bootstrap(error.to_string()))?;
-        if pointer.id != self.model_version_id
+        if binding.champion.model_version_id != self.model_version_id
+            || binding.shadow.is_some()
             || Self::project_hash(candidate, self.route)? != self.non_route_policy_hash
         {
             return Err(invalid_bootstrap(
@@ -1072,10 +1053,13 @@ fn invalid_bootstrap(detail: impl Into<String>) -> FeedbackError {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+
     use super::ModelBootstrapPolicyProjection;
     use crate::{
         runtime_config::{
-            ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, ModelVersionRef,
+            ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, ModelBinding,
+            ModelBindingSource,
         },
         types::{DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration},
     };
@@ -1099,34 +1083,51 @@ mod tests {
     fn pooled_projection_isolated() {
         let bundle = ActivePolicyBundle::empty_fixture();
         let model_version_id = ModelVersionId::from_v7();
+        let bound_at = Utc::now();
         let projection = ModelBootstrapPolicyProjection::try_new(
             &bundle,
             BuyModelRoute::Pooled,
             model_version_id,
+            bound_at,
         )
         .expect("project first pooled champion");
         projection
             .validate_candidate(projection.prospective_snapshot())
             .expect("validate exact pooled route delta");
-        let pointer = projection
+        let binding = projection
             .prospective_snapshot()
             .model_routing
             .model
-            .active_pointer(BuyModelRoute::Pooled)
-            .expect("pooled route pointer");
-        assert_eq!(*pointer.id(), model_version_id);
-        assert!(
+            .route_binding(BuyModelRoute::Pooled)
+            .expect("pooled route binding");
+        assert_eq!(binding.champion.model_version_id, model_version_id);
+        assert_eq!(binding.champion.bound_at, bound_at);
+        assert_eq!(
             projection
                 .prospective_snapshot()
                 .model_routing
                 .model
-                .category_model_pointers
-                .is_empty()
+                .buy_routes
+                .len(),
+            1
         );
 
         let mut drifted = projection.prospective_snapshot().clone();
-        drifted.model_routing.model.shadow_model_version_id =
-            Some(ModelVersionRef::new(ModelVersionId::from_v7()));
+        drifted
+            .model_routing
+            .model
+            .buy_routes
+            .get_mut(&BuyModelRoute::Pooled)
+            .expect("pooled route")
+            .shadow = Some(ModelBinding::new(
+            ModelVersionId::from_v7(),
+            ModelBindingSource::Bootstrap,
+            bound_at,
+            PolicyBundleGeneration::FIRST
+                .checked_next()
+                .expect("next generation"),
+            2,
+        ));
         assert!(projection.validate_candidate(&drifted).is_err());
         assert!(
             ModelBootstrapPolicyProjection::try_new(
@@ -1146,6 +1147,7 @@ mod tests {
                 ),
                 BuyModelRoute::Pooled,
                 model_version_id,
+                bound_at,
             )
             .is_err()
         );

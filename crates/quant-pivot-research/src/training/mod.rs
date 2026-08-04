@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-pub use cohort::ModelLearningCohortCodec;
+pub use cohort::{ModelLearningCohortCodec, ModelScoreCohortCodec};
 pub use labeler::{
     HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LIQUIDITY_EXIT_POSSIBLE, LabelDefinition,
     LiquidityExitLabeler, MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS,
@@ -887,7 +887,9 @@ fn validate_example_boundary(
 impl TrainingExample {
     fn validate_sample_contract(&self) -> QuantResult<()> {
         let valid = match self.sample_source {
-            TrainingSampleSource::HistoricalPit | TrainingSampleSource::RecommendationFeedback => {
+            TrainingSampleSource::HistoricalPit
+            | TrainingSampleSource::ModelScoreFeedback
+            | TrainingSampleSource::PublishedDecisionDiagnostic => {
                 self.lot_context.is_none()
                     && self.position_state.is_none()
                     && self.book_fidelity.is_none()

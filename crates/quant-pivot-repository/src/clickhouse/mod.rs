@@ -4,6 +4,7 @@ mod fact;
 mod fact_read;
 mod feature_parity;
 mod native_read;
+mod query_batch;
 mod query_limits;
 
 pub use fact::{ChFactWriter, ChQuantFactRepository};

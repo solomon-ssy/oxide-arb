@@ -2,7 +2,8 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::quant::{
         FeedbackSchedulerClaim, FeedbackSchedulerControl, FeedbackSchedulerLease,
-        FeedbackSchedulerStateInfo, FeedbackSchedulerSuccess, NewFeedbackSchedulerState,
+        FeedbackSchedulerRetry, FeedbackSchedulerStateInfo, FeedbackSchedulerSuccess,
+        NewFeedbackSchedulerState,
     },
     types::{ResearchProfileId, WorkerId},
 };
@@ -45,8 +46,7 @@ pub trait FeedbackSchedulerRepository: Send + Sync {
     async fn settle_retry(
         &self,
         lease: FeedbackSchedulerLease,
-        retry_delay_secs: u64,
-        error: String,
+        retry: FeedbackSchedulerRetry,
     ) -> Result<FeedbackSchedulerStateInfo, StorageError>;
 
     /// Apply an operator pause/resume mutation with pause-revision CAS.

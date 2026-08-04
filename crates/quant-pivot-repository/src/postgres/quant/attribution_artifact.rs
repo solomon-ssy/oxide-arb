@@ -4,7 +4,12 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity::QUANT_ATTRIBUTION_ARTIFACT};
 use quant_pivot_models::{
     domain::quant::{AttributionArtifactInfo, NewAttributionArtifact},
-    entities::quant_attribution_artifact::{Column, Entity, Model},
+    entities::{
+        quant_attribution_artifact::{
+            Column as AttributionColumn, Entity as AttributionEntity, Model as AttributionModel,
+        },
+        quant_feedback_cycle::{Column as CycleColumn, Entity as CycleEntity},
+    },
     types::{AttributionArtifactId, FeedbackCycleId},
 };
 use sea_orm::{
@@ -24,7 +29,7 @@ impl PgAttributionArtifactRepository {
         Self { db }
     }
 
-    fn info(row: Model) -> Result<AttributionArtifactInfo, StorageError> {
+    fn info(row: AttributionModel) -> Result<AttributionArtifactInfo, StorageError> {
         let info: AttributionArtifactInfo = row.into();
         info.validate().map_err(|error| {
             StorageError::invariant_violation(Some(QUANT_ATTRIBUTION_ARTIFACT), error.to_string())
@@ -43,9 +48,9 @@ impl AttributionArtifactRepository for PgAttributionArtifactRepository {
             StorageError::invariant_violation(Some(QUANT_ATTRIBUTION_ARTIFACT), error.to_string())
         })?;
         let artifact_id = artifact.attribution_artifact_id;
-        let result = Entity::insert(artifact.clone().into_active_model())
+        let result = AttributionEntity::insert(artifact.clone().into_active_model())
             .on_conflict(
-                OnConflict::column(Column::AttributionArtifactId)
+                OnConflict::column(AttributionColumn::AttributionArtifactId)
                     .do_nothing()
                     .to_owned(),
             )
@@ -91,7 +96,7 @@ impl AttributionArtifactRepository for PgAttributionArtifactRepository {
         &self,
         artifact_id: &AttributionArtifactId,
     ) -> Result<Option<AttributionArtifactInfo>, StorageError> {
-        Entity::find_by_id(*artifact_id)
+        AttributionEntity::find_by_id(*artifact_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -103,9 +108,9 @@ impl AttributionArtifactRepository for PgAttributionArtifactRepository {
         &self,
         feedback_cycle_id: FeedbackCycleId,
     ) -> Result<Vec<AttributionArtifactInfo>, StorageError> {
-        Entity::find()
-            .filter(Column::SourceFeedbackCycleId.eq(feedback_cycle_id))
-            .order_by_asc(Column::ArtifactHash)
+        AttributionEntity::find()
+            .filter(AttributionColumn::SourceFeedbackCycleId.eq(feedback_cycle_id))
+            .order_by_asc(AttributionColumn::ArtifactHash)
             .all(&self.db)
             .await
             .map_err(StorageError::from)?
@@ -119,16 +124,33 @@ impl AttributionArtifactRepository for PgAttributionArtifactRepository {
         feedback_cycle_id: FeedbackCycleId,
         cutoff: DateTime<Utc>,
     ) -> Result<Vec<AttributionArtifactInfo>, StorageError> {
-        Entity::find()
-            .filter(Column::SourceFeedbackCycleId.ne(feedback_cycle_id))
-            .filter(Column::SourceCutoff.lt(cutoff))
-            .filter(Column::AvailableAt.lte(cutoff))
-            .order_by_asc(Column::ArtifactHash)
+        let target = CycleEntity::find_by_id(feedback_cycle_id)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found("quant_feedback_cycle", feedback_cycle_id))?;
+        AttributionEntity::find()
+            .find_also_related(CycleEntity)
+            .filter(AttributionColumn::SourceFeedbackCycleId.ne(feedback_cycle_id))
+            .filter(AttributionColumn::SourceCutoff.lt(cutoff))
+            .filter(AttributionColumn::AvailableAt.lte(cutoff))
+            .filter(CycleColumn::ProfileRef.eq(target.profile_ref))
+            .filter(CycleColumn::Route.eq(target.route))
+            .filter(CycleColumn::ChampionModelFamily.eq(target.champion_model_family))
+            .order_by_asc(AttributionColumn::ArtifactHash)
             .all(&self.db)
             .await
             .map_err(StorageError::from)?
             .into_iter()
-            .map(Self::info)
+            .map(|(artifact, source_cycle)| {
+                source_cycle.ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some("quant_attribution_artifact"),
+                        "attribution source cycle relation is missing",
+                    )
+                })?;
+                Self::info(artifact)
+            })
             .collect()
     }
 }

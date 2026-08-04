@@ -3,7 +3,11 @@
 use std::{cmp, sync::Arc, time::Duration};
 
 use quant_pivot_error::{QuantResult, feedback::FeedbackError};
-use quant_pivot_models::{domain::quant::FeedbackSchedulerClaim, types::WorkerId};
+use quant_pivot_models::{
+    domain::quant::{FeedbackSchedulerClaim, FeedbackSchedulerRetry},
+    enums::quant::FeedbackSchedulerFailureKind,
+    types::WorkerId,
+};
 use quant_pivot_repository::traits::FeedbackSchedulerRepository;
 use tokio::time::{Instant, MissedTickBehavior, interval, interval_at};
 use tokio_util::sync::CancellationToken;
@@ -127,7 +131,7 @@ impl FeedbackScheduler {
             return;
         };
         match result {
-            Ok(success) => match self.repository.settle_success(lease, success).await {
+            Ok(success) => match self.repository.settle_success(lease.clone(), success).await {
                 Ok(state) => info!(
                     profile_id = %state.research_profile_id,
                     cycle_id = ?state.last_cycle_id,
@@ -135,18 +139,42 @@ impl FeedbackScheduler {
                     cooldown_until = ?state.cooldown_until,
                     "scheduled feedback cycle materialized"
                 ),
-                Err(error) => warn!(
-                    profile_id = %claim.state.research_profile_id,
-                    %error,
-                    "feedback scheduler could not commit its success cursor"
-                ),
+                Err(error) => {
+                    let summary = bounded_error(&format!("success settlement failed: {error}"));
+                    let retry = FeedbackSchedulerRetry {
+                        failure_kind: FeedbackSchedulerFailureKind::Settlement,
+                        retry_delay_secs: BASE_RETRY_SECS,
+                        error: summary,
+                    };
+                    if let Err(recovery_error) = self.repository.settle_retry(lease, retry).await {
+                        warn!(
+                            profile_id = %claim.state.research_profile_id,
+                            %error,
+                            %recovery_error,
+                            "feedback scheduler success settlement and durable recovery both failed"
+                        );
+                    } else {
+                        warn!(
+                            profile_id = %claim.state.research_profile_id,
+                            %error,
+                            "feedback scheduler entered durable settlement recovery"
+                        );
+                    }
+                }
             },
             Err(error) => {
                 let summary = bounded_error(&error.to_string());
                 let retry_delay_secs = retry_delay(claim.state.attempt);
                 if let Err(settlement_error) = self
                     .repository
-                    .settle_retry(lease, retry_delay_secs, summary)
+                    .settle_retry(
+                        lease,
+                        FeedbackSchedulerRetry {
+                            failure_kind: FeedbackSchedulerFailureKind::Materialization,
+                            retry_delay_secs,
+                            error: summary,
+                        },
+                    )
                     .await
                 {
                     warn!(

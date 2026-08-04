@@ -6,13 +6,15 @@ use quant_pivot_models::{
         ports::{
             FeedbackComparisonArtifactRef, FeedbackShadowContract, FeedbackShadowContractInput,
             FeedbackShadowExecutionPort, FeedbackShadowJobParams, FeedbackShadowSubject,
+            ShadowBindingArtifactRef,
         },
         quant::{ResearchJobArtifactRef, ShadowObservationWindow},
     },
+    runtime_config::BuyModelRoute,
     types::{
         ArtifactUri, ContentHash, DecisionPolicySnapshotId, FeedbackComparisonArtifactId,
         FeedbackCycleId, FeedbackShadowArtifactId, ModelVersionId, PolicyBundleGeneration,
-        Probability, ResearchJobId, builtin_research_profiles,
+        Probability, ResearchJobId, ShadowBindingArtifactId, builtin_research_profiles,
     },
 };
 use quant_pivot_research::feedback_shadow::{
@@ -39,6 +41,7 @@ fn contract(
     let profile = builtin_research_profiles()
         .expect("built-in profiles")
         .remove(0);
+    let snapshot_hash = hash(3);
     FeedbackShadowContract::try_seal(FeedbackShadowContractInput {
         profile_ref: profile.profile_ref,
         feedback_policy_hash: profile
@@ -47,8 +50,8 @@ fn contract(
             .content_hash()
             .expect("policy hash"),
         category_scope: profile.spec.category,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-        decision_policy_snapshot_hash: hash(3),
+        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_content_hash(&snapshot_hash),
+        decision_policy_snapshot_hash: snapshot_hash,
         policy_bundle_generation: PolicyBundleGeneration::FIRST,
         champion_model_version_id: ModelVersionId::from_v7(),
         champion_serving_contract_hash: active_contract,
@@ -58,7 +61,7 @@ fn contract(
         observation_window_end: instant(3_600),
         minimum_observations: profile.spec.feedback_policy.shadow_minimum_observations,
         required_window_secs: 600,
-        minimum_topn_overlap: Probability::new(dec!(0.60)),
+        minimum_topn_decision_overlap: Probability::new(dec!(0.60)),
     })
     .expect("shadow contract")
 }
@@ -66,27 +69,50 @@ fn contract(
 fn params(contract: FeedbackShadowContract) -> FeedbackShadowJobParams {
     let cycle_hash = hash(10);
     let feedback_cycle_id = FeedbackCycleId::from_idempotency_hash(&cycle_hash);
+    let comparison = FeedbackComparisonArtifactRef {
+        feedback_cycle_id,
+        job_id: ResearchJobId::from_v7(),
+        artifact_id: FeedbackComparisonArtifactId::from_cycle_id(feedback_cycle_id),
+        input_hash: hash(11),
+        candidate_family_hash: hash(12),
+        decision_policy_snapshot_id: contract.decision_policy_snapshot_id(),
+        artifact: ResearchJobArtifactRef {
+            uri: ArtifactUri::parse("memory://feedback-shadow/comparison.json")
+                .expect("artifact URI"),
+            content_hash: hash(13),
+        },
+    };
     FeedbackShadowJobParams {
         feedback_cycle_id,
         cycle_idempotency_hash: cycle_hash,
         artifact_id: FeedbackShadowArtifactId::from_cycle_id(feedback_cycle_id),
-        previous: FeedbackComparisonArtifactRef {
+        binding: ShadowBindingArtifactRef {
             feedback_cycle_id,
             job_id: ResearchJobId::from_v7(),
-            artifact_id: FeedbackComparisonArtifactId::from_cycle_id(feedback_cycle_id),
-            input_hash: hash(11),
-            candidate_family_hash: hash(12),
-            decision_policy_snapshot_id: contract.decision_policy_snapshot_id(),
+            artifact_id: ShadowBindingArtifactId::from_cycle_id(feedback_cycle_id),
+            input_hash: hash(14),
+            route: BuyModelRoute::Pooled,
+            bound_at: contract.observation_window_start(),
+            binding_generation: 2,
+            receipt_hash: hash(15),
+            committed_policy_generation: contract.policy_bundle_generation(),
+            committed_snapshot_id: contract.decision_policy_snapshot_id(),
+            committed_snapshot_hash: contract.decision_policy_snapshot_hash(),
+            champion_model_version_id: contract.champion_model_version_id(),
+            champion_serving_contract_hash: contract.champion_serving_contract_hash(),
+            candidate_model_version_id: contract.candidate_model_version_id(),
+            candidate_serving_contract_hash: contract.candidate_serving_contract_hash(),
+            comparison,
             artifact: ResearchJobArtifactRef {
-                uri: ArtifactUri::parse("memory://feedback-shadow/comparison.json")
+                uri: ArtifactUri::parse("memory://feedback-shadow/binding.json")
                     .expect("artifact URI"),
-                content_hash: hash(13),
+                content_hash: hash(16),
             },
         },
         profile_ref: contract.profile_ref().clone(),
         feedback_policy_hash: contract.feedback_policy_hash(),
         subject: FeedbackShadowSubject::Candidate {
-            candidate_recipe_hash: hash(14),
+            candidate_recipe_hash: hash(17),
             contract: Box::new(contract),
         },
     }
@@ -114,7 +140,7 @@ fn insufficient_omits_stability_metrics() {
             sample_count: 999,
             first_decision_at: Some(instant(0)),
             last_decision_at: Some(instant(700)),
-            mean_topn_overlap: Some(Probability::new(dec!(0.99))),
+            mean_topn_decision_overlap: Some(Probability::new(dec!(0.99))),
             any_hard_divergence: false,
         },
     )
@@ -127,7 +153,7 @@ fn insufficient_omits_stability_metrics() {
     };
     assert_eq!((*observed, *required), (999, 1_000));
     let encoded = serde_json::to_string(&outcome).expect("serialize outcome");
-    assert!(!encoded.contains("mean_topn_overlap"));
+    assert!(!encoded.contains("mean_topn_decision_overlap"));
     assert!(!encoded.contains("any_hard_divergence"));
 }
 
@@ -140,7 +166,7 @@ fn stable_unstable_are_typed() {
             sample_count: 1_000,
             first_decision_at: Some(instant(0)),
             last_decision_at: Some(instant(700)),
-            mean_topn_overlap: Some(Probability::new(dec!(0.80))),
+            mean_topn_decision_overlap: Some(Probability::new(dec!(0.80))),
             any_hard_divergence: false,
         },
     )
@@ -153,7 +179,7 @@ fn stable_unstable_are_typed() {
             sample_count: 1_000,
             first_decision_at: Some(instant(0)),
             last_decision_at: Some(instant(700)),
-            mean_topn_overlap: Some(Probability::new(dec!(0.50))),
+            mean_topn_decision_overlap: Some(Probability::new(dec!(0.50))),
             any_hard_divergence: true,
         },
     )
@@ -165,7 +191,7 @@ fn stable_unstable_are_typed() {
         reasons,
         vec![
             FeedbackShadowUnstableReason::HardDivergence,
-            FeedbackShadowUnstableReason::TopnOverlapBelowMinimum,
+            FeedbackShadowUnstableReason::TopnDecisionOverlapBelowMinimum,
         ]
     );
 }
@@ -195,7 +221,7 @@ fn contracts_must_be_distinct() {
         observation_window_end: instant(3_600),
         minimum_observations: profile.spec.feedback_policy.shadow_minimum_observations,
         required_window_secs: 600,
-        minimum_topn_overlap: Probability::new(dec!(0.60)),
+        minimum_topn_decision_overlap: Probability::new(dec!(0.60)),
     });
     assert!(result.is_err());
 }
@@ -212,7 +238,7 @@ fn artifact_restart_detects_tamper() {
             sample_count: 1_000,
             first_decision_at: Some(instant(0)),
             last_decision_at: Some(instant(700)),
-            mean_topn_overlap: Some(Probability::new(dec!(0.80))),
+            mean_topn_decision_overlap: Some(Probability::new(dec!(0.80))),
             any_hard_divergence: false,
         },
     )
@@ -221,7 +247,7 @@ fn artifact_restart_detects_tamper() {
         artifact_id: params.artifact_id,
         feedback_cycle_id: params.feedback_cycle_id,
         job_input_hash: params.input_hash().expect("input hash"),
-        previous: params.previous.clone(),
+        binding: params.binding.clone(),
         profile_ref: params.profile_ref.clone(),
         feedback_policy_hash: params.feedback_policy_hash,
         subject: params.subject.clone(),
@@ -234,23 +260,20 @@ fn artifact_restart_detects_tamper() {
     assert_eq!(restored, artifact);
 
     let mut tampered: Value = serde_json::from_slice(&bytes).expect("JSON");
-    tampered["outcome"]["evidence"]["mean_topn_overlap"] = serde_json::json!("0.20");
+    tampered["outcome"]["evidence"]["mean_topn_decision_overlap"] = serde_json::json!("0.20");
     let tampered = serde_json::to_vec(&tampered).expect("tampered bytes");
     assert!(FeedbackShadowCodec::decode(&tampered).is_err());
 
-    let short = FeedbackShadowEvaluator::evaluate(
+    let sparse = FeedbackShadowEvaluator::evaluate(
         contract,
         &ShadowObservationWindow {
             sample_count: 1_000,
             first_decision_at: Some(instant(0)),
             last_decision_at: Some(instant(0) + Duration::seconds(599)),
-            mean_topn_overlap: Some(Probability::new(dec!(0.99))),
+            mean_topn_decision_overlap: Some(Probability::new(dec!(0.99))),
             any_hard_divergence: false,
         },
     )
-    .expect("time insufficient");
-    assert!(matches!(
-        short,
-        FeedbackShadowOutcome::InsufficientObservations { .. }
-    ));
+    .expect("served window is contract-owned");
+    assert!(matches!(sparse, FeedbackShadowOutcome::Stable { .. }));
 }

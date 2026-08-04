@@ -9,12 +9,14 @@ use quant_pivot_models::{
         api::{
             ActivateModelRouteRequest, BootstrapModelRouteRequest, CancelFeedbackCycleRequest,
             DriftReportListQuery, DriftReportView, FeedbackCycleDetailView, FeedbackCycleListQuery,
-            FeedbackCycleMutationView, FeedbackCycleTriggerView, FeedbackCycleView,
-            FeedbackOverviewView, FeedbackSchedulerControlRequest, FeedbackSchedulerListView,
-            FeedbackSchedulerMutationView, IssuePromotionPermitRequest,
-            ModelRouteActivationReceiptView, ModelRouteBootstrapReceiptView,
-            PromotionPermitListQuery, PromotionPermitMutationView, PromotionPermitView,
-            RevokePromotionPermitRequest, TriggerFeedbackCycleRequest,
+            FeedbackCycleMutationView, FeedbackCycleTriggerRequest, FeedbackCycleTriggerView,
+            FeedbackCycleView, FeedbackOverviewView, FeedbackSchedulerControlRequest,
+            FeedbackSchedulerListView, FeedbackSchedulerMutationView, IssuePromotionPermitRequest,
+            ModelRouteActivationMutationView, ModelRouteActivationReceiptView,
+            ModelRouteBootstrapReceiptView, PromotionPermitListQuery, PromotionPermitMutationView,
+            PromotionPermitView, RejectShadowBindingRequest, RemediateResolutionProjectionRequest,
+            ResolutionProjectionRemediationView, RevokePromotionPermitRequest,
+            ShadowBindingRejectionReceiptView,
         },
         pagination::Paginated,
         quant::FeedbackCycleActor,
@@ -24,7 +26,10 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::{ContentHash, FeedbackCycleId, PromotionPermitId, ResearchProfileId, RoleCode},
+    types::{
+        ContentHash, FeedbackCycleId, PolicyActivationId, PromotionPermitId, ResearchProfileId,
+        ResolutionObservationId, RoleCode, ShadowBindingArtifactId,
+    },
 };
 use serde::Serialize;
 
@@ -104,7 +109,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         spec(
             Method::POST,
             "/research/model-route-activation-permits",
-            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
+            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Authorize),
             issue_permit,
         ),
         spec(
@@ -122,8 +127,26 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         spec(
             Method::POST,
             "/research/model-route-activations",
-            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
+            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Activate),
             activate_route,
+        ),
+        spec(
+            Method::POST,
+            "/research/model-route-shadow-bindings/{binding_id}/reject",
+            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Reject),
+            reject_shadow,
+        ),
+        spec(
+            Method::POST,
+            "/research/resolution-projections/{observation_id}/remediations",
+            Rule::ActingRoleGoverned(ResourceType::Reconciliation, Operation::Resolve),
+            remediate_resolution,
+        ),
+        spec(
+            Method::GET,
+            "/research/model-route-activations/{activation_id}",
+            Rule::ResourceOp(ResourceType::Publication, Operation::Read),
+            get_activation,
         ),
     ]
 }
@@ -246,7 +269,7 @@ pub async fn trigger_cycle(
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
-    body: ValidatedJson<TriggerFeedbackCycleRequest>,
+    body: ValidatedJson<FeedbackCycleTriggerRequest>,
 ) -> Result<WebResponse<FeedbackCycleTriggerView>, WebError> {
     let request = body.into_inner();
     let profile_id = request.profile_id.clone();
@@ -424,7 +447,7 @@ pub async fn activate_route(
     request_id: RequestId,
     op_ctx: OperationCtx,
     body: ValidatedJson<ActivateModelRouteRequest>,
-) -> Result<WebResponse<ModelRouteActivationReceiptView>, WebError> {
+) -> Result<WebResponse<ModelRouteActivationMutationView>, WebError> {
     let request = body.into_inner();
     let permit_id = request.promotion_permit_id;
     let cycle_id = request.feedback_cycle_id;
@@ -436,20 +459,114 @@ pub async fn activate_route(
     op_ctx.set_action(OperationCategory::Governance, "model_route.activate");
     op_ctx.set_resource(
         ResourceType::Publication,
-        view.policy_activation_id.to_string(),
+        view.receipt.policy_activation_id.to_string(),
     );
     op_ctx.set_state_hashes(None, Some(after_hash));
     op_ctx.set_detail(serde_json::json!({
         "promotion_permit_id": permit_id.to_string(),
         "feedback_cycle_id": cycle_id.to_string(),
-        "previous_route_generation": view.previous_route_generation,
-        "activated_route_generation": view.activated_route_generation,
-        "transaction_hash": view.transaction_hash,
+        "previous_route_generation": view.receipt.previous_route_generation,
+        "activated_route_generation": view.receipt.activated_route_generation,
+        "transaction_hash": view.receipt.transaction_hash,
         "replayed": view.replayed,
         "acting_role": acting_role.0,
         "request_id": request_id.0,
     }))?;
     Ok(WebResponse::created(view))
+}
+
+/// `POST /api/research/model-route-shadow-bindings/{binding_id}/reject`.
+pub async fn reject_shadow(
+    state: Data<AppState>,
+    binding_id: Path<ShadowBindingArtifactId>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<RejectShadowBindingRequest>,
+) -> Result<WebResponse<ShadowBindingRejectionReceiptView>, WebError> {
+    let binding_id = binding_id.into_inner();
+    let view = state
+        .feedback_mutation
+        .reject_shadow(
+            binding_id,
+            body.into_inner(),
+            feedback_actor(&actor, &acting_role)?,
+        )
+        .await?;
+    let after_hash = canonical_state_hash(&view)?;
+    op_ctx.set_action(OperationCategory::Governance, "model_route.shadow.reject");
+    op_ctx.set_resource(ResourceType::Publication, binding_id.to_string());
+    op_ctx.set_state_hashes(None, Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "binding_id": binding_id.to_string(),
+        "feedback_cycle_id": view.receipt.feedback_cycle_id.to_string(),
+        "route": view.receipt.route,
+        "previous_binding_generation": view.receipt.previous_binding_generation,
+        "cleared_route_generation": view.receipt.cleared_route_generation,
+        "policy_activation_id": view.receipt.policy_activation_id.to_string(),
+        "replayed": view.replayed,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::ok(view))
+}
+
+/// `POST /api/research/resolution-projections/{observation_id}/remediations`.
+pub async fn remediate_resolution(
+    state: Data<AppState>,
+    observation_id: Path<ResolutionObservationId>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<RemediateResolutionProjectionRequest>,
+) -> Result<WebResponse<ResolutionProjectionRemediationView>, WebError> {
+    let observation_id = observation_id.into_inner();
+    let view = state
+        .feedback_mutation
+        .remediate_resolution(
+            observation_id,
+            body.into_inner(),
+            feedback_actor(&actor, &acting_role)?,
+        )
+        .await?;
+    let after_hash = canonical_state_hash(&view)?;
+    op_ctx.set_action(
+        OperationCategory::Governance,
+        "resolution_projection.remediate",
+    );
+    op_ctx.set_resource(ResourceType::Reconciliation, observation_id.to_string());
+    op_ctx.set_state_hashes(None, Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "resolution_observation_id": observation_id.to_string(),
+        "remediation_id": view.remediation.remediation_id.to_string(),
+        "action": view.remediation.action,
+        "expected_revision": view.remediation.expected_revision,
+        "committed_revision": view.remediation.committed_revision,
+        "prior_status": view.remediation.prior_status,
+        "resulting_status": view.remediation.resulting_status,
+        "replayed": view.replayed,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::ok(view))
+}
+
+/// `GET /api/research/model-route-activations/{activation_id}`.
+pub async fn get_activation(
+    state: Data<AppState>,
+    activation_id: Path<PolicyActivationId>,
+) -> Result<WebResponse<ModelRouteActivationReceiptView>, WebError> {
+    let activation_id = activation_id.into_inner();
+    let view = state
+        .feedback_mutation
+        .get_activation(activation_id)
+        .await?
+        .ok_or_else(|| {
+            WebError::NotFound(format!("model-route activation not found: {activation_id}"))
+        })?;
+    Ok(WebResponse::ok(view))
 }
 
 fn feedback_actor(

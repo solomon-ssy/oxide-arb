@@ -3,9 +3,10 @@
 //! Pure computation: given the **active** model's ranked candidates and a
 //! **shadow** model's ranked candidates for the same `as_of` cross-section, it
 //! quantifies how far the shadow diverges from production at the candidate
-//! ranking layer: `TopN` overlap, per-market rank delta, and per-market score
-//! delta. Report-level deltas such as capital allocation, would-execute, and
-//! risk envelope are outside this component's contract.
+//! ranking layer: signed `TopN` decision overlap (`market_id` + `outcome_side`),
+//! per-market rank delta, and per-market score delta. Report-level deltas such
+//! as capital allocation, would-execute, and risk envelope are outside this
+//! component's contract.
 //!
 //! The result is content-addressed and persisted to `quant_shadow_comparison`
 //! by the core `ModelRunner`; a `hard_divergence` raises a critical alert but
@@ -36,10 +37,10 @@ use crate::{
 /// Canonical, surrogate-free projection for content addressing.
 #[derive(Serialize)]
 struct ComparisonHashInput<'a> {
-    active_model_version_id: &'a ModelVersionId,
-    shadow_model_version_id: &'a ModelVersionId,
-    active_serving_contract_hash: ContentHash,
-    shadow_serving_contract_hash: ContentHash,
+    champion_model_version_id: &'a ModelVersionId,
+    candidate_model_version_id: &'a ModelVersionId,
+    champion_serving_contract_hash: ContentHash,
+    candidate_serving_contract_hash: ContentHash,
     research_profile_artifact_id: &'a ResearchProfileArtifactId,
     category_scope: Option<MarketCategory>,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
@@ -47,7 +48,7 @@ struct ComparisonHashInput<'a> {
     policy_bundle_generation: PolicyBundleGeneration,
     weight_source: ModelWeightSource,
     decision_at: DateTime<Utc>,
-    topn_overlap: &'a Probability,
+    topn_decision_overlap: &'a Probability,
     rank_delta: &'a ShadowRankDelta,
     score_delta: &'a ShadowScoreDelta,
     hard_divergence: bool,
@@ -62,10 +63,10 @@ struct Ranked {
 
 /// Complete immutable input to one active-vs-shadow comparison.
 pub struct ShadowComparisonRequest<'a> {
-    pub active_model_version_id: ModelVersionId,
-    pub shadow_model_version_id: ModelVersionId,
-    pub active_serving_contract_hash: ContentHash,
-    pub shadow_serving_contract_hash: ContentHash,
+    pub champion_model_version_id: ModelVersionId,
+    pub candidate_model_version_id: ModelVersionId,
+    pub champion_serving_contract_hash: ContentHash,
+    pub candidate_serving_contract_hash: ContentHash,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub category_scope: Option<MarketCategory>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
@@ -91,10 +92,10 @@ pub struct ShadowComparisonRequest<'a> {
 pub fn compute_shadow_comparison(
     request: &ShadowComparisonRequest<'_>,
 ) -> QuantResult<ShadowComparison> {
-    let active_model_version_id = request.active_model_version_id;
-    let shadow_model_version_id = request.shadow_model_version_id;
-    let active_serving_contract_hash = request.active_serving_contract_hash;
-    let shadow_serving_contract_hash = request.shadow_serving_contract_hash;
+    let champion_model_version_id = request.champion_model_version_id;
+    let candidate_model_version_id = request.candidate_model_version_id;
+    let champion_serving_contract_hash = request.champion_serving_contract_hash;
+    let candidate_serving_contract_hash = request.candidate_serving_contract_hash;
     let research_profile_artifact_id = request.research_profile_artifact_id.clone();
     let category_scope = request.category_scope;
     let decision_policy_snapshot_id = request.decision_policy_snapshot_id;
@@ -149,7 +150,7 @@ pub fn compute_shadow_comparison(
     let side_disagreement_rate = ratio(Decimal::from(side_disagreements), common_decimal);
     let spearman = stats::spearman(&active_ranks, &shadow_ranks);
 
-    let topn_overlap = topn_overlap(active, shadow, top_n);
+    let topn_decision_overlap = topn_decision_overlap(active, shadow, top_n);
     let hard_divergence = mean_abs_score_delta > score_divergence_threshold;
 
     let rank_delta = ShadowRankDelta {
@@ -165,10 +166,10 @@ pub fn compute_shadow_comparison(
     };
 
     let comparison_hash = ResearchHasher::canonical(&ComparisonHashInput {
-        active_model_version_id: &active_model_version_id,
-        shadow_model_version_id: &shadow_model_version_id,
-        active_serving_contract_hash,
-        shadow_serving_contract_hash,
+        champion_model_version_id: &champion_model_version_id,
+        candidate_model_version_id: &candidate_model_version_id,
+        champion_serving_contract_hash,
+        candidate_serving_contract_hash,
         research_profile_artifact_id: &research_profile_artifact_id,
         category_scope,
         decision_policy_snapshot_id,
@@ -176,7 +177,7 @@ pub fn compute_shadow_comparison(
         policy_bundle_generation,
         weight_source,
         decision_at,
-        topn_overlap: &topn_overlap,
+        topn_decision_overlap: &topn_decision_overlap,
         rank_delta: &rank_delta,
         score_delta: &score_delta,
         hard_divergence,
@@ -184,10 +185,10 @@ pub fn compute_shadow_comparison(
 
     Ok(ShadowComparison {
         shadow_comparison_id: ShadowComparisonId::from_v7(),
-        active_model_version_id,
-        shadow_model_version_id,
-        active_serving_contract_hash,
-        shadow_serving_contract_hash,
+        champion_model_version_id,
+        candidate_model_version_id,
+        champion_serving_contract_hash,
+        candidate_serving_contract_hash,
         research_profile_artifact_id,
         category_scope,
         decision_policy_snapshot_id,
@@ -195,7 +196,7 @@ pub fn compute_shadow_comparison(
         policy_bundle_generation,
         weight_source,
         decision_at,
-        topn_overlap,
+        topn_decision_overlap,
         rank_delta,
         score_delta,
         matured_outcome_delta: None,
@@ -221,20 +222,19 @@ fn index_by_market(candidates: &[SignalCandidate]) -> BTreeMap<String, Ranked> {
         .collect()
 }
 
-/// Jaccard overlap of the two `TopN` market sets (by `rank_before_portfolio`).
+/// Jaccard overlap of the two signed `TopN` decision sets.
 ///
-/// Two empty `TopN` sets are identical (`1`); exactly one empty is maximal
-/// divergence (`0`); otherwise `|∩| / |∪|`.
-fn topn_overlap(
+/// A decision identity is `(market_id, outcome_side)`: selecting the same
+/// market on the opposite side is diametrically different economic behavior
+/// and therefore has zero intersection. Empty `TopN` sets carry no stability
+/// evidence and score `0`; otherwise the overlap is `|∩| / |∪|`.
+fn topn_decision_overlap(
     active: &[SignalCandidate],
     shadow: &[SignalCandidate],
     top_n: usize,
 ) -> Probability {
-    let active_top = top_markets(active, top_n);
-    let shadow_top = top_markets(shadow, top_n);
-    if active_top.is_empty() && shadow_top.is_empty() {
-        return Probability::new(Decimal::ONE);
-    }
+    let active_top = top_decisions(active, top_n);
+    let shadow_top = top_decisions(shadow, top_n);
     if active_top.is_empty() || shadow_top.is_empty() {
         return Probability::new(Decimal::ZERO);
     }
@@ -246,15 +246,20 @@ fn topn_overlap(
     ))
 }
 
-/// The market ids ranked within the `TopN` (`rank_before_portfolio <= top_n`).
-fn top_markets(candidates: &[SignalCandidate], top_n: usize) -> BTreeSet<String> {
+/// Signed decisions ranked within the `TopN` (`rank_before_portfolio <= top_n`).
+fn top_decisions(candidates: &[SignalCandidate], top_n: usize) -> BTreeSet<(String, i8)> {
     let bound = u32::try_from(top_n).unwrap_or(u32::MAX);
     candidates
         .iter()
         .filter(|candidate| {
             candidate.rank_before_portfolio >= 1 && candidate.rank_before_portfolio <= bound
         })
-        .map(|candidate| candidate.market_id.to_string())
+        .map(|candidate| {
+            (
+                candidate.market_id.to_string(),
+                candidate.outcome_side.as_i8(),
+            )
+        })
         .collect()
 }
 
@@ -328,10 +333,10 @@ mod tests {
             .remove(0)
             .profile_ref;
         ShadowComparisonRequest {
-            active_model_version_id: ModelVersionId::from_v7(),
-            shadow_model_version_id: ModelVersionId::from_v7(),
-            active_serving_contract_hash: ContentHash::from_bytes([1; 32]),
-            shadow_serving_contract_hash: ContentHash::from_bytes([2; 32]),
+            champion_model_version_id: ModelVersionId::from_v7(),
+            candidate_model_version_id: ModelVersionId::from_v7(),
+            champion_serving_contract_hash: ContentHash::from_bytes([1; 32]),
+            candidate_serving_contract_hash: ContentHash::from_bytes([2; 32]),
             research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile),
             category_scope: profile
                 .resolve_builtin_research_profile()
@@ -369,7 +374,7 @@ mod tests {
             .collect::<Vec<_>>();
         let comparison = compute_shadow_comparison(&request(&active, &shadow, 5, dec!(0.10)))
             .expect("comparison");
-        assert_eq!(comparison.topn_overlap, Probability::new(dec!(1)));
+        assert_eq!(comparison.topn_decision_overlap, Probability::new(dec!(1)));
         assert_eq!(comparison.score_delta.mean_abs_score_delta, dec!(0));
         assert_eq!(comparison.rank_delta.max_rank_delta, 0);
         assert!(!comparison.hard_divergence);
@@ -382,6 +387,7 @@ mod tests {
         let comparison = compute_shadow_comparison(&request(&active, &shadow, 5, dec!(0.10)))
             .expect("comparison");
         assert!(comparison.hard_divergence);
+        assert_eq!(comparison.topn_decision_overlap, Probability::ZERO);
         assert_eq!(comparison.score_delta.mean_abs_score_delta, dec!(0.5));
         assert_eq!(comparison.score_delta.side_disagreement_rate, dec!(1));
     }
@@ -406,7 +412,7 @@ mod tests {
         assert_eq!(comparison.rank_delta.max_rank_delta, 1);
         assert!(comparison.score_delta.mean_abs_score_delta > dec!(0));
         // TopN(2): active {a,b}, shadow {a,b} → full overlap of the top-2 set.
-        assert_eq!(comparison.topn_overlap, Probability::new(dec!(1)));
+        assert_eq!(comparison.topn_decision_overlap, Probability::new(dec!(1)));
         // Inverted ranks ⇒ negative spearman over the two common markets.
         assert!(comparison.rank_delta.spearman <= dec!(0));
     }
@@ -417,7 +423,17 @@ mod tests {
         let shadow = vec![candidate("b", 1, dec!(0.9), OutcomeSide::Yes)];
         let comparison = compute_shadow_comparison(&request(&active, &shadow, 5, dec!(0.10)))
             .expect("comparison");
-        assert_eq!(comparison.topn_overlap, Probability::new(dec!(0)));
+        assert_eq!(comparison.topn_decision_overlap, Probability::ZERO);
         assert_eq!(comparison.rank_delta.common_markets, 0);
+    }
+
+    #[test]
+    fn empty_rankings_not_evidence() {
+        let comparison =
+            compute_shadow_comparison(&request(&[], &[], 5, dec!(0.10))).expect("comparison");
+
+        assert_eq!(comparison.topn_decision_overlap, Probability::ZERO);
+        assert_eq!(comparison.rank_delta.common_markets, 0);
+        assert!(!comparison.hard_divergence);
     }
 }

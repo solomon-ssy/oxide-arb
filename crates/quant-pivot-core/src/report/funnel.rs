@@ -2,27 +2,24 @@
 
 use std::collections::HashMap;
 
+use crate::service::{feature_pipeline::RejectedMarket, model_runner::ModelMarketDecision};
 use ahash::AHashMap;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
     clickhouse::ReportMarketFunnelRow,
     enums::quant::RejectionReason,
-    hashing::CanonicalDigest,
     types::{
-        DecisionPolicySnapshotId, EventId, FeatureVectorId, MarketId, MarketSelectionId,
-        MissingFeatureDiagnostic, ModelRunId, ModelVersionId, RecommendationId,
-        RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
-        ResearchProfileRef, SignalCandidateId, TokenId, stable_name::FeatureName,
+        DecisionPolicySnapshotId, EventId, FeatureVectorId, MarketId, MissingFeatureDiagnostic,
+        ModelRunId, ModelVersionId, RecommendationId, RecommendationReportId,
+        ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage, ResearchProfileRef,
+        SignalCandidateId, TokenId, stable_name::FeatureName,
     },
 };
 use quant_pivot_research::{
     portfolio::RejectedCandidate,
     selection::{ExcludedMarket, ExclusionReason, MarketSelectionSnapshot, SelectedMarket},
 };
-use serde::Serialize;
-
-use crate::service::{feature_pipeline::RejectedMarket, model_runner::ModelMarketDecision};
 
 #[derive(Clone, Copy)]
 pub struct ReportFunnelInput<'a> {
@@ -52,7 +49,8 @@ pub struct PublishedRecommendationRef {
 
 struct DraftDecision {
     event_id: EventId,
-    token_id: TokenId,
+    primary_token_id: TokenId,
+    secondary_token_id: Option<TokenId>,
     terminal_stage: Option<ReportFunnelStage>,
     primary_reason: Option<ReportFunnelReason>,
     secondary_diagnostics: ReportFunnelDiagnostics,
@@ -65,7 +63,8 @@ impl DraftDecision {
     fn included(market: &SelectedMarket) -> Self {
         Self {
             event_id: market.event_id.clone(),
-            token_id: market.primary_token_id.clone(),
+            primary_token_id: market.primary_token_id.clone(),
+            secondary_token_id: market.secondary_token_id.clone(),
             terminal_stage: None,
             primary_reason: None,
             secondary_diagnostics: ReportFunnelDiagnostics::None {},
@@ -97,7 +96,8 @@ impl DraftDecision {
         };
         Self {
             event_id: market.event_id.clone(),
-            token_id: market.primary_token_id.clone(),
+            primary_token_id: market.primary_token_id.clone(),
+            secondary_token_id: None,
             terminal_stage: Some(terminal_stage),
             primary_reason: Some(primary_reason),
             secondary_diagnostics,
@@ -124,6 +124,10 @@ impl DraftDecision {
         self.primary_reason = Some(reason);
         self.secondary_diagnostics = diagnostics;
         Ok(())
+    }
+
+    fn recognizes_token(&self, token_id: &TokenId) -> bool {
+        self.primary_token_id == *token_id || self.secondary_token_id.as_ref() == Some(token_id)
     }
 }
 
@@ -175,6 +179,16 @@ pub fn build_report_market_funnel(
     }
     for model in input.model_decisions {
         let decision = require_pending(&mut decisions, &model.market_id)?;
+        if !decision.recognizes_token(&model.token_id) {
+            return Err(ReportError::InvariantViolation {
+                stage: "report_funnel",
+                detail: format!(
+                    "model decision for market {} references token {} outside its frozen selection",
+                    model.market_id, model.token_id
+                ),
+            }
+            .into());
+        }
         if decision.feature_vector_id.is_none() {
             return Err(ReportError::InvariantViolation {
                 stage: "report_funnel",
@@ -330,20 +344,6 @@ fn row_from_decision(
                 stage: "report_funnel",
                 detail: format!("market {market_id} has no primary reason"),
             })?;
-    let hash_input = FunnelRowHashInput {
-        report_id: input.report_id,
-        market_selection_id: &input.selection.market_selection_id,
-        profile_ref: input.profile_ref,
-        market_id,
-        event_id: &decision.event_id,
-        token_id: &decision.token_id,
-        terminal_stage,
-        primary_reason,
-        secondary_diagnostics: &decision.secondary_diagnostics,
-        feature_vector_id: decision.feature_vector_id.as_ref(),
-        signal_candidate_id: decision.signal_candidate_id.as_ref(),
-        recommendation_id: decision.recommendation_id.as_ref(),
-    };
     decision
         .secondary_diagnostics
         .validate_for(primary_reason)
@@ -351,13 +351,12 @@ fn row_from_decision(
             stage: "report_funnel",
             detail: detail.to_owned(),
         })?;
-    let row_hash = CanonicalDigest::content_hash_json(&hash_input)?;
     let secondary_diagnostics_json = serde_json::to_string(&decision.secondary_diagnostics)
         .map_err(|error| ReportError::InvariantViolation {
             stage: "report_funnel",
             detail: format!("funnel diagnostics serialization failed: {error}"),
         })?;
-    Ok(ReportMarketFunnelRow {
+    let mut row = ReportMarketFunnelRow {
         event_time: input.event_time.timestamp_millis(),
         recommendation_report_id: *input.report_id,
         market_selection_id: input.selection.market_selection_id,
@@ -369,32 +368,22 @@ fn row_from_decision(
         model_run_id: input.model_run_id.copied(),
         market_id: market_id.clone(),
         event_id: decision.event_id,
-        token_id: decision.token_id,
+        primary_token_id: decision.primary_token_id,
         terminal_stage: terminal_stage.as_str().to_owned(),
         primary_reason: primary_reason.as_str().to_owned(),
         secondary_diagnostics_json,
         feature_vector_id: decision.feature_vector_id,
         signal_candidate_id: decision.signal_candidate_id,
         recommendation_id: decision.recommendation_id,
-        row_hash: row_hash.to_string(),
+        row_hash: String::new(),
         ingestion_time: input.event_time.timestamp_millis(),
-    })
-}
-
-#[derive(Serialize)]
-struct FunnelRowHashInput<'a> {
-    report_id: &'a RecommendationReportId,
-    market_selection_id: &'a MarketSelectionId,
-    profile_ref: &'a ResearchProfileRef,
-    market_id: &'a MarketId,
-    event_id: &'a EventId,
-    token_id: &'a TokenId,
-    terminal_stage: ReportFunnelStage,
-    primary_reason: ReportFunnelReason,
-    secondary_diagnostics: &'a ReportFunnelDiagnostics,
-    feature_vector_id: Option<&'a FeatureVectorId>,
-    signal_candidate_id: Option<&'a SignalCandidateId>,
-    recommendation_id: Option<&'a RecommendationId>,
+    };
+    row.seal_hash()
+        .map_err(|error| ReportError::InvariantViolation {
+            stage: "report_funnel",
+            detail: error.to_string(),
+        })?;
+    Ok(row)
 }
 
 const fn selection_terminal(reason: &ExclusionReason) -> (ReportFunnelStage, ReportFunnelReason) {
@@ -519,17 +508,21 @@ mod tests {
     use quant_pivot_models::{
         enums::common::MarketCategory,
         types::{
-            ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId,
-            ModelVersionId, RecommendationReportId, ReportFunnelReason, ReportFunnelStage,
-            SelectionExclusionSummary, TokenId,
+            ContentHash, DecisionPolicySnapshotId, EventId, FeatureVectorId, MarketId,
+            MarketSelectionId, ModelRunId, ModelVersionId, RecommendationId,
+            RecommendationReportId, ReportFunnelReason, ReportFunnelStage,
+            SelectionExclusionSummary, SignalCandidateId, TokenId,
         },
     };
     use quant_pivot_research::selection::{
         ExcludedMarket, ExclusionReason, MarketSelectionSnapshot, SelectedMarket,
     };
 
-    use super::{ReportFunnelInput, build_report_market_funnel};
-    use crate::test_fixtures::execution_pg_seed::fixture_profile_ref;
+    use super::{PublishedRecommendationRef, ReportFunnelInput, build_report_market_funnel};
+    use crate::{
+        service::model_runner::ModelMarketDecision,
+        test_fixtures::execution_pg_seed::fixture_profile_ref,
+    };
 
     fn selection() -> MarketSelectionSnapshot {
         let decision_at = Utc
@@ -611,6 +604,94 @@ mod tests {
             feature_rejected: &[],
             feature_vector_by_market: &HashMap::default(),
             model_decisions: &[],
+            planner_rejected: &[],
+            recommendations: &[],
+            early_terminal: None,
+            event_time: selection.decision_at,
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn published_preserves_primary_token() {
+        let mut selection = selection();
+        let secondary_token = TokenId::new("token-secondary");
+        selection.included[0].secondary_token_id = Some(secondary_token.clone());
+        let report_id = RecommendationReportId::from_v7();
+        let model_version_id = ModelVersionId::from_v7();
+        let model_run_id = ModelRunId::from_v7();
+        let feature_vector_id = FeatureVectorId::from_v7();
+        let signal_candidate_id = SignalCandidateId::from_v7();
+        let recommendation_id = RecommendationId::from_v7();
+        let profile = fixture_profile_ref();
+        let feature_vectors = HashMap::from([(MarketId::new("included"), feature_vector_id)]);
+        let model_decisions = [ModelMarketDecision {
+            signal_candidate_id,
+            market_id: MarketId::new("included"),
+            token_id: secondary_token,
+            gate_passed: true,
+            primary_reason: None,
+        }];
+        let recommendations = [PublishedRecommendationRef {
+            recommendation_id,
+            market_id: MarketId::new("included"),
+        }];
+
+        let rows = build_report_market_funnel(ReportFunnelInput {
+            report_id: &report_id,
+            profile_ref: &profile,
+            decision_policy_snapshot_id: &selection.decision_policy_snapshot_id,
+            model_version_id: &model_version_id,
+            model_run_id: Some(&model_run_id),
+            selection: &selection,
+            feature_rejected: &[],
+            feature_vector_by_market: &feature_vectors,
+            model_decisions: &model_decisions,
+            planner_rejected: &[],
+            recommendations: &recommendations,
+            early_terminal: None,
+            event_time: selection.decision_at,
+        })
+        .expect("secondary-token recommendation should conserve its primary model token");
+
+        let published = rows
+            .iter()
+            .find(|row| row.market_id.as_str() == "included")
+            .expect("published market row");
+        assert_eq!(published.primary_token_id.as_str(), "token-included");
+        assert_eq!(published.terminal_stage, "published");
+        assert_eq!(published.signal_candidate_id, Some(signal_candidate_id));
+        assert_eq!(published.recommendation_id, Some(recommendation_id));
+    }
+
+    #[test]
+    fn unknown_model_token_fails() {
+        let selection = selection();
+        let report_id = RecommendationReportId::from_v7();
+        let model_version_id = ModelVersionId::from_v7();
+        let model_run_id = ModelRunId::from_v7();
+        let profile = fixture_profile_ref();
+        let feature_vectors =
+            HashMap::from([(MarketId::new("included"), FeatureVectorId::from_v7())]);
+        let model_decisions = [ModelMarketDecision {
+            signal_candidate_id: SignalCandidateId::from_v7(),
+            market_id: MarketId::new("included"),
+            token_id: TokenId::new("foreign-token"),
+            gate_passed: true,
+            primary_reason: None,
+        }];
+
+        let result = build_report_market_funnel(ReportFunnelInput {
+            report_id: &report_id,
+            profile_ref: &profile,
+            decision_policy_snapshot_id: &selection.decision_policy_snapshot_id,
+            model_version_id: &model_version_id,
+            model_run_id: Some(&model_run_id),
+            selection: &selection,
+            feature_rejected: &[],
+            feature_vector_by_market: &feature_vectors,
+            model_decisions: &model_decisions,
             planner_rejected: &[],
             recommendations: &[],
             early_terminal: None,

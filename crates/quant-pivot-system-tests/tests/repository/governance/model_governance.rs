@@ -27,7 +27,7 @@ use quant_pivot_repository::{
     },
     traits::{
         ModelGovernanceAuditRepository, ModelRegistryRepository, PolicyRepository,
-        ShadowComparisonRepository,
+        ShadowComparisonRepository, ShadowComparisonWriteOutcome,
     },
 };
 use quant_pivot_system_tests::{
@@ -47,10 +47,10 @@ fn content_hash(seed: char) -> ContentHash {
 }
 
 struct ShadowFixture {
-    active_model_version_id: ModelVersionId,
-    shadow_model_version_id: ModelVersionId,
-    active_serving_contract_hash: ContentHash,
-    shadow_serving_contract_hash: ContentHash,
+    champion_model_version_id: ModelVersionId,
+    candidate_model_version_id: ModelVersionId,
+    champion_serving_contract_hash: ContentHash,
+    candidate_serving_contract_hash: ContentHash,
     research_profile_artifact_id: ResearchProfileArtifactId,
     category_scope: Option<MarketCategory>,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
@@ -62,17 +62,17 @@ impl ShadowFixture {
     fn comparison(
         &self,
         decision_at: DateTime<Utc>,
-        topn_overlap: Probability,
+        topn_decision_overlap: Probability,
         hard_divergence: bool,
         weight_source: ModelWeightSource,
         hash_seed: char,
     ) -> NewShadowComparison {
         NewShadowComparison {
             shadow_comparison_id: ShadowComparisonId::from_v7(),
-            active_model_version_id: self.active_model_version_id,
-            shadow_model_version_id: self.shadow_model_version_id,
-            active_serving_contract_hash: self.active_serving_contract_hash,
-            shadow_serving_contract_hash: self.shadow_serving_contract_hash,
+            champion_model_version_id: self.champion_model_version_id,
+            candidate_model_version_id: self.candidate_model_version_id,
+            champion_serving_contract_hash: self.champion_serving_contract_hash,
+            candidate_serving_contract_hash: self.candidate_serving_contract_hash,
             research_profile_artifact_id: self.research_profile_artifact_id.clone(),
             category_scope: self.category_scope,
             decision_policy_snapshot_id: self.decision_policy_snapshot_id,
@@ -80,7 +80,7 @@ impl ShadowFixture {
             policy_bundle_generation: self.policy_bundle_generation,
             weight_source,
             decision_at,
-            topn_overlap,
+            topn_decision_overlap,
             rank_delta_json: ShadowRankDelta {
                 mean_abs_rank_delta: dec!(1),
                 max_rank_delta: 2,
@@ -104,10 +104,10 @@ impl ShadowFixture {
         window_end: DateTime<Utc>,
     ) -> ShadowObservationQuery {
         ShadowObservationQuery {
-            active_model_version_id: self.active_model_version_id,
-            shadow_model_version_id: self.shadow_model_version_id,
-            active_serving_contract_hash: self.active_serving_contract_hash,
-            shadow_serving_contract_hash: self.shadow_serving_contract_hash,
+            champion_model_version_id: self.champion_model_version_id,
+            candidate_model_version_id: self.candidate_model_version_id,
+            champion_serving_contract_hash: self.champion_serving_contract_hash,
+            candidate_serving_contract_hash: self.candidate_serving_contract_hash,
             research_profile_artifact_id: self.research_profile_artifact_id.clone(),
             category_scope: self.category_scope,
             decision_policy_snapshot_id: self.decision_policy_snapshot_id,
@@ -190,10 +190,10 @@ async fn seed_two_versions(db: &DatabaseConnection) -> ShadowFixture {
         active_bindings.policy_snapshot.snapshot_hash
     );
     ShadowFixture {
-        active_model_version_id: active.model_version_id,
-        shadow_model_version_id: shadow.model_version_id,
-        active_serving_contract_hash: active.serving_contract_hash,
-        shadow_serving_contract_hash: shadow.serving_contract_hash,
+        champion_model_version_id: active.model_version_id,
+        candidate_model_version_id: shadow.model_version_id,
+        champion_serving_contract_hash: active.serving_contract_hash,
+        candidate_serving_contract_hash: shadow.serving_contract_hash,
         research_profile_artifact_id: active.profile_ref.artifact_id(),
         category_scope: active.category_scope,
         decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
@@ -225,9 +225,36 @@ pub async fn quant_shadow_comparison_crud() {
         .expect("create comparison");
     }
 
+    let replay = repo
+        .create(fixture.comparison(
+            now - ChronoDuration::hours(23),
+            Probability::new(dec!(0.80)),
+            false,
+            ModelWeightSource::Artifact,
+            'g',
+        ))
+        .await
+        .expect("replay exact comparison");
+    assert!(matches!(
+        replay,
+        ShadowComparisonWriteOutcome::AlreadyPresent(_)
+    ));
+    assert!(
+        repo.create(fixture.comparison(
+            now - ChronoDuration::hours(23),
+            Probability::new(dec!(0.81)),
+            false,
+            ModelWeightSource::Artifact,
+            'g',
+        ))
+        .await
+        .is_err(),
+        "a reused content hash with different immutable content must fail closed"
+    );
+
     let summary = repo
         .summary(
-            &fixture.shadow_model_version_id,
+            &fixture.candidate_model_version_id,
             now - ChronoDuration::days(1),
         )
         .await
@@ -238,7 +265,10 @@ pub async fn quant_shadow_comparison_crud() {
         "the window includes a divergence"
     );
     // Mean of 0.80, 0.60, and 1.00.
-    assert_eq!(summary.mean_topn_overlap, Probability::new(dec!(0.80)));
+    assert_eq!(
+        summary.mean_topn_decision_overlap,
+        Probability::new(dec!(0.80))
+    );
     assert!(summary.window_start.is_some() && summary.window_end.is_some());
 }
 
@@ -274,7 +304,7 @@ pub async fn shadow_window_is_exact() {
         ModelWeightSource::Artifact,
         'm',
     );
-    wrong_contract.active_serving_contract_hash = content_hash('1');
+    wrong_contract.champion_serving_contract_hash = content_hash('1');
     repo.create(wrong_contract)
         .await
         .expect("insert mismatched-contract row");
@@ -329,7 +359,7 @@ pub async fn shadow_window_is_exact() {
     assert_eq!(observed.first_decision_at, Some(window_start));
     assert_eq!(observed.last_decision_at, Some(now));
     assert_eq!(
-        observed.mean_topn_overlap,
+        observed.mean_topn_decision_overlap,
         Some(Probability::new(dec!(0.70)))
     );
     assert!(observed.any_hard_divergence);
@@ -352,7 +382,7 @@ pub async fn shadow_window_is_exact() {
     assert_eq!(sealed.sample_count, 0);
     assert_eq!(sealed.first_decision_at, None);
     assert_eq!(sealed.last_decision_at, None);
-    assert_eq!(sealed.mean_topn_overlap, None);
+    assert_eq!(sealed.mean_topn_decision_overlap, None);
     assert!(!sealed.any_hard_divergence);
 }
 
@@ -367,7 +397,7 @@ pub async fn quant_model_governance_crud() {
     let created = repo
         .create(NewModelGovernanceAudit {
             audit_id,
-            model_version_id: Some(fixture.active_model_version_id),
+            model_version_id: Some(fixture.champion_model_version_id),
             training_dataset_id: None,
             action: ModelGovernanceAction::SealCalibration,
             actor_user_id: None,
@@ -375,7 +405,7 @@ pub async fn quant_model_governance_crud() {
             actor_role: Some(RoleCode::new("risk_manager")),
             reason: "seal calibrated child artifact".to_owned(),
             detail: ModelGovernanceAuditDetail::SealCalibration {
-                source_version_id: fixture.active_model_version_id,
+                source_version_id: fixture.champion_model_version_id,
                 source_artifact_hash: content_hash('a'),
                 calibrated_version_id,
                 calibrated_artifact_hash: content_hash('g'),
@@ -396,7 +426,7 @@ pub async fn quant_model_governance_crud() {
     ));
 
     let listed = repo
-        .list_by_version(&fixture.active_model_version_id)
+        .list_by_version(&fixture.champion_model_version_id)
         .await
         .expect("list");
     assert_eq!(listed.len(), 1);

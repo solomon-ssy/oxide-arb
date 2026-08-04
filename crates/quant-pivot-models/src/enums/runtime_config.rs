@@ -262,6 +262,9 @@ pg_enum! {
         Initial => "initial",
         Promote => "promote",
         ModelBootstrap => "model_bootstrap",
+        ModelShadowBinding => "model_shadow_binding",
+        ModelShadowCancellation => "model_shadow_cancellation",
+        ModelShadowRejection => "model_shadow_rejection",
         ModelPromotion => "model_promotion",
         Rollback => "rollback",
     }

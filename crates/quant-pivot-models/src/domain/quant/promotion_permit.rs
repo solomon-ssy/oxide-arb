@@ -10,8 +10,8 @@ use crate::{
     enums::{common::MarketCategory, model::ModelFamily, quant::QuantRuntimeMode},
     hashing::CanonicalDigest,
     runtime_config::{
-        ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, DecisionPolicySnapshotDocument,
-        ModelVersionRef,
+        ActivePolicyBundle, BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot,
+        DecisionPolicySnapshotDocument, ModelBinding, ModelBindingSource,
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId,
@@ -23,7 +23,7 @@ use crate::{
     },
 };
 
-const PROMOTION_PERMIT_SCOPE_VERSION: u32 = 5;
+const PROMOTION_PERMIT_SCOPE_VERSION: u32 = 6;
 const PROMOTION_PERMIT_SCOPE_DOMAIN: &str = "quant-pivot/promotion-permit-scope";
 const PROMOTION_PERMIT_ISSUANCE_VERSION: u32 = 1;
 const PROMOTION_PERMIT_ISSUANCE_DOMAIN: &str = "quant-pivot/promotion-permit-issuance";
@@ -80,6 +80,7 @@ pub struct PromotionPermitScope {
     expected_runtime_control_revision: i64,
     expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     expected_snapshot_hash: ContentHash,
+    expected_route_generation: u64,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
     candidate_model_version_id: ModelVersionId,
@@ -103,6 +104,7 @@ struct PromotionPermitScopeDocument {
     expected_runtime_control_revision: i64,
     expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     expected_snapshot_hash: ContentHash,
+    expected_route_generation: u64,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
     candidate_model_version_id: ModelVersionId,
@@ -125,6 +127,7 @@ pub struct PromotionPermitScopeInput {
     pub expected_runtime_control_revision: i64,
     pub expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub expected_snapshot_hash: ContentHash,
+    pub expected_route_generation: u64,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
     pub candidate_model_version_id: ModelVersionId,
@@ -149,6 +152,7 @@ impl PromotionPermitScope {
             expected_runtime_control_revision: input.expected_runtime_control_revision,
             expected_decision_policy_snapshot_id: input.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: input.expected_snapshot_hash,
+            expected_route_generation: input.expected_route_generation,
             champion_model_version_id: input.champion_model_version_id,
             champion_serving_contract_hash: input.champion_serving_contract_hash,
             candidate_model_version_id: input.candidate_model_version_id,
@@ -197,6 +201,16 @@ impl PromotionPermitScope {
                 "expected runtime-control revision cannot be negative",
             ));
         }
+        if self.expected_route_generation == 0 {
+            return Err(invalid_permit(
+                "expected route binding generation must be positive",
+            ));
+        }
+        i64::try_from(self.expected_route_generation).map_err(|error| {
+            invalid_permit(format!(
+                "expected route binding generation exceeds PostgreSQL bigint: {error}"
+            ))
+        })?;
         if self.expected_decision_policy_snapshot_id
             != DecisionPolicySnapshotId::from_content_hash(&self.expected_snapshot_hash)
         {
@@ -266,6 +280,11 @@ impl PromotionPermitScope {
     }
 
     #[must_use]
+    pub const fn expected_route_generation(&self) -> u64 {
+        self.expected_route_generation
+    }
+
+    #[must_use]
     pub const fn champion_model_version_id(&self) -> ModelVersionId {
         self.champion_model_version_id
     }
@@ -318,8 +337,8 @@ impl PromotionPermitScope {
     /// The only policy field this scope can authorize.
     pub fn field_mask(&self) -> Result<&'static str, FeedbackError> {
         match self.category {
-            MarketCategory::Crypto => Ok("model.category_model_pointers.crypto"),
-            MarketCategory::Weather => Ok("model.category_model_pointers.weather"),
+            MarketCategory::Crypto => Ok("model.buy_routes.crypto"),
+            MarketCategory::Weather => Ok("model.buy_routes.weather"),
             _ => Err(invalid_permit(
                 "permit category does not own a promotable model route",
             )),
@@ -367,6 +386,7 @@ impl TryFrom<PromotionPermitScopeDocument> for PromotionPermitScope {
             expected_runtime_control_revision: document.expected_runtime_control_revision,
             expected_decision_policy_snapshot_id: document.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: document.expected_snapshot_hash,
+            expected_route_generation: document.expected_route_generation,
             champion_model_version_id: document.champion_model_version_id,
             champion_serving_contract_hash: document.champion_serving_contract_hash,
             candidate_model_version_id: document.candidate_model_version_id,
@@ -396,17 +416,26 @@ struct PromotionNonRouteDocument<'a> {
 /// consumed are normalized out of the non-route digest. The `ModelRouting`
 /// revision identity is also normalized because P04 must create a new revision
 /// for this exact document. Every other policy field remains hash-bound.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotionPolicyProjection {
     category: MarketCategory,
+    route: BuyModelRoute,
     champion_model_version_id: ModelVersionId,
     candidate_model_version_id: ModelVersionId,
+    shadow_binding_generation: u64,
+    candidate_binding_source: ModelBindingSource,
+    candidate_config_revision: PolicyBundleGeneration,
+    candidate_generation: u64,
     non_route_policy_hash: ContentHash,
-    prospective_snapshot: DecisionPolicySnapshot,
+    base_snapshot: DecisionPolicySnapshot,
 }
 
 impl PromotionPolicyProjection {
-    /// Build the sole permitted champion/shadow-to-category transition.
+    /// Freeze the sole permitted champion/shadow-to-category transition.
+    ///
+    /// Activation time is deliberately absent: permit issuance and replay
+    /// must derive an identical projection, while the eventual champion
+    /// binding must carry the `PostgreSQL` activation timestamp.
     pub fn try_new(
         bundle: &ActivePolicyBundle,
         category: MarketCategory,
@@ -428,39 +457,34 @@ impl PromotionPolicyProjection {
         let route = BuyModelRoute::try_from(Some(category))
             .map_err(|error| invalid_preflight(error.to_string()))?;
         let model = &bundle.snapshot.model_routing.model;
-        let champion_model_version_id = model
-            .active_pointer(route)
-            .map_err(|error| invalid_preflight(error.to_string()))?
-            .id;
+        let current_binding = model
+            .route_binding(route)
+            .map_err(|error| invalid_preflight(error.to_string()))?;
+        let champion_model_version_id = current_binding.champion.model_version_id;
         if champion_model_version_id == candidate_model_version_id {
             return Err(invalid_preflight(
                 "promotion candidate already owns the target category route",
             ));
         }
-        if model
-            .shadow_model_version_id
-            .as_ref()
-            .map(|reference| reference.id)
-            != Some(candidate_model_version_id)
-        {
+        let shadow = current_binding.shadow.as_ref().ok_or_else(|| {
+            invalid_preflight("promotion target route has no bound shadow candidate")
+        })?;
+        if shadow.model_version_id != candidate_model_version_id {
             return Err(invalid_preflight(
-                "promotion candidate must be the exact current global shadow pointer",
+                "promotion candidate must be the exact current route shadow binding",
             ));
         }
         let candidate_is_other_route = model
-            .active_model_version_id
+            .active_exit_model_version_id
             .as_ref()
             .is_some_and(|reference| reference.id == candidate_model_version_id)
-            || model
-                .active_exit_model_version_id
-                .as_ref()
-                .is_some_and(|reference| reference.id == candidate_model_version_id)
-            || model
-                .category_model_pointers
-                .iter()
-                .any(|(other, reference)| {
-                    *other != category && reference.id == candidate_model_version_id
-                });
+            || model.buy_routes.iter().any(|(other, binding)| {
+                *other != route
+                    && (binding.champion.model_version_id == candidate_model_version_id
+                        || binding.shadow.as_ref().is_some_and(|other_shadow| {
+                            other_shadow.model_version_id == candidate_model_version_id
+                        }))
+            });
         if candidate_is_other_route {
             return Err(invalid_preflight(
                 "promotion candidate is already referenced by another active route",
@@ -469,30 +493,52 @@ impl PromotionPolicyProjection {
 
         let non_route_policy_hash =
             Self::project_hash(&bundle.snapshot, category).map_err(invalid_preflight)?;
-        let mut prospective_snapshot = bundle.snapshot.clone();
-        prospective_snapshot
-            .model_routing
-            .model
-            .category_model_pointers
-            .insert(category, ModelVersionRef::new(candidate_model_version_id));
-        prospective_snapshot
-            .model_routing
-            .model
-            .shadow_model_version_id = None;
-        let prospective_hash =
-            Self::project_hash(&prospective_snapshot, category).map_err(invalid_preflight)?;
-        if prospective_hash != non_route_policy_hash {
+        let config_revision = bundle
+            .generation
+            .checked_next()
+            .map_err(|error| invalid_preflight(error.to_string()))?;
+        let generation = shadow.generation.checked_add(1).ok_or_else(|| {
+            invalid_preflight("route binding generation overflowed during promotion")
+        })?;
+        if shadow.config_revision != bundle.generation {
             return Err(invalid_preflight(
-                "prospective promotion changed non-route policy fields",
+                "promotion shadow binding belongs to another policy generation",
             ));
         }
+        let candidate_binding_source = shadow.source.clone();
         Ok(Self {
             category,
+            route,
             champion_model_version_id,
             candidate_model_version_id,
+            shadow_binding_generation: shadow.generation,
+            candidate_binding_source,
+            candidate_config_revision: config_revision,
+            candidate_generation: generation,
             non_route_policy_hash,
-            prospective_snapshot,
+            base_snapshot: bundle.snapshot.clone(),
         })
+    }
+
+    /// Materialize the exact promotion delta at the transaction's database
+    /// timestamp.
+    #[must_use]
+    pub fn candidate_snapshot(&self, promoted_at: DateTime<Utc>) -> DecisionPolicySnapshot {
+        let mut candidate = self.base_snapshot.clone();
+        candidate.model_routing.model.buy_routes.insert(
+            self.route,
+            BuyRouteBinding {
+                champion: ModelBinding::new(
+                    self.candidate_model_version_id,
+                    self.candidate_binding_source.clone(),
+                    promoted_at,
+                    self.candidate_config_revision,
+                    self.candidate_generation,
+                ),
+                shadow: None,
+            },
+        );
+        candidate
     }
 
     fn project_hash(
@@ -502,18 +548,18 @@ impl PromotionPolicyProjection {
         let mut document = snapshot
             .persistence_document()
             .map_err(|error| error.to_string())?;
+        let route = BuyModelRoute::try_from(Some(category)).map_err(|error| error.to_string())?;
         if document
             .model_routing
             .model
-            .category_model_pointers
-            .remove(&category)
+            .buy_routes
+            .remove(&route)
             .is_none()
         {
             return Err(format!(
-                "policy has no exact {category} category pointer to project"
+                "policy has no exact {category} route binding to project"
             ));
         }
-        document.model_routing.model.shadow_model_version_id = None;
         document.revisions.model_routing = None;
         CanonicalDigest::content_hash_typed(
             PROMOTION_NON_ROUTE_DOMAIN,
@@ -532,26 +578,61 @@ impl PromotionPolicyProjection {
     pub fn validate_candidate(
         &self,
         candidate: &DecisionPolicySnapshot,
+        promoted_at: DateTime<Utc>,
     ) -> Result<(), FeedbackError> {
         let route = BuyModelRoute::try_from(Some(self.category))
             .map_err(|error| invalid_preflight(error.to_string()))?;
-        let pointer = candidate
+        let binding = candidate
             .model_routing
             .model
-            .active_pointer(route)
+            .route_binding(route)
             .map_err(|error| invalid_preflight(error.to_string()))?;
-        if pointer.id != self.candidate_model_version_id
-            || candidate
-                .model_routing
-                .model
-                .shadow_model_version_id
-                .is_some()
-            || Self::project_hash(candidate, self.category).map_err(invalid_preflight)?
-                != self.non_route_policy_hash
-        {
-            return Err(invalid_preflight(
-                "candidate snapshot differs from the exact category promotion delta",
-            ));
+        let expected = ModelBinding::new(
+            self.candidate_model_version_id,
+            self.candidate_binding_source.clone(),
+            promoted_at,
+            self.candidate_config_revision,
+            self.candidate_generation,
+        );
+        if binding.champion.bound_at != expected.bound_at {
+            return Err(invalid_preflight(format!(
+                "candidate snapshot champion bound_at differs from the transaction clock: actual={}, expected={}",
+                binding.champion.bound_at, expected.bound_at
+            )));
+        }
+        let non_route_hash =
+            Self::project_hash(candidate, self.category).map_err(invalid_preflight)?;
+        let mismatches = [
+            (
+                binding.champion.model_version_id != expected.model_version_id,
+                "champion_model_version_id",
+            ),
+            (
+                binding.champion.source != expected.source,
+                "champion_source",
+            ),
+            (
+                binding.champion.config_revision != expected.config_revision,
+                "champion_config_revision",
+            ),
+            (
+                binding.champion.generation != expected.generation,
+                "champion_generation",
+            ),
+            (binding.shadow.is_some(), "shadow_slot"),
+            (
+                non_route_hash != self.non_route_policy_hash,
+                "non_route_policy",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(mismatch, field)| mismatch.then_some(field))
+        .collect::<Vec<_>>();
+        if !mismatches.is_empty() {
+            return Err(invalid_preflight(format!(
+                "candidate snapshot differs from the exact category promotion delta: {}",
+                mismatches.join(", ")
+            )));
         }
         Ok(())
     }
@@ -572,13 +653,13 @@ impl PromotionPolicyProjection {
     }
 
     #[must_use]
-    pub const fn non_route_policy_hash(&self) -> ContentHash {
-        self.non_route_policy_hash
+    pub const fn shadow_binding_generation(&self) -> u64 {
+        self.shadow_binding_generation
     }
 
     #[must_use]
-    pub const fn prospective_snapshot(&self) -> &DecisionPolicySnapshot {
-        &self.prospective_snapshot
+    pub const fn non_route_policy_hash(&self) -> ContentHash {
+        self.non_route_policy_hash
     }
 }
 
@@ -1152,7 +1233,7 @@ pub struct ModelRoutePromotionRoute {
     pub candidate_model_version_id: ModelVersionId,
     pub candidate_artifact_hash: ContentHash,
     pub candidate_serving_contract_hash: ContentHash,
-    pub consumed_shadow_model_version_id: ModelVersionId,
+    pub consumed_candidate_model_version_id: ModelVersionId,
 }
 
 /// Old/new policy identities and the single database transaction revision.
@@ -1167,6 +1248,8 @@ pub struct ModelRoutePromotionPolicy {
     pub committed_snapshot_hash: ContentHash,
     pub previous_model_routing_revision_id: PolicyRevisionId,
     pub committed_model_routing_revision_id: PolicyRevisionId,
+    pub rollback_target_revision_id: PolicyRevisionId,
+    pub rollback_target_revision_hash: ContentHash,
     pub policy_approval_id: PolicyApprovalId,
     pub policy_activation_id: PolicyActivationId,
 }
@@ -1283,7 +1366,8 @@ impl ModelRoutePromotionRecord {
             && self.route.candidate_artifact_hash == candidate.candidate_artifact_hash()
             && self.route.candidate_serving_contract_hash
                 == candidate.candidate_serving_contract_hash()
-            && self.route.consumed_shadow_model_version_id == self.route.candidate_model_version_id
+            && self.route.consumed_candidate_model_version_id
+                == self.route.candidate_model_version_id
             && self.route.champion_model_version_id != self.route.candidate_model_version_id
             && self.policy.previous_generation == scope.expected_policy_generation()
             && self.policy.transaction_revision == next_revision
@@ -1294,7 +1378,12 @@ impl ModelRoutePromotionRecord {
                     &self.policy.committed_snapshot_hash,
                 )
             && self.policy.previous_model_routing_revision_id
-                != self.policy.committed_model_routing_revision_id;
+                != self.policy.committed_model_routing_revision_id
+            && self.policy.rollback_target_revision_id
+                != self.policy.committed_model_routing_revision_id
+            && self.policy.rollback_target_revision_id
+                != self.policy.previous_model_routing_revision_id
+            && self.policy.rollback_target_revision_hash != ContentHash::from_bytes([0; 32]);
         if !exact_projection || self.transaction_hash != Self::derive_hash(&self.preimage())? {
             return Err(invalid_preflight(
                 "promotion transaction record has inconsistent permit, route, policy, or hash",
@@ -1579,6 +1668,7 @@ pub struct NewPromotionPermit {
     expected_runtime_control_revision: i64,
     expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     expected_snapshot_hash: ContentHash,
+    expected_route_generation: i64,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
     candidate_model_version_id: ModelVersionId,
@@ -1620,6 +1710,12 @@ impl NewPromotionPermit {
             PROMOTION_PERMIT_ISSUANCE_VERSION,
             &document,
         )?;
+        let expected_route_generation = i64::try_from(input.scope.expected_route_generation)
+            .map_err(|error| {
+                invalid_permit(format!(
+                    "expected route binding generation exceeds PostgreSQL bigint: {error}"
+                ))
+            })?;
         let profile_ref = input.scope.profile_ref;
         Ok(Self {
             promotion_permit_id: PromotionPermitId::from_issuance_hash(&issuance_hash),
@@ -1635,6 +1731,7 @@ impl NewPromotionPermit {
             expected_runtime_control_revision: input.scope.expected_runtime_control_revision,
             expected_decision_policy_snapshot_id: input.scope.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: input.scope.expected_snapshot_hash,
+            expected_route_generation,
             champion_model_version_id: input.scope.champion_model_version_id,
             champion_serving_contract_hash: input.scope.champion_serving_contract_hash,
             candidate_model_version_id: input.scope.candidate_model_version_id,
@@ -1663,9 +1760,14 @@ impl NewPromotionPermit {
         &self.idempotency_key
     }
 
-    #[must_use]
-    pub fn scope(&self) -> PromotionPermitScope {
-        PromotionPermitScope {
+    pub fn scope(&self) -> Result<PromotionPermitScope, FeedbackError> {
+        let expected_route_generation =
+            u64::try_from(self.expected_route_generation).map_err(|error| {
+                invalid_permit(format!(
+                    "persisted route binding generation is invalid: {error}"
+                ))
+            })?;
+        let scope = PromotionPermitScope {
             format_version: PROMOTION_PERMIT_SCOPE_VERSION,
             feedback_cycle_id: self.feedback_cycle_id,
             profile_ref: self.profile_ref.clone(),
@@ -1674,6 +1776,7 @@ impl NewPromotionPermit {
             expected_runtime_control_revision: self.expected_runtime_control_revision,
             expected_decision_policy_snapshot_id: self.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: self.expected_snapshot_hash,
+            expected_route_generation,
             champion_model_version_id: self.champion_model_version_id,
             champion_serving_contract_hash: self.champion_serving_contract_hash,
             candidate_model_version_id: self.candidate_model_version_id,
@@ -1684,7 +1787,9 @@ impl NewPromotionPermit {
             non_route_policy_hash: self.non_route_policy_hash,
             serving_constraints_hash: self.serving_constraints_hash,
             expires_at: self.expires_at,
-        }
+        };
+        scope.validate()?;
+        Ok(scope)
     }
 
     #[must_use]
@@ -1766,6 +1871,7 @@ pub struct PromotionPermitInfo {
     pub expected_runtime_control_revision: i64,
     pub expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub expected_snapshot_hash: ContentHash,
+    pub expected_route_generation: i64,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
     pub candidate_model_version_id: ModelVersionId,
@@ -1835,6 +1941,12 @@ impl PromotionPermitInfo {
     }
 
     pub fn scope(&self) -> Result<PromotionPermitScope, FeedbackError> {
+        let expected_route_generation =
+            u64::try_from(self.expected_route_generation).map_err(|error| {
+                invalid_permit(format!(
+                    "persisted route binding generation is invalid: {error}"
+                ))
+            })?;
         PromotionPermitScope::try_new(PromotionPermitScopeInput {
             feedback_cycle_id: self.feedback_cycle_id,
             profile_ref: self.profile_ref.clone(),
@@ -1843,6 +1955,7 @@ impl PromotionPermitInfo {
             expected_runtime_control_revision: self.expected_runtime_control_revision,
             expected_decision_policy_snapshot_id: self.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: self.expected_snapshot_hash,
+            expected_route_generation,
             champion_model_version_id: self.champion_model_version_id,
             champion_serving_contract_hash: self.champion_serving_contract_hash,
             candidate_model_version_id: self.candidate_model_version_id,
@@ -1860,7 +1973,7 @@ impl PromotionPermitInfo {
     /// unique key, before accepting an idempotent replay.
     pub fn has_same_issuance(&self, expected: &NewPromotionPermit) -> Result<bool, FeedbackError> {
         self.validate()?;
-        expected.scope().validate()?;
+        expected.scope()?.validate()?;
         Ok(self.promotion_permit_id == expected.promotion_permit_id
             && self.idempotency_key == expected.idempotency_key
             && self.scope_hash == expected.scope_hash
@@ -1875,6 +1988,7 @@ impl PromotionPermitInfo {
             && self.expected_decision_policy_snapshot_id
                 == expected.expected_decision_policy_snapshot_id
             && self.expected_snapshot_hash == expected.expected_snapshot_hash
+            && self.expected_route_generation == expected.expected_route_generation
             && self.champion_model_version_id == expected.champion_model_version_id
             && self.champion_serving_contract_hash == expected.champion_serving_contract_hash
             && self.candidate_model_version_id == expected.candidate_model_version_id
@@ -2064,7 +2178,10 @@ mod tests {
 
     use crate::{
         enums::{common::MarketCategory, model::ModelFamily, quant::QuantRuntimeMode},
-        runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot, ModelVersionRef},
+        runtime_config::{
+            ActivePolicyBundle, BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot,
+            ModelBinding, ModelBindingSource,
+        },
         types::{
             ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId,
             FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackShadowArtifactId,
@@ -2117,6 +2234,7 @@ mod tests {
                     &snapshot_hash,
                 ),
                 expected_snapshot_hash: snapshot_hash,
+                expected_route_generation: 1,
                 champion_model_version_id: ModelVersionId::from_v7(),
                 champion_serving_contract_hash: hash(2),
                 candidate_model_version_id: ModelVersionId::from_v7(),
@@ -2160,7 +2278,7 @@ mod tests {
                 .with_ymd_and_hms(2026, 7, 28, 12, 0, 0)
                 .single()
                 .expect("issued at");
-            let scope = new.scope();
+            let scope = new.scope().expect("sealed permit scope");
             PromotionPermitInfo {
                 promotion_permit_id: new.promotion_permit_id(),
                 idempotency_key: new.idempotency_key().clone(),
@@ -2175,6 +2293,8 @@ mod tests {
                 expected_runtime_control_revision: scope.expected_runtime_control_revision(),
                 expected_decision_policy_snapshot_id: scope.expected_snapshot_id(),
                 expected_snapshot_hash: scope.expected_snapshot_hash(),
+                expected_route_generation: i64::try_from(scope.expected_route_generation())
+                    .expect("route generation fits bigint"),
                 champion_model_version_id: scope.champion_model_version_id(),
                 champion_serving_contract_hash: scope.champion_serving_contract_hash(),
                 candidate_model_version_id: scope.candidate_model_version_id(),
@@ -2206,15 +2326,51 @@ mod tests {
             candidate: ModelVersionId,
             weather: ModelVersionId,
         ) -> ActivePolicyBundle {
+            let bound_at = Utc
+                .with_ymd_and_hms(2026, 7, 28, 10, 0, 0)
+                .single()
+                .expect("binding time");
             let mut snapshot = DecisionPolicySnapshot::default();
-            snapshot.model_routing.model.category_model_pointers = [
-                (MarketCategory::Crypto, ModelVersionRef::new(champion)),
-                (MarketCategory::Weather, ModelVersionRef::new(weather)),
+            snapshot.model_routing.model.buy_routes = [
+                (
+                    BuyModelRoute::Crypto,
+                    BuyRouteBinding {
+                        champion: ModelBinding::new(
+                            champion,
+                            ModelBindingSource::Bootstrap,
+                            bound_at,
+                            PolicyBundleGeneration::FIRST,
+                            1,
+                        ),
+                        shadow: Some(ModelBinding::new(
+                            candidate,
+                            ModelBindingSource::Feedback {
+                                feedback_cycle_id: FeedbackCycleId::from_idempotency_hash(&hash(
+                                    41,
+                                )),
+                            },
+                            bound_at,
+                            PolicyBundleGeneration::FIRST,
+                            2,
+                        )),
+                    },
+                ),
+                (
+                    BuyModelRoute::Weather,
+                    BuyRouteBinding {
+                        champion: ModelBinding::new(
+                            weather,
+                            ModelBindingSource::Bootstrap,
+                            bound_at,
+                            PolicyBundleGeneration::FIRST,
+                            1,
+                        ),
+                        shadow: None,
+                    },
+                ),
             ]
             .into_iter()
             .collect();
-            snapshot.model_routing.model.shadow_model_version_id =
-                Some(ModelVersionRef::new(candidate));
             let snapshot_hash = snapshot.persistence_hash().expect("policy hash");
             ActivePolicyBundle::from_parts(
                 PolicyBundleGeneration::FIRST,
@@ -2266,6 +2422,7 @@ mod tests {
                 expected_runtime_control_revision: 7,
                 expected_decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
                 expected_snapshot_hash: bundle.snapshot_hash,
+                expected_route_generation: projection.shadow_binding_generation(),
                 champion_model_version_id: champion,
                 champion_serving_contract_hash: hash(34),
                 candidate_model_version_id: constraints.candidate_model_version_id(),
@@ -2316,7 +2473,7 @@ mod tests {
         let scope = PermitFixture::new().scope();
         assert_eq!(
             scope.field_mask().expect("Crypto route field mask"),
-            "model.category_model_pointers.crypto"
+            "model.buy_routes.crypto"
         );
         assert!(scope.allows_mode(QuantRuntimeMode::SemiAuto));
         assert!(!scope.allows_mode(QuantRuntimeMode::AutoExecution));
@@ -2417,52 +2574,66 @@ mod tests {
         let candidate = ModelVersionId::from_v7();
         let weather = ModelVersionId::from_v7();
         let bundle = PermitFixture::bundle(champion, candidate, weather);
+        let promoted_at = Utc
+            .with_ymd_and_hms(2026, 7, 28, 12, 0, 0)
+            .single()
+            .expect("promotion time");
         let projection =
             PromotionPolicyProjection::try_new(&bundle, MarketCategory::Crypto, candidate)
                 .expect("project exact promotion");
+        let prospective = projection.candidate_snapshot(promoted_at);
         assert_eq!(projection.champion_model_version_id(), champion);
         assert_eq!(projection.candidate_model_version_id(), candidate);
         assert_eq!(
-            projection
-                .prospective_snapshot()
+            prospective
                 .model_routing
                 .model
-                .category_model_pointers
-                .get(&MarketCategory::Weather)
+                .buy_routes
+                .get(&BuyModelRoute::Weather)
                 .expect("weather route")
-                .id,
+                .champion
+                .model_version_id,
             weather
         );
         assert!(
-            projection
-                .prospective_snapshot()
+            prospective
                 .model_routing
                 .model
-                .shadow_model_version_id
+                .buy_routes
+                .get(&BuyModelRoute::Crypto)
+                .expect("crypto route")
+                .shadow
                 .is_none()
         );
 
-        let mut candidate_snapshot = projection.prospective_snapshot().clone();
+        let mut candidate_snapshot = prospective;
         candidate_snapshot.revisions.model_routing = Some(PolicyRevisionId::from_v7());
         projection
-            .validate_candidate(&candidate_snapshot)
+            .validate_candidate(&candidate_snapshot, promoted_at)
             .expect("derived routing revision is normalized");
         candidate_snapshot
             .model_routing
             .model
-            .category_model_pointers
-            .insert(
-                MarketCategory::Weather,
-                ModelVersionRef::new(ModelVersionId::from_v7()),
-            );
-        assert!(projection.validate_candidate(&candidate_snapshot).is_err());
+            .buy_routes
+            .get_mut(&BuyModelRoute::Weather)
+            .expect("weather route")
+            .champion
+            .model_version_id = ModelVersionId::from_v7();
+        assert!(
+            projection
+                .validate_candidate(&candidate_snapshot, promoted_at)
+                .is_err()
+        );
 
         let mut aliased = bundle.snapshot.clone();
         aliased
             .model_routing
             .model
-            .category_model_pointers
-            .insert(MarketCategory::Weather, ModelVersionRef::new(candidate));
+            .buy_routes
+            .get_mut(&BuyModelRoute::Weather)
+            .expect("weather route")
+            .champion
+            .model_version_id = candidate;
         let aliased_hash = aliased.persistence_hash().expect("aliased policy hash");
         let aliased_bundle = ActivePolicyBundle::from_parts(
             bundle.generation,
@@ -2471,7 +2642,7 @@ mod tests {
             aliased,
         );
         assert!(
-            PromotionPolicyProjection::try_new(&aliased_bundle, MarketCategory::Crypto, candidate)
+            PromotionPolicyProjection::try_new(&aliased_bundle, MarketCategory::Crypto, candidate,)
                 .is_err()
         );
     }

@@ -29,10 +29,10 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
-    FactorRepository, FeatureRepository, FeedbackCohortRepository, MarketLinkageRepository,
-    MarketRepository, ModelRegistryRepository, PolicyRepository, PositionRepository,
-    QuantFactReadRepository, SourceSliceRepository, TradePolicyRepository,
-    TrainingDatasetRepository,
+    FactorRepository, FeatureRepository, MarketLinkageRepository, MarketRepository,
+    ModelRegistryRepository, PolicyRepository, PositionRepository, QuantFactReadRepository,
+    RecommendationReportRepository, ServingEvidenceRepository, SourceSliceRepository,
+    TradePolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, training::DatasetPlanRequest};
 use tokio::time::{Instant, sleep};
@@ -85,7 +85,8 @@ pub struct CoreTrainingDatasetPort {
     bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     source_slice_repo: Arc<dyn SourceSliceRepository>,
     clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
-    feedback_cohort_repo: Arc<dyn FeedbackCohortRepository>,
+    recommendation_report_repo: Arc<dyn RecommendationReportRepository>,
+    serving_evidence_repo: Arc<dyn ServingEvidenceRepository>,
     feature_repo: Arc<dyn FeatureRepository>,
     factor_repo: Arc<dyn FactorRepository>,
     /// Deploy guard: hard cap on the deterministic historical spine.
@@ -94,13 +95,16 @@ pub struct CoreTrainingDatasetPort {
 
 impl CoreTrainingDatasetPort {
     fn validate_public_sources(sources: &TrainingSampleSources) -> QuantResult<()> {
-        if sources
-            .as_slice()
-            .contains(&TrainingSampleSource::RecommendationFeedback)
-        {
+        if sources.as_slice().iter().any(|source| {
+            matches!(
+                source,
+                TrainingSampleSource::ModelScoreFeedback
+                    | TrainingSampleSource::PublishedDecisionDiagnostic
+            )
+        }) {
             return Err(ResearchError::DatasetPlan {
                 detail:
-                    "recommendation_feedback datasets are internal artifacts of a frozen feedback cycle"
+                    "model_score_feedback datasets are internal artifacts of a frozen feedback cycle"
                         .to_owned(),
             }
             .into());
@@ -114,7 +118,6 @@ impl CoreTrainingDatasetPort {
         research: &ResearchBundle,
         runtime_config: Arc<dyn PolicyRepository>,
         bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
-        feedback_cohort_repo: Arc<dyn FeedbackCohortRepository>,
         max_spine_samples: u64,
         _plan_sample_slices: u32,
         _plan_sample_markets: u32,
@@ -134,7 +137,8 @@ impl CoreTrainingDatasetPort {
             bias_table_repo,
             source_slice_repo: Arc::clone(&research.source_slice_repo),
             clob_market_info_repo: Arc::clone(&research.clob_market_info_repo),
-            feedback_cohort_repo,
+            recommendation_report_repo: Arc::clone(&research.recommendation_report_repo),
+            serving_evidence_repo: Arc::clone(&research.serving_evidence_repo),
             feature_repo: Arc::clone(&research.feature_repo),
             factor_repo: Arc::clone(&research.factor_repo),
             max_spine_samples,
@@ -558,7 +562,7 @@ mod authority_tests {
     fn public_sources_reject_feedback() {
         let sources = TrainingSampleSources::try_from(vec![
             TrainingSampleSource::HistoricalPit,
-            TrainingSampleSource::RecommendationFeedback,
+            TrainingSampleSource::ModelScoreFeedback,
         ])
         .expect("canonical feedback sources");
         let error = CoreTrainingDatasetPort::validate_public_sources(&sources)
@@ -833,7 +837,9 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         let dataset_service = Arc::new(self.service_for(&decision_policy_snapshot_id).await?);
         Box::pin(
             FeedbackDatasetService::new(FeedbackDatasetServiceDeps {
-                cohort_repository: Arc::clone(&self.feedback_cohort_repo),
+                report_repository: Arc::clone(&self.recommendation_report_repo),
+                fact_repository: Arc::clone(&self.fact_read),
+                serving_evidence_repository: Arc::clone(&self.serving_evidence_repo),
                 feature_repository: Arc::clone(&self.feature_repo),
                 factor_repository: Arc::clone(&self.factor_repo),
                 artifact_store: Arc::clone(&self.artifact_store),

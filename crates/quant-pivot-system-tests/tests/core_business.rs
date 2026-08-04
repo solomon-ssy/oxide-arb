@@ -94,6 +94,24 @@ async fn online_model_runtime() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shadow_evidence_failure() {
+    Box::pin(postgres::with_postgres_suite(
+        model_runtime::shadow_persistence_degrades_only(),
+    ))
+    .await
+    .expect("start shadow-evidence persistence PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shadow_replay_idempotency() {
+    Box::pin(postgres::with_postgres_suite(
+        model_runtime::cached_planes_stay_stable(),
+    ))
+    .await
+    .expect("start shadow-replay idempotency PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn report_pipeline_recommendations() {
     Box::pin(postgres::with_postgres_suite(
         report_pipeline::ad_hoc_publishes_recommendations(),
@@ -151,6 +169,7 @@ async fn core_business_scenarios_server() {
         scenario!(model_runtime::online_loop_selection_candidates);
         scenario!(model_runtime::generation_rejects_bad_shadow);
         scenario!(model_runtime::cached_planes_stay_stable);
+        scenario!(model_runtime::shadow_persistence_degrades_only);
         scenario!(model_runtime::generation_uses_route_authority);
         scenario!(model_runtime::model_run_create_fail);
 

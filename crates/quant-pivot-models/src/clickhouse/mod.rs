@@ -12,7 +12,7 @@ mod serde;
 mod trade_tape;
 mod types;
 
-pub use book_l2_ledger::BookL2LedgerRow;
+pub use book_l2_ledger::{BookL2LedgerRow, BookLedgerReplayAnchor};
 pub use book_microstructure::{BookMicrostructureRow, MidPriceBucketRow};
 pub use book_stream_session::BookStreamSessionRow;
 pub use domain_event::{

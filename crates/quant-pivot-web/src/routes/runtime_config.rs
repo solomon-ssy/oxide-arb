@@ -131,6 +131,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             list_revisions,
         ),
         spec(
+            Method::GET,
+            "/config/{kind}/revisions/{id}",
+            Rule::ResourceOp(ResourceType::DecisionPolicySnapshot, Operation::Read),
+            get_revision,
+        ),
+        spec(
             Method::POST,
             "/config/{kind}/drafts",
             Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Create),
@@ -260,6 +266,22 @@ pub async fn list_revisions(
         .map(Into::into)
         .collect();
     Ok(WebResponse::ok(revisions))
+}
+
+pub async fn get_revision(
+    state: Data<AppState>,
+    path: Path<(ConfigResourceKind, PolicyRevisionId)>,
+) -> Result<WebResponse<PolicyRevisionView>, WebError> {
+    let (kind, revision_id) = path.into_inner();
+    let revision = state
+        .runtime_config
+        .load_revision(&revision_id)
+        .await?
+        .filter(|revision| revision.resource_kind == kind)
+        .ok_or_else(|| {
+            WebError::NotFound(format!("{kind} policy revision not found: {revision_id}"))
+        })?;
+    Ok(WebResponse::ok(revision.into()))
 }
 
 pub async fn create_draft(
@@ -912,7 +934,11 @@ async fn transition_revision(
             PolicyActivationKind::Initial | PolicyActivationKind::Promote => {
                 DecisionPolicySnapshotSource::Activation
             }
-            PolicyActivationKind::ModelBootstrap | PolicyActivationKind::ModelPromotion => {
+            PolicyActivationKind::ModelBootstrap
+            | PolicyActivationKind::ModelPromotion
+            | PolicyActivationKind::ModelShadowBinding
+            | PolicyActivationKind::ModelShadowCancellation
+            | PolicyActivationKind::ModelShadowRejection => {
                 return Err(WebError::BadRequest(
                     "model route governance is not accepted by generic policy activation"
                         .to_owned(),

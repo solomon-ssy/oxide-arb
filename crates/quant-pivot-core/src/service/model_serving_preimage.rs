@@ -25,6 +25,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         CalibrationArtifactId, ModelInputContract, ModelVersionId, ResearchProfileArtifact,
+        SourceSliceManifest,
         calibration::{
             ModelScoreCalibrationDatasetBinding, ModelScoreCalibrationFitContract,
             ModelScoreCalibrationModelBinding, ModelScoreCalibrationPolicyBinding,
@@ -83,9 +84,10 @@ pub struct ModelServingPreimageDeps {
 /// A fully verified immutable serving source.
 ///
 /// Construction has no durable side effects. Every opaque commitment in the
-/// serving envelope has been resolved to its canonical preimage and all
-/// Dataset/Source Slice/model bytes have been read back before this value is
-/// returned.
+/// serving envelope has been resolved to its canonical preimage. Model,
+/// Dataset, and Source Slice manifest bytes are always read back; research
+/// verification additionally materializes every historical Source Slice fact
+/// object, while runtime verification deliberately stops at immutable lineage.
 pub struct VerifiedModelServingPreimage {
     artifact: ModelArtifact,
     estimator_bytes: Option<Vec<u8>>,
@@ -102,6 +104,10 @@ struct VerifiedCalibrationParent {
     version: ModelVersionInfo,
     source: VerifiedModelServingPreimage,
     calibration: ResolvedCalibration,
+}
+
+fn label_horizon_matches(horizons_secs: &[u64], target_label_horizon_secs: u64) -> bool {
+    target_label_horizon_secs == 0 || horizons_secs.contains(&target_label_horizon_secs)
 }
 
 /// Integrity-gated frozen Dataset accepted for deterministic replay against
@@ -256,6 +262,14 @@ pub struct ModelServingPreimageService {
     deps: ModelServingPreimageDeps,
 }
 
+/// Controls whether preimage verification must materialize historical fact
+/// objects or only the immutable lineage required to construct a runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreimageVerificationDepth {
+    RuntimeLineage,
+    FullObjects,
+}
+
 impl ModelServingPreimageService {
     #[must_use]
     pub const fn new(deps: ModelServingPreimageDeps) -> Self {
@@ -268,11 +282,31 @@ impl ModelServingPreimageService {
         &self,
         version: &ModelVersionInfo,
     ) -> QuantResult<VerifiedModelServingPreimage> {
-        let mut root = self.load_base(version).await?;
+        self.load_depth(version, PreimageVerificationDepth::FullObjects)
+            .await
+    }
+
+    /// Resolve the complete executable graph while avoiding historical fact
+    /// materialization that is irrelevant to inference. Dataset bytes, the
+    /// WORM Source Slice row, and the exact manifest bytes remain verified.
+    pub(crate) async fn load_runtime(
+        &self,
+        version: &ModelVersionInfo,
+    ) -> QuantResult<VerifiedModelServingPreimage> {
+        self.load_depth(version, PreimageVerificationDepth::RuntimeLineage)
+            .await
+    }
+
+    async fn load_depth(
+        &self,
+        version: &ModelVersionInfo,
+        depth: PreimageVerificationDepth,
+    ) -> QuantResult<VerifiedModelServingPreimage> {
+        let mut root = self.load_base(version, depth).await?;
         let mut visiting = HashSet::new();
         let mut verified = HashSet::new();
         root.calibration = self
-            .verify_graph(version, &root, &mut visiting, &mut verified)
+            .verify_graph(version, &root, &mut visiting, &mut verified, depth)
             .await?;
         root.graph_verified = true;
         root.ensure_runtime_materialized()?;
@@ -282,6 +316,7 @@ impl ModelServingPreimageService {
     pub(crate) async fn load_base(
         &self,
         version: &ModelVersionInfo,
+        depth: PreimageVerificationDepth,
     ) -> QuantResult<VerifiedModelServingPreimage> {
         let artifact =
             ModelArtifact::load_verified(self.deps.artifact_store.as_ref(), version).await?;
@@ -293,7 +328,7 @@ impl ModelServingPreimageService {
             .load_policy_preimage(&contract.bindings().policy_snapshot)
             .await?;
         let training_dataset = self
-            .load_training_preimage(&artifact, &model_spec, &profile, &policy_snapshot)
+            .load_training_preimage(&artifact, &model_spec, &profile, &policy_snapshot, depth)
             .await?;
         let bias_table = self
             .verify_bias_preimage(contract, &policy_snapshot)
@@ -317,6 +352,7 @@ impl ModelServingPreimageService {
         source: &'a VerifiedModelServingPreimage,
         visiting: &'a mut HashSet<ModelVersionId>,
         verified: &'a mut HashSet<ModelVersionId>,
+        depth: PreimageVerificationDepth,
     ) -> BoxFuture<'a, QuantResult<Option<ResolvedCalibration>>> {
         Box::pin(async move {
             let version_id = version.model_version_id;
@@ -332,16 +368,16 @@ impl ModelServingPreimageService {
                 .into());
             }
             let calibration = if let Some(parent) =
-                Box::pin(self.load_calibration_parent(version, source)).await?
+                Box::pin(self.load_calibration_parent(version, source, depth)).await?
             {
-                self.verify_graph(&parent.version, &parent.source, visiting, verified)
+                self.verify_graph(&parent.version, &parent.source, visiting, verified, depth)
                     .await?;
                 Some(parent.calibration)
             } else {
                 None
             };
             if let Some(policy) = Box::pin(
-                self.deps.trade_policy_preimages.verify(
+                self.deps.trade_policy_preimages.verify_depth(
                     self,
                     TradePolicyPreimageTarget {
                         dataset: source.training_dataset(),
@@ -355,6 +391,7 @@ impl ModelServingPreimageService {
                         profile: source.profile(),
                     },
                     TradePolicyEvidenceDurability::Production,
+                    depth,
                 ),
             )
             .await?
@@ -379,6 +416,7 @@ impl ModelServingPreimageService {
                     policy.subject_preimage(),
                     visiting,
                     verified,
+                    depth,
                 )
                 .await?;
             }
@@ -396,6 +434,16 @@ impl ModelServingPreimageService {
         &self,
         source: &VerifiedModelServingPreimage,
         info: &CalibrationArtifactInfo,
+    ) -> QuantResult<VerifiedModelScoreCalibration> {
+        self.verify_calibrator_depth(source, info, PreimageVerificationDepth::FullObjects)
+            .await
+    }
+
+    async fn verify_calibrator_depth(
+        &self,
+        source: &VerifiedModelServingPreimage,
+        info: &CalibrationArtifactInfo,
+        depth: PreimageVerificationDepth,
     ) -> QuantResult<VerifiedModelScoreCalibration> {
         let calibrator = VerifiedModelScoreCalibration::try_from(info)?;
         let source_model_version_id = source
@@ -415,7 +463,8 @@ impl ModelServingPreimageService {
             }
             .into());
         }
-        self.verify_calibration_dataset(source, &calibrator).await?;
+        self.verify_calibration_dataset(source, &calibrator, depth)
+            .await?;
         Ok(calibrator)
     }
 
@@ -577,6 +626,7 @@ impl ModelServingPreimageService {
         &self,
         version: &ModelVersionInfo,
         source: &VerifiedModelServingPreimage,
+        depth: PreimageVerificationDepth,
     ) -> QuantResult<Option<VerifiedCalibrationParent>> {
         let derivation =
             version
@@ -627,7 +677,7 @@ impl ModelServingPreimageService {
                 entity: "quant_model_version",
                 id: parent_id.to_string(),
             })?;
-        let parent_source = self.load_base(&parent).await?;
+        let parent_source = self.load_base(&parent, depth).await?;
         let info = self
             .deps
             .calibration_repo
@@ -637,7 +687,9 @@ impl ModelServingPreimageService {
                 entity: "calibration_artifact",
                 id: calibration_artifact_id.to_string(),
             })?;
-        let verified = self.verify_calibrator(&parent_source, &info).await?;
+        let verified = self
+            .verify_calibrator_depth(&parent_source, &info, depth)
+            .await?;
         let binding = binding.ok_or_else(|| ResearchError::InvalidModelArtifact {
             detail: format!(
                 "model {} lost its calibration binding during verification",
@@ -899,29 +951,71 @@ impl ModelServingPreimageService {
         dataset: &TrainingDatasetInfo,
         profile: &ResearchProfileArtifact,
     ) -> QuantResult<()> {
-        let materialization = require_dataset_materialization(dataset)?;
-        let bytes = self
-            .deps
-            .artifact_store
-            .get(materialization.parquet_uri)
-            .await?;
-        verify_frozen_dataset_artifact(dataset, &bytes)?;
+        self.verify_dataset_bytes(dataset).await?;
         self.verify_source_slice_ledger(dataset).await?;
 
         let lineage = &dataset.source_lineage;
         let frozen = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
             .read_ref(&lineage.source_slice)
             .await?;
+        Self::verify_source_manifest(dataset, profile, &frozen.manifest)
+    }
+
+    pub(crate) async fn verify_dataset(
+        &self,
+        dataset: &TrainingDatasetInfo,
+        profile: &ResearchProfileArtifact,
+        depth: PreimageVerificationDepth,
+    ) -> QuantResult<()> {
+        match depth {
+            PreimageVerificationDepth::RuntimeLineage => {
+                self.verify_dataset_lineage(dataset, profile).await
+            }
+            PreimageVerificationDepth::FullObjects => {
+                self.verify_dataset_objects(dataset, profile).await
+            }
+        }
+    }
+
+    async fn verify_dataset_lineage(
+        &self,
+        dataset: &TrainingDatasetInfo,
+        profile: &ResearchProfileArtifact,
+    ) -> QuantResult<()> {
+        self.verify_dataset_bytes(dataset).await?;
+        self.verify_source_slice_ledger(dataset).await?;
+        let lineage = &dataset.source_lineage;
+        let manifest = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
+            .verify_manifest_ref(&lineage.source_slice)
+            .await?;
+        Self::verify_source_manifest(dataset, profile, &manifest)
+    }
+
+    async fn verify_dataset_bytes(&self, dataset: &TrainingDatasetInfo) -> QuantResult<()> {
+        let materialization = require_dataset_materialization(dataset)?;
+        let bytes = self
+            .deps
+            .artifact_store
+            .get(materialization.parquet_uri)
+            .await?;
+        verify_frozen_dataset_artifact(dataset, &bytes).map(|_| ())
+    }
+
+    fn verify_source_manifest(
+        dataset: &TrainingDatasetInfo,
+        profile: &ResearchProfileArtifact,
+        manifest: &SourceSliceManifest,
+    ) -> QuantResult<()> {
+        let lineage = &dataset.source_lineage;
         lineage
-            .verify_manifest(&frozen.manifest)
+            .verify_manifest(manifest)
             .map_err(|error| ResearchError::DatasetBuild {
                 detail: format!(
                     "dataset {} Source Slice manifest differs from its frozen lineage: {error}",
                     dataset.training_dataset_id
                 ),
             })?;
-        frozen
-            .manifest
+        manifest
             .validate_for_profile(
                 profile,
                 &lineage.research_program_hash,
@@ -996,6 +1090,7 @@ impl ModelServingPreimageService {
         model_spec: &ModelSpecInfo,
         profile: &ResearchProfileArtifact,
         policy: &DecisionPolicySnapshotInfo,
+        depth: PreimageVerificationDepth,
     ) -> QuantResult<TrainingDatasetInfo> {
         let contract = artifact.header().serving_contract();
         let binding = &contract.bindings().dataset;
@@ -1030,7 +1125,7 @@ impl ModelServingPreimageService {
             .into());
         }
         Self::verify_semantic_bindings(artifact, model_spec, profile, policy, &dataset)?;
-        self.verify_dataset_objects(&dataset, profile).await?;
+        self.verify_dataset(&dataset, profile, depth).await?;
         Ok(dataset)
     }
 
@@ -1128,7 +1223,7 @@ impl ModelServingPreimageService {
             && expected_trade_policy == manifest.trade_policy_artifact_id
             && bound_trade_policy_hash == manifest.trade_policy_hash;
         let label_horizon_matches =
-            target_label_horizon == 0 || manifest.horizons_secs.contains(&target_label_horizon);
+            label_horizon_matches(&manifest.horizons_secs, target_label_horizon);
         let configured_cross_section = &policy
             .snapshot
             .profile_artifacts
@@ -1216,6 +1311,7 @@ impl ModelServingPreimageService {
         &self,
         source: &VerifiedModelServingPreimage,
         calibrator: &VerifiedModelScoreCalibration,
+        depth: PreimageVerificationDepth,
     ) -> QuantResult<()> {
         let contract = source.artifact().header().serving_contract();
         let training = require_dataset_materialization(source.training_dataset())?;
@@ -1228,10 +1324,13 @@ impl ModelServingPreimageService {
             contract,
             &materialization,
             &training,
+            source
+                .model_spec()
+                .training_contract
+                .target_label_horizon_secs,
         )?;
         Self::verify_calibration_window(source, calibrator, &dataset, &materialization)?;
-        self.verify_dataset_objects(&dataset, source.profile())
-            .await
+        self.verify_dataset(&dataset, source.profile(), depth).await
     }
 
     fn verify_calibration_model(
@@ -1313,6 +1412,7 @@ impl ModelServingPreimageService {
         contract: &ModelServingContract,
         materialization: &TrainingDatasetMaterialization<'_>,
         training: &TrainingDatasetMaterialization<'_>,
+        target_label_horizon_secs: u64,
     ) -> QuantResult<()> {
         let dataset_id = dataset.training_dataset_id;
         let bindings = contract.bindings();
@@ -1342,36 +1442,45 @@ impl ModelServingPreimageService {
         let training_manifest = training.manifest;
         let source_lineage = &manifest.source_lineage;
         let training_lineage = &training_manifest.source_lineage;
-        if dataset.model_spec_id != bindings.model.model_spec_id
-            || dataset.model_spec_definition_hash != bindings.model.model_spec_definition_hash
-            || dataset.model_family != bindings.model.model_family
-            || manifest.model_spec_id != bindings.model.model_spec_id
-            || manifest.model_spec_definition_hash != bindings.model.model_spec_definition_hash
-            || manifest.model_family != bindings.model.model_family
-            || manifest.feature_schema_version != training_manifest.feature_schema_version
-            || manifest.feature_schema_hash != bindings.schemas.feature_schema_hash
-            || manifest.factor_serving_plane != bindings.factors.plane
-            || manifest.label_schema_hash != bindings.schemas.label_schema_hash
-            || manifest.trade_policy_artifact_id != training_manifest.trade_policy_artifact_id
-            || manifest.trade_policy_hash != training_manifest.trade_policy_hash
-            || source_lineage.research_profile_artifact_id.profile_ref()
-                != bindings.model.profile_ref
-            || source_lineage.research_program_hash != training_lineage.research_program_hash
-            || source_lineage.decision_policy_snapshot_id
-                != bindings.policy_snapshot.decision_policy_snapshot_id
-            || source_lineage.runtime_config_hash != bindings.policy_snapshot.snapshot_hash
-            || source_lineage.reader_contract_version != training_lineage.reader_contract_version
-            || source_lineage.schema_contract_version != training_lineage.schema_contract_version
-            || source_lineage.source_schema_hash != training_lineage.source_schema_hash
-            || source_lineage.capability_registry_hashes != bindings.capability_registry_hashes
-            || !manifest
-                .horizons_secs
-                .contains(&bindings.model.prediction_horizon_secs)
+        let model_identity_matches = dataset.model_spec_id == bindings.model.model_spec_id
+            && dataset.model_spec_definition_hash == bindings.model.model_spec_definition_hash
+            && dataset.model_family == bindings.model.model_family
+            && manifest.model_spec_id == bindings.model.model_spec_id
+            && manifest.model_spec_definition_hash == bindings.model.model_spec_definition_hash
+            && manifest.model_family == bindings.model.model_family;
+        let schema_plane_matches = manifest.feature_schema_version
+            == training_manifest.feature_schema_version
+            && manifest.feature_schema_hash == bindings.schemas.feature_schema_hash
+            && manifest.factor_serving_plane == bindings.factors.plane
+            && manifest.label_schema_hash == bindings.schemas.label_schema_hash;
+        let trade_policy_matches = manifest.trade_policy_artifact_id
+            == training_manifest.trade_policy_artifact_id
+            && manifest.trade_policy_hash == training_manifest.trade_policy_hash;
+        let profile_matches =
+            source_lineage.research_profile_artifact_id.profile_ref() == bindings.model.profile_ref;
+        let policy_matches = source_lineage.decision_policy_snapshot_id
+            == bindings.policy_snapshot.decision_policy_snapshot_id
+            && source_lineage.runtime_config_hash == bindings.policy_snapshot.snapshot_hash;
+        let source_contract_matches = source_lineage.research_program_hash
+            == training_lineage.research_program_hash
+            && source_lineage.reader_contract_version == training_lineage.reader_contract_version
+            && source_lineage.schema_contract_version == training_lineage.schema_contract_version
+            && source_lineage.source_schema_hash == training_lineage.source_schema_hash
+            && source_lineage.capability_registry_hashes == bindings.capability_registry_hashes;
+        let label_horizon_matches =
+            label_horizon_matches(&manifest.horizons_secs, target_label_horizon_secs);
+        if !model_identity_matches
+            || !schema_plane_matches
+            || !trade_policy_matches
+            || !profile_matches
+            || !policy_matches
+            || !source_contract_matches
+            || !label_horizon_matches
         {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: format!(
-                    "calibration Dataset {dataset_id} family/profile/policy/schema/source preimage differs from model {}",
-                    bindings.model.model_version_id
+                    "calibration Dataset {dataset_id} preimage differs from model {}: model_identity={model_identity_matches}, schema_plane={schema_plane_matches}, trade_policy={trade_policy_matches}, profile={profile_matches}, policy={policy_matches}, source_contract={source_contract_matches}, target_label_horizon={label_horizon_matches}",
+                    bindings.model.model_version_id,
                 ),
             }
             .into());
@@ -1500,5 +1609,17 @@ impl ModelServingPreimageService {
             .into());
         }
         Ok(Some(Arc::new(table)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::label_horizon_matches;
+
+    #[test]
+    fn event_driven_label_matches() {
+        assert!(label_horizon_matches(&[0], 0));
+        assert!(label_horizon_matches(&[3_600, 86_400], 86_400));
+        assert!(!label_horizon_matches(&[0], 86_400));
     }
 }

@@ -211,7 +211,7 @@ impl PromotionPermitRepository for PgPromotionPermitRepository {
             command.actor.user_id,
             &command.actor.acting_role,
             ResourceType::Publication,
-            Operation::Publish,
+            Operation::Authorize,
         )
         .await?;
         let expected = NewPromotionPermit::try_seal(PromotionPermitIssueInput {
@@ -232,7 +232,7 @@ impl PromotionPermitRepository for PgPromotionPermitRepository {
         }
 
         let database_now = primitives::statement_timestamp(&transaction).await?;
-        if expected.scope().expires_at() <= database_now {
+        if expected.scope()?.expires_at() <= database_now {
             return Err(FeedbackError::InvalidPromotionPermit {
                 detail: "new permit expiry must be later than the PostgreSQL statement clock"
                     .to_owned(),

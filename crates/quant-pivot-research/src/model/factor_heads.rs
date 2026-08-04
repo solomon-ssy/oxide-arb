@@ -62,6 +62,12 @@ pub struct FactorHeadScore {
     pub alpha_quality: Decimal,
     /// Side-neutral multiplicative opportunity adequacy.
     pub context_multiplier: Decimal,
+    /// Exact context-and-policy multiplier used by the ranking transform.
+    ///
+    /// This remains unrounded so decision intervention replay can apply the
+    /// same transform to a different alpha without reconstructing it from the
+    /// presentation-rounded `context_multiplier`.
+    pub ranking_multiplier: Decimal,
     /// Context evidence coverage/reliability.
     pub context_quality: Decimal,
     /// Agreement of signed alpha evidence, with cancellation mapped to zero.
@@ -396,7 +402,8 @@ pub fn score_factor_heads(
     };
     let reliability =
         substitution_reliability * alpha_quality.min(context_quality) * directional_coherence;
-    let composite_score = yes_alpha.abs() * context_multiplier * policy_multiplier;
+    let ranking_multiplier = context_multiplier * policy_multiplier;
+    let composite_score = yes_alpha.abs() * ranking_multiplier;
     let outcome_side = if yes_alpha.abs() <= spec.alpha_deadband {
         None
     } else if yes_alpha.is_sign_positive() {
@@ -409,6 +416,7 @@ pub fn score_factor_heads(
         yes_alpha,
         alpha_quality: unit_rounded(alpha_quality),
         context_multiplier: unit_rounded(context_multiplier),
+        ranking_multiplier,
         context_quality: unit_rounded(context_quality),
         directional_coherence: unit_rounded(directional_coherence),
         reliability: unit_rounded(reliability),
@@ -648,7 +656,7 @@ mod tests {
 
     use super::{
         AlphaFactorWeight, ContextFactorWeight, FactorHeadScore, FactorHeadSpec,
-        score_factor_heads, sell_market_alpha,
+        score_factor_heads, sell_market_alpha, unit_rounded,
     };
     use crate::factors::{FactorValue, NormalizedFactor};
 
@@ -1022,6 +1030,7 @@ mod tests {
             yes_alpha: dec!(0.8),
             alpha_quality: Decimal::ONE,
             context_multiplier: dec!(0.1),
+            ranking_multiplier: dec!(0.1),
             context_quality: Decimal::ONE,
             directional_coherence: Decimal::ONE,
             reliability: Decimal::ONE,
@@ -1211,7 +1220,88 @@ mod tests {
         .expect("head score");
 
         assert_eq!(score.context_multiplier, dec!(0.65625));
+        assert_eq!(score.ranking_multiplier, dec!(0.65625));
         assert_eq!(score.context_quality, dec!(0.75));
+    }
+
+    #[test]
+    fn ranking_multiplier_preserves_replay() {
+        let alpha = alpha_revision("alpha.signal", true);
+        let first = context_revision("context.first");
+        let second = context_revision("context.second");
+        let third = context_revision("context.third");
+        let fourth = context_revision("context.fourth");
+        let plane = FactorServingPlane::try_seal(vec![
+            fourth.clone(),
+            second.clone(),
+            alpha.clone(),
+            first.clone(),
+            third.clone(),
+        ])
+        .expect("plane");
+        let head_spec = FactorHeadSpec {
+            alpha_weights: vec![AlphaFactorWeight {
+                factor_definition_id: alpha.factor_definition_id(),
+                factor: alpha.factor_name().clone(),
+                weight: Decimal::ONE,
+            }],
+            context_weights: vec![
+                ContextFactorWeight {
+                    factor_definition_id: first.factor_definition_id(),
+                    factor: first.factor_name().clone(),
+                    coverage_weight: dec!(0.25),
+                    penalty_strength: dec!(0.169867093539),
+                },
+                ContextFactorWeight {
+                    factor_definition_id: fourth.factor_definition_id(),
+                    factor: fourth.factor_name().clone(),
+                    coverage_weight: dec!(0.25),
+                    penalty_strength: dec!(0.735264492861),
+                },
+                ContextFactorWeight {
+                    factor_definition_id: second.factor_definition_id(),
+                    factor: second.factor_name().clone(),
+                    coverage_weight: dec!(0.25),
+                    penalty_strength: dec!(0.686501606011),
+                },
+                ContextFactorWeight {
+                    factor_definition_id: third.factor_definition_id(),
+                    factor: third.factor_name().clone(),
+                    coverage_weight: dec!(0.25),
+                    penalty_strength: dec!(0.486188552387),
+                },
+            ],
+            alpha_deadband: Decimal::ZERO,
+        };
+        let policy_multiplier = dec!(0.531609704401);
+        let score = score_factor_heads(
+            &[
+                scored(&alpha, dec!(1), dec!(0.374694907765)),
+                scored_with_confidence(&first, dec!(1), dec!(0.821166597746), dec!(0.404025572335)),
+                scored_with_confidence(&second, dec!(1), dec!(0.337835964815), dec!(0.37543404481)),
+                scored_with_confidence(&third, dec!(1), dec!(0.104505458621), dec!(0.286053168579)),
+                scored_with_confidence(
+                    &fourth,
+                    dec!(1),
+                    dec!(0.366242932536),
+                    dec!(0.961477432875),
+                ),
+            ],
+            &plane,
+            &head_spec,
+            &binding(OutcomeSide::Yes),
+            Decimal::ONE,
+            policy_multiplier,
+        )
+        .expect("head score");
+
+        let presentation_replay =
+            unit_rounded(score.yes_alpha.abs() * score.context_multiplier * policy_multiplier);
+        assert_ne!(presentation_replay, score.composite_score);
+        assert_eq!(
+            unit_rounded(score.yes_alpha.abs() * score.ranking_multiplier),
+            score.composite_score
+        );
     }
 
     #[test]

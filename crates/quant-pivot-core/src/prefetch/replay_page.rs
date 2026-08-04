@@ -457,6 +457,7 @@ fn page_catalog(source: &FrozenSourceSlice, scope: &ReplayPageScope<'_>) -> Cata
         .cloned()
         .collect();
     let clob_market_info = source
+        .prefetched
         .clob_market_info
         .iter()
         .filter(|row| {
@@ -961,6 +962,7 @@ mod tests {
                 market_changes: Vec::new(),
                 event_changes: Vec::new(),
             },
+            clob_market_info: Vec::new(),
             domain_observations: HashMap::new(),
             crypto_reports: HashMap::new(),
             weather_observations: HashMap::new(),
@@ -982,7 +984,6 @@ mod tests {
             window_end: Utc.timestamp_opt(120, 0).single().expect("source end"),
             pit_cutoff: Utc.timestamp_opt(130, 0).single().expect("source cutoff"),
             prefetched,
-            clob_market_info: Vec::new(),
             l2_ledger: vec![
                 event(&token_id, session, 1, 100_000),
                 event(&token_id, session, 2, 108_000),

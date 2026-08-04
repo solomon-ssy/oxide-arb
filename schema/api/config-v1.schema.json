@@ -188,6 +188,29 @@
       },
       "additionalProperties": false
     },
+    "BuyRouteBinding": {
+      "description": "Champion plus the optional challenger bound to one exact Buy route.",
+      "type": "object",
+      "properties": {
+        "champion": {
+          "$ref": "#/$defs/ModelBinding"
+        },
+        "shadow": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "champion"
+      ]
+    },
     "CalibrationMethod": {
       "description": "The fitting method a `ModelScore` `ProbabilityCalibrator` used.",
       "oneOf": [
@@ -531,7 +554,7 @@
           "description": "Maximum age for a book snapshot before it is stale.",
           "type": "integer",
           "format": "uint64",
-          "default": 5000,
+          "default": 15000,
           "minimum": 0
         },
         "max_domain_observation_age_secs": {
@@ -1180,6 +1203,79 @@
         "other"
       ]
     },
+    "ModelBinding": {
+      "description": "One role binding inside a Buy route.",
+      "type": "object",
+      "properties": {
+        "bound_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "config_revision": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1
+        },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "model_version_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "source": {
+          "$ref": "#/$defs/ModelBindingSource"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model_version_id",
+        "source",
+        "bound_at",
+        "config_revision",
+        "generation"
+      ]
+    },
+    "ModelBindingSource": {
+      "description": "Immutable provenance of one route-owned model binding.",
+      "oneOf": [
+        {
+          "description": "Explicit first-champion governance transaction.",
+          "type": "object",
+          "properties": {
+            "source_kind": {
+              "type": "string",
+              "const": "bootstrap"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "source_kind"
+          ]
+        },
+        {
+          "description": "Feedback cycle that trained and bound the model.",
+          "type": "object",
+          "properties": {
+            "feedback_cycle_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "source_kind": {
+              "type": "string",
+              "const": "feedback"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "source_kind",
+            "feedback_cycle_id"
+          ]
+        }
+      ]
+    },
     "ModelCalibrationConfig": {
       "description": "Active and shadow model references.",
       "type": "object",
@@ -1212,11 +1308,11 @@
       "additionalProperties": false
     },
     "ModelConfig": {
-      "description": "Active and shadow model references.",
+      "description": "Route-owned Buy models and independent Sell model reference.",
       "type": "object",
       "properties": {
         "active_exit_model_version_id": {
-          "description": "Champion Sell-side hold-vs-exit scorer version. The\nopportunistic-Sell exit evaluator loads this; a distinct pointer from\n`active_model_version_id` so Buy and Sell models are governed separately.",
+          "description": "Champion Sell-side hold-vs-exit scorer version. The\nopportunistic-Sell exit evaluator loads this; a distinct pointer from\nBuy routes so Buy and Sell models are governed separately.",
           "anyOf": [
             {
               "$ref": "#/$defs/ModelVersionRef"
@@ -1227,17 +1323,22 @@
           ],
           "default": null
         },
-        "active_model_version_id": {
-          "description": "Champion model for the explicit pooled Buy route.\n\nThis route may score only non-Crypto/non-Weather report scopes. It is\nnot a fallback for a missing vertical route.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ModelVersionRef"
+        "buy_routes": {
+          "description": "Exact Buy-side bindings. A missing route fails closed and never falls\nback to another route.",
+          "type": "object",
+          "properties": {
+            "crypto": {
+              "$ref": "#/$defs/BuyRouteBinding"
             },
-            {
-              "type": "null"
+            "pooled": {
+              "$ref": "#/$defs/BuyRouteBinding"
+            },
+            "weather": {
+              "$ref": "#/$defs/BuyRouteBinding"
             }
-          ],
-          "default": null
+          },
+          "additionalProperties": false,
+          "default": {}
         },
         "calibration": {
           "description": "Model-score probability-calibrator fit policy.",
@@ -1254,44 +1355,6 @@
           "$ref": "#/$defs/DecimalValue",
           "default": "0.00"
         },
-        "category_model_pointers": {
-          "description": "Category-specific Buy-side model pointers (`ModelRouting`).\n\nOnly Crypto and Weather may appear here. An enabled vertical must be the\nsole category in its report and must have its exact pointer; missing,\nunloadable or mis-scoped routes fail before selection.\nNon-vertical categories use the explicit pooled\n`active_model_version_id`. Governed exactly like the pooled/shadow\npointers.",
-          "type": "object",
-          "properties": {
-            "crypto": {
-              "$ref": "#/$defs/ModelVersionRef"
-            },
-            "culture": {
-              "$ref": "#/$defs/ModelVersionRef"
-            },
-            "economics": {
-              "$ref": "#/$defs/ModelVersionRef"
-            },
-            "finance": {
-              "$ref": "#/$defs/ModelVersionRef"
-            },
-            "geopolitics": {
-              "$ref": "#/$defs/ModelVersionRef"
-            },
-            "other": {
-              "$ref": "#/$defs/ModelVersionRef"
-            },
-            "politics": {
-              "$ref": "#/$defs/ModelVersionRef"
-            },
-            "sports": {
-              "$ref": "#/$defs/ModelVersionRef"
-            },
-            "tech": {
-              "$ref": "#/$defs/ModelVersionRef"
-            },
-            "weather": {
-              "$ref": "#/$defs/ModelVersionRef"
-            }
-          },
-          "additionalProperties": false,
-          "default": {}
-        },
         "min_model_confidence": {
           "description": "Minimum model confidence.",
           "$ref": "#/$defs/DecimalValue",
@@ -1301,18 +1364,6 @@
           "description": "Shadow/live diff threshold.",
           "$ref": "#/$defs/DecimalValue",
           "default": "0.10"
-        },
-        "shadow_model_version_id": {
-          "description": "Shadow model version id.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ModelVersionRef"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         }
       },
       "additionalProperties": false
@@ -1325,7 +1376,7 @@
           "$ref": "#/$defs/ModelConfig",
           "default": {
             "active_exit_model_version_id": null,
-            "active_model_version_id": null,
+            "buy_routes": {},
             "calibration": {
               "ci_confidence": "0.95",
               "embargo_secs": 86400,
@@ -1333,10 +1384,8 @@
               "min_samples_isotonic": 1000
             },
             "candidate_score_floor": "0.00",
-            "category_model_pointers": {},
             "min_model_confidence": "0.50",
-            "shadow_diff_threshold": "0.10",
-            "shadow_model_version_id": null
+            "shadow_diff_threshold": "0.10"
           }
         },
         "schema_version": {
@@ -1469,6 +1518,9 @@
         "initial",
         "promote",
         "model_bootstrap",
+        "model_shadow_binding",
+        "model_shadow_cancellation",
+        "model_shadow_rejection",
         "model_promotion",
         "rollback"
       ]
@@ -2385,7 +2437,7 @@
           "$ref": "#/$defs/DataQualityConfig",
           "default": {
             "feature_staleness_policy": "reject_stale_required",
-            "max_book_age_ms": 5000,
+            "max_book_age_ms": 15000,
             "max_domain_observation_age_secs": 300,
             "max_feature_bucket_age_secs": 30,
             "max_ingest_lag_ms": 10000,

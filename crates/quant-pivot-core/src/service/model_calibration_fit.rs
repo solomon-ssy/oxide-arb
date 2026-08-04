@@ -27,8 +27,8 @@ use quant_pivot_models::{
         query::TimeWindow,
     },
     enums::quant::{
-        CalibrationKind, CalibrationMethod, DatasetPurpose, ModelRunErrorCode, ModelRunKind,
-        ModelRunStatus, TrainingDatasetStatus,
+        CalibrationKind, CalibrationMethod, DatasetPurpose, DownsideSource, ModelRunErrorCode,
+        ModelRunKind, ModelRunStatus, TrainingDatasetStatus,
     },
     hashing::CanonicalDigest,
     types::{
@@ -46,7 +46,7 @@ use quant_pivot_repository::traits::{
     TrainingDatasetRepository,
 };
 use quant_pivot_research::{
-    backtest::SampleOutcome,
+    backtest::ModelCalibrationOutcome,
     model::{
         IsotonicCalibrator, PlattCalibrator, ProbabilityCalibrator, ReliabilitySample,
         compute_reliability,
@@ -94,7 +94,7 @@ struct InsufficientCalibrationCommitment<'a> {
 }
 
 struct CalibrationFitSamples<'a> {
-    binary: Vec<&'a SampleOutcome>,
+    binary: Vec<&'a ModelCalibrationOutcome>,
     split_hash: ContentHash,
     sample_count: u64,
     total_sample_count: u64,
@@ -152,6 +152,37 @@ impl<'a> CalibrationFitSamples<'a> {
 
     const fn is_insufficient(&self) -> bool {
         self.sample_count < self.minimum_sample_count
+    }
+
+    fn validate_downside_support(&self, downside_source: DownsideSource) -> QuantResult<()> {
+        match downside_source {
+            DownsideSource::MfeMae => {
+                let missing = self
+                    .binary
+                    .iter()
+                    .filter(|sample| sample.max_adverse_excursion_bps.is_none())
+                    .count();
+                let positive = self
+                    .binary
+                    .iter()
+                    .filter(|sample| {
+                        sample
+                            .max_adverse_excursion_bps
+                            .is_some_and(|value| value > Decimal::ZERO)
+                    })
+                    .count();
+                if missing > 0 || positive > 0 {
+                    return Err(ResearchError::ValidationMethodology {
+                        detail: format!(
+                            "MfeMae calibration requires one non-positive frozen MAE observation per binary sample; missing={missing}, positive={positive}, total={}",
+                            self.binary.len()
+                        ),
+                    }
+                    .into());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn insufficient_hash(
@@ -507,7 +538,8 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
             model_run_id,
             request,
             decision_policy_snapshot_id,
-            ..
+            downside_source,
+            actor: _,
         } = params;
         let policy = self.frozen_policy(&decision_policy_snapshot_id).await?;
         self.validate_split(&request.model_version_id, &request, &policy)
@@ -520,7 +552,8 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
             cancel,
         ))
         .await?;
-        let persisted = Box::pin(self.fit_and_persist(&request, &policy, &evidence)).await;
+        let persisted =
+            Box::pin(self.fit_and_persist(&request, &policy, &evidence, downside_source)).await;
         match persisted {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
@@ -677,11 +710,13 @@ impl ModelCalibrationFitService {
         request: &FitModelCalibratorRequest,
         policy: &CalibrationFitPolicy,
         evidence: &CalibrationReplayEvidence,
+        downside_source: DownsideSource,
     ) -> QuantResult<ModelCalibrationFitOutcome> {
         let samples = CalibrationFitSamples::new(request, policy, evidence)?;
         if samples.is_insufficient() {
             return self.commit_insufficient(request, evidence, &samples).await;
         }
+        samples.validate_downside_support(downside_source)?;
         self.commit_calibrated(request, policy, evidence, &samples)
             .await
     }

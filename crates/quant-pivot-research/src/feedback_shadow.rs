@@ -5,8 +5,8 @@ use quant_pivot_error::{QuantResult, feedback::FeedbackError, research::Research
 use quant_pivot_models::{
     domain::{
         ports::{
-            FeedbackComparisonArtifactRef, FeedbackShadowContract, FeedbackShadowJobParams,
-            FeedbackShadowSubject, FeedbackShadowUnavailableReason,
+            FeedbackShadowContract, FeedbackShadowJobParams, FeedbackShadowSubject,
+            FeedbackShadowUnavailableReason, ShadowBindingArtifactRef,
         },
         quant::ShadowObservationWindow,
     },
@@ -17,7 +17,7 @@ use quant_pivot_models::{
 };
 use serde::{Deserialize, Serialize};
 
-const ARTIFACT_FORMAT_VERSION: u32 = 1;
+const ARTIFACT_FORMAT_VERSION: u32 = 3;
 const ARTIFACT_HASH_DOMAIN: &str = "quant-pivot/feedback-shadow-replay-artifact";
 const ARTIFACT_SCHEMA_DOMAIN: &str = "quant-pivot/feedback-shadow-replay-schema";
 const OBSERVATION_HASH_DOMAIN: &str = "quant-pivot/feedback-shadow-observation";
@@ -27,7 +27,7 @@ const OBSERVATION_HASH_DOMAIN: &str = "quant-pivot/feedback-shadow-observation";
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackShadowUnstableReason {
     HardDivergence,
-    TopnOverlapBelowMinimum,
+    TopnDecisionOverlapBelowMinimum,
 }
 
 /// Numeric evidence is present only after count and actual time coverage pass.
@@ -38,8 +38,8 @@ pub struct FeedbackShadowEvidence {
     pub observed: u64,
     pub first_decision_at: DateTime<Utc>,
     pub last_decision_at: DateTime<Utc>,
-    pub observed_window_secs: u64,
-    pub mean_topn_overlap: Probability,
+    pub served_window_secs: u64,
+    pub mean_topn_decision_overlap: Probability,
     pub any_hard_divergence: bool,
 }
 
@@ -55,7 +55,7 @@ pub enum FeedbackShadowOutcome {
         required: u64,
         first_decision_at: Option<DateTime<Utc>>,
         last_decision_at: Option<DateTime<Utc>>,
-        observed_window_secs: u64,
+        served_window_secs: u64,
         required_window_secs: u64,
     },
     Stable {
@@ -76,16 +76,15 @@ impl FeedbackShadowEvaluator {
         window: &ShadowObservationWindow,
     ) -> Result<FeedbackShadowOutcome, FeedbackError> {
         contract.validate()?;
-        let observed_window_secs = Self::observed_secs(window)?;
-        if window.sample_count < contract.minimum_observations()
-            || observed_window_secs < contract.required_window_secs()
-        {
+        Self::validate_observation_shape(window)?;
+        let served_window_secs = Self::served_secs(contract)?;
+        if window.sample_count < contract.minimum_observations() {
             return Ok(FeedbackShadowOutcome::InsufficientObservations {
                 observed: window.sample_count,
                 required: contract.minimum_observations(),
                 first_decision_at: window.first_decision_at,
                 last_decision_at: window.last_decision_at,
-                observed_window_secs,
+                served_window_secs,
                 required_window_secs: contract.required_window_secs(),
             });
         }
@@ -95,9 +94,9 @@ impl FeedbackShadowEvaluator {
         let last_decision_at = window.last_decision_at.ok_or_else(|| {
             invalid("sufficient shadow observations have no last decision timestamp")
         })?;
-        let mean_topn_overlap = window
-            .mean_topn_overlap
-            .ok_or_else(|| invalid("sufficient shadow observations have no overlap aggregate"))?;
+        let mean_topn_decision_overlap = window.mean_topn_decision_overlap.ok_or_else(|| {
+            invalid("sufficient shadow observations have no decision-overlap aggregate")
+        })?;
         let observation_hash = CanonicalDigest::content_hash_typed(
             OBSERVATION_HASH_DOMAIN,
             ARTIFACT_FORMAT_VERSION,
@@ -106,8 +105,8 @@ impl FeedbackShadowEvaluator {
                 window.sample_count,
                 first_decision_at,
                 last_decision_at,
-                observed_window_secs,
-                mean_topn_overlap,
+                served_window_secs,
+                mean_topn_decision_overlap,
                 window.any_hard_divergence,
             ),
         )?;
@@ -116,16 +115,16 @@ impl FeedbackShadowEvaluator {
             observed: window.sample_count,
             first_decision_at,
             last_decision_at,
-            observed_window_secs,
-            mean_topn_overlap,
+            served_window_secs,
+            mean_topn_decision_overlap,
             any_hard_divergence: window.any_hard_divergence,
         };
         let mut reasons = Vec::with_capacity(2);
         if window.any_hard_divergence {
             reasons.push(FeedbackShadowUnstableReason::HardDivergence);
         }
-        if mean_topn_overlap.inner() < contract.minimum_topn_overlap().inner() {
-            reasons.push(FeedbackShadowUnstableReason::TopnOverlapBelowMinimum);
+        if mean_topn_decision_overlap.inner() < contract.minimum_topn_decision_overlap().inner() {
+            reasons.push(FeedbackShadowUnstableReason::TopnDecisionOverlapBelowMinimum);
         }
         if reasons.is_empty() {
             Ok(FeedbackShadowOutcome::Stable { evidence })
@@ -134,24 +133,30 @@ impl FeedbackShadowEvaluator {
         }
     }
 
-    fn observed_secs(window: &ShadowObservationWindow) -> Result<u64, FeedbackError> {
+    fn validate_observation_shape(window: &ShadowObservationWindow) -> Result<(), FeedbackError> {
         match (window.first_decision_at, window.last_decision_at) {
             (None, None)
                 if window.sample_count == 0
-                    && window.mean_topn_overlap.is_none()
+                    && window.mean_topn_decision_overlap.is_none()
                     && !window.any_hard_divergence =>
             {
-                Ok(0)
+                Ok(())
             }
-            (Some(first), Some(last)) if window.sample_count > 0 && first <= last => {
-                u64::try_from(last.signed_duration_since(first).num_seconds()).map_err(|error| {
-                    invalid(format!("shadow observation duration is invalid: {error}"))
-                })
-            }
+            (Some(first), Some(last)) if window.sample_count > 0 && first <= last => Ok(()),
             _ => Err(invalid(
                 "shadow observation count, timestamps, or aggregate shape is inconsistent",
             )),
         }
+    }
+
+    fn served_secs(contract: &FeedbackShadowContract) -> Result<u64, FeedbackError> {
+        u64::try_from(
+            contract
+                .observation_window_end()
+                .signed_duration_since(contract.observation_window_start())
+                .num_seconds(),
+        )
+        .map_err(|error| invalid(format!("shadow serving window is invalid: {error}")))
     }
 }
 
@@ -160,7 +165,7 @@ pub struct FeedbackShadowArtifactInput {
     pub artifact_id: FeedbackShadowArtifactId,
     pub feedback_cycle_id: FeedbackCycleId,
     pub job_input_hash: ContentHash,
-    pub previous: FeedbackComparisonArtifactRef,
+    pub binding: ShadowBindingArtifactRef,
     pub profile_ref: ResearchProfileRef,
     pub feedback_policy_hash: ContentHash,
     pub subject: FeedbackShadowSubject,
@@ -176,7 +181,7 @@ pub struct FeedbackShadowArtifact {
     artifact_id: FeedbackShadowArtifactId,
     feedback_cycle_id: FeedbackCycleId,
     job_input_hash: ContentHash,
-    previous: FeedbackComparisonArtifactRef,
+    binding: ShadowBindingArtifactRef,
     profile_ref: ResearchProfileRef,
     feedback_policy_hash: ContentHash,
     subject: FeedbackShadowSubject,
@@ -191,7 +196,7 @@ struct FeedbackShadowArtifactDocument {
     artifact_id: FeedbackShadowArtifactId,
     feedback_cycle_id: FeedbackCycleId,
     job_input_hash: ContentHash,
-    previous: FeedbackComparisonArtifactRef,
+    binding: ShadowBindingArtifactRef,
     profile_ref: ResearchProfileRef,
     feedback_policy_hash: ContentHash,
     subject: FeedbackShadowSubject,
@@ -204,7 +209,7 @@ struct FeedbackShadowArtifactPreimage<'a> {
     artifact_id: FeedbackShadowArtifactId,
     feedback_cycle_id: FeedbackCycleId,
     job_input_hash: ContentHash,
-    previous: &'a FeedbackComparisonArtifactRef,
+    binding: &'a ShadowBindingArtifactRef,
     profile_ref: &'a ResearchProfileRef,
     feedback_policy_hash: ContentHash,
     subject: &'a FeedbackShadowSubject,
@@ -218,7 +223,7 @@ impl FeedbackShadowArtifact {
             artifact_id: input.artifact_id,
             feedback_cycle_id: input.feedback_cycle_id,
             job_input_hash: input.job_input_hash,
-            previous: &input.previous,
+            binding: &input.binding,
             profile_ref: &input.profile_ref,
             feedback_policy_hash: input.feedback_policy_hash,
             subject: &input.subject,
@@ -230,7 +235,7 @@ impl FeedbackShadowArtifact {
             artifact_id: input.artifact_id,
             feedback_cycle_id: input.feedback_cycle_id,
             job_input_hash: input.job_input_hash,
-            previous: input.previous,
+            binding: input.binding,
             profile_ref: input.profile_ref,
             feedback_policy_hash: input.feedback_policy_hash,
             subject: input.subject,
@@ -241,7 +246,7 @@ impl FeedbackShadowArtifact {
     }
 
     pub fn validate(&self) -> Result<(), FeedbackError> {
-        self.previous.validate_for(self.feedback_cycle_id)?;
+        self.binding.validate_for(self.feedback_cycle_id)?;
         self.profile_ref
             .validate()
             .map_err(|error| invalid(format!("shadow artifact profile is invalid: {error}")))?;
@@ -275,16 +280,16 @@ impl FeedbackShadowArtifact {
                     required,
                     first_decision_at,
                     last_decision_at,
-                    observed_window_secs,
+                    served_window_secs,
                     required_window_secs,
                 },
             ) => {
                 Self::require_contract(contract, &self.profile_ref, self.feedback_policy_hash)?;
                 let count_insufficient = observed < required;
-                let time_insufficient = observed_window_secs < required_window_secs;
                 if *required != contract.minimum_observations()
                     || *required_window_secs != contract.required_window_secs()
-                    || (!count_insufficient && !time_insufficient)
+                    || *served_window_secs < *required_window_secs
+                    || !count_insufficient
                     || (first_decision_at.is_none() != last_decision_at.is_none())
                 {
                     return Err(invalid(
@@ -319,7 +324,7 @@ impl FeedbackShadowArtifact {
         if self.artifact_id != params.artifact_id
             || self.feedback_cycle_id != params.feedback_cycle_id
             || self.job_input_hash != params.input_hash()?
-            || self.previous != params.previous
+            || self.binding != params.binding
             || self.profile_ref != params.profile_ref
             || self.feedback_policy_hash != params.feedback_policy_hash
             || self.subject != params.subject
@@ -345,8 +350,8 @@ impl FeedbackShadowArtifact {
                 evidence.observed,
                 evidence.first_decision_at,
                 evidence.last_decision_at,
-                evidence.observed_window_secs,
-                evidence.mean_topn_overlap,
+                evidence.served_window_secs,
+                evidence.mean_topn_decision_overlap,
                 evidence.any_hard_divergence,
             ),
         )?;
@@ -354,11 +359,13 @@ impl FeedbackShadowArtifact {
         if evidence.any_hard_divergence {
             expected_reasons.push(FeedbackShadowUnstableReason::HardDivergence);
         }
-        if evidence.mean_topn_overlap.inner() < contract.minimum_topn_overlap().inner() {
-            expected_reasons.push(FeedbackShadowUnstableReason::TopnOverlapBelowMinimum);
+        if evidence.mean_topn_decision_overlap.inner()
+            < contract.minimum_topn_decision_overlap().inner()
+        {
+            expected_reasons.push(FeedbackShadowUnstableReason::TopnDecisionOverlapBelowMinimum);
         }
         if evidence.observed < contract.minimum_observations()
-            || evidence.observed_window_secs < contract.required_window_secs()
+            || evidence.served_window_secs < contract.required_window_secs()
             || evidence.first_decision_at > evidence.last_decision_at
             || evidence.observation_hash != expected_hash
             || reasons != expected_reasons
@@ -392,7 +399,7 @@ impl FeedbackShadowArtifact {
             artifact_id: self.artifact_id,
             feedback_cycle_id: self.feedback_cycle_id,
             job_input_hash: self.job_input_hash,
-            previous: &self.previous,
+            binding: &self.binding,
             profile_ref: &self.profile_ref,
             feedback_policy_hash: self.feedback_policy_hash,
             subject: &self.subject,
@@ -428,8 +435,8 @@ impl FeedbackShadowArtifact {
     }
 
     #[must_use]
-    pub const fn previous(&self) -> &FeedbackComparisonArtifactRef {
-        &self.previous
+    pub const fn binding(&self) -> &ShadowBindingArtifactRef {
+        &self.binding
     }
 
     #[must_use]
@@ -463,7 +470,7 @@ impl TryFrom<FeedbackShadowArtifactDocument> for FeedbackShadowArtifact {
             artifact_id: document.artifact_id,
             feedback_cycle_id: document.feedback_cycle_id,
             job_input_hash: document.job_input_hash,
-            previous: document.previous,
+            binding: document.binding,
             profile_ref: document.profile_ref,
             feedback_policy_hash: document.feedback_policy_hash,
             subject: document.subject,

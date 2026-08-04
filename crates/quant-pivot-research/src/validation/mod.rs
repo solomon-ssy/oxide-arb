@@ -31,8 +31,9 @@ pub mod trials;
 
 pub use cpcv::{
     BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
-    DefaultCombinatorialPurgedBacktester, FoldModelSource, FoldRuntime, GroupEvaluation,
-    GroupRowFilter, PolicyFoldRuntime, RankObservation, ReplayEngine,
+    DefaultCombinatorialPurgedBacktester, FoldModelSource, FoldRuntime, FoldTrainingIdentity,
+    FoldTrainingRequest, GroupEvaluation, GroupRowFilter, PolicyFoldRuntime, RankObservation,
+    ReplayEngine,
 };
 pub use dsr::{DsrInput, DsrReport, min_track_record_length};
 pub use pbo::{PboInput, TrialPerformanceMatrix, probability_of_backtest_overfitting};

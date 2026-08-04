@@ -42,13 +42,16 @@ use smartcore::{
         logistic_regression::{LogisticRegression, LogisticRegressionParameters},
         ridge_regression::{RidgeRegression, RidgeRegressionParameters},
     },
-    xgboost::{XGRegressor, XGRegressorParameters},
+    xgboost::{
+        XGRegressor, XGRegressorParameters,
+        xgb_regressor::{XG_TYPED_EXPORT_REVISION, XGModelExport, XGTreeNodeExport},
+    },
 };
 
 use crate::{
     attribution::{
-        DecisionTreeSpec, MissingBranch, TreeEnsembleInput, TreeEnsembleSpec, TreeNode,
-        TreeShapModelContract,
+        DecisionTreeSpec, MissingBranch, TreeEnsembleInput, TreeEnsembleSpec, TreeInputSupport,
+        TreeNode, TreeShapModelContract,
     },
     model::{
         artifact::{
@@ -816,27 +819,6 @@ fn extract_logistic(model: &Logistic) -> QuantResult<(Vec<f64>, f64)> {
     Ok((weights, intercept))
 }
 
-#[derive(Deserialize)]
-struct XgModelDocument {
-    regressors: Option<Vec<XgTreeDocument>>,
-    parameters: Option<XgParametersDocument>,
-}
-
-#[derive(Deserialize)]
-struct XgParametersDocument {
-    learning_rate: f64,
-    base_score: f64,
-}
-
-#[derive(Deserialize)]
-struct XgTreeDocument {
-    left: Option<Box<Self>>,
-    right: Option<Box<Self>>,
-    value: f64,
-    threshold: f64,
-    split_feature_idx: usize,
-}
-
 fn extract_tree_shap_contract(
     model: &SmartcoreModel,
     serialized_model_hash: ContentHash,
@@ -862,25 +844,12 @@ fn extract_tree_shap_contract(
         }
         .into());
     }
-    let document = serde_json::from_value::<XgModelDocument>(
-        serde_json::to_value(estimator).map_err(|error| ResearchError::Serialization {
-            detail: format!("serialize GBDT explanation preimage: {error}"),
-        })?,
-    )
-    .map_err(|error| ResearchError::Serialization {
-        detail: format!("decode GBDT explanation preimage: {error}"),
-    })?;
-    let parameters = document
-        .parameters
-        .ok_or_else(|| ResearchError::InvalidModelArtifact {
-            detail: "GBDT estimator omitted its fitted parameters".to_owned(),
+    let export = estimator
+        .export_model()
+        .map_err(|error| ResearchError::InvalidModelArtifact {
+            detail: format!("typed GBDT export failed: {error}"),
         })?;
-    let regressors = document
-        .regressors
-        .filter(|trees| !trees.is_empty())
-        .ok_or_else(|| ResearchError::InvalidModelArtifact {
-            detail: "GBDT estimator omitted its fitted trees".to_owned(),
-        })?;
+    validate_typed_export(&export)?;
     let background_bits = standardized_rows
         .iter()
         .map(|row| row.iter().map(|value| value.to_bits()).collect::<Vec<_>>())
@@ -890,16 +859,19 @@ fn extract_tree_shap_contract(
         1,
         &(&feature_names, background_bits),
     )?;
-    let trees = regressors
+    let trees = export
+        .trees
         .iter()
-        .map(|tree| portable_tree(tree, parameters.learning_rate, standardized_rows))
+        .map(|tree| portable_tree(tree, export.learning_rate, standardized_rows))
         .collect::<QuantResult<Vec<_>>>()?;
+    let feature_supports = tree_input_supports(standardized_rows, feature_names.len())?;
     let ensemble = TreeEnsembleSpec {
         serialized_model_hash,
         input_contract_hash,
         background_distribution_hash,
         feature_names,
-        base_value: decimal(parameters.base_score, "GBDT base score")?,
+        feature_supports,
+        base_value: decimal(export.base_score, "GBDT base score")?,
         trees,
     };
     let inputs = standardized_rows
@@ -920,8 +892,55 @@ fn extract_tree_shap_contract(
     TreeShapModelContract::verify(ensemble, &inputs, &references)
 }
 
+fn tree_input_supports(
+    standardized_rows: &[Vec<f64>],
+    feature_count: usize,
+) -> QuantResult<Vec<TreeInputSupport>> {
+    (0..feature_count)
+        .map(|feature_index| {
+            let mut values = standardized_rows
+                .iter()
+                .map(|row| decimal(row[feature_index], "GBDT intervention support observation"));
+            let first = values.next().ok_or_else(|| ResearchError::MatrixBuild {
+                detail: "GBDT intervention support has no training observations".to_owned(),
+            })??;
+            let (minimum, maximum) =
+                values.try_fold((first, first), |(minimum, maximum), value| {
+                    let value = value?;
+                    Ok::<_, QuantError>((minimum.min(value), maximum.max(value)))
+                })?;
+            TreeInputSupport::try_new(minimum, maximum)
+        })
+        .collect()
+}
+
+fn validate_typed_export(export: &XGModelExport) -> QuantResult<()> {
+    if export.revision != XG_TYPED_EXPORT_REVISION {
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: format!(
+                "unsupported typed GBDT export revision {}; expected {}",
+                export.revision, XG_TYPED_EXPORT_REVISION
+            ),
+        }
+        .into());
+    }
+    if export.trees.is_empty() {
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: "typed GBDT export omitted its fitted trees".to_owned(),
+        }
+        .into());
+    }
+    if !export.base_score.is_finite() {
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: "GBDT base score must be finite".to_owned(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 fn portable_tree(
-    root: &XgTreeDocument,
+    root: &XGTreeNodeExport,
     learning_rate: f64,
     background: &[Vec<f64>],
 ) -> QuantResult<DecisionTreeSpec> {
@@ -986,7 +1005,7 @@ fn portable_tree(
 }
 
 fn flatten_xg_tree(
-    node: &XgTreeDocument,
+    node: &XGTreeNodeExport,
     learning_rate: f64,
     nodes: &mut Vec<TreeNode>,
 ) -> QuantResult<usize> {
@@ -995,30 +1014,29 @@ fn flatten_xg_tree(
         value: Decimal::ZERO,
         cover: Decimal::ZERO,
     });
-    match (&node.left, &node.right) {
-        (None, None) => {
+    match node {
+        XGTreeNodeExport::Leaf { value } => {
             nodes[node_index] = TreeNode::Leaf {
-                value: decimal(node.value * learning_rate, "GBDT leaf value")?,
+                value: decimal(*value * learning_rate, "GBDT leaf value")?,
                 cover: Decimal::ZERO,
             };
         }
-        (Some(left), Some(right)) => {
+        XGTreeNodeExport::Split {
+            feature_index,
+            threshold,
+            left,
+            right,
+        } => {
             let left_child = flatten_xg_tree(left, learning_rate, nodes)?;
             let right_child = flatten_xg_tree(right, learning_rate, nodes)?;
             nodes[node_index] = TreeNode::Split {
-                feature_index: node.split_feature_idx,
-                threshold: decimal(node.threshold, "GBDT split threshold")?,
+                feature_index: *feature_index,
+                threshold: decimal(*threshold, "GBDT split threshold")?,
                 missing_branch: MissingBranch::Left,
                 left_child,
                 right_child,
                 cover: Decimal::ZERO,
             };
-        }
-        _ => {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: "GBDT tree node has only one child".to_owned(),
-            }
-            .into());
         }
     }
     Ok(node_index)

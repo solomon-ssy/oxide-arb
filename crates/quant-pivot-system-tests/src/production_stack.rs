@@ -15,7 +15,7 @@ use anyhow::{Context, Error as AnyhowError, Result, bail, ensure};
 use chrono::Utc;
 use clap::ValueEnum;
 use quant_pivot_models::{
-    config::{ArtifactStoreDeployConfig, ArtifactStoreKind, DeployConfig},
+    config::{ArtifactStoreDeployConfig, ArtifactStoreKind, ClickHouseConfig, DeployConfig},
     domain::{api::ModelVersionListQuery, pagination::PageRequest},
     entities::{
         market::Entity as MarketEntity,
@@ -23,27 +23,38 @@ use quant_pivot_models::{
         quant_settlement_redeem::Entity as QuantSettlementRedeemEntity,
     },
     enums::{
-        market::MarketStatus, quant::FeatureParityRunKind, settlement::SettlementEffectivePolicy,
+        market::MarketStatus,
+        quant::{
+            FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus, FeedbackStage,
+            FeedbackStageEventKind,
+        },
+        settlement::SettlementEffectivePolicy,
     },
-    types::{ContentHash, FeedbackCycleId, MarketId, RecommendationReportId, WorkerId},
+    types::{
+        ContentHash, FeedbackCycleId, MarketId, ModelVersionId, RecommendationReportId,
+        ResearchJobId, WorkerId,
+    },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgExecutionSubmissionRepository, PgFeedbackCycleRepository, PgModelRegistryRepository,
-        PgPolicyRepository, policy_bootstrap::ensure_default_policy_bundle,
+        PgExecutionSubmissionRepository, PgFeatureParityRepository, PgFeedbackCycleRepository,
+        PgModelRegistryRepository, PgPolicyRepository,
+        policy_bootstrap::ensure_default_policy_bundle,
     },
-    traits::{FeedbackCycleRepository, ModelRegistryRepository},
+    traits::{FeatureParityRepository, FeedbackCycleRepository, ModelRegistryRepository},
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore, S3ArtifactStore, S3StaticCredentials},
     model::ModelArtifact,
 };
 use reqwest::Client;
+use rust_decimal_macros::dec;
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
     QueryFilter, QueryOrder,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
     core::{Mount, WaitFor, wait::HttpWaitStrategy},
@@ -58,18 +69,24 @@ use tokio::{
 use toml::{Table, Value};
 use uuid::Uuid;
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    Mock, MockServer, Request, ResponseTemplate,
+    matchers::{method, path, path_regex},
 };
 
 use crate::{
     stack::SystemStack,
     support::execution_pg_seed::{
-        ReportSeedConfig, enable_test_admission, fill_entry_lot, seed_approved_intent,
-        seed_demo_with_store, seed_feedback_serving_infra, seed_pending_intent,
-        seed_report_on_infra,
+        ReportSeedConfig, SharedDemoInfra, enable_test_admission, fill_entry_lot,
+        seed_approved_intent, seed_demo_with_store, seed_feedback_serving_infra,
+        seed_pending_intent, seed_production_report,
     },
-    support::research_browser_seed::{seed_browser_research, seed_governed_feedback_research},
+    support::feedback_closure_seed::{
+        FeedbackClosureFixture, complete_feedback_closure, seed_feedback_closure,
+    },
+    support::research_browser_seed::{
+        BrowserResearchFixture, seed_browser_research, seed_closure_feedback_research,
+        seed_governed_feedback_research,
+    },
     support::trade_policy_fixtures::SYSTEM_EVIDENCE_SIGNING_KEY,
 };
 
@@ -79,11 +96,28 @@ const API_KEY: &str = "00000000-0000-0000-0000-000000000000";
 const API_PASSPHRASE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const API_SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const JWT_SIGNING_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
+const ERC1967_IMPLEMENTATION_SLOT: &str =
+    "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+const COLLATERAL_IMPLEMENTATION_WORD: &str =
+    "0x0000000000000000000000006bbcef9f7ef3b6c592c99e0f206a0de94ad0925f";
 const STARTUP_TIMEOUT: Duration = Duration::from_mins(1);
+// A parity attempt waiting on append-only evidence must release its worker slot
+// promptly so another queued parity run can establish its own pending clock.
+const SAMPLED_PARITY_START_TIMEOUT: Duration = Duration::from_mins(1);
+// The production parity executor deliberately enforces a ten-minute minimum
+// materialization grace. Start this budget only after the target run has
+// durably entered pending_materialization.
+const SAMPLED_PARITY_CONTAINMENT_TIMEOUT: Duration = Duration::from_mins(12);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const RECOVERY_POINT_TIMEOUT: Duration = Duration::from_mins(10);
+const LEASE_RECOVERY_TIMEOUT: Duration = Duration::from_mins(3);
 const SIGNAL_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(1);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GOVERNED_CANCELLATION_LEASE_SECS: u64 = 3_600;
+// The production gate remains one full day. The closure fixture compresses
+// wall-clock time while preserving 1,000 real ModelRunner observations; five
+// minutes leaves deterministic headroom for slower validation hosts.
+const CLOSURE_SHADOW_WINDOW_SECS: u64 = 5 * 60;
 const MINIO_ACCESS_KEY: &str = "quantpivot-system-test";
 const MINIO_SECRET_KEY: &str = "quantpivot-system-test-object-lock-secret";
 const MINIO_BUCKET: &str = "quant-pivot-production-stack";
@@ -131,8 +165,10 @@ struct ProductionLaunch {
 }
 
 struct BrowserFixtureEvidence {
+    closure: Option<FeedbackClosureFixture>,
     governed_cancellation_cycle_id: Option<FeedbackCycleId>,
-    sampled_parity_report_id: RecommendationReportId,
+    sampled_parity_report_id: Option<RecommendationReportId>,
+    await_settlement_discovery: bool,
 }
 
 struct StartedProduction {
@@ -358,6 +394,8 @@ impl ProductionLaunch {
 
 pub struct ProductionStack {
     child: Child,
+    closure_cycle_id: Option<FeedbackCycleId>,
+    fixture: ProductionStackFixture,
     governed_cancellation_cycle_id: Option<FeedbackCycleId>,
     launch: ProductionLaunch,
     listen_port: u16,
@@ -375,15 +413,79 @@ pub enum ProductionStackFixture {
     Browser,
     /// Browser evidence plus one exact active Weather serving route.
     GovernedFeedback,
+    /// Historical PIT facts plus one real production feedback closure cycle.
+    FeedbackClosure,
+    /// Feedback closure with a real binary crash and durable lease recovery.
+    FeedbackClosureRecovery,
 }
 
 impl ProductionStackFixture {
     const fn seeds_browser(self) -> bool {
-        matches!(self, Self::Browser | Self::GovernedFeedback)
+        matches!(
+            self,
+            Self::Browser
+                | Self::GovernedFeedback
+                | Self::FeedbackClosure
+                | Self::FeedbackClosureRecovery
+        )
     }
 
     const fn requires_default_policy(self) -> bool {
-        !matches!(self, Self::GovernedFeedback)
+        !matches!(
+            self,
+            Self::GovernedFeedback | Self::FeedbackClosure | Self::FeedbackClosureRecovery
+        )
+    }
+
+    async fn seed_research_fixture(
+        self,
+        db: &DatabaseConnection,
+        store: &Arc<dyn ArtifactStore>,
+    ) -> Result<(SharedDemoInfra, BrowserResearchFixture)> {
+        match self {
+            Self::Browser => {
+                let infra = Box::pin(seed_demo_with_store(db, store)).await;
+                let research = Box::pin(seed_browser_research(db, store, &infra)).await?;
+                Ok((infra, research))
+            }
+            Self::GovernedFeedback => {
+                let governed = Box::pin(seed_feedback_serving_infra(
+                    db,
+                    store,
+                    86_400,
+                    dec!(0.10),
+                    dec!(5000),
+                ))
+                .await;
+                let research = Box::pin(seed_governed_feedback_research(
+                    db,
+                    store,
+                    &governed.template,
+                    governed.champion_model_version_id,
+                ))
+                .await?;
+                Ok((governed.template, research))
+            }
+            Self::FeedbackClosure | Self::FeedbackClosureRecovery => {
+                let governed = Box::pin(seed_feedback_serving_infra(
+                    db,
+                    store,
+                    CLOSURE_SHADOW_WINDOW_SECS,
+                    dec!(1),
+                    dec!(1),
+                ))
+                .await;
+                let research = Box::pin(seed_closure_feedback_research(
+                    db,
+                    store,
+                    &governed.template,
+                    governed.champion_model_version_id,
+                ))
+                .await?;
+                Ok((governed.template, research))
+            }
+            Self::Empty => bail!("empty production fixture cannot seed browser evidence"),
+        }
     }
 }
 
@@ -477,10 +579,34 @@ impl ProductionStack {
         self.governed_cancellation_cycle_id
     }
 
+    /// Cycle driven only by production coordinator stages in the closure fixture.
+    #[must_use]
+    pub const fn closure_cycle_id(&self) -> Option<FeedbackCycleId> {
+        self.closure_cycle_id
+    }
+
     /// Gracefully restart only the real binary while preserving every owned
     /// persistence service, the rendered config, port, and artifact directory.
     pub async fn restart(&mut self) -> Result<()> {
         self.shutdown_binary(ShutdownOrigin::Harness).await?;
+        self.child = self.launch.spawn().await?;
+        Ok(())
+    }
+
+    /// Abruptly terminate the real binary without releasing its durable
+    /// coordinator lease, then start the same binary against the same stores.
+    async fn crash_restart(&mut self) -> Result<()> {
+        self.child
+            .start_kill()
+            .context("kill production binary at lease-recovery fault point")?;
+        let status = timeout(SHUTDOWN_TIMEOUT, self.child.wait())
+            .await
+            .context("time out waiting for crashed production binary")?
+            .context("wait for crashed production binary")?;
+        ensure!(
+            !status.success(),
+            "production binary unexpectedly exited successfully at crash fault point"
+        );
         self.child = self.launch.spawn().await?;
         Ok(())
     }
@@ -733,6 +859,7 @@ impl ProductionStack {
                 Some(
                     Box::pin(seed_browser_fixture(
                         infrastructure.postgres.connection(),
+                        &infrastructure.clickhouse_config,
                         &runtime_artifact_store,
                         fixture,
                     ))
@@ -787,8 +914,16 @@ impl ProductionStack {
             .browser_evidence
             .as_ref()
             .and_then(|evidence| evidence.governed_cancellation_cycle_id);
-        let running = Self {
+        let closure_cycle_id = started.browser_evidence.as_ref().and_then(|evidence| {
+            evidence
+                .closure
+                .as_ref()
+                .map(|closure| closure.feedback_cycle_id)
+        });
+        let mut running = Self {
             child: started.child,
+            closure_cycle_id,
+            fixture,
             governed_cancellation_cycle_id,
             launch: started.launch,
             listen_port,
@@ -796,23 +931,7 @@ impl ProductionStack {
             artifact_infrastructure,
             infrastructure,
         };
-        let readiness = async {
-            if let Some(evidence) = started.browser_evidence.as_ref() {
-                // The real research worker consumes the report's mandatory
-                // sampled parity job. The deterministic browser profile has no
-                // serving facts, so wait for fail-closed containment before
-                // exposing the stable, auditable report/intent state.
-                await_sampled_parity_containment(
-                    running.infrastructure.postgres.connection(),
-                    &evidence.sampled_parity_report_id,
-                )
-                .await?;
-                await_browser_settlement_discovery(running.infrastructure.postgres.connection())
-                    .await?;
-            }
-            Ok::<_, AnyhowError>(())
-        }
-        .await;
+        let readiness = Box::pin(running.await_readiness(started.browser_evidence.as_ref())).await;
         if let Err(error) = readiness {
             let cleanup = running
                 .shutdown(false, ShutdownOrigin::Harness)
@@ -827,35 +946,140 @@ impl ProductionStack {
         }
         Ok(running)
     }
+
+    async fn await_readiness(&mut self, evidence: Option<&BrowserFixtureEvidence>) -> Result<()> {
+        let Some(evidence) = evidence else {
+            return Ok(());
+        };
+        if let Some(closure) = evidence.closure.as_ref() {
+            if self.fixture == ProductionStackFixture::FeedbackClosureRecovery {
+                let job_id = await_recovery_point(
+                    self.infrastructure.postgres.connection(),
+                    closure.feedback_cycle_id,
+                )
+                .await?;
+                self.crash_restart().await?;
+                await_lease_recovery(
+                    self.infrastructure.postgres.connection(),
+                    closure.feedback_cycle_id,
+                    job_id,
+                )
+                .await?;
+                println!(
+                    "feedback closure lease recovery: cycle_id={} stage={} job_id={}",
+                    closure.feedback_cycle_id,
+                    FeedbackStage::Attribution,
+                    job_id,
+                );
+            }
+            let artifact_store = self
+                .artifact_infrastructure
+                .as_ref()
+                .context("feedback closure fixture has no artifact infrastructure")?
+                .store()?;
+            Box::pin(complete_feedback_closure(
+                self.infrastructure.postgres.connection(),
+                &artifact_store,
+                closure,
+            ))
+            .await?;
+        }
+        // The real research worker consumes the report's mandatory sampled
+        // parity job. The deterministic browser profile has no serving facts,
+        // so wait for fail-closed containment before exposing stable evidence.
+        if let Some(report_id) = evidence.sampled_parity_report_id.as_ref() {
+            await_sampled_parity_containment(self.infrastructure.postgres.connection(), report_id)
+                .await?;
+        }
+        if evidence.await_settlement_discovery {
+            await_browser_settlement_discovery(self.infrastructure.postgres.connection()).await?;
+        }
+        Ok(())
+    }
+}
+
+async fn await_recovery_point(
+    db: &DatabaseConnection,
+    cycle_id: FeedbackCycleId,
+) -> Result<ResearchJobId> {
+    let deadline = Instant::now() + RECOVERY_POINT_TIMEOUT;
+    let cycles = PgFeedbackCycleRepository::new(db.clone());
+    loop {
+        let events = cycles.list_stage_events(&cycle_id).await?;
+        if let Some(job_id) = events.iter().rev().find_map(|event| {
+            (event.stage == FeedbackStage::Attribution
+                && event.event_kind == FeedbackStageEventKind::Started)
+                .then_some(event.research_job_id)
+                .flatten()
+        }) {
+            return Ok(job_id);
+        }
+        let cycle = cycles
+            .find_cycle(&cycle_id)
+            .await?
+            .with_context(|| format!("recovery closure cycle {cycle_id} disappeared"))?;
+        ensure!(
+            !cycle.status.is_terminal(),
+            "recovery closure cycle terminated before the Attribution crash point: status={:?} decision={:?} reason={:?}",
+            cycle.status,
+            cycle.decision,
+            cycle.terminal_reason_code
+        );
+        ensure!(
+            Instant::now() < deadline,
+            "recovery closure cycle {cycle_id} did not start Attribution within {RECOVERY_POINT_TIMEOUT:?}"
+        );
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn await_lease_recovery(
+    db: &DatabaseConnection,
+    cycle_id: FeedbackCycleId,
+    job_id: ResearchJobId,
+) -> Result<()> {
+    let deadline = Instant::now() + LEASE_RECOVERY_TIMEOUT;
+    let cycles = PgFeedbackCycleRepository::new(db.clone());
+    loop {
+        let events = cycles.list_stage_events(&cycle_id).await?;
+        if events.iter().any(|event| {
+            event.stage == FeedbackStage::Attribution
+                && event.research_job_id == Some(job_id)
+                && event.event_kind == FeedbackStageEventKind::LeaseRecovered
+        }) {
+            ensure!(
+                cycles.find_coordinator_fault(&cycle_id).await?.is_none(),
+                "recovered closure cycle persisted a coordinator fault"
+            );
+            return Ok(());
+        }
+        let cycle = cycles
+            .find_cycle(&cycle_id)
+            .await?
+            .with_context(|| format!("recovery closure cycle {cycle_id} disappeared"))?;
+        ensure!(
+            !cycle.status.is_terminal(),
+            "recovery closure cycle terminated before lease recovery: status={:?} decision={:?} reason={:?}",
+            cycle.status,
+            cycle.decision,
+            cycle.terminal_reason_code
+        );
+        ensure!(
+            Instant::now() < deadline,
+            "recovery closure cycle {cycle_id} did not recover Attribution job {job_id} within {LEASE_RECOVERY_TIMEOUT:?}"
+        );
+        sleep(POLL_INTERVAL).await;
+    }
 }
 
 async fn seed_browser_fixture(
     db: &DatabaseConnection,
+    clickhouse_config: &ClickHouseConfig,
     runtime_artifact_store: &Arc<dyn ArtifactStore>,
     fixture: ProductionStackFixture,
 ) -> Result<BrowserFixtureEvidence> {
-    let (infra, research) = match fixture {
-        ProductionStackFixture::Browser => {
-            let infra = Box::pin(seed_demo_with_store(db, runtime_artifact_store)).await;
-            let research =
-                Box::pin(seed_browser_research(db, runtime_artifact_store, &infra)).await?;
-            (infra, research)
-        }
-        ProductionStackFixture::GovernedFeedback => {
-            let governed = Box::pin(seed_feedback_serving_infra(db, runtime_artifact_store)).await;
-            let research = Box::pin(seed_governed_feedback_research(
-                db,
-                runtime_artifact_store,
-                &governed.template,
-                governed.active_model_version_id,
-            ))
-            .await?;
-            (governed.template, research)
-        }
-        ProductionStackFixture::Empty => {
-            bail!("empty production fixture cannot seed browser evidence")
-        }
-    };
+    let (infra, research) =
+        Box::pin(fixture.seed_research_fixture(db, runtime_artifact_store)).await?;
     println!(
         "browser research fixture: model_version_id={} evaluation_dataset_id={} backtest_report_id={} feedback_cycle_id={} governed_cancellation_cycle_id={:?}",
         research.model_version_id,
@@ -864,11 +1088,26 @@ async fn seed_browser_fixture(
         research.feedback_cycle_id,
         research.governed_cancellation_cycle_id,
     );
+    let closure = Box::pin(seed_optional_closure(
+        db,
+        clickhouse_config,
+        runtime_artifact_store,
+        &infra,
+        research.model_version_id,
+        research.feedback_cycle_id,
+        fixture,
+    ))
+    .await?;
     let governed_cancellation_cycle_id =
         if let Some(cycle_id) = research.governed_cancellation_cycle_id {
             ensure!(
-                fixture == ProductionStackFixture::GovernedFeedback,
-                "only GovernedFeedback may seed a governed cancellation cycle"
+                matches!(
+                    fixture,
+                    ProductionStackFixture::GovernedFeedback
+                        | ProductionStackFixture::FeedbackClosure
+                        | ProductionStackFixture::FeedbackClosureRecovery
+                ),
+                "only a governed feedback fixture may seed a cancellation cycle"
             );
             // Model a cycle already owned by another healthy worker. Its live lease
             // makes API cancellation deterministic without weakening the terminal
@@ -886,14 +1125,33 @@ async fn seed_browser_fixture(
             Some(cycle_id)
         } else {
             ensure!(
-                fixture != ProductionStackFixture::GovernedFeedback,
-                "GovernedFeedback fixture is missing its queued cancellation cycle"
+                !matches!(
+                    fixture,
+                    ProductionStackFixture::GovernedFeedback
+                        | ProductionStackFixture::FeedbackClosure
+                        | ProductionStackFixture::FeedbackClosureRecovery
+                ),
+                "governed feedback fixture is missing its queued cancellation cycle"
             );
             None
         };
+    if matches!(
+        fixture,
+        ProductionStackFixture::FeedbackClosure | ProductionStackFixture::FeedbackClosureRecovery
+    ) {
+        verify_browser_artifacts(db, runtime_artifact_store).await?;
+        return Ok(BrowserFixtureEvidence {
+            closure,
+            governed_cancellation_cycle_id,
+            sampled_parity_report_id: None,
+            await_settlement_discovery: false,
+        });
+    }
     enable_test_admission(db, "browser-e2e-fixture").await;
-    let settlement_report = seed_report_on_infra(
+    let settlement_report = seed_production_report(
         db,
+        clickhouse_config,
+        runtime_artifact_store,
         &infra,
         ReportSeedConfig {
             event_id: "browser-settlement-event".to_owned(),
@@ -907,7 +1165,7 @@ async fn seed_browser_fixture(
             ),
         },
     )
-    .await;
+    .await?;
     let settlement_intent = seed_approved_intent(db, &settlement_report).await;
     fill_entry_lot(
         db,
@@ -935,8 +1193,10 @@ async fn seed_browser_fixture(
     // cannot supersede its still-pending intent before the real worker
     // atomically revokes it.
     let parity_infra = Box::pin(seed_demo_with_store(db, runtime_artifact_store)).await;
-    let report = Box::pin(seed_report_on_infra(
+    let report = Box::pin(seed_production_report(
         db,
+        clickhouse_config,
+        runtime_artifact_store,
         &parity_infra,
         ReportSeedConfig {
             event_id: "evt-1".to_owned(),
@@ -947,13 +1207,42 @@ async fn seed_browser_fixture(
             trigger_key: format!("scheduled:test:{}", RecommendationReportId::from_v7()),
         },
     ))
-    .await;
+    .await?;
     seed_pending_intent(db, &report).await;
     verify_browser_artifacts(db, runtime_artifact_store).await?;
     Ok(BrowserFixtureEvidence {
+        closure,
         governed_cancellation_cycle_id,
-        sampled_parity_report_id: report.report,
+        sampled_parity_report_id: Some(report.report),
+        await_settlement_discovery: true,
     })
+}
+
+async fn seed_optional_closure(
+    db: &DatabaseConnection,
+    clickhouse_config: &ClickHouseConfig,
+    runtime_artifact_store: &Arc<dyn ArtifactStore>,
+    infra: &SharedDemoInfra,
+    model_version_id: ModelVersionId,
+    historical_feedback_cycle_id: FeedbackCycleId,
+    fixture: ProductionStackFixture,
+) -> Result<Option<FeedbackClosureFixture>> {
+    if !matches!(
+        fixture,
+        ProductionStackFixture::FeedbackClosure | ProductionStackFixture::FeedbackClosureRecovery
+    ) {
+        return Ok(None);
+    }
+    Box::pin(seed_feedback_closure(
+        db,
+        clickhouse_config,
+        runtime_artifact_store,
+        infra,
+        model_version_id,
+        historical_feedback_cycle_id,
+    ))
+    .await
+    .map(Some)
 }
 
 async fn verify_browser_artifacts(
@@ -1015,7 +1304,9 @@ async fn await_sampled_parity_containment(
     db: &DatabaseConnection,
     report_id: &RecommendationReportId,
 ) -> Result<()> {
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    let start_deadline = Instant::now() + SAMPLED_PARITY_START_TIMEOUT;
+    let mut containment_deadline = None;
+    let parity = PgFeatureParityRepository::new(db.clone());
     loop {
         let run = Entity::find()
             .filter(Column::Kind.eq(FeatureParityRunKind::Sampled))
@@ -1024,14 +1315,78 @@ async fn await_sampled_parity_containment(
             .one(db)
             .await
             .context("read initial automatic feature-parity run")?;
-        if let Some(run) = run
-            && run.status.is_terminal()
-            && run.containment_completed_at.is_some()
-        {
-            return Ok(());
+        if let Some(run) = run.as_ref() {
+            if run.containment_completed_at.is_some() {
+                return Ok(());
+            }
+            if run.status == FeatureParityRunStatus::Passed {
+                bail!(
+                    "sampled feature-parity run {} passed although this no-serving-evidence fixture requires fail-closed containment",
+                    run.run_id,
+                );
+            }
+            if matches!(
+                run.status,
+                FeatureParityRunStatus::Mismatched | FeatureParityRunStatus::Failed
+            ) {
+                let latch = parity
+                    .current_state()
+                    .await?
+                    .context("terminal unsafe parity run has no fail-closed latch generation")?;
+                ensure!(
+                    latch.state == FeatureParityLatchState::Open
+                        && latch.cause_run_id == Some(run.run_id),
+                    "terminal unsafe parity run {} became visible without its atomic latch generation; latch_state={} latch_cause={:?}",
+                    run.run_id,
+                    latch.state.as_str(),
+                    latch.cause_run_id,
+                );
+                containment_deadline
+                    .get_or_insert_with(|| Instant::now() + SAMPLED_PARITY_CONTAINMENT_TIMEOUT);
+            }
         }
-        if Instant::now() >= deadline {
-            bail!("sampled feature-parity containment did not settle before browser handoff");
+        if run.as_ref().is_some_and(|run| run.pending_since.is_some())
+            && containment_deadline.is_none()
+        {
+            containment_deadline = Some(Instant::now() + SAMPLED_PARITY_CONTAINMENT_TIMEOUT);
+        }
+        let now = Instant::now();
+        if containment_deadline.is_none() && now >= start_deadline {
+            let state = run.as_ref().map_or_else(
+                || "run_missing".to_owned(),
+                |run| {
+                    format!(
+                        "run_id={} status={} pending_since={:?}",
+                        run.run_id,
+                        run.status.as_str(),
+                        run.pending_since,
+                    )
+                },
+            );
+            bail!(
+                "sampled feature-parity run did not establish a durable evidence wait within \
+                 {SAMPLED_PARITY_START_TIMEOUT:?}; another pending run may be blocking the \
+                 serialized worker: {state}"
+            );
+        }
+        if containment_deadline.is_some_and(|deadline| now >= deadline) {
+            let state = run.as_ref().map_or_else(
+                || "run_missing".to_owned(),
+                |run| {
+                    format!(
+                        "run_id={} status={} pending_since={:?} failure_code={:?} failure_detail={:?}",
+                        run.run_id,
+                        run.status.as_str(),
+                        run.pending_since,
+                        run.failure_code,
+                        run.failure_detail,
+                    )
+                },
+            );
+            bail!(
+                "sampled feature-parity containment did not settle within \
+                 {SAMPLED_PARITY_CONTAINMENT_TIMEOUT:?} after pending materialization: {state}"
+            );
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -1079,6 +1434,11 @@ impl Workspace {
 
 async fn deterministic_upstream() -> MockServer {
     let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(deterministic_polygon_rpc)
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/time"))
         .respond_with(ResponseTemplate::new(200).set_body_string("1000000"))
@@ -1107,7 +1467,151 @@ async fn deterministic_upstream() -> MockServer {
         })))
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"^/clob-markets/feedback-closure-(training|calibration|evaluation)-market-[0-9]+$",
+        ))
+        .respond_with(deterministic_closure_market_info)
+        .mount(&server)
+        .await;
     server
+}
+
+fn deterministic_closure_market_info(request: &Request) -> ResponseTemplate {
+    let Some(identity) = request
+        .url
+        .path()
+        .strip_prefix("/clob-markets/feedback-closure-")
+    else {
+        return ResponseTemplate::new(404);
+    };
+    let Some((scope, ordinal)) = identity.rsplit_once("-market-") else {
+        return ResponseTemplate::new(404);
+    };
+    let Ok(ordinal) = ordinal.parse::<usize>() else {
+        return ResponseTemplate::new(404);
+    };
+    let Some((yes_base, no_base)) = (match scope {
+        "training" => Some((710_000_usize, 810_000_usize)),
+        "calibration" => Some((720_000, 820_000)),
+        "evaluation" => Some((730_000, 830_000)),
+        _ => None,
+    }) else {
+        return ResponseTemplate::new(404);
+    };
+    let condition_id = request.url.path().trim_start_matches("/clob-markets/");
+    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "c": condition_id,
+        "t": [
+            { "t": (yes_base + ordinal).to_string(), "o": "Yes" },
+            { "t": (no_base + ordinal).to_string(), "o": "No" }
+        ],
+        "mts": "0.01",
+        "mos": "1",
+        "nr": false,
+        "itode": false,
+        "ibce": false,
+        "oas": 0,
+        "fd": { "r": "0", "e": 1, "to": true },
+        "mbf": 0,
+        "tbf": 0,
+        "rfqe": false
+    }))
+}
+
+fn deterministic_polygon_rpc(request: &Request) -> ResponseTemplate {
+    let request = serde_json::from_slice::<JsonRpcRequest>(&request.body);
+    let Ok(request) = request else {
+        return ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": { "code": -32700, "message": "invalid JSON-RPC request" },
+        }));
+    };
+    let result = match request.method.as_str() {
+        "eth_chainId" => serde_json::json!("0x89"),
+        "eth_blockNumber" => serde_json::json!("0x4000000"),
+        "eth_getBlockByNumber" => deterministic_polygon_block(&request.params),
+        "eth_getLogs" => serde_json::json!([]),
+        "eth_getCode" => serde_json::json!("0x01"),
+        "eth_getStorageAt" => deterministic_polygon_storage(&request.params),
+        "eth_call" => serde_json::json!(format!("0x{}", "0".repeat(64))),
+        method => {
+            return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request.id,
+                "error": { "code": -32601, "message": format!("unsupported deterministic method: {method}") },
+            }));
+        }
+    };
+    ResponseTemplate::new(200).set_body_json(JsonRpcResponse {
+        jsonrpc: "2.0",
+        id: request.id,
+        result,
+    })
+}
+
+fn deterministic_polygon_storage(params: &JsonValue) -> JsonValue {
+    let slot = params
+        .as_array()
+        .and_then(|params| params.get(1))
+        .and_then(JsonValue::as_str);
+    if slot.is_some_and(|slot| slot.eq_ignore_ascii_case(ERC1967_IMPLEMENTATION_SLOT)) {
+        serde_json::json!(COLLATERAL_IMPLEMENTATION_WORD)
+    } else {
+        serde_json::json!(format!("0x{}", "0".repeat(64)))
+    }
+}
+
+fn deterministic_polygon_block(params: &JsonValue) -> JsonValue {
+    let requested = params
+        .as_array()
+        .and_then(|params| params.first())
+        .and_then(JsonValue::as_str)
+        .unwrap_or("finalized");
+    let number = if matches!(requested, "finalized" | "latest" | "safe") {
+        "0x4000000"
+    } else {
+        requested
+    };
+    serde_json::json!({
+        "number": number,
+        "hash": format!("0x{}", "11".repeat(32)),
+        "parentHash": format!("0x{}", "10".repeat(32)),
+        "sha3Uncles": format!("0x{}", "1d".repeat(32)),
+        "miner": format!("0x{}", "22".repeat(20)),
+        "stateRoot": format!("0x{}", "33".repeat(32)),
+        "transactionsRoot": format!("0x{}", "44".repeat(32)),
+        "receiptsRoot": format!("0x{}", "55".repeat(32)),
+        "logsBloom": format!("0x{}", "00".repeat(256)),
+        "difficulty": "0x0",
+        "gasLimit": "0x1c9c380",
+        "gasUsed": "0x0",
+        "timestamp": format!("0x{:x}", Utc::now().timestamp()),
+        "extraData": "0x",
+        "mixHash": format!("0x{}", "66".repeat(32)),
+        "nonce": "0x0000000000000000",
+        "baseFeePerGas": "0x0",
+        "totalDifficulty": "0x0",
+        "size": "0x200",
+        "transactions": [],
+        "uncles": [],
+    })
+}
+
+#[derive(Deserialize)]
+struct JsonRpcRequest {
+    id: JsonValue,
+    method: String,
+    #[serde(default)]
+    params: JsonValue,
+}
+
+#[derive(Serialize)]
+struct JsonRpcResponse {
+    jsonrpc: &'static str,
+    id: JsonValue,
+    result: JsonValue,
 }
 
 fn render_config(

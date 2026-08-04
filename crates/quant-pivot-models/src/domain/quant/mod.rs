@@ -28,6 +28,8 @@ mod feature;
 #[allow(clippy::needless_update)] // Insert DTOs omit database-managed timestamps.
 mod feature_parity;
 mod feedback_cohort;
+#[allow(clippy::needless_update)] // Insert DTO omits DB-managed created_at.
+mod feedback_coordinator_fault;
 #[allow(clippy::needless_update)] // New feedback DTOs omit DB-managed lifecycle/timestamps.
 mod feedback_cycle;
 #[allow(clippy::needless_update)] // Scheduler sync payload omits DB-managed lifecycle/timestamps.
@@ -142,6 +144,10 @@ pub use feedback_cohort::{
     FeedbackExecutionEvidence, FeedbackExecutionState, FeedbackRecommendationContext,
     FeedbackResolutionEvidence,
 };
+pub use feedback_coordinator_fault::{
+    FeedbackCoordinatorFaultInfo, FeedbackCoordinatorFaultInput, FeedbackCoordinatorFaultReason,
+    FeedbackCoordinatorTimelineHead, NewFeedbackCoordinatorFault,
+};
 pub use feedback_cycle::{
     DriftReportInfo, DriftReportInput, FeedbackCycleActor, FeedbackCycleInfo, FeedbackCycleKey,
     FeedbackCycleKeyInput, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
@@ -152,10 +158,12 @@ pub use feedback_cycle::{
 };
 pub use feedback_scheduler::{
     FeedbackSchedulerClaim, FeedbackSchedulerControl, FeedbackSchedulerLease,
-    FeedbackSchedulerStateInfo, FeedbackSchedulerSuccess, NewFeedbackSchedulerState,
-    cadence_cutoff,
+    FeedbackSchedulerRetry, FeedbackSchedulerStateInfo, FeedbackSchedulerSuccess,
+    NewFeedbackSchedulerState, cadence_cutoff, next_cadence_after,
 };
-pub use feedback_trigger::{FeedbackTriggerEventInfo, NewFeedbackTriggerEvent};
+pub use feedback_trigger::{
+    FeedbackTriggerEventInfo, FeedbackTriggerEventInput, NewFeedbackTriggerEvent,
+};
 pub use governance_audit::{
     ModelGovernanceAuditDetail, ModelGovernanceAuditInfo, NewModelGovernanceAudit,
     NewRoutePromotionAudit,
@@ -250,10 +258,11 @@ pub use research_job::{
 };
 pub use research_readiness::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo};
 pub use resolution_observation::{
-    NewResolutionObservationInbox, ResolutionObservationContractError,
-    ResolutionObservationInboxInfo, ResolutionObservationProjectionInfo,
-    ResolutionProjectionBarrier, ResolutionProjectionClaim, ResolutionProjectionSettlement,
-    ResolutionScanCommitOutcome,
+    NewResolutionObservationInbox, RemediateResolutionProjection,
+    ResolutionObservationContractError, ResolutionObservationInboxInfo,
+    ResolutionObservationProjectionInfo, ResolutionProjectionAttentionItem,
+    ResolutionProjectionBarrier, ResolutionProjectionClaim, ResolutionProjectionRemediationInfo,
+    ResolutionProjectionSettlement, ResolutionRemediationCommit, ResolutionScanCommitOutcome,
 };
 pub use selection::{
     MarketSelectionInfo, MarketSelectionMemberInfo, MarketSelectionModel, NewMarketSelection,

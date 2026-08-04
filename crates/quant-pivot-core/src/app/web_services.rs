@@ -7,8 +7,9 @@ use quant_pivot_models::domain::{
     governance::NewOperationLog,
     ports::{
         CatalogStatusPort, CommittedPolicyApplyPort, DataQualityPort, ExecutionReadPort,
-        ExecutionRecoveryPort, FeatureIntegrityPort, FeedbackMutationPort, FeedbackReadPort,
-        MarketLinkageGovernancePort, ModelCalibrationFitPort, OrderIntentPort, PolicySnapshotPort,
+        ExecutionRecoveryPort, FeatureIntegrityPort, FeedbackActivationReadPort,
+        FeedbackMutationPort, FeedbackReadPort, MarketLinkageGovernancePort,
+        ModelCalibrationFitPort, OrderIntentPort, PasswordCryptoPort, PolicySnapshotPort,
         ReconciliationPort, ResearchJobPort, ResearchReadinessPort, TradePolicyPort,
         TrainingDatasetPort, settlement_control::SettlementControlPort,
     },
@@ -20,9 +21,9 @@ use quant_pivot_repository::{
         CatalogLedgerRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
         EntryConditionRepository, EquitySnapshotRepository, ExecutionAttemptOutcomeRepository,
         ExecutionOrderRepository, FeatureParityEventRepository, FeatureRepository,
-        FeedbackCohortRepository, FeedbackCycleRepository, FeedbackOutboxRepository,
-        FeedbackSchedulerRepository, MenuRepository, OperationLogRepository, OrderIntentRepository,
-        PolicyRepository, PositionRepository, PromotionPermitRepository,
+        FeedbackCycleRepository, FeedbackOutboxRepository, FeedbackSchedulerRepository,
+        MenuRepository, ModelRouteShadowBindingRepository, OperationLogRepository,
+        OrderIntentRepository, PolicyRepository, PositionRepository, PromotionPermitRepository,
         RecommendationExecutionRollupRepository, RecommendationReportRepository,
         RecommendationRepository, ReconciliationRepository, ReportRunRepository,
         ResolutionObservationRepository, RoleMenuRepository, RolePermissionRepository,
@@ -72,6 +73,7 @@ use crate::{
         feature_integrity::{CatalogFeatureIntegrityCoverage, FeatureIntegrityService},
         feedback_coordinator::FeedbackCoordinatorWake,
         model_calibration_fit::ModelCalibrationFitService,
+        password_crypto::PasswordCryptoService,
         research_readiness::ResearchReadinessEvidenceService,
         trade_policy::{TradePolicyService, TradePolicyServiceDeps},
     },
@@ -172,6 +174,11 @@ async fn build_app_state(
     let trade_policy_dataset_builder =
         Arc::clone(&research_ports.training_datasets) as Arc<dyn TrainingDatasetPort>;
     let research_readiness = Arc::clone(&ctx.research.research_readiness);
+    let feedback_mutation = build_feedback_mutation(
+        ctx,
+        Arc::clone(&research_ports.training_datasets),
+        feedback_wake,
+    );
 
     Ok(AppState {
         deploy: Arc::clone(&ctx.config),
@@ -179,6 +186,7 @@ async fn build_app_state(
         committed_policy_apply: Arc::clone(&ctx.governance.committed_policy)
             as Arc<dyn CommittedPolicyApplyPort>,
         jwt: auth.jwt,
+        password_crypto: auth.password_crypto,
         jwt_blacklist: Arc::clone(&ctx.infra.jwt_blacklist),
         users: Arc::clone(&repos.user) as Arc<dyn UserRepository>,
         roles: Arc::clone(&repos.role) as Arc<dyn RoleRepository>,
@@ -236,24 +244,13 @@ async fn build_app_state(
                 as Arc<dyn ExecutionAttemptOutcomeRepository>,
             rollups: Arc::clone(&repos.recommendation_execution_rollup)
                 as Arc<dyn RecommendationExecutionRollupRepository>,
+            shadow_bindings: Arc::clone(&repos.model_route_shadow_binding)
+                as Arc<dyn ModelRouteShadowBindingRepository>,
             decisions: Arc::clone(&ctx.research.feedback_decisions),
+            activations: Arc::clone(&feedback_mutation) as Arc<dyn FeedbackActivationReadPort>,
         })) as Arc<dyn FeedbackReadPort>,
         feedback_outbox: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackOutboxRepository>,
-        feedback_mutation: Arc::new(CoreFeedbackMutationPort::new(CoreFeedbackMutationDeps {
-            cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
-            scheduler: Arc::clone(&repos.feedback_scheduler)
-                as Arc<dyn FeedbackSchedulerRepository>,
-            permits: Arc::clone(&repos.promotion_permit) as Arc<dyn PromotionPermitRepository>,
-            permit_service: Arc::clone(&ctx.governance.promotion_permits),
-            promotion_preflight: Arc::clone(&ctx.research.promotion_preflight),
-            serving_preimages: Arc::clone(&ctx.research.serving_preimages),
-            serving_generations: Arc::clone(&ctx.research.serving_generations),
-            route_governance: Arc::clone(&ctx.research.model_route_governance),
-            training_datasets: Arc::clone(&research_ports.training_datasets),
-            feedback_wake,
-            shutdown: ctx.shutdown.clone(),
-            metrics: Arc::clone(&ctx.infra.metrics),
-        })) as Arc<dyn FeedbackMutationPort>,
+        feedback_mutation: feedback_mutation as Arc<dyn FeedbackMutationPort>,
         feature_integrity: (ctx).build_feature_integrity(),
         calibration_artifacts: Arc::clone(&ctx.research.calibration_artifact_fit),
         model_calibration_fit: research_ports.model_calibration_fit
@@ -312,6 +309,30 @@ async fn build_app_state(
     })
 }
 
+fn build_feedback_mutation(
+    ctx: &AppContext,
+    training_datasets: Arc<CoreTrainingDatasetPort>,
+    feedback_wake: FeedbackCoordinatorWake,
+) -> Arc<CoreFeedbackMutationPort> {
+    let repos = &ctx.infra.repos;
+    Arc::new(CoreFeedbackMutationPort::new(CoreFeedbackMutationDeps {
+        cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
+        scheduler: Arc::clone(&repos.feedback_scheduler) as Arc<dyn FeedbackSchedulerRepository>,
+        permits: Arc::clone(&repos.promotion_permit) as Arc<dyn PromotionPermitRepository>,
+        permit_service: Arc::clone(&ctx.governance.promotion_permits),
+        promotion_preflight: Arc::clone(&ctx.research.promotion_preflight),
+        serving_preimages: Arc::clone(&ctx.research.serving_preimages),
+        serving_generations: Arc::clone(&ctx.research.serving_generations),
+        route_governance: Arc::clone(&ctx.research.model_route_governance),
+        resolutions: Arc::clone(&repos.resolution_observation)
+            as Arc<dyn ResolutionObservationRepository>,
+        training_datasets,
+        feedback_wake,
+        shutdown: ctx.shutdown.clone(),
+        metrics: Arc::clone(&ctx.infra.metrics),
+    }))
+}
+
 fn build_trade_policy_port(
     ctx: &AppContext,
     dataset_builder: Arc<dyn TrainingDatasetPort>,
@@ -350,6 +371,7 @@ impl AppContext {
 struct WebAuthServices {
     casbin: Arc<CasbinService>,
     jwt: Arc<JwtService>,
+    password_crypto: Arc<dyn PasswordCryptoPort>,
     perm_checker: Arc<PermChecker>,
 }
 
@@ -372,9 +394,14 @@ impl AppContext {
                 detail: error.to_string(),
             })?,
         );
+        let password_crypto = Arc::new(
+            PasswordCryptoService::new(Arc::clone(&self.compute), &self.config.web.password_crypto)
+                .await?,
+        ) as Arc<dyn PasswordCryptoPort>;
         Ok(WebAuthServices {
             casbin,
             jwt,
+            password_crypto,
             perm_checker,
         })
     }
@@ -482,7 +509,6 @@ impl AppContext {
                 &self.research,
                 Arc::clone(&runtime_config),
                 Arc::clone(&bias_table),
-                Arc::clone(&self.infra.repos.feedback_cohort) as Arc<dyn FeedbackCohortRepository>,
                 self.config.quant.research_jobs.max_spine_samples,
                 self.config.quant.research_jobs.plan_sample_slices,
                 self.config.quant.research_jobs.plan_sample_markets,

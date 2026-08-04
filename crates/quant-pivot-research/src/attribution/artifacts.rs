@@ -8,7 +8,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         Bps, ContentHash, FeedbackCycleId, MarketId, ModelVersionId, OrderIntentId,
-        OutcomeTokenBinding, Price, RecommendationId, TokenId,
+        OutcomeTokenBinding, Price, RecommendationId, Shares, TokenId, Usd,
         factor::{FactorAlphaOrientation, FactorOutputSemantics, FactorServingPlane},
     },
 };
@@ -31,18 +31,15 @@ const ASSOCIATION_RESOLUTIONS_DOMAIN: &str = "quant-pivot/attribution-resolution
 const ASSOCIATION_EXECUTIONS_DOMAIN: &str = "quant-pivot/attribution-execution-set";
 const ASSOCIATION_VERSION: u32 = 1;
 const DECISION_INTERVENTION_DOMAIN: &str = "quant-pivot/decision-intervention-policy";
-const DECISION_DEPENDENCY_DOMAIN: &str = "quant-pivot/decision-dependency-graph";
+const DECISION_GRAPH_CONTRACT_DOMAIN: &str = "quant-pivot/decision-computation-graph-contract";
+const DECISION_GRAPH_DOMAIN: &str = "quant-pivot/decision-computation-graph";
+const DECISION_GRAPH_NODE_DOMAIN: &str = "quant-pivot/decision-computation-node";
 const DECISION_UNIVERSE_DOMAIN: &str = "quant-pivot/decision-candidate-universe";
-const DECISION_VERSION: u32 = 2;
+const DECISION_VERSION: u32 = 3;
 const DECISION_INTERVENTION_POLICY: &str =
-    "versioned_encoded_input_intervention_replay_model_economics_rank_topn_v2";
-const DECISION_DEPENDENCY_NODES: [&str; 5] = [
-    "composite_score",
-    "economic_projection",
-    "model_output",
-    "model_rank",
-    "model_top_n",
-];
+    "feature_specific_domain_admissible_in_support_intervention_replay_v3";
+const DECISION_GRAPH_CONTRACT: &str =
+    "feature_transform_model_output_calibration_composite_rank_top_n_decision_v1";
 
 fn invalid(detail: impl Into<String>) -> QuantError {
     ResearchError::InvalidModelArtifact {
@@ -397,17 +394,7 @@ impl PredictionExplanationArtifact {
     }
 }
 
-/// One admissible intervention and the dependency closure it invalidates.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CounterfactualIntervention {
-    pub input_name: String,
-    pub observed_value: Decimal,
-    pub intervened_value: Decimal,
-    pub affected_nodes: Vec<String>,
-}
-
-/// Candidate score used by deterministic rank/TopN replay.
+/// Candidate identity used by deterministic rank/TopN replay.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionCandidateKey {
@@ -424,13 +411,235 @@ pub struct DecisionCandidateScore {
     pub confidence: Decimal,
 }
 
+/// Semantic role of one node in the persisted decision computation graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionGraphNodeKind {
+    FeatureInput,
+    Transform,
+    ModelOutput,
+    CalibrationComposite,
+    Rank,
+    TopN,
+    Decision,
+}
+
+/// One content-bound node in the exact computation graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionGraphNode {
+    pub node_id: String,
+    pub kind: DecisionGraphNodeKind,
+    pub input_name: Option<String>,
+    pub contract_hash: ContentHash,
+}
+
+/// One directed dependency edge in the exact computation graph.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionGraphEdge {
+    pub from_node_id: String,
+    pub to_node_id: String,
+}
+
+/// Exact directed path invalidated by one evaluated feature intervention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionGraphPath {
+    pub node_ids: Vec<String>,
+}
+
+/// Persisted directed graph from governed feature input to final decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionComputationGraph {
+    pub contract_hash: ContentHash,
+    pub nodes: Vec<DecisionGraphNode>,
+    pub edges: Vec<DecisionGraphEdge>,
+    pub graph_hash: ContentHash,
+}
+
+#[derive(Serialize)]
+struct DecisionGraphNodePreimage<'a> {
+    kind: DecisionGraphNodeKind,
+    node_id: &'a str,
+    binding_hashes: &'a [ContentHash],
+}
+
+#[derive(Serialize)]
+struct DecisionGraphPreimage<'a> {
+    contract_hash: ContentHash,
+    nodes: &'a [DecisionGraphNode],
+    edges: &'a [DecisionGraphEdge],
+}
+
+impl DecisionComputationGraph {
+    fn try_new(
+        input_names: &[String],
+        model_artifact_hash: ContentHash,
+        input_contract_hash: ContentHash,
+        input_transform_hash: ContentHash,
+        policy: &DecisionReplayPolicy,
+    ) -> QuantResult<Self> {
+        let mut names = input_names.to_vec();
+        names.sort();
+        if names.is_empty()
+            || names.iter().any(|name| name.trim().is_empty())
+            || !strictly_sorted(&names)
+        {
+            return Err(invalid_method(
+                "decision computation graph requires non-empty unique feature inputs",
+            ));
+        }
+        let contract_hash = DecisionReplayPolicy::graph_contract_hash()?;
+        let mut nodes = Vec::with_capacity(names.len().saturating_mul(2).saturating_add(5));
+        let mut edges = Vec::with_capacity(names.len().saturating_mul(2).saturating_add(4));
+        for input_name in &names {
+            let feature_id = Self::feature_id(input_name);
+            let transform_id = Self::transform_id(input_name);
+            nodes.push(Self::node(
+                feature_id.clone(),
+                DecisionGraphNodeKind::FeatureInput,
+                Some(input_name.clone()),
+                &[input_contract_hash],
+            )?);
+            nodes.push(Self::node(
+                transform_id.clone(),
+                DecisionGraphNodeKind::Transform,
+                Some(input_name.clone()),
+                &[input_transform_hash],
+            )?);
+            edges.push(DecisionGraphEdge {
+                from_node_id: feature_id,
+                to_node_id: transform_id.clone(),
+            });
+            edges.push(DecisionGraphEdge {
+                from_node_id: transform_id,
+                to_node_id: "model_output".to_owned(),
+            });
+        }
+        nodes.extend([
+            Self::node(
+                "model_output".to_owned(),
+                DecisionGraphNodeKind::ModelOutput,
+                None,
+                &[model_artifact_hash],
+            )?,
+            Self::node(
+                "calibration_composite".to_owned(),
+                DecisionGraphNodeKind::CalibrationComposite,
+                None,
+                &[model_artifact_hash, policy.policy_hash],
+            )?,
+            Self::node(
+                "rank".to_owned(),
+                DecisionGraphNodeKind::Rank,
+                None,
+                &[policy.policy_hash, policy.candidate_universe_hash],
+            )?,
+            Self::node(
+                "top_n".to_owned(),
+                DecisionGraphNodeKind::TopN,
+                None,
+                &[policy.policy_hash, policy.candidate_universe_hash],
+            )?,
+            Self::node(
+                "decision".to_owned(),
+                DecisionGraphNodeKind::Decision,
+                None,
+                &[policy.policy_hash, policy.candidate_universe_hash],
+            )?,
+        ]);
+        edges.extend([
+            DecisionGraphEdge {
+                from_node_id: "model_output".to_owned(),
+                to_node_id: "calibration_composite".to_owned(),
+            },
+            DecisionGraphEdge {
+                from_node_id: "calibration_composite".to_owned(),
+                to_node_id: "rank".to_owned(),
+            },
+            DecisionGraphEdge {
+                from_node_id: "rank".to_owned(),
+                to_node_id: "top_n".to_owned(),
+            },
+            DecisionGraphEdge {
+                from_node_id: "top_n".to_owned(),
+                to_node_id: "decision".to_owned(),
+            },
+        ]);
+        nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        edges.sort();
+        let graph_hash = CanonicalDigest::content_hash_typed(
+            DECISION_GRAPH_DOMAIN,
+            DECISION_VERSION,
+            &DecisionGraphPreimage {
+                contract_hash,
+                nodes: &nodes,
+                edges: &edges,
+            },
+        )?;
+        Ok(Self {
+            contract_hash,
+            nodes,
+            edges,
+            graph_hash,
+        })
+    }
+
+    fn node(
+        node_id: String,
+        kind: DecisionGraphNodeKind,
+        input_name: Option<String>,
+        binding_hashes: &[ContentHash],
+    ) -> QuantResult<DecisionGraphNode> {
+        let contract_hash = CanonicalDigest::content_hash_typed(
+            DECISION_GRAPH_NODE_DOMAIN,
+            DECISION_VERSION,
+            &DecisionGraphNodePreimage {
+                kind,
+                node_id: &node_id,
+                binding_hashes,
+            },
+        )?;
+        Ok(DecisionGraphNode {
+            node_id,
+            kind,
+            input_name,
+            contract_hash,
+        })
+    }
+
+    fn path(input_name: &str) -> DecisionGraphPath {
+        DecisionGraphPath {
+            node_ids: vec![
+                Self::feature_id(input_name),
+                Self::transform_id(input_name),
+                "model_output".to_owned(),
+                "calibration_composite".to_owned(),
+                "rank".to_owned(),
+                "top_n".to_owned(),
+                "decision".to_owned(),
+            ],
+        }
+    }
+
+    fn feature_id(input_name: &str) -> String {
+        format!("feature:{input_name}")
+    }
+
+    fn transform_id(input_name: &str) -> String {
+        format!("transform:{input_name}")
+    }
+}
+
 /// Versioned rank and selection policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionReplayPolicy {
     pub policy_hash: ContentHash,
     pub admissible_intervention_policy_hash: ContentHash,
-    pub dependency_graph_hash: ContentHash,
+    pub computation_graph_contract_hash: ContentHash,
     pub candidate_universe_hash: ContentHash,
     pub candidate_score_floor: Decimal,
     pub minimum_confidence: Decimal,
@@ -438,9 +647,13 @@ pub struct DecisionReplayPolicy {
 }
 
 impl DecisionReplayPolicy {
-    #[must_use]
-    pub const fn affected_nodes() -> &'static [&'static str] {
-        &DECISION_DEPENDENCY_NODES
+    pub fn graph_contract_hash() -> QuantResult<ContentHash> {
+        CanonicalDigest::content_hash_typed(
+            DECISION_GRAPH_CONTRACT_DOMAIN,
+            DECISION_VERSION,
+            &DECISION_GRAPH_CONTRACT,
+        )
+        .map_err(Into::into)
     }
 
     pub fn try_new(
@@ -473,11 +686,7 @@ impl DecisionReplayPolicy {
                 DECISION_VERSION,
                 &DECISION_INTERVENTION_POLICY,
             )?,
-            dependency_graph_hash: CanonicalDigest::content_hash_typed(
-                DECISION_DEPENDENCY_DOMAIN,
-                DECISION_VERSION,
-                &DECISION_DEPENDENCY_NODES,
-            )?,
+            computation_graph_contract_hash: Self::graph_contract_hash()?,
             candidate_universe_hash: CanonicalDigest::content_hash_typed(
                 DECISION_UNIVERSE_DOMAIN,
                 DECISION_VERSION,
@@ -495,9 +704,10 @@ impl DecisionReplayPolicy {
         if self.top_n == 0
             || !(Decimal::ZERO..=Decimal::ONE).contains(&self.candidate_score_floor)
             || !(Decimal::ZERO..=Decimal::ONE).contains(&self.minimum_confidence)
+            || self.computation_graph_contract_hash != Self::graph_contract_hash()?
         {
             return Err(invalid_method(
-                "decision counterfactual floors must be in [0, 1] and top_n must be positive",
+                "decision replay policy has invalid floors, top_n, or computation graph contract",
             ));
         }
         Ok(())
@@ -509,53 +719,150 @@ impl DecisionReplayPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionReplayScope {
-    AdmittedModelRankTopN,
+    ModelOutputThroughDecision,
 }
 
-/// Result of replaying score, rank, `TopN`, and decision.
+/// Result of replaying composite score, rank, `TopN`, and the final gate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionReplay {
-    pub score: Decimal,
+    pub model_output: Decimal,
+    pub composite_score: Decimal,
     pub rank: u32,
-    pub model_top_n_selected: bool,
+    pub top_n_selected: bool,
+    pub decision_selected: bool,
 }
 
-/// Immutable model/policy counterfactual. It is deliberately not named or
+/// Frozen admissible interval for one model-ready feature input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionInterventionSupport {
+    pub minimum: Decimal,
+    pub maximum: Decimal,
+}
+
+impl DecisionInterventionSupport {
+    pub fn try_new(minimum: Decimal, maximum: Decimal) -> QuantResult<Self> {
+        if minimum > maximum {
+            return Err(invalid_method(
+                "decision intervention support minimum exceeds maximum",
+            ));
+        }
+        Ok(Self { minimum, maximum })
+    }
+
+    #[must_use]
+    pub fn contains(self, value: Decimal) -> bool {
+        (self.minimum..=self.maximum).contains(&value)
+    }
+}
+
+/// Typed reason why a proposed feature intervention was not replayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionInterventionNotEvaluableReason {
+    MissingObservedValue,
+    NoMaterialModelContribution,
+    ObservedValueOutOfSupport,
+    ProposedValueOutOfSupport,
+    NoMaterialInputChange,
+    DeadbandWouldSuppressDecision,
+    OutcomeSideFlipNotAdmissible,
+    ProjectionNotAdmissible,
+    TokenSideFlipNotAdmissible,
+    NoMaterialDecisionChange,
+}
+
+/// Materializer result used to construct one immutable intervention outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionInterventionEvaluation {
+    Evaluated {
+        intervened_model_output: Decimal,
+        intervened_composite_score: Decimal,
+    },
+    NotEvaluable {
+        reason: DecisionInterventionNotEvaluableReason,
+    },
+}
+
+/// Complete materializer input for one feature-specific intervention attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionInterventionAttempt {
+    pub input_name: String,
+    pub model_contribution: Decimal,
+    pub observed_value: Option<Decimal>,
+    pub proposed_value: Option<Decimal>,
+    pub support: DecisionInterventionSupport,
+    pub evaluation: DecisionInterventionEvaluation,
+}
+
+/// Persisted result for one feature-specific intervention attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum DecisionInterventionOutcome {
+    Evaluated {
+        affected_paths: Vec<DecisionGraphPath>,
+        replay: DecisionReplay,
+    },
+    NotEvaluable {
+        reason: DecisionInterventionNotEvaluableReason,
+    },
+}
+
+/// One persisted intervention and its domain/support audit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionIntervention {
+    pub input_name: String,
+    pub model_contribution: Decimal,
+    pub observed_value: Option<Decimal>,
+    pub proposed_value: Option<Decimal>,
+    pub support: DecisionInterventionSupport,
+    pub outcome: DecisionInterventionOutcome,
+}
+
+/// Immutable model-to-decision intervention replay. This is deliberately not
 /// represented as a causal effect on the real world.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DecisionCounterfactualArtifact {
+pub struct DecisionInterventionReplayArtifact {
     pub lineage: AttributionLineage,
     pub model_version_id: ModelVersionId,
     pub recommendation_id: RecommendationId,
     pub target_key: DecisionCandidateKey,
     pub prediction_explanation_hash: ContentHash,
+    pub model_artifact_hash: ContentHash,
+    pub input_contract_hash: ContentHash,
+    pub input_transform_hash: ContentHash,
     pub scope: DecisionReplayScope,
     pub policy: DecisionReplayPolicy,
-    pub interventions: Vec<CounterfactualIntervention>,
+    pub candidate_universe: Vec<DecisionCandidateScore>,
+    pub computation_graph: DecisionComputationGraph,
     pub baseline: DecisionReplay,
-    pub counterfactual: DecisionReplay,
+    pub interventions: Vec<DecisionIntervention>,
 }
 
-/// Complete input to one deterministic decision counterfactual replay.
+/// Complete input to one deterministic model-to-decision intervention replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecisionCounterfactualInput {
+pub struct DecisionInterventionReplayInput {
     pub lineage: AttributionLineage,
     pub model_version_id: ModelVersionId,
     pub recommendation_id: RecommendationId,
     pub target_key: DecisionCandidateKey,
     pub prediction_explanation_hash: ContentHash,
+    pub model_artifact_hash: ContentHash,
+    pub input_contract_hash: ContentHash,
+    pub input_transform_hash: ContentHash,
     pub policy: DecisionReplayPolicy,
-    pub interventions: Vec<CounterfactualIntervention>,
+    pub interventions: Vec<DecisionInterventionAttempt>,
+    pub baseline_model_output: Decimal,
     pub baseline_score: Decimal,
-    pub counterfactual_score: Decimal,
     pub target_confidence: Decimal,
     pub peer_scores: Vec<DecisionCandidateScore>,
 }
 
-impl DecisionCounterfactualArtifact {
-    pub fn replay(input: DecisionCounterfactualInput) -> QuantResult<Self> {
+impl DecisionInterventionReplayArtifact {
+    pub fn replay(input: DecisionInterventionReplayInput) -> QuantResult<Self> {
         input.policy.validate()?;
         let mut universe = input.peer_scores.clone();
         universe.push(DecisionCandidateScore {
@@ -579,21 +886,20 @@ impl DecisionCounterfactualArtifact {
             DECISION_VERSION,
             &DECISION_INTERVENTION_POLICY,
         )?;
-        let expected_dependency = CanonicalDigest::content_hash_typed(
-            DECISION_DEPENDENCY_DOMAIN,
-            DECISION_VERSION,
-            &DECISION_DEPENDENCY_NODES,
-        )?;
+        let expected_graph_contract = DecisionReplayPolicy::graph_contract_hash()?;
         let required_lineage = [
             input.prediction_explanation_hash,
+            input.model_artifact_hash,
+            input.input_contract_hash,
+            input.input_transform_hash,
             input.policy.policy_hash,
             input.policy.admissible_intervention_policy_hash,
-            input.policy.dependency_graph_hash,
+            input.policy.computation_graph_contract_hash,
             input.policy.candidate_universe_hash,
         ];
         if input.policy.candidate_universe_hash != expected_universe
             || input.policy.admissible_intervention_policy_hash != expected_intervention
-            || input.policy.dependency_graph_hash != expected_dependency
+            || input.policy.computation_graph_contract_hash != expected_graph_contract
             || required_lineage.iter().any(|hash| {
                 input
                     .lineage
@@ -603,34 +909,77 @@ impl DecisionCounterfactualArtifact {
             })
         {
             return Err(invalid_method(
-                "decision replay policy, universe, dependency graph, or lineage is inconsistent",
+                "decision replay policy, universe, computation graph, or lineage is inconsistent",
             ));
         }
+        let mut attempts = input.interventions;
+        attempts.sort_by(|left, right| left.input_name.cmp(&right.input_name));
+        let input_names = attempts
+            .iter()
+            .map(|attempt| attempt.input_name.clone())
+            .collect::<Vec<_>>();
+        let computation_graph = DecisionComputationGraph::try_new(
+            &input_names,
+            input.model_artifact_hash,
+            input.input_contract_hash,
+            input.input_transform_hash,
+            &input.policy,
+        )?;
         let baseline = replay_decision(
             &input.target_key,
+            input.baseline_model_output,
             input.baseline_score,
             input.target_confidence,
             &input.peer_scores,
             &input.policy,
         )?;
-        let counterfactual = replay_decision(
-            &input.target_key,
-            input.counterfactual_score,
-            input.target_confidence,
-            &input.peer_scores,
-            &input.policy,
-        )?;
+        let interventions = attempts
+            .into_iter()
+            .map(|attempt| {
+                let outcome = match attempt.evaluation {
+                    DecisionInterventionEvaluation::Evaluated {
+                        intervened_model_output,
+                        intervened_composite_score,
+                    } => DecisionInterventionOutcome::Evaluated {
+                        affected_paths: vec![DecisionComputationGraph::path(&attempt.input_name)],
+                        replay: replay_decision(
+                            &input.target_key,
+                            intervened_model_output,
+                            intervened_composite_score,
+                            input.target_confidence,
+                            &input.peer_scores,
+                            &input.policy,
+                        )?,
+                    },
+                    DecisionInterventionEvaluation::NotEvaluable { reason } => {
+                        DecisionInterventionOutcome::NotEvaluable { reason }
+                    }
+                };
+                Ok(DecisionIntervention {
+                    input_name: attempt.input_name,
+                    model_contribution: attempt.model_contribution,
+                    observed_value: attempt.observed_value,
+                    proposed_value: attempt.proposed_value,
+                    support: attempt.support,
+                    outcome,
+                })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
         let artifact = Self {
             lineage: input.lineage,
             model_version_id: input.model_version_id,
             recommendation_id: input.recommendation_id,
             target_key: input.target_key,
             prediction_explanation_hash: input.prediction_explanation_hash,
-            scope: DecisionReplayScope::AdmittedModelRankTopN,
+            model_artifact_hash: input.model_artifact_hash,
+            input_contract_hash: input.input_contract_hash,
+            input_transform_hash: input.input_transform_hash,
+            scope: DecisionReplayScope::ModelOutputThroughDecision,
             policy: input.policy,
-            interventions: input.interventions,
+            candidate_universe: universe,
+            computation_graph,
             baseline,
-            counterfactual,
+            interventions,
         };
         artifact.validate()?;
         Ok(artifact)
@@ -639,24 +988,192 @@ impl DecisionCounterfactualArtifact {
     pub fn validate(&self) -> QuantResult<()> {
         self.lineage.validate()?;
         self.policy.validate()?;
-        if self.scope != DecisionReplayScope::AdmittedModelRankTopN || self.interventions.is_empty()
+        if self.scope != DecisionReplayScope::ModelOutputThroughDecision
+            || self.interventions.is_empty()
         {
             return Err(invalid_method(
-                "decision counterfactual requires an admissible intervention",
+                "decision intervention replay requires at least one feature attempt",
             ));
         }
-        let mut names = BTreeSet::new();
+        self.validate_universe()?;
+        let target = self
+            .candidate_universe
+            .iter()
+            .find(|candidate| candidate.key == self.target_key)
+            .ok_or_else(|| invalid_method("decision replay universe omitted its target"))?;
+        let peers = self
+            .candidate_universe
+            .iter()
+            .filter(|candidate| candidate.key != self.target_key)
+            .cloned()
+            .collect::<Vec<_>>();
+        if self.baseline
+            != replay_decision(
+                &self.target_key,
+                self.baseline.model_output,
+                target.score,
+                target.confidence,
+                &peers,
+                &self.policy,
+            )?
+        {
+            return Err(invalid_method(
+                "decision replay baseline differs from its candidate universe",
+            ));
+        }
+        self.validate_lineage()?;
         for intervention in &self.interventions {
-            if intervention.input_name.trim().is_empty()
-                || intervention.observed_value == intervention.intervened_value
-                || intervention.affected_nodes.is_empty()
-                || !strictly_sorted(&intervention.affected_nodes)
-                || !names.insert(intervention.input_name.as_str())
-            {
+            DecisionInterventionSupport::try_new(
+                intervention.support.minimum,
+                intervention.support.maximum,
+            )?;
+            let observed_in_support = intervention
+                .observed_value
+                .is_some_and(|value| intervention.support.contains(value));
+            let proposed_in_support = intervention
+                .proposed_value
+                .is_some_and(|value| intervention.support.contains(value));
+            match &intervention.outcome {
+                DecisionInterventionOutcome::Evaluated {
+                    affected_paths,
+                    replay,
+                } => {
+                    if intervention.model_contribution.is_zero()
+                        || !observed_in_support
+                        || !proposed_in_support
+                        || intervention.observed_value == intervention.proposed_value
+                        || affected_paths
+                            != &[DecisionComputationGraph::path(&intervention.input_name)]
+                        || replay
+                            != &replay_decision(
+                                &self.target_key,
+                                replay.model_output,
+                                replay.composite_score,
+                                target.confidence,
+                                &peers,
+                                &self.policy,
+                            )?
+                    {
+                        return Err(invalid_method(
+                            "evaluated intervention is not domain-admissible or replay-exact",
+                        ));
+                    }
+                }
+                DecisionInterventionOutcome::NotEvaluable { reason } => {
+                    let valid_reason = match reason {
+                        DecisionInterventionNotEvaluableReason::MissingObservedValue => {
+                            intervention.observed_value.is_none()
+                        }
+                        DecisionInterventionNotEvaluableReason::NoMaterialModelContribution => {
+                            intervention.model_contribution.is_zero()
+                        }
+                        DecisionInterventionNotEvaluableReason::ObservedValueOutOfSupport => {
+                            intervention.observed_value.is_some() && !observed_in_support
+                        }
+                        DecisionInterventionNotEvaluableReason::ProposedValueOutOfSupport => {
+                            intervention.proposed_value.is_some() && !proposed_in_support
+                        }
+                        DecisionInterventionNotEvaluableReason::NoMaterialInputChange => {
+                            intervention.observed_value.is_some()
+                                && intervention.observed_value == intervention.proposed_value
+                        }
+                        DecisionInterventionNotEvaluableReason::DeadbandWouldSuppressDecision
+                        | DecisionInterventionNotEvaluableReason::OutcomeSideFlipNotAdmissible
+                        | DecisionInterventionNotEvaluableReason::ProjectionNotAdmissible
+                        | DecisionInterventionNotEvaluableReason::TokenSideFlipNotAdmissible
+                        | DecisionInterventionNotEvaluableReason::NoMaterialDecisionChange => {
+                            !intervention.model_contribution.is_zero()
+                                && observed_in_support
+                                && proposed_in_support
+                                && intervention.observed_value != intervention.proposed_value
+                        }
+                    };
+                    if !valid_reason {
+                        return Err(invalid_method(
+                            "not-evaluable intervention reason contradicts its frozen inputs",
+                        ));
+                    }
+                }
+            }
+            if intervention.input_name.trim().is_empty() {
                 return Err(invalid_method(
-                    "counterfactual interventions must be unique, material, and dependency-complete",
+                    "decision intervention input name must not be empty",
                 ));
             }
+        }
+        Ok(())
+    }
+
+    fn validate_universe(&self) -> QuantResult<()> {
+        if self.candidate_universe.is_empty()
+            || self.candidate_universe.windows(2).any(|pair| {
+                pair[0].score < pair[1].score
+                    || (pair[0].score == pair[1].score && pair[0].key >= pair[1].key)
+            })
+            || self.candidate_universe.iter().any(|candidate| {
+                !(Decimal::ZERO..=Decimal::ONE).contains(&candidate.score)
+                    || !(Decimal::ZERO..=Decimal::ONE).contains(&candidate.confidence)
+            })
+        {
+            return Err(invalid_method(
+                "decision replay candidate universe must be unique and canonically ranked",
+            ));
+        }
+        let expected = CanonicalDigest::content_hash_typed(
+            DECISION_UNIVERSE_DOMAIN,
+            DECISION_VERSION,
+            &self.candidate_universe,
+        )?;
+        if self.policy.candidate_universe_hash != expected {
+            return Err(invalid_method(
+                "decision replay candidate universe differs from its policy binding",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_lineage(&self) -> QuantResult<()> {
+        let required = [
+            self.prediction_explanation_hash,
+            self.model_artifact_hash,
+            self.input_contract_hash,
+            self.input_transform_hash,
+            self.policy.policy_hash,
+            self.policy.admissible_intervention_policy_hash,
+            self.policy.computation_graph_contract_hash,
+            self.policy.candidate_universe_hash,
+        ];
+        if required.iter().any(|hash| {
+            self.lineage
+                .source_evidence_hashes
+                .binary_search(hash)
+                .is_err()
+        }) {
+            return Err(invalid_method(
+                "decision replay lineage omits an exact model, policy, or graph contract",
+            ));
+        }
+        let names = self
+            .interventions
+            .iter()
+            .map(|intervention| intervention.input_name.clone())
+            .collect::<Vec<_>>();
+        if !strictly_sorted(&names) {
+            return Err(invalid_method(
+                "decision intervention attempts must be unique and sorted",
+            ));
+        }
+        let expected = DecisionComputationGraph::try_new(
+            &names,
+            self.model_artifact_hash,
+            self.input_contract_hash,
+            self.input_transform_hash,
+            &self.policy,
+        )?;
+        if self.computation_graph != expected {
+            return Err(invalid_method(
+                "decision computation graph differs from its exact contracts",
+            ));
         }
         Ok(())
     }
@@ -672,7 +1189,7 @@ pub enum AssociationInterpretation {
 /// Outcome variable used by one association analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OutcomeAssociationTarget {
+pub enum ResolutionOutcomeAssociationTarget {
     FinalTokenPayoutRatio,
 }
 
@@ -689,27 +1206,48 @@ pub struct AssociationEstimate {
     pub sample_count: u64,
 }
 
+fn validate_estimates(
+    estimates: &[AssociationEstimate],
+    included_recommendation_count: u64,
+) -> QuantResult<()> {
+    let mut names = BTreeSet::new();
+    for estimate in estimates {
+        if estimate.input_name.trim().is_empty()
+            || !names.insert(estimate.input_name.as_str())
+            || estimate.sample_count != included_recommendation_count
+            || estimate.standard_error < Decimal::ZERO
+            || !(Decimal::ZERO..Decimal::ONE).contains(&estimate.confidence_level)
+            || estimate.confidence_interval_low > estimate.estimate
+            || estimate.confidence_interval_high < estimate.estimate
+        {
+            return Err(invalid_method(
+                "outcome association estimate has invalid uncertainty or cohort binding",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Cohort-level association between model explanations and final outcome truth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OutcomeAssociationArtifact {
+pub struct ResolutionOutcomeAssociationArtifact {
     pub lineage: AttributionLineage,
     pub model_version_id: ModelVersionId,
     pub interpretation: AssociationInterpretation,
-    pub target: OutcomeAssociationTarget,
+    pub target: ResolutionOutcomeAssociationTarget,
     pub estimator_contract_hash: ContentHash,
     pub conditioning_policy_hash: ContentHash,
     pub cohort_manifest_hash: ContentHash,
     pub explanation_set_hash: ContentHash,
     pub resolution_set_hash: ContentHash,
-    pub execution_rollup_set_hash: ContentHash,
     pub included_recommendation_count: u64,
     pub estimates: Vec<AssociationEstimate>,
 }
 
 /// One mature recommendation admitted to a conditional association estimate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutcomeAssociationSample {
+pub struct ResolutionOutcomeAssociationSample {
     pub recommendation_id: RecommendationId,
     pub explanation_hash: ContentHash,
     pub outcome_hash: ContentHash,
@@ -719,96 +1257,106 @@ pub struct OutcomeAssociationSample {
 
 /// Complete immutable preimage for one cohort-level association artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutcomeAssociationInput {
+pub struct ResolutionOutcomeAssociationInput {
     pub lineage: AttributionLineage,
     pub model_version_id: ModelVersionId,
-    pub target: OutcomeAssociationTarget,
+    pub target: ResolutionOutcomeAssociationTarget,
     pub estimator_contract_hash: ContentHash,
     pub conditioning_policy_hash: ContentHash,
     pub cohort_manifest_hash: ContentHash,
     pub explanation_set_hash: ContentHash,
     pub resolution_set_hash: ContentHash,
-    pub execution_rollup_set_hash: ContentHash,
-    pub samples: Vec<OutcomeAssociationSample>,
+    pub samples: Vec<ResolutionOutcomeAssociationSample>,
 }
 
-impl OutcomeAssociationInput {
-    fn fit_estimates(&self, input_names: Vec<String>) -> QuantResult<Vec<AssociationEstimate>> {
-        let sample_count = u64::try_from(self.samples.len())
-            .map_err(|error| invalid_method(format!("sample count overflow: {error}")))?;
-        let count = Decimal::from(sample_count);
-        let degrees_of_freedom = count - Decimal::from(2_u32);
-        let confidence_level = Decimal::new(95, 2);
-        let z = Decimal::new(1_959_963_984_540_054_i64, 15);
-        let mut estimates = Vec::with_capacity(input_names.len());
-        for (index, input_name) in input_names.into_iter().enumerate() {
-            let x_mean = self
-                .samples
-                .iter()
-                .map(|sample| sample.contributions[index].contribution)
-                .sum::<Decimal>()
-                / count;
-            let y_mean = self
-                .samples
-                .iter()
-                .map(|sample| sample.outcome)
-                .sum::<Decimal>()
-                / count;
-            let sxx = self
-                .samples
-                .iter()
-                .map(|sample| {
-                    let centered = sample.contributions[index].contribution - x_mean;
-                    centered * centered
-                })
-                .sum::<Decimal>();
-            if sxx.is_zero() {
-                continue;
-            }
-            let sxy = self
-                .samples
-                .iter()
-                .map(|sample| {
-                    (sample.contributions[index].contribution - x_mean) * (sample.outcome - y_mean)
-                })
-                .sum::<Decimal>();
-            let estimate = sxy / sxx;
-            let squared_error = self
-                .samples
-                .iter()
-                .map(|sample| {
-                    let fitted =
-                        y_mean + estimate * (sample.contributions[index].contribution - x_mean);
-                    let residual = sample.outcome - fitted;
-                    residual * residual
-                })
-                .sum::<Decimal>();
-            let variance = squared_error / degrees_of_freedom / sxx;
-            let standard_error = variance.sqrt().ok_or_else(|| {
-                invalid_method(format!(
-                    "outcome association `{input_name}` has an invalid variance"
-                ))
-            })?;
-            let margin = z * standard_error;
-            estimates.push(AssociationEstimate {
-                input_name,
-                estimate,
-                standard_error,
-                confidence_level,
-                confidence_interval_low: estimate - margin,
-                confidence_interval_high: estimate + margin,
-                sample_count,
-            });
-        }
-        Ok(estimates)
+trait AssociationRegressionSample {
+    fn outcome(&self) -> Decimal;
+    fn contributions(&self) -> &[PredictionContribution];
+}
+
+impl AssociationRegressionSample for ResolutionOutcomeAssociationSample {
+    fn outcome(&self) -> Decimal {
+        self.outcome
+    }
+
+    fn contributions(&self) -> &[PredictionContribution] {
+        &self.contributions
     }
 }
 
-impl OutcomeAssociationArtifact {
+fn fit_association_estimates(
+    samples: &[impl AssociationRegressionSample],
+    input_names: Vec<String>,
+) -> QuantResult<Vec<AssociationEstimate>> {
+    let sample_count = u64::try_from(samples.len())
+        .map_err(|error| invalid_method(format!("sample count overflow: {error}")))?;
+    let count = Decimal::from(sample_count);
+    let degrees_of_freedom = count - Decimal::from(2_u32);
+    let confidence_level = Decimal::new(95, 2);
+    let z = Decimal::new(1_959_963_984_540_054_i64, 15);
+    let mut estimates = Vec::with_capacity(input_names.len());
+    for (index, input_name) in input_names.into_iter().enumerate() {
+        let x_mean = samples
+            .iter()
+            .map(|sample| sample.contributions()[index].contribution)
+            .sum::<Decimal>()
+            / count;
+        let y_mean = samples
+            .iter()
+            .map(AssociationRegressionSample::outcome)
+            .sum::<Decimal>()
+            / count;
+        let sxx = samples
+            .iter()
+            .map(|sample| {
+                let centered = sample.contributions()[index].contribution - x_mean;
+                centered * centered
+            })
+            .sum::<Decimal>();
+        if sxx.is_zero() {
+            continue;
+        }
+        let sxy = samples
+            .iter()
+            .map(|sample| {
+                (sample.contributions()[index].contribution - x_mean) * (sample.outcome() - y_mean)
+            })
+            .sum::<Decimal>();
+        let estimate = sxy / sxx;
+        let squared_error = samples
+            .iter()
+            .map(|sample| {
+                let fitted =
+                    y_mean + estimate * (sample.contributions()[index].contribution - x_mean);
+                let residual = sample.outcome() - fitted;
+                residual * residual
+            })
+            .sum::<Decimal>();
+        let variance = squared_error / degrees_of_freedom / sxx;
+        let standard_error = variance.sqrt().ok_or_else(|| {
+            invalid_method(format!(
+                "outcome association `{input_name}` has an invalid variance"
+            ))
+        })?;
+        let margin = z * standard_error;
+        estimates.push(AssociationEstimate {
+            input_name,
+            estimate,
+            standard_error,
+            confidence_level,
+            confidence_interval_low: estimate - margin,
+            confidence_interval_high: estimate + margin,
+            sample_count,
+        });
+    }
+    Ok(estimates)
+}
+
+impl ResolutionOutcomeAssociationArtifact {
     /// Fit independent cohort-conditional OLS slopes with classical 95%
     /// uncertainty. The result is descriptive association only; no feature
     /// contribution is multiplied by `PnL` and no causal effect is asserted.
-    pub fn estimate(mut input: OutcomeAssociationInput) -> QuantResult<Self> {
+    pub fn estimate(mut input: ResolutionOutcomeAssociationInput) -> QuantResult<Self> {
         if input.samples.len() < 3 {
             return Err(invalid_method(
                 "outcome association requires at least three mature recommendations",
@@ -861,22 +1409,11 @@ impl OutcomeAssociationArtifact {
             ASSOCIATION_VERSION,
             &resolution_hashes,
         )?;
-        let expected_executions = CanonicalDigest::content_hash_typed(
-            ASSOCIATION_EXECUTIONS_DOMAIN,
-            ASSOCIATION_VERSION,
-            &Vec::<ContentHash>::new(),
-        )?;
-        let required_lineage = [
-            expected_cohort,
-            expected_explanations,
-            expected_resolutions,
-            expected_executions,
-        ];
+        let required_lineage = [expected_cohort, expected_explanations, expected_resolutions];
         if input.estimator_contract_hash != expected_estimator
             || input.cohort_manifest_hash != expected_cohort
             || input.explanation_set_hash != expected_explanations
             || input.resolution_set_hash != expected_resolutions
-            || input.execution_rollup_set_hash != expected_executions
             || required_lineage.iter().any(|hash| {
                 input
                     .lineage
@@ -911,7 +1448,7 @@ impl OutcomeAssociationArtifact {
                 "outcome association explanations do not share one canonical input plane",
             ));
         }
-        let estimates = input.fit_estimates(input_names)?;
+        let estimates = fit_association_estimates(&input.samples, input_names)?;
         let artifact = Self {
             lineage: input.lineage,
             model_version_id: input.model_version_id,
@@ -922,7 +1459,6 @@ impl OutcomeAssociationArtifact {
             cohort_manifest_hash: input.cohort_manifest_hash,
             explanation_set_hash: input.explanation_set_hash,
             resolution_set_hash: input.resolution_set_hash,
-            execution_rollup_set_hash: input.execution_rollup_set_hash,
             included_recommendation_count: u64::try_from(input.samples.len())
                 .map_err(|error| invalid_method(format!("sample count overflow: {error}")))?,
             estimates,
@@ -941,33 +1477,407 @@ impl OutcomeAssociationArtifact {
                 "outcome association requires a multi-observation cohort and non-causal semantics",
             ));
         }
-        let mut names = BTreeSet::new();
-        for estimate in &self.estimates {
-            if estimate.input_name.trim().is_empty()
-                || !names.insert(estimate.input_name.as_str())
-                || estimate.sample_count != self.included_recommendation_count
-                || estimate.standard_error < Decimal::ZERO
-                || !(Decimal::ZERO..Decimal::ONE).contains(&estimate.confidence_level)
-                || estimate.confidence_interval_low > estimate.estimate
-                || estimate.confidence_interval_high < estimate.estimate
-            {
-                return Err(invalid_method(
-                    "outcome association estimate has invalid uncertainty or cohort binding",
-                ));
-            }
+        validate_estimates(&self.estimates, self.included_recommendation_count)
+    }
+}
+
+/// Net execution variable used by one association analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionOutcomeAssociationTarget {
+    RealizedNetPnlUsd,
+}
+
+/// Complete terminal execution rollup identity and economics admitted to an
+/// execution association.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionOutcomeBinding {
+    pub recommendation_id: RecommendationId,
+    pub rollup_hash: ContentHash,
+    pub attempt_set_hash: ContentHash,
+    pub intent_count: i32,
+    pub attempt_count: i32,
+    pub total_filled_shares: Shares,
+    pub total_entry_fee_usd: Option<Usd>,
+    pub total_exit_fee_usd: Option<Usd>,
+    pub total_realized_pnl_usd: Usd,
+    pub terminal_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+}
+
+impl ExecutionOutcomeBinding {
+    fn validate(&self) -> QuantResult<()> {
+        if self.intent_count < 0
+            || self.attempt_count < 0
+            || self.attempt_count > self.intent_count
+            || self.total_filled_shares.is_negative()
+            || self
+                .total_entry_fee_usd
+                .is_some_and(|fee| fee.is_negative())
+            || self.total_exit_fee_usd.is_some_and(|fee| fee.is_negative())
+            || self.terminal_at > self.available_at
+        {
+            return Err(invalid_method(
+                "execution association binding has invalid counts, economics, or timeline",
+            ));
         }
         Ok(())
     }
 }
 
-/// One PIT executable-price observation used by an attempt trajectory.
+/// One terminal execution rollup admitted to a non-causal association.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionOutcomeAssociationSample {
+    pub explanation_hash: ContentHash,
+    pub binding: ExecutionOutcomeBinding,
+    pub contributions: Vec<PredictionContribution>,
+}
+
+impl AssociationRegressionSample for ExecutionOutcomeAssociationSample {
+    fn outcome(&self) -> Decimal {
+        self.binding.total_realized_pnl_usd.inner()
+    }
+
+    fn contributions(&self) -> &[PredictionContribution] {
+        &self.contributions
+    }
+}
+
+/// Complete immutable preimage for one execution-outcome association.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionOutcomeAssociationInput {
+    pub lineage: AttributionLineage,
+    pub model_version_id: ModelVersionId,
+    pub target: ExecutionOutcomeAssociationTarget,
+    pub estimator_contract_hash: ContentHash,
+    pub conditioning_policy_hash: ContentHash,
+    pub cohort_manifest_hash: ContentHash,
+    pub explanation_set_hash: ContentHash,
+    pub execution_rollup_set_hash: ContentHash,
+    pub samples: Vec<ExecutionOutcomeAssociationSample>,
+}
+
+/// Cohort-level association between model explanations and terminal execution
+/// truth. The estimate remains descriptive and explicitly non-causal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionOutcomeAssociationArtifact {
+    pub lineage: AttributionLineage,
+    pub model_version_id: ModelVersionId,
+    pub interpretation: AssociationInterpretation,
+    pub target: ExecutionOutcomeAssociationTarget,
+    pub estimator_contract_hash: ContentHash,
+    pub conditioning_policy_hash: ContentHash,
+    pub cohort_manifest_hash: ContentHash,
+    pub explanation_set_hash: ContentHash,
+    pub execution_rollup_set_hash: ContentHash,
+    pub included_recommendation_count: u64,
+    pub estimates: Vec<AssociationEstimate>,
+}
+
+impl ExecutionOutcomeAssociationArtifact {
+    pub fn estimate(mut input: ExecutionOutcomeAssociationInput) -> QuantResult<Self> {
+        if input.samples.len() < 3 {
+            return Err(invalid_method(
+                "execution outcome association requires at least three terminal rollups",
+            ));
+        }
+        input
+            .samples
+            .sort_by_key(|sample| sample.binding.recommendation_id.as_uuid());
+        if input
+            .samples
+            .windows(2)
+            .any(|pair| pair[0].binding.recommendation_id == pair[1].binding.recommendation_id)
+        {
+            return Err(invalid_method(
+                "execution outcome association contains duplicate recommendations",
+            ));
+        }
+        for sample in &input.samples {
+            sample.binding.validate()?;
+        }
+        let recommendation_ids = input
+            .samples
+            .iter()
+            .map(|sample| sample.binding.recommendation_id)
+            .collect::<Vec<_>>();
+        let explanation_hashes = input
+            .samples
+            .iter()
+            .map(|sample| sample.explanation_hash)
+            .collect::<Vec<_>>();
+        let bindings = input
+            .samples
+            .iter()
+            .map(|sample| &sample.binding)
+            .collect::<Vec<_>>();
+        let expected_estimator = CanonicalDigest::content_hash_typed(
+            ASSOCIATION_ESTIMATOR_DOMAIN,
+            ASSOCIATION_VERSION,
+            &"univariate_ols_classical_95pct_noncausal",
+        )?;
+        let expected_cohort = CanonicalDigest::content_hash_typed(
+            ASSOCIATION_COHORT_DOMAIN,
+            ASSOCIATION_VERSION,
+            &recommendation_ids,
+        )?;
+        let expected_explanations = CanonicalDigest::content_hash_typed(
+            ASSOCIATION_EXPLANATIONS_DOMAIN,
+            ASSOCIATION_VERSION,
+            &explanation_hashes,
+        )?;
+        let expected_executions = CanonicalDigest::content_hash_typed(
+            ASSOCIATION_EXECUTIONS_DOMAIN,
+            ASSOCIATION_VERSION,
+            &bindings,
+        )?;
+        if input.estimator_contract_hash != expected_estimator
+            || input.cohort_manifest_hash != expected_cohort
+            || input.explanation_set_hash != expected_explanations
+            || input.execution_rollup_set_hash != expected_executions
+            || [expected_cohort, expected_explanations, expected_executions]
+                .iter()
+                .any(|hash| {
+                    input
+                        .lineage
+                        .source_evidence_hashes
+                        .binary_search(hash)
+                        .is_err()
+                })
+        {
+            return Err(invalid_method(
+                "execution association set hashes or lineage differ from terminal rollups",
+            ));
+        }
+        let input_names = input
+            .samples
+            .first()
+            .ok_or_else(|| invalid_method("execution association sample set is empty"))?
+            .contributions
+            .iter()
+            .map(|contribution| contribution.input_name.clone())
+            .collect::<Vec<_>>();
+        if input_names.is_empty()
+            || input.samples.iter().any(|sample| {
+                validate_contributions(&sample.contributions).is_err()
+                    || sample
+                        .contributions
+                        .iter()
+                        .map(|contribution| &contribution.input_name)
+                        .ne(input_names.iter())
+            })
+        {
+            return Err(invalid_method(
+                "execution association explanations do not share one canonical input plane",
+            ));
+        }
+        let estimates = fit_association_estimates(&input.samples, input_names)?;
+        let artifact = Self {
+            lineage: input.lineage,
+            model_version_id: input.model_version_id,
+            interpretation: AssociationInterpretation::ConditionalNonCausal,
+            target: input.target,
+            estimator_contract_hash: input.estimator_contract_hash,
+            conditioning_policy_hash: input.conditioning_policy_hash,
+            cohort_manifest_hash: input.cohort_manifest_hash,
+            explanation_set_hash: input.explanation_set_hash,
+            execution_rollup_set_hash: input.execution_rollup_set_hash,
+            included_recommendation_count: u64::try_from(input.samples.len())
+                .map_err(|error| invalid_method(format!("sample count overflow: {error}")))?,
+            estimates,
+        };
+        artifact.validate()?;
+        Ok(artifact)
+    }
+
+    pub fn validate(&self) -> QuantResult<()> {
+        self.lineage.validate()?;
+        if self.interpretation != AssociationInterpretation::ConditionalNonCausal
+            || self.included_recommendation_count < 3
+            || self.estimates.is_empty()
+            || self.execution_rollup_set_hash == ContentHash::from_bytes([0; 32])
+        {
+            return Err(invalid_method(
+                "execution association requires non-empty terminal rollups and non-causal semantics",
+            ));
+        }
+        validate_estimates(&self.estimates, self.included_recommendation_count)
+    }
+}
+
+/// Why the immutable actual execution facts cannot support a numeric return
+/// baseline. A non-evaluable baseline is evidence, never an implicit zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActualBaselineNotEvaluableReason {
+    MissingEntryFee,
+    MissingExitFee,
+    MissingRealizedPnl,
+}
+
+/// Gross and net actual economics derived from one terminal execution attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum ActualExecutionBaseline {
+    Evaluated {
+        entry_fee_usd: Usd,
+        exit_fee_usd: Usd,
+        entry_cash_outlay_usd: Usd,
+        actual_gross_pnl_usd: Usd,
+        actual_net_pnl_usd: Usd,
+        actual_gross_return_bps: Bps,
+        actual_net_return_bps: Bps,
+    },
+    NotEvaluable {
+        reason: ActualBaselineNotEvaluableReason,
+    },
+}
+
+/// Point-specific source defect that prevents executable economics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrajectoryPointNotEvaluableReason {
+    NoBidDepth,
+    InvalidBookDepth,
+    FeeScheduleUnavailable,
+    InvalidFeeSchedule,
+}
+
+/// Size-specific executable economics for one PIT L2 snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum TrajectoryPointEconomics {
+    Executable {
+        filled_shares: Shares,
+        remaining_shares: Shares,
+        depth_levels_consumed: u32,
+        best_bid_price: Price,
+        executable_exit_price: Price,
+        gross_exit_proceeds_usd: Usd,
+        exit_fee_usd: Usd,
+        net_exit_proceeds_usd: Usd,
+        fee_schedule_hash: ContentHash,
+        slippage_bps: Bps,
+    },
+    InsufficientDepth {
+        filled_shares: Shares,
+        remaining_shares: Shares,
+        depth_levels_consumed: u32,
+        best_bid_price: Price,
+        partial_vwap: Price,
+        partial_gross_proceeds_usd: Usd,
+        partial_exit_fee_usd: Usd,
+        partial_net_proceeds_usd: Usd,
+        fee_schedule_hash: ContentHash,
+        partial_slippage_bps: Bps,
+    },
+    NotEvaluable {
+        reason: TrajectoryPointNotEvaluableReason,
+    },
+}
+
+/// One PIT full-depth observation used by an attempt trajectory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrajectoryPoint {
     pub observed_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
-    pub executable_exit_price: Price,
+    pub requested_shares: Shares,
+    pub economics: TrajectoryPointEconomics,
     pub source_fact_hash: ContentHash,
+}
+
+impl TrajectoryPoint {
+    fn validate(&self) -> QuantResult<()> {
+        if !self.requested_shares.is_positive() {
+            return Err(invalid_method(
+                "trajectory point requires a positive requested size",
+            ));
+        }
+        match &self.economics {
+            TrajectoryPointEconomics::Executable {
+                filled_shares,
+                remaining_shares,
+                depth_levels_consumed,
+                best_bid_price,
+                executable_exit_price,
+                gross_exit_proceeds_usd,
+                exit_fee_usd,
+                net_exit_proceeds_usd,
+                fee_schedule_hash,
+                slippage_bps,
+            } => PointEconomicsValidation {
+                requested_shares: self.requested_shares,
+                filled_shares: *filled_shares,
+                remaining_shares: *remaining_shares,
+                depth_levels_consumed: *depth_levels_consumed,
+                best_bid_price: *best_bid_price,
+                vwap: *executable_exit_price,
+                gross_proceeds_usd: *gross_exit_proceeds_usd,
+                fee_usd: *exit_fee_usd,
+                net_proceeds_usd: *net_exit_proceeds_usd,
+                fee_schedule_hash: *fee_schedule_hash,
+                slippage_bps: *slippage_bps,
+                requires_complete: true,
+            }
+            .validate(),
+            TrajectoryPointEconomics::InsufficientDepth {
+                filled_shares,
+                remaining_shares,
+                depth_levels_consumed,
+                best_bid_price,
+                partial_vwap,
+                partial_gross_proceeds_usd,
+                partial_exit_fee_usd,
+                partial_net_proceeds_usd,
+                fee_schedule_hash,
+                partial_slippage_bps,
+            } => PointEconomicsValidation {
+                requested_shares: self.requested_shares,
+                filled_shares: *filled_shares,
+                remaining_shares: *remaining_shares,
+                depth_levels_consumed: *depth_levels_consumed,
+                best_bid_price: *best_bid_price,
+                vwap: *partial_vwap,
+                gross_proceeds_usd: *partial_gross_proceeds_usd,
+                fee_usd: *partial_exit_fee_usd,
+                net_proceeds_usd: *partial_net_proceeds_usd,
+                fee_schedule_hash: *fee_schedule_hash,
+                slippage_bps: *partial_slippage_bps,
+                requires_complete: false,
+            }
+            .validate(),
+            TrajectoryPointEconomics::NotEvaluable { .. } => Ok(()),
+        }
+    }
+
+    const fn executable_net_proceeds(&self) -> Option<Usd> {
+        match self.economics {
+            TrajectoryPointEconomics::Executable {
+                net_exit_proceeds_usd,
+                ..
+            } => Some(net_exit_proceeds_usd),
+            TrajectoryPointEconomics::InsufficientDepth { .. }
+            | TrajectoryPointEconomics::NotEvaluable { .. } => None,
+        }
+    }
+}
+
+/// Typed MAE/MFE state. Numeric excursions only exist when both the actual
+/// baseline and at least one full-size executable observation are available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum TrajectoryExcursionEvaluation {
+    Evaluated {
+        max_adverse_excursion_bps: Bps,
+        max_favorable_excursion_bps: Bps,
+    },
+    ActualBaselineUnavailable {
+        reason: ActualBaselineNotEvaluableReason,
+    },
+    NoExecutableObservation,
 }
 
 /// Immutable per-attempt trajectory. MAE/MFE are derived here and never
@@ -981,11 +1891,13 @@ pub struct ExecutionTrajectoryArtifact {
     pub attempt_outcome_hash: ContentHash,
     pub pit_book_contract_hash: ContentHash,
     pub entry_at: DateTime<Utc>,
+    pub entry_shares: Shares,
     pub entry_price: Price,
+    pub entry_principal_usd: Usd,
+    pub actual_baseline: ActualExecutionBaseline,
     pub horizon_end: DateTime<Utc>,
     pub points: Vec<TrajectoryPoint>,
-    pub max_adverse_excursion_bps: Bps,
-    pub max_favorable_excursion_bps: Bps,
+    pub excursions: TrajectoryExcursionEvaluation,
 }
 
 /// Complete immutable source binding for one attempt trajectory.
@@ -997,20 +1909,27 @@ pub struct ExecutionTrajectoryInput {
     pub attempt_outcome_hash: ContentHash,
     pub pit_book_contract_hash: ContentHash,
     pub entry_at: DateTime<Utc>,
+    pub entry_shares: Shares,
     pub entry_price: Price,
+    pub actual_baseline: ActualExecutionBaseline,
     pub horizon_end: DateTime<Utc>,
     pub points: Vec<TrajectoryPoint>,
 }
 
 impl ExecutionTrajectoryArtifact {
     pub fn try_new(input: ExecutionTrajectoryInput) -> QuantResult<Self> {
-        if input.entry_price <= Price::ZERO {
+        if input.entry_price <= Price::ZERO || input.entry_shares <= Shares::ZERO {
             return Err(invalid_method(
-                "execution trajectory requires a positive entry price",
+                "execution trajectory requires positive entry price and shares",
             ));
         }
-        let (max_adverse_excursion_bps, max_favorable_excursion_bps) =
-            trajectory_excursions(input.entry_price, &input.points)?;
+        let entry_principal_usd = input.entry_shares * input.entry_price;
+        validate_actual_baseline(
+            &input.actual_baseline,
+            entry_principal_usd,
+            input.entry_shares,
+        )?;
+        let excursions = trajectory_excursions(&input.actual_baseline, &input.points)?;
         let artifact = Self {
             lineage: input.lineage,
             recommendation_id: input.recommendation_id,
@@ -1018,11 +1937,13 @@ impl ExecutionTrajectoryArtifact {
             attempt_outcome_hash: input.attempt_outcome_hash,
             pit_book_contract_hash: input.pit_book_contract_hash,
             entry_at: input.entry_at,
+            entry_shares: input.entry_shares,
             entry_price: input.entry_price,
+            entry_principal_usd,
+            actual_baseline: input.actual_baseline,
             horizon_end: input.horizon_end,
             points: input.points,
-            max_adverse_excursion_bps,
-            max_favorable_excursion_bps,
+            excursions,
         };
         artifact.validate()?;
         Ok(artifact)
@@ -1033,12 +1954,18 @@ impl ExecutionTrajectoryArtifact {
         if self.entry_at >= self.horizon_end
             || self.horizon_end > self.lineage.source_cutoff
             || self.entry_price <= Price::ZERO
-            || self.points.is_empty()
+            || self.entry_shares <= Shares::ZERO
+            || self.entry_principal_usd != self.entry_shares * self.entry_price
         {
             return Err(leakage(
-                "execution trajectory window is empty, inverted, or not mature by cutoff",
+                "execution trajectory window, entry economics, or maturity is invalid",
             ));
         }
+        validate_actual_baseline(
+            &self.actual_baseline,
+            self.entry_principal_usd,
+            self.entry_shares,
+        )?;
         let mut prior = None;
         let mut hashes = BTreeSet::new();
         let entry_at = self.entry_at;
@@ -1049,22 +1976,20 @@ impl ExecutionTrajectoryArtifact {
                 || point.observed_at > horizon_end
                 || point.available_at < point.observed_at
                 || point.available_at > source_cutoff
-                || !(Price::ZERO..=Price::ONE).contains(&point.executable_exit_price)
+                || point.requested_shares != self.entry_shares
                 || prior.is_some_and(|timestamp| timestamp >= point.observed_at)
                 || !hashes.insert(point.source_fact_hash)
             {
                 return Err(leakage(
-                    "trajectory points must be unique, ordered PIT facts inside the mature horizon",
+                    "trajectory points must be unique, ordered PIT facts for the exact entry size",
                 ));
             }
+            point.validate()?;
             prior = Some(point.observed_at);
         }
-        let (adverse, favorable) = trajectory_excursions(self.entry_price, &self.points)?;
-        if adverse != self.max_adverse_excursion_bps
-            || favorable != self.max_favorable_excursion_bps
-        {
+        if trajectory_excursions(&self.actual_baseline, &self.points)? != self.excursions {
             return Err(invalid_method(
-                "stored trajectory excursions differ from the PIT replay",
+                "stored trajectory excursions differ from the size-specific net replay",
             ));
         }
         Ok(())
@@ -1100,6 +2025,38 @@ impl AlternativeExitPolicy {
     }
 }
 
+/// Why an approved alternative policy cannot produce a numeric estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyCounterfactualNotEvaluableReason {
+    ActualBaselineUnavailable,
+    NoTrajectoryObservation,
+    NoFullyExecutableObservation,
+    IncompleteFirstBarrierPath,
+}
+
+/// Typed result of an alternative-policy replay. Numeric estimates exist only
+/// in the `Evaluated` variant and therefore cannot be confused with zeros.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum PolicyCounterfactualEvaluation {
+    Evaluated {
+        counterfactual_exit_at: DateTime<Utc>,
+        counterfactual_exit_price: Price,
+        counterfactual_gross_proceeds_usd: Usd,
+        counterfactual_exit_fee_usd: Usd,
+        counterfactual_net_proceeds_usd: Usd,
+        actual_gross_return_bps: Bps,
+        actual_net_return_bps: Bps,
+        counterfactual_gross_return_bps: Bps,
+        counterfactual_net_return_bps: Bps,
+        missed_return_bps: Bps,
+    },
+    NotEvaluable {
+        reason: PolicyCounterfactualNotEvaluableReason,
+    },
+}
+
 /// Alternative-policy replay bound to one immutable attempt trajectory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1110,11 +2067,7 @@ pub struct PolicyCounterfactualOutcome {
     pub trajectory_artifact_hash: ContentHash,
     pub alternative_policy_hash: ContentHash,
     pub alternative_policy: AlternativeExitPolicy,
-    pub counterfactual_exit_at: DateTime<Utc>,
-    pub counterfactual_exit_price: Price,
-    pub counterfactual_gross_return_bps: Bps,
-    pub baseline_realized_return_bps: Option<Bps>,
-    pub gross_return_delta_bps: Option<Bps>,
+    pub evaluation: PolicyCounterfactualEvaluation,
 }
 
 impl PolicyCounterfactualOutcome {
@@ -1123,45 +2076,10 @@ impl PolicyCounterfactualOutcome {
         trajectory_artifact_hash: ContentHash,
         alternative_policy_hash: ContentHash,
         alternative_policy: AlternativeExitPolicy,
-        baseline_realized_return_bps: Option<Bps>,
     ) -> QuantResult<Self> {
         trajectory.validate()?;
         alternative_policy.validate()?;
-        let selected = match alternative_policy {
-            AlternativeExitPolicy::LatestExecutableAtOrBeforeHorizon => trajectory.points.last(),
-            AlternativeExitPolicy::FirstBarrier {
-                take_profit_bps,
-                stop_loss_bps,
-                max_holding_secs,
-            } => {
-                let maximum_at = trajectory.entry_at
-                    + Duration::seconds(i64::try_from(max_holding_secs).map_err(|error| {
-                        invalid_method(format!("holding period exceeds chrono range: {error}"))
-                    })?);
-                trajectory
-                    .points
-                    .iter()
-                    .find(|point| {
-                        let excursion = Bps::relative(
-                            point.executable_exit_price.inner() - trajectory.entry_price.inner(),
-                            trajectory.entry_price.inner(),
-                        );
-                        point.observed_at >= maximum_at
-                            || excursion.is_some_and(|value| {
-                                value >= take_profit_bps || value <= stop_loss_bps
-                            })
-                    })
-                    .or_else(|| trajectory.points.last())
-            }
-        }
-        .ok_or_else(|| invalid_method("counterfactual trajectory has no exit observation"))?;
-        let counterfactual_gross_return_bps = Bps::relative(
-            selected.executable_exit_price.inner() - trajectory.entry_price.inner(),
-            trajectory.entry_price.inner(),
-        )
-        .ok_or_else(|| invalid_method("counterfactual return denominator is zero"))?;
-        let gross_return_delta_bps =
-            baseline_realized_return_bps.map(|baseline| counterfactual_gross_return_bps - baseline);
+        let evaluation = replay_policy(trajectory, alternative_policy)?;
         let artifact = Self {
             lineage: trajectory.lineage.clone(),
             recommendation_id: trajectory.recommendation_id,
@@ -1169,11 +2087,7 @@ impl PolicyCounterfactualOutcome {
             trajectory_artifact_hash,
             alternative_policy_hash,
             alternative_policy,
-            counterfactual_exit_at: selected.observed_at,
-            counterfactual_exit_price: selected.executable_exit_price,
-            counterfactual_gross_return_bps,
-            baseline_realized_return_bps,
-            gross_return_delta_bps,
+            evaluation,
         };
         artifact.validate()?;
         Ok(artifact)
@@ -1182,15 +2096,26 @@ impl PolicyCounterfactualOutcome {
     pub fn validate(&self) -> QuantResult<()> {
         self.lineage.validate()?;
         self.alternative_policy.validate()?;
-        if self.counterfactual_exit_at > self.lineage.source_cutoff
-            || !(Price::ZERO..=Price::ONE).contains(&self.counterfactual_exit_price)
-            || self.gross_return_delta_bps
-                != self
-                    .baseline_realized_return_bps
-                    .map(|baseline| self.counterfactual_gross_return_bps - baseline)
+        if let PolicyCounterfactualEvaluation::Evaluated {
+            counterfactual_exit_at,
+            counterfactual_exit_price,
+            counterfactual_gross_proceeds_usd,
+            counterfactual_exit_fee_usd,
+            counterfactual_net_proceeds_usd,
+            actual_net_return_bps,
+            counterfactual_net_return_bps,
+            missed_return_bps,
+            ..
+        } = self.evaluation
+            && (counterfactual_exit_at > self.lineage.source_cutoff
+                || !(Price::ZERO..=Price::ONE).contains(&counterfactual_exit_price)
+                || counterfactual_gross_proceeds_usd < counterfactual_exit_fee_usd
+                || counterfactual_net_proceeds_usd
+                    != counterfactual_gross_proceeds_usd - counterfactual_exit_fee_usd
+                || missed_return_bps != counterfactual_net_return_bps - actual_net_return_bps)
         {
             return Err(invalid_method(
-                "policy counterfactual result is inconsistent with its baseline or cutoff",
+                "policy counterfactual result is inconsistent with its net economics or cutoff",
             ));
         }
         Ok(())
@@ -1202,8 +2127,9 @@ impl PolicyCounterfactualOutcome {
 #[serde(rename_all = "snake_case", tag = "artifact_kind", content = "artifact")]
 pub enum AttributionArtifact {
     PredictionExplanation(Box<PredictionExplanationArtifact>),
-    DecisionCounterfactual(Box<DecisionCounterfactualArtifact>),
-    OutcomeAssociation(Box<OutcomeAssociationArtifact>),
+    DecisionInterventionReplay(Box<DecisionInterventionReplayArtifact>),
+    ResolutionOutcomeAssociation(Box<ResolutionOutcomeAssociationArtifact>),
+    ExecutionOutcomeAssociation(Box<ExecutionOutcomeAssociationArtifact>),
     ExecutionTrajectory(Box<ExecutionTrajectoryArtifact>),
     PolicyCounterfactualOutcome(Box<PolicyCounterfactualOutcome>),
 }
@@ -1212,8 +2138,9 @@ impl AttributionArtifact {
     pub fn validate(&self) -> QuantResult<()> {
         match self {
             Self::PredictionExplanation(artifact) => artifact.validate(),
-            Self::DecisionCounterfactual(artifact) => artifact.validate(),
-            Self::OutcomeAssociation(artifact) => artifact.validate(),
+            Self::DecisionInterventionReplay(artifact) => artifact.validate(),
+            Self::ResolutionOutcomeAssociation(artifact) => artifact.validate(),
+            Self::ExecutionOutcomeAssociation(artifact) => artifact.validate(),
             Self::ExecutionTrajectory(artifact) => artifact.validate(),
             Self::PolicyCounterfactualOutcome(artifact) => artifact.validate(),
         }
@@ -1223,8 +2150,15 @@ impl AttributionArtifact {
     pub const fn kind(&self) -> AttributionArtifactKind {
         match self {
             Self::PredictionExplanation(_) => AttributionArtifactKind::PredictionExplanation,
-            Self::DecisionCounterfactual(_) => AttributionArtifactKind::DecisionCounterfactual,
-            Self::OutcomeAssociation(_) => AttributionArtifactKind::OutcomeAssociation,
+            Self::DecisionInterventionReplay(_) => {
+                AttributionArtifactKind::DecisionInterventionReplay
+            }
+            Self::ResolutionOutcomeAssociation(_) => {
+                AttributionArtifactKind::ResolutionOutcomeAssociation
+            }
+            Self::ExecutionOutcomeAssociation(_) => {
+                AttributionArtifactKind::ExecutionOutcomeAssociation
+            }
             Self::ExecutionTrajectory(_) => AttributionArtifactKind::ExecutionTrajectory,
             Self::PolicyCounterfactualOutcome(_) => {
                 AttributionArtifactKind::PolicyCounterfactualOutcome
@@ -1236,8 +2170,9 @@ impl AttributionArtifact {
     pub const fn lineage(&self) -> &AttributionLineage {
         match self {
             Self::PredictionExplanation(artifact) => &artifact.lineage,
-            Self::DecisionCounterfactual(artifact) => &artifact.lineage,
-            Self::OutcomeAssociation(artifact) => &artifact.lineage,
+            Self::DecisionInterventionReplay(artifact) => &artifact.lineage,
+            Self::ResolutionOutcomeAssociation(artifact) => &artifact.lineage,
+            Self::ExecutionOutcomeAssociation(artifact) => &artifact.lineage,
             Self::ExecutionTrajectory(artifact) => &artifact.lineage,
             Self::PolicyCounterfactualOutcome(artifact) => &artifact.lineage,
         }
@@ -1250,11 +2185,14 @@ impl AttributionArtifact {
                 model_version_id: artifact.model_version_id,
                 recommendation_id: artifact.recommendation_id,
             },
-            Self::DecisionCounterfactual(artifact) => AttributionSubject::Decision {
+            Self::DecisionInterventionReplay(artifact) => AttributionSubject::Decision {
                 model_version_id: artifact.model_version_id,
                 recommendation_id: artifact.recommendation_id,
             },
-            Self::OutcomeAssociation(artifact) => AttributionSubject::Outcome {
+            Self::ResolutionOutcomeAssociation(artifact) => AttributionSubject::ResolutionOutcome {
+                model_version_id: artifact.model_version_id,
+            },
+            Self::ExecutionOutcomeAssociation(artifact) => AttributionSubject::ExecutionOutcome {
                 model_version_id: artifact.model_version_id,
             },
             Self::ExecutionTrajectory(artifact) => AttributionSubject::Execution {
@@ -1305,6 +2243,7 @@ impl AttributionArtifactCodec {
 
 fn replay_decision(
     target_key: &DecisionCandidateKey,
+    model_output: Decimal,
     score: Decimal,
     confidence: Decimal,
     peer_scores: &[DecisionCandidateScore],
@@ -1364,12 +2303,15 @@ fn replay_decision(
         .ok_or_else(|| invalid_method("decision replay lost the target recommendation"))?;
     let rank = u32::try_from(position + 1)
         .map_err(|error| invalid_method(format!("decision replay rank overflow: {error}")))?;
+    let top_n_selected = rank <= policy.top_n;
     Ok(DecisionReplay {
-        score,
+        model_output,
+        composite_score: score,
         rank,
-        model_top_n_selected: score >= policy.candidate_score_floor
-            && confidence >= policy.minimum_confidence
-            && rank <= policy.top_n,
+        top_n_selected,
+        decision_selected: top_n_selected
+            && score >= policy.candidate_score_floor
+            && confidence >= policy.minimum_confidence,
     })
 }
 
@@ -1391,33 +2333,277 @@ fn validate_contributions(contributions: &[PredictionContribution]) -> QuantResu
     Ok(())
 }
 
+fn validate_actual_baseline(
+    baseline: &ActualExecutionBaseline,
+    entry_principal_usd: Usd,
+    entry_shares: Shares,
+) -> QuantResult<()> {
+    if !entry_principal_usd.is_positive() || !entry_shares.is_positive() {
+        return Err(invalid_method(
+            "actual baseline requires positive entry principal and shares",
+        ));
+    }
+    let ActualExecutionBaseline::Evaluated {
+        entry_fee_usd,
+        exit_fee_usd,
+        entry_cash_outlay_usd,
+        actual_gross_pnl_usd,
+        actual_net_pnl_usd,
+        actual_gross_return_bps,
+        actual_net_return_bps,
+    } = baseline
+    else {
+        return Ok(());
+    };
+    let expected_cash_outlay = entry_principal_usd + *entry_fee_usd;
+    let expected_gross_pnl = *actual_net_pnl_usd + *entry_fee_usd + *exit_fee_usd;
+    let expected_gross_return =
+        Bps::relative(expected_gross_pnl.inner(), entry_principal_usd.inner())
+            .ok_or_else(|| invalid_method("actual gross return denominator is zero"))?;
+    let expected_net_return =
+        Bps::relative(actual_net_pnl_usd.inner(), expected_cash_outlay.inner())
+            .ok_or_else(|| invalid_method("actual net return denominator is zero"))?;
+    if entry_fee_usd.is_negative()
+        || exit_fee_usd.is_negative()
+        || *entry_cash_outlay_usd != expected_cash_outlay
+        || *actual_gross_pnl_usd != expected_gross_pnl
+        || *actual_gross_return_bps != expected_gross_return
+        || *actual_net_return_bps != expected_net_return
+    {
+        return Err(invalid_method(
+            "actual baseline gross/net economics are internally inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+struct PointEconomicsValidation {
+    requested_shares: Shares,
+    filled_shares: Shares,
+    remaining_shares: Shares,
+    depth_levels_consumed: u32,
+    best_bid_price: Price,
+    vwap: Price,
+    gross_proceeds_usd: Usd,
+    fee_usd: Usd,
+    net_proceeds_usd: Usd,
+    fee_schedule_hash: ContentHash,
+    slippage_bps: Bps,
+    requires_complete: bool,
+}
+
+impl PointEconomicsValidation {
+    fn validate(self) -> QuantResult<()> {
+        let completion_is_valid = if self.requires_complete {
+            self.filled_shares == self.requested_shares && self.remaining_shares == Shares::ZERO
+        } else {
+            self.filled_shares.is_positive()
+                && self.filled_shares < self.requested_shares
+                && self.remaining_shares == self.requested_shares - self.filled_shares
+        };
+        let expected_vwap =
+            Price::new(self.gross_proceeds_usd.inner() / self.filled_shares.inner());
+        let expected_slippage = Bps::relative(
+            self.best_bid_price.inner() - self.vwap.inner(),
+            self.best_bid_price.inner(),
+        )
+        .ok_or_else(|| invalid_method("trajectory slippage denominator is zero"))?;
+        if !completion_is_valid
+            || self.depth_levels_consumed == 0
+            || !(Price::ZERO..=Price::ONE).contains(&self.best_bid_price)
+            || self.best_bid_price.is_zero()
+            || !(Price::ZERO..=Price::ONE).contains(&self.vwap)
+            || self.vwap.is_zero()
+            || self.best_bid_price < self.vwap
+            || self.gross_proceeds_usd <= Usd::ZERO
+            || self.fee_usd.is_negative()
+            || self.gross_proceeds_usd < self.fee_usd
+            || self.net_proceeds_usd != self.gross_proceeds_usd - self.fee_usd
+            || self.vwap != expected_vwap
+            || self.slippage_bps != expected_slippage
+            || self.fee_schedule_hash == ContentHash::from_bytes([0; 32])
+        {
+            return Err(invalid_method(
+                "trajectory point depth, fee, VWAP, or slippage economics are inconsistent",
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn trajectory_excursions(
-    entry_price: Price,
+    baseline: &ActualExecutionBaseline,
     points: &[TrajectoryPoint],
-) -> QuantResult<(Bps, Bps)> {
+) -> QuantResult<TrajectoryExcursionEvaluation> {
+    let entry_cash_outlay_usd = match baseline {
+        ActualExecutionBaseline::Evaluated {
+            entry_cash_outlay_usd,
+            ..
+        } => entry_cash_outlay_usd,
+        ActualExecutionBaseline::NotEvaluable { reason } => {
+            return Ok(TrajectoryExcursionEvaluation::ActualBaselineUnavailable {
+                reason: *reason,
+            });
+        }
+    };
     let excursions = points
         .iter()
-        .map(|point| {
+        .filter_map(|point| point.executable_net_proceeds().map(|net| (point, net)))
+        .map(|(_, net)| {
             Bps::relative(
-                point.executable_exit_price.inner() - entry_price.inner(),
-                entry_price.inner(),
+                (net - *entry_cash_outlay_usd).inner(),
+                entry_cash_outlay_usd.inner(),
             )
             .ok_or_else(|| invalid_method("trajectory excursion denominator is zero"))
         })
         .collect::<QuantResult<Vec<_>>>()?;
-    let adverse = excursions
+    if excursions.is_empty() {
+        return Ok(TrajectoryExcursionEvaluation::NoExecutableObservation);
+    }
+    let max_adverse_excursion_bps = excursions
         .iter()
         .copied()
         .min()
         .unwrap_or(Bps::ZERO)
         .min(Bps::ZERO);
-    let favorable = excursions
+    let max_favorable_excursion_bps = excursions
         .iter()
         .copied()
         .max()
         .unwrap_or(Bps::ZERO)
         .max(Bps::ZERO);
-    Ok((adverse, favorable))
+    Ok(TrajectoryExcursionEvaluation::Evaluated {
+        max_adverse_excursion_bps,
+        max_favorable_excursion_bps,
+    })
+}
+
+fn replay_policy(
+    trajectory: &ExecutionTrajectoryArtifact,
+    policy: AlternativeExitPolicy,
+) -> QuantResult<PolicyCounterfactualEvaluation> {
+    let ActualExecutionBaseline::Evaluated { .. } = trajectory.actual_baseline else {
+        return Ok(PolicyCounterfactualEvaluation::NotEvaluable {
+            reason: PolicyCounterfactualNotEvaluableReason::ActualBaselineUnavailable,
+        });
+    };
+    if trajectory.points.is_empty() {
+        return Ok(PolicyCounterfactualEvaluation::NotEvaluable {
+            reason: PolicyCounterfactualNotEvaluableReason::NoTrajectoryObservation,
+        });
+    }
+    let selected = match policy {
+        AlternativeExitPolicy::LatestExecutableAtOrBeforeHorizon => trajectory
+            .points
+            .iter()
+            .rev()
+            .find(|point| point.executable_net_proceeds().is_some()),
+        AlternativeExitPolicy::FirstBarrier {
+            take_profit_bps,
+            stop_loss_bps,
+            max_holding_secs,
+        } => {
+            let holding_secs = i64::try_from(max_holding_secs).map_err(|error| {
+                invalid_method(format!("holding period exceeds chrono range: {error}"))
+            })?;
+            let maximum_at = trajectory
+                .entry_at
+                .checked_add_signed(Duration::seconds(holding_secs))
+                .ok_or_else(|| invalid_method("holding period exceeds timestamp range"))?
+                .min(trajectory.horizon_end);
+            let mut latest = None;
+            for point in trajectory
+                .points
+                .iter()
+                .take_while(|point| point.observed_at <= maximum_at)
+            {
+                let Some(net_proceeds) = point.executable_net_proceeds() else {
+                    return Ok(PolicyCounterfactualEvaluation::NotEvaluable {
+                        reason: PolicyCounterfactualNotEvaluableReason::IncompleteFirstBarrierPath,
+                    });
+                };
+                latest = Some(point);
+                let net_return = counterfactual_net_return(trajectory, net_proceeds)?;
+                if net_return >= take_profit_bps || net_return <= stop_loss_bps {
+                    break;
+                }
+            }
+            latest
+        }
+    };
+    let Some(selected) = selected else {
+        return Ok(PolicyCounterfactualEvaluation::NotEvaluable {
+            reason: PolicyCounterfactualNotEvaluableReason::NoFullyExecutableObservation,
+        });
+    };
+    evaluated_policy_replay(trajectory, selected)
+}
+
+fn evaluated_policy_replay(
+    trajectory: &ExecutionTrajectoryArtifact,
+    selected: &TrajectoryPoint,
+) -> QuantResult<PolicyCounterfactualEvaluation> {
+    let ActualExecutionBaseline::Evaluated {
+        actual_gross_return_bps,
+        actual_net_return_bps,
+        ..
+    } = trajectory.actual_baseline
+    else {
+        return Err(invalid_method(
+            "evaluated policy replay lost its actual execution baseline",
+        ));
+    };
+    let TrajectoryPointEconomics::Executable {
+        executable_exit_price,
+        gross_exit_proceeds_usd,
+        exit_fee_usd,
+        net_exit_proceeds_usd,
+        ..
+    } = selected.economics
+    else {
+        return Err(invalid_method(
+            "evaluated policy replay selected a non-executable point",
+        ));
+    };
+    let counterfactual_gross_return_bps = Bps::relative(
+        (gross_exit_proceeds_usd - trajectory.entry_principal_usd).inner(),
+        trajectory.entry_principal_usd.inner(),
+    )
+    .ok_or_else(|| invalid_method("counterfactual gross return denominator is zero"))?;
+    let counterfactual_net_return_bps =
+        counterfactual_net_return(trajectory, net_exit_proceeds_usd)?;
+    Ok(PolicyCounterfactualEvaluation::Evaluated {
+        counterfactual_exit_at: selected.observed_at,
+        counterfactual_exit_price: executable_exit_price,
+        counterfactual_gross_proceeds_usd: gross_exit_proceeds_usd,
+        counterfactual_exit_fee_usd: exit_fee_usd,
+        counterfactual_net_proceeds_usd: net_exit_proceeds_usd,
+        actual_gross_return_bps,
+        actual_net_return_bps,
+        counterfactual_gross_return_bps,
+        counterfactual_net_return_bps,
+        missed_return_bps: counterfactual_net_return_bps - actual_net_return_bps,
+    })
+}
+
+fn counterfactual_net_return(
+    trajectory: &ExecutionTrajectoryArtifact,
+    net_proceeds: Usd,
+) -> QuantResult<Bps> {
+    let ActualExecutionBaseline::Evaluated {
+        entry_cash_outlay_usd,
+        ..
+    } = trajectory.actual_baseline
+    else {
+        return Err(invalid_method(
+            "counterfactual net return requires an evaluated actual baseline",
+        ));
+    };
+    Bps::relative(
+        (net_proceeds - entry_cash_outlay_usd).inner(),
+        entry_cash_outlay_usd.inner(),
+    )
+    .ok_or_else(|| invalid_method("counterfactual net return denominator is zero"))
 }
 
 fn strictly_sorted<T: Ord>(values: &[T]) -> bool {
@@ -1426,33 +2612,79 @@ fn strictly_sorted<T: Ord>(values: &[T]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         enums::quant::AttributionCohort,
         hashing::CanonicalDigest,
         types::{
             Bps, ContentHash, FeedbackCycleId, MarketId, ModelVersionId, OrderIntentId, Price,
-            RecommendationId, TokenId,
+            RecommendationId, Shares, TokenId, Usd,
         },
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     use super::{
-        ASSOCIATION_COHORT_DOMAIN, ASSOCIATION_ESTIMATOR_DOMAIN, ASSOCIATION_EXECUTIONS_DOMAIN,
-        ASSOCIATION_EXPLANATIONS_DOMAIN, ASSOCIATION_RESOLUTIONS_DOMAIN, ASSOCIATION_VERSION,
+        ASSOCIATION_COHORT_DOMAIN, ASSOCIATION_ESTIMATOR_DOMAIN, ASSOCIATION_EXPLANATIONS_DOMAIN,
+        ASSOCIATION_RESOLUTIONS_DOMAIN, ASSOCIATION_VERSION, ActualExecutionBaseline,
         AlternativeExitPolicy, AssociationInterpretation, AttributionArtifact,
-        AttributionArtifactCodec, AttributionLineage, CounterfactualIntervention,
-        DecisionCandidateKey, DecisionCandidateScore, DecisionCounterfactualArtifact,
-        DecisionCounterfactualInput, DecisionReplayPolicy, ExecutionTrajectoryArtifact,
-        ExecutionTrajectoryInput, OutcomeAssociationArtifact, OutcomeAssociationInput,
-        OutcomeAssociationSample, OutcomeAssociationTarget, PolicyCounterfactualOutcome,
+        AttributionArtifactCodec, AttributionLineage, DecisionCandidateKey, DecisionCandidateScore,
+        DecisionInterventionAttempt, DecisionInterventionEvaluation,
+        DecisionInterventionNotEvaluableReason, DecisionInterventionOutcome,
+        DecisionInterventionReplayArtifact, DecisionInterventionReplayInput,
+        DecisionInterventionSupport, DecisionReplayPolicy, ExecutionTrajectoryArtifact,
+        ExecutionTrajectoryInput, PolicyCounterfactualEvaluation, PolicyCounterfactualOutcome,
         PredictionContribution, PredictionExplanationArtifact, PredictionOutputKind,
-        TrajectoryPoint, WeightedExplanationInput, WeightedTerm,
+        ResolutionOutcomeAssociationArtifact, ResolutionOutcomeAssociationInput,
+        ResolutionOutcomeAssociationSample, ResolutionOutcomeAssociationTarget,
+        TrajectoryExcursionEvaluation, TrajectoryPoint, TrajectoryPointEconomics,
+        WeightedExplanationInput, WeightedTerm,
     };
 
     fn hash(seed: &str) -> ContentHash {
         CanonicalDigest::content_hash_json(&seed).expect("fixture hash")
+    }
+
+    impl ActualExecutionBaseline {
+        fn fixture() -> Self {
+            Self::Evaluated {
+                entry_fee_usd: Usd::ZERO,
+                exit_fee_usd: Usd::ZERO,
+                entry_cash_outlay_usd: Usd::new(dec!(50)),
+                actual_gross_pnl_usd: Usd::new(dec!(5)),
+                actual_net_pnl_usd: Usd::new(dec!(5)),
+                actual_gross_return_bps: Bps::new(dec!(1000)),
+                actual_net_return_bps: Bps::new(dec!(1000)),
+            }
+        }
+    }
+
+    fn executable_point(
+        observed_at: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        price: Price,
+        source: &str,
+    ) -> TrajectoryPoint {
+        let shares = Shares::new(dec!(100));
+        let proceeds = shares * price;
+        TrajectoryPoint {
+            observed_at,
+            available_at,
+            requested_shares: shares,
+            economics: TrajectoryPointEconomics::Executable {
+                filled_shares: shares,
+                remaining_shares: Shares::ZERO,
+                depth_levels_consumed: 1,
+                best_bid_price: price,
+                executable_exit_price: price,
+                gross_exit_proceeds_usd: proceeds,
+                exit_fee_usd: Usd::ZERO,
+                net_exit_proceeds_usd: proceeds,
+                fee_schedule_hash: hash("fee-schedule"),
+                slippage_bps: Bps::ZERO,
+            },
+            source_fact_hash: hash(source),
+        }
     }
 
     impl AttributionLineage {
@@ -1517,17 +2749,19 @@ mod tests {
             (dec!(0.2), dec!(1)),
         ]
         .into_iter()
-        .map(|(contribution, outcome)| OutcomeAssociationSample {
-            recommendation_id: RecommendationId::from_v7(),
-            explanation_hash: hash(&format!("explanation-{contribution}")),
-            outcome_hash: hash(&format!("outcome-{outcome}")),
-            outcome,
-            contributions: vec![PredictionContribution {
-                input_name: "canonical_alpha".to_owned(),
-                input_value: Some(contribution),
-                contribution,
-            }],
-        })
+        .map(
+            |(contribution, outcome)| ResolutionOutcomeAssociationSample {
+                recommendation_id: RecommendationId::from_v7(),
+                explanation_hash: hash(&format!("explanation-{contribution}")),
+                outcome_hash: hash(&format!("outcome-{outcome}")),
+                outcome,
+                contributions: vec![PredictionContribution {
+                    input_name: "canonical_alpha".to_owned(),
+                    input_value: Some(contribution),
+                    contribution,
+                }],
+            },
+        )
         .collect::<Vec<_>>();
         samples.sort_by_key(|sample| sample.recommendation_id.as_uuid());
         let recommendation_ids = samples
@@ -1566,12 +2800,6 @@ mod tests {
             &resolution_hashes,
         )
         .expect("resolution set");
-        let execution_rollup_set_hash = CanonicalDigest::content_hash_typed(
-            ASSOCIATION_EXECUTIONS_DOMAIN,
-            ASSOCIATION_VERSION,
-            &Vec::<ContentHash>::new(),
-        )
-        .expect("execution set");
         let base = AttributionLineage::fixture();
         let lineage = AttributionLineage::try_new(
             base.source_feedback_cycle_id,
@@ -1582,23 +2810,22 @@ mod tests {
                 cohort_manifest_hash,
                 explanation_set_hash,
                 resolution_set_hash,
-                execution_rollup_set_hash,
             ],
         )
         .expect("association lineage");
-        let artifact = OutcomeAssociationArtifact::estimate(OutcomeAssociationInput {
-            lineage,
-            model_version_id: ModelVersionId::from_v7(),
-            target: OutcomeAssociationTarget::FinalTokenPayoutRatio,
-            estimator_contract_hash,
-            conditioning_policy_hash: hash("conditioning"),
-            cohort_manifest_hash,
-            explanation_set_hash,
-            resolution_set_hash,
-            execution_rollup_set_hash,
-            samples,
-        })
-        .expect("association");
+        let artifact =
+            ResolutionOutcomeAssociationArtifact::estimate(ResolutionOutcomeAssociationInput {
+                lineage,
+                model_version_id: ModelVersionId::from_v7(),
+                target: ResolutionOutcomeAssociationTarget::FinalTokenPayoutRatio,
+                estimator_contract_hash,
+                conditioning_policy_hash: hash("conditioning"),
+                cohort_manifest_hash,
+                explanation_set_hash,
+                resolution_set_hash,
+                samples,
+            })
+            .expect("association");
         assert_eq!(
             artifact.interpretation,
             AssociationInterpretation::ConditionalNonCausal
@@ -1639,6 +2866,9 @@ mod tests {
         let policy = DecisionReplayPolicy::try_new(policy_hash, &universe, dec!(0.5), dec!(0.5), 1)
             .expect("decision policy");
         let prediction_explanation_hash = hash("prediction");
+        let model_artifact_hash = hash("model-artifact");
+        let input_contract_hash = hash("input-contract");
+        let input_transform_hash = hash("input-transform");
         let base = AttributionLineage::fixture();
         let lineage = AttributionLineage::try_new(
             base.source_feedback_cycle_id,
@@ -1647,40 +2877,100 @@ mod tests {
             base.generated_at,
             vec![
                 prediction_explanation_hash,
+                model_artifact_hash,
+                input_contract_hash,
+                input_transform_hash,
                 policy_hash,
                 policy.admissible_intervention_policy_hash,
-                policy.dependency_graph_hash,
+                policy.computation_graph_contract_hash,
                 policy.candidate_universe_hash,
             ],
         )
         .expect("decision lineage");
-        let artifact = DecisionCounterfactualArtifact::replay(DecisionCounterfactualInput {
-            lineage,
-            model_version_id: ModelVersionId::from_v7(),
-            recommendation_id: RecommendationId::from_v7(),
-            target_key,
-            prediction_explanation_hash,
-            policy,
-            interventions: vec![CounterfactualIntervention {
-                input_name: "canonical_alpha".to_owned(),
-                observed_value: dec!(0.4),
-                intervened_value: Decimal::ZERO,
-                affected_nodes: vec![
-                    "composite_score".to_owned(),
-                    "economic_projection".to_owned(),
-                    "model_output".to_owned(),
-                    "model_rank".to_owned(),
-                    "model_top_n".to_owned(),
-                ],
-            }],
-            baseline_score: dec!(0.8),
-            counterfactual_score: dec!(0.4),
-            target_confidence: dec!(0.9),
-            peer_scores: vec![peer],
-        })
-        .expect("decision replay");
-        assert!(artifact.baseline.model_top_n_selected);
-        assert!(!artifact.counterfactual.model_top_n_selected);
+        let artifact =
+            DecisionInterventionReplayArtifact::replay(DecisionInterventionReplayInput {
+                lineage,
+                model_version_id: ModelVersionId::from_v7(),
+                recommendation_id: RecommendationId::from_v7(),
+                target_key,
+                prediction_explanation_hash,
+                model_artifact_hash,
+                input_contract_hash,
+                input_transform_hash,
+                policy,
+                interventions: vec![DecisionInterventionAttempt {
+                    input_name: "canonical_alpha".to_owned(),
+                    model_contribution: dec!(0.4),
+                    observed_value: Some(dec!(0.4)),
+                    proposed_value: Some(Decimal::ZERO),
+                    support: DecisionInterventionSupport::try_new(-Decimal::ONE, Decimal::ONE)
+                        .expect("support"),
+                    evaluation: DecisionInterventionEvaluation::Evaluated {
+                        intervened_model_output: dec!(0.4),
+                        intervened_composite_score: dec!(0.4),
+                    },
+                }],
+                baseline_model_output: dec!(0.8),
+                baseline_score: dec!(0.8),
+                target_confidence: dec!(0.9),
+                peer_scores: vec![peer],
+            })
+            .expect("decision replay");
+        assert!(artifact.baseline.top_n_selected);
+        assert!(artifact.baseline.decision_selected);
+        let DecisionInterventionOutcome::Evaluated {
+            affected_paths,
+            replay,
+        } = &artifact.interventions[0].outcome
+        else {
+            panic!("fixture intervention must be evaluated");
+        };
+        assert!(!replay.top_n_selected);
+        assert!(!replay.decision_selected);
+        assert_eq!(
+            affected_paths[0].node_ids,
+            [
+                "feature:canonical_alpha",
+                "transform:canonical_alpha",
+                "model_output",
+                "calibration_composite",
+                "rank",
+                "top_n",
+                "decision",
+            ]
+        );
+
+        let mut out_of_support = artifact.clone();
+        let intervention = out_of_support
+            .interventions
+            .first_mut()
+            .expect("fixture intervention");
+        intervention.observed_value = Some(dec!(2));
+        intervention.outcome = DecisionInterventionOutcome::NotEvaluable {
+            reason: DecisionInterventionNotEvaluableReason::ObservedValueOutOfSupport,
+        };
+        out_of_support
+            .validate()
+            .expect("typed out-of-support outcome");
+
+        let mut contradictory = out_of_support.clone();
+        contradictory
+            .interventions
+            .first_mut()
+            .expect("fixture intervention")
+            .outcome = DecisionInterventionOutcome::NotEvaluable {
+            reason: DecisionInterventionNotEvaluableReason::NoMaterialDecisionChange,
+        };
+        assert!(contradictory.validate().is_err());
+
+        let mut tampered_graph = artifact;
+        tampered_graph
+            .computation_graph
+            .edges
+            .first_mut()
+            .expect("fixture graph edge")
+            .to_node_id = "decision".to_owned();
+        assert!(tampered_graph.validate().is_err());
     }
 
     #[test]
@@ -1694,26 +2984,33 @@ mod tests {
             attempt_outcome_hash: hash("attempt"),
             pit_book_contract_hash: hash("pit-book"),
             entry_at,
+            entry_shares: Shares::new(dec!(100)),
             entry_price: Price::new(dec!(0.5)),
+            actual_baseline: ActualExecutionBaseline::fixture(),
             horizon_end: entry_at + Duration::hours(1),
             points: vec![
-                TrajectoryPoint {
-                    observed_at: entry_at + Duration::minutes(10),
-                    available_at: entry_at + Duration::minutes(10),
-                    executable_exit_price: Price::new(dec!(0.4)),
-                    source_fact_hash: hash("point-1"),
-                },
-                TrajectoryPoint {
-                    observed_at: entry_at + Duration::minutes(20),
-                    available_at: entry_at + Duration::minutes(20),
-                    executable_exit_price: Price::new(dec!(0.65)),
-                    source_fact_hash: hash("point-2"),
-                },
+                executable_point(
+                    entry_at + Duration::minutes(10),
+                    entry_at + Duration::minutes(10),
+                    Price::new(dec!(0.4)),
+                    "point-1",
+                ),
+                executable_point(
+                    entry_at + Duration::minutes(20),
+                    entry_at + Duration::minutes(20),
+                    Price::new(dec!(0.65)),
+                    "point-2",
+                ),
             ],
         })
         .expect("valid trajectory");
-        assert_eq!(trajectory.max_adverse_excursion_bps, Bps::new(dec!(-2000)));
-        assert_eq!(trajectory.max_favorable_excursion_bps, Bps::new(dec!(3000)));
+        assert_eq!(
+            trajectory.excursions,
+            TrajectoryExcursionEvaluation::Evaluated {
+                max_adverse_excursion_bps: Bps::new(dec!(-2000)),
+                max_favorable_excursion_bps: Bps::new(dec!(3000)),
+            }
+        );
 
         let counterfactual = PolicyCounterfactualOutcome::replay(
             &trajectory,
@@ -1724,17 +3021,20 @@ mod tests {
                 stop_loss_bps: Bps::new(dec!(-2500)),
                 max_holding_secs: 3600,
             },
-            Some(Bps::new(dec!(1000))),
         )
         .expect("policy replay");
-        assert_eq!(
-            counterfactual.counterfactual_exit_price,
-            Price::new(dec!(0.65))
-        );
-        assert_eq!(
-            counterfactual.gross_return_delta_bps,
-            Some(Bps::new(dec!(2000)))
-        );
+        let PolicyCounterfactualEvaluation::Evaluated {
+            counterfactual_exit_price,
+            counterfactual_net_return_bps,
+            missed_return_bps,
+            ..
+        } = counterfactual.evaluation
+        else {
+            panic!("expected evaluated policy replay");
+        };
+        assert_eq!(counterfactual_exit_price, Price::new(dec!(0.65)));
+        assert_eq!(counterfactual_net_return_bps, Bps::new(dec!(3000)));
+        assert_eq!(missed_return_bps, Bps::new(dec!(2000)));
     }
 
     #[test]
@@ -1748,14 +3048,16 @@ mod tests {
             attempt_outcome_hash: hash("attempt"),
             pit_book_contract_hash: hash("pit-book"),
             entry_at,
+            entry_shares: Shares::new(dec!(100)),
             entry_price: Price::new(dec!(0.5)),
+            actual_baseline: ActualExecutionBaseline::fixture(),
             horizon_end: lineage.source_cutoff,
-            points: vec![TrajectoryPoint {
-                observed_at: entry_at + Duration::minutes(1),
-                available_at: lineage.source_cutoff + Duration::seconds(1),
-                executable_exit_price: Price::new(dec!(0.6)),
-                source_fact_hash: hash("future"),
-            }],
+            points: vec![executable_point(
+                entry_at + Duration::minutes(1),
+                lineage.source_cutoff + Duration::seconds(1),
+                Price::new(dec!(0.6)),
+                "future",
+            )],
         });
         assert!(result.is_err());
     }

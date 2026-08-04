@@ -619,7 +619,7 @@ async fn release_projection_retries(db: &DatabaseConnection) {
         DbBackend::Postgres,
         "UPDATE quant_resolution_observation_projection \
          SET next_attempt_at = statement_timestamp() + INTERVAL '1 millisecond' \
-         WHERE status = 'retrying'",
+         WHERE status = 'retry_scheduled'",
     ))
     .await
     .expect("advance projection retry schedule");

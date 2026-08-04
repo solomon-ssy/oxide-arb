@@ -99,9 +99,13 @@ impl ResolvedCalibration {
     /// `E[r] = P(win)·(1-p)/p − (1−P(win))`, `downside` = the calibration
     /// split's mean `max_adverse_excursion_bps` in the candidate's
     /// **calibrated-probability** bucket (matching the reliability report's
-    /// ECE bucketing — never the raw pre-calibration score bucket). An
-    /// invalid market price (outside `(0, 1)`) or a probability bucket with
-    /// no MAE evidence rejects inference. Neither condition is a business zero.
+    /// ECE bucketing — never the raw pre-calibration score bucket). Empty ECE
+    /// buckets are omitted by construction, while monotone interpolation can
+    /// still emit probabilities inside those gaps. Such sparse gaps use the
+    /// report's worst observed absolute bucket mean as a conservative frozen
+    /// envelope. An invalid market price (outside `(0, 1)`) or an artifact
+    /// with no MAE evidence rejects inference. Neither condition is a business
+    /// zero.
     ///
     /// `win_probability` on the returned [`ReturnEstimate`] is the *same*
     /// `P(win)` used to derive `expected_return_bps` — Kelly sizing consumes it
@@ -130,14 +134,12 @@ impl ResolvedCalibration {
                 .round_dp(RESEARCH_DECIMAL_SCALE);
         let downside_bps = self
             .reliability
-            .bin_for(p_win_inner)
-            .and_then(|bin| bin.mean_adverse_excursion_bps)
+            .conservative_downside_bps(p_win_inner)
             .ok_or_else(|| ResearchError::Inference {
                 detail: format!(
                     "calibrated probability {p_win_inner} has no frozen MAE downside evidence"
                 ),
             })?
-            .abs()
             .round_dp(RESEARCH_DECIMAL_SCALE);
         Ok(ReturnEstimate {
             expected_return_bps,
@@ -251,6 +253,35 @@ mod tests {
                 .estimate_return(dec!(0.5), Price::new(dec!(0.5)))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn estimate_uses_sparse_envelope() {
+        let mut resolved = ResolvedCalibration::test_fixture();
+        resolved.reliability.bins = vec![
+            ReliabilityBin {
+                predicted_lo: dec!(0.2),
+                predicted_hi: dec!(0.3),
+                sample_count: 40,
+                mean_predicted: Probability::new(dec!(0.25)),
+                empirical_frequency: Probability::new(dec!(0.25)),
+                wilson_ci: (Probability::new(dec!(0.1)), Probability::new(dec!(0.4))),
+                mean_adverse_excursion_bps: Some(dec!(-300)),
+            },
+            ReliabilityBin {
+                predicted_lo: dec!(0.6),
+                predicted_hi: dec!(0.7),
+                sample_count: 60,
+                mean_predicted: Probability::new(dec!(0.65)),
+                empirical_frequency: Probability::new(dec!(0.65)),
+                wilson_ci: (Probability::new(dec!(0.5)), Probability::new(dec!(0.8))),
+                mean_adverse_excursion_bps: Some(dec!(-700)),
+            },
+        ];
+        let estimate = resolved
+            .estimate_return(dec!(0.5), Price::new(dec!(0.5)))
+            .expect("sparse reliability envelope");
+        assert_eq!(estimate.downside_bps, dec!(700));
     }
 
     #[test]

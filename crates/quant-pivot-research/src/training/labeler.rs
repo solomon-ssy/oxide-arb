@@ -135,7 +135,9 @@ pub fn label_names_for_sources(
             ]);
         }
     }
-    if sources.contains(&TrainingSampleSource::RecommendationFeedback) {
+    if sources.contains(&TrainingSampleSource::ModelScoreFeedback)
+        || sources.contains(&TrainingSampleSource::PublishedDecisionDiagnostic)
+    {
         labels.push(TOKEN_PAYOUT_RATIO);
     }
     if sources.contains(&TrainingSampleSource::ExitDecision) {

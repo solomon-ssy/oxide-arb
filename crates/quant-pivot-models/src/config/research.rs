@@ -65,6 +65,9 @@ pub struct ModelServingRegistryConfig {
     pub max_concurrent_loads: usize,
     /// End-to-end deadline for one cold contract load.
     pub load_timeout_ms: u64,
+    /// Total resident-memory reservation available to route-owned shadow
+    /// bindings across all Buy routes.
+    pub max_total_shadow_model_bytes: u64,
 }
 
 impl Default for ModelServingRegistryConfig {
@@ -74,6 +77,7 @@ impl Default for ModelServingRegistryConfig {
             max_pending_loads: 64,
             max_concurrent_loads: 4,
             load_timeout_ms: 60_000,
+            max_total_shadow_model_bytes: 2_147_483_648,
         }
     }
 }

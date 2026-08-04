@@ -82,10 +82,10 @@ impl LinkageResolverService {
         )?;
         Ok(Self {
             deps,
-            resolver: LayeredResolver::deterministic(
+            resolver: LayeredResolver::try_deterministic(
                 weather_station_registry,
                 weather_vertical_bindings,
-            ),
+            )?,
             classifier,
             capability_registry_hash,
         })

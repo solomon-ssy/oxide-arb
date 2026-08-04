@@ -18,11 +18,13 @@ pub(crate) mod metrics;
 mod runner;
 mod simulator;
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 pub use calendarize::{
     CalendarReturn, active_observation_count, calendarize_lot_returns, mean_calendar_return,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 pub use comparison::ModelComparisonReport;
 pub use lot_replay::{
     LotBacktestInputs, LotBacktestRunResult, LotBacktester, LotDecisionSequence, LotOutcome,
@@ -50,7 +52,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     execution_semantics::PitFeeSchedule,
     features::NullReason,
-    model::{QuantModelRuntime, runtime::ModelRuntimeInput},
+    model::{ModelRankTarget, QuantModelRuntime, runtime::ModelRuntimeInput},
+    precision::RESEARCH_DECIMAL_SCALE,
 };
 
 /// Exact decision-time execution inputs for one outcome token.
@@ -68,6 +71,82 @@ pub struct BacktestExecutionSnapshot {
     pub fill_at: DateTime<Utc>,
     pub limit_price: Price,
     pub book_hash: ContentHash,
+}
+
+/// One immutable post-decision price observation used to derive empirical
+/// downside for the exact outcome token emitted by a replayed model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacktestDownsidePoint {
+    pub at: DateTime<Utc>,
+    pub best_bid_low: Option<Price>,
+}
+
+/// Frozen executable downside path for one `(market, token, decision)`.
+///
+/// The entry basis is the decision-time best ask (the price a buy-to-open
+/// would actually cross), while forward observations use best-bid lows (the
+/// executable side of a later exit). The model's own suggested horizon is
+/// applied only after inference, so YES/NO side changes always consume the
+/// matching token path instead of a market-level surrogate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacktestDownsideTrajectory {
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub anchor: DateTime<Utc>,
+    pub entry_ask: Price,
+    pub data_available_until: DateTime<Utc>,
+    pub points: Vec<BacktestDownsidePoint>,
+}
+
+impl BacktestDownsideTrajectory {
+    /// Resolve non-positive MAE bps for the requested horizon.
+    ///
+    /// `None` is explicit unevaluable evidence: the frozen source did not
+    /// mature through the horizon or contained no executable forward bid.
+    pub fn max_adverse_excursion_bps(&self, horizon_secs: u64) -> QuantResult<Option<Decimal>> {
+        let horizon_secs = i64::try_from(horizon_secs).map_err(|error| {
+            QuantError::config(format!("backtest downside horizon exceeds i64: {error}"))
+        })?;
+        if horizon_secs <= 0 {
+            return Err(QuantError::config(
+                "backtest downside horizon must be positive",
+            ));
+        }
+        let horizon_end = self
+            .anchor
+            .checked_add_signed(ChronoDuration::seconds(horizon_secs))
+            .ok_or_else(|| QuantError::config("backtest downside horizon is outside chrono"))?;
+        if self.data_available_until < horizon_end {
+            return Ok(None);
+        }
+        if self.points.windows(2).any(|pair| pair[0].at >= pair[1].at)
+            || self.points.iter().any(|point| point.at <= self.anchor)
+        {
+            return Err(QuantError::config(
+                "backtest downside trajectory points are not strictly ordered after the anchor",
+            ));
+        }
+        let lowest_bid = self
+            .points
+            .iter()
+            .take_while(|point| point.at <= horizon_end)
+            .filter_map(|point| point.best_bid_low)
+            .map(Price::inner)
+            .min();
+        let Some(lowest_bid) = lowest_bid else {
+            return Ok(None);
+        };
+        let entry = self.entry_ask.inner();
+        if entry <= Decimal::ZERO {
+            return Err(QuantError::config(
+                "backtest downside trajectory entry ask must be positive",
+            ));
+        }
+        let excursion = ((lowest_bid - entry) / entry * Decimal::from(10_000))
+            .min(Decimal::ZERO)
+            .round_dp(RESEARCH_DECIMAL_SCALE);
+        Ok(Some(excursion))
+    }
 }
 
 /// Identity + window of a backtest run (the report's stable header).
@@ -109,10 +188,18 @@ pub struct MarketOutcome {
     /// Exact YES-token payout when mature. `None` means no resolution was
     /// available by the frozen cutoff; it never means a zero payout.
     pub yes_payout_ratio: Option<PayoutRatio>,
-    /// `max_adverse_excursion_bps` label value, when materialized: the
-    /// calibration downside source and empirical worst intra-horizon
-    /// unfavorable move, distinct from the binary settlement outcome).
-    pub max_adverse_excursion_bps: Option<Decimal>,
+}
+
+/// One immutable supervised target from the replay dataset.
+///
+/// Rank-quality validation joins this value only to a [`ModelRankScore`](crate::model::ModelRankScore)
+/// carrying the exact same target binding and canonical token identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacktestRankTarget {
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub target: ModelRankTarget,
+    pub realized: Decimal,
 }
 
 /// One replay tick: the model input + realized outcomes + market metadata, all
@@ -130,10 +217,14 @@ pub struct BacktestTick {
     pub model_input: ModelRuntimeInput,
     /// Realized settlement outcomes for the tick's markets.
     pub outcomes: Vec<MarketOutcome>,
+    /// Canonical supervised targets for allocation-independent rank validation.
+    pub rank_targets: Vec<BacktestRankTarget>,
     /// Per-market metadata for allocation + breakdown.
     pub market_meta: Vec<BacktestMarketMeta>,
     /// Full-L2/PIT-fee execution inputs for every outcome token a model may buy.
     pub execution: Vec<BacktestExecutionSnapshot>,
+    /// Token-specific post-decision downside paths from the same Source Slice.
+    pub downside_trajectories: Vec<BacktestDownsideTrajectory>,
 }
 
 /// Portfolio budget / exposure / liquidity caps (projected from `PortfolioConfig`).
@@ -239,7 +330,7 @@ pub struct BacktestReport {
     pub liquidity_feasibility: Probability,
     /// Per-category breakdown.
     pub category_breakdown: Vec<CategoryMetric>,
-    /// Conditional mean of the worst-decile realized returns (tail loss, bps).
+    /// Conditional mean return of the worst realized-return decile, in bps.
     pub tail_loss: Decimal,
     /// Portfolio `PnL` simulation.
     pub report_pnl_simulation: PnlSimulation,
@@ -247,10 +338,8 @@ pub struct BacktestReport {
     pub report_hash: ContentHash,
 }
 
-/// One resolved candidate outcome retained for purpose-bound calibration replay.
-///
-/// Not part of the persisted summary (so it does not enter `report_hash`); the
-/// independent calibration pipeline consumes these score/outcome pairs.
+/// One allocated, executable, and resolved candidate outcome retained for
+/// economic backtest and comparison metrics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SampleOutcome {
     /// Decision time.
@@ -302,6 +391,37 @@ pub struct SampleOutcome {
     pub substitution_reasons: Vec<NullReason>,
 }
 
+/// Allocation-independent resolved model-score observation.
+///
+/// Probability calibration fits the model output over the complete
+/// purpose-bound Calibration Dataset. Portfolio caps, optimizer selection, L2
+/// fill capacity, and execution fees are downstream economic concerns and must
+/// not censor the score/outcome population.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCalibrationOutcome {
+    pub decision_at: DateTime<Utc>,
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub composite_score: Probability,
+    pub token_payout_ratio: PayoutRatio,
+    pub max_adverse_excursion_bps: Option<Decimal>,
+}
+
+/// Allocation-independent canonical ranking observation.
+///
+/// This is intentionally distinct from [`ModelCalibrationOutcome`]: the rank
+/// score and realized value share the model's supervised target units, while
+/// calibration remains a selected-side probability/outcome contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRankOutcome {
+    pub decision_at: DateTime<Utc>,
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub score: Decimal,
+    pub target: ModelRankTarget,
+    pub realized: Decimal,
+}
+
 /// Net portfolio result for one governed decision tick.
 ///
 /// Comparison keeps every decision tick, including genuine no-allocation
@@ -316,15 +436,29 @@ pub struct PortfolioReturnObservation {
     pub net_return_bps: Bps,
 }
 
-/// The result of a backtest run: the persisted report + per-sample outcomes.
+/// The result of a backtest run: the persisted report plus purpose-specific
+/// score, execution, and portfolio observations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BacktestRunResult {
     /// The content-addressed summary report.
     pub report: BacktestReport,
-    /// Per-sample resolved outcomes (calibration input; not in `report_hash`).
+    /// Resolved model-score outcomes before portfolio allocation. This is the
+    /// calibration input and is intentionally not part of `report_hash`.
+    pub calibration_outcomes: Vec<ModelCalibrationOutcome>,
+    /// Canonical score/label evidence for rank-quality validation. This field
+    /// is intentionally not part of `report_hash`.
+    pub rank_outcomes: Vec<ModelRankOutcome>,
+    /// Resolved outcomes that were allocated and executed by the economic
+    /// replay. These drive report and comparison metrics.
     pub sample_outcomes: Vec<SampleOutcome>,
     /// Complete same-window decision-tick portfolio-return series.
     pub portfolio_returns: Vec<PortfolioReturnObservation>,
+    /// Canonical per-market allocation weights for every replay tick, in the
+    /// same ascending decision-time order as `portfolio_returns`. CPCV uses
+    /// these exact weights to reconstruct path-level turnover after stitching
+    /// out-of-sample fold partitions; averaging fold-level turnover would lose
+    /// the transitions at partition boundaries.
+    pub tick_weights: Vec<BTreeMap<String, Decimal>>,
 }
 
 /// Runs a point-in-time backtest of a model version.

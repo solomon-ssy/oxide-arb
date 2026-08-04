@@ -4,8 +4,10 @@
 //! Mirrors the crate boundary the single-path [`BacktestService`](crate::service::backtest::BacktestService)
 //! and [`ModelTrainerService`](crate::service::model_training::ModelTrainerService)
 //! already establish: this service does the **impure** work (dataset load,
-//! Parquet decode plus exact frozen-input tick assembly — done exactly **once**,
-//! then reused across every CPCV fold and every trial), and delegates every
+//! Parquet decode plus exact frozen execution/economic tick assembly — done
+//! exactly **once**, then reused across every CPCV fold and every trial), and
+//! reapplies each fitted weighted model's own frozen reference-CDF transform to
+//! the immutable feature vectors before scoring. It delegates every
 //! **pure** algorithm (purge/embargo, φ-path reconstruction, DSR/PSR/MinTRL,
 //! CSCV/PBO) to [`quant_pivot_research::validation`]. No live `BookStore` is
 //! ever touched and no current feature/factor code replaces frozen rows.
@@ -23,8 +25,8 @@ use quant_pivot_error::{
     QuantError, QuantResult, hashing::CanonicalDigestError, research::ResearchError,
 };
 use quant_pivot_models::{
-    domain::quant::{JobProgressSink, ModelVersionInfo, TrainingDatasetInfo},
-    enums::{model::ModelFamily, quant::CalibrationKind},
+    domain::quant::{JobProgressSink, ModelSpecInfo, ModelVersionInfo, TrainingDatasetInfo},
+    enums::{common::MarketCategory, model::ModelFamily, quant::CalibrationKind},
     hashing::CanonicalDigest,
     runtime_config::{
         DecimalValue, DecisionPolicySnapshot, FactorCrossSectionConfig, PortfolioConfig,
@@ -34,8 +36,8 @@ use quant_pivot_models::{
         BacktestPathSetId, BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId,
         ModelInputContract, ModelRunId, ModelVersionId, ResearchJobProgress, TrainingDatasetId,
         backtest::{
-            BacktestPath, CpcvFoldArtifact, CpcvFoldArtifacts, CpcvFoldCalibrationPolicy,
-            CpcvFoldRole, CpcvMethodologyBinding, CpcvPathSetSubject,
+            BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
+            CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
         },
         factor::FactorServingPlane,
         model_lineage::ModelVersionDerivation,
@@ -54,7 +56,7 @@ use quant_pivot_research::model::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::{
-        BacktestInputs, BacktestRequest, BacktestTick, Backtester, PortfolioCaps,
+        BacktestInputs, BacktestRequest, BacktestTick, Backtester, ModelRankOutcome, PortfolioCaps,
         PortfolioReplayBacktester, sharpe_ratio,
     },
     factors::FactorEngine,
@@ -73,9 +75,10 @@ use quant_pivot_research::{
     validation::{
         BacktestPathSet, ClassicalTrialGrid, CombinatorialPurgedBacktester, CpcvConfig,
         CpcvRequest, DefaultCombinatorialPurgedBacktester, DsrInput, DsrReport, FoldModelSource,
-        FoldRuntime, GroupEvaluation, GroupRowFilter, PboInput, PurgeConfig, RankObservation,
-        ReplayEngine, TimelineGroup, Trial, TrialGridSpec, TrialPerformanceMatrix,
-        WeightedFactorTrialGrid, min_track_record_length, probability_of_backtest_overfitting,
+        FoldRuntime, FoldTrainingIdentity, FoldTrainingRequest, GroupEvaluation, GroupRowFilter,
+        PboInput, PurgeConfig, RankObservation, ReplayEngine, TimelineGroup, Trial, TrialGridSpec,
+        TrialPerformanceMatrix, WeightedFactorTrialGrid, min_track_record_length,
+        probability_of_backtest_overfitting,
     },
 };
 use rayon::prelude::*;
@@ -88,8 +91,9 @@ use tokio_util::sync::CancellationToken;
 use crate::service::model_training;
 use crate::{
     prefetch::source_slice::SourceSliceReader,
+    projection::inference_batch::build_runtime_input,
     service::{
-        backtest::frozen_ticks,
+        backtest::{FrozenTickBuild, frozen_ticks},
         historical_replay::ReplayConfig,
         model_serving_preimage::VerifiedModelServingPreimage,
         training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
@@ -101,6 +105,13 @@ use crate::{
 /// Progress stages are sequential; each reports `with_total(..., TOTAL)` so the
 /// UI can show a determinate percentage plus a named stage.
 struct CpcvProgress;
+
+fn rank_target(model_spec: &ModelSpecInfo) -> LabelSelector {
+    LabelSelector {
+        name: LabelName::new(model_spec.training_contract.target_label_name.clone()),
+        horizon_secs: model_spec.training_contract.target_label_horizon_secs,
+    }
+}
 
 impl CpcvProgress {
     const TOTAL: u64 = 100;
@@ -137,9 +148,9 @@ struct CancellableFoldSource<'a> {
 }
 
 impl FoldModelSource for CancellableFoldSource<'_> {
-    fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<FoldRuntime> {
+    fn train_fold(&self, request: FoldTrainingRequest<'_>) -> QuantResult<FoldRuntime> {
         ensure_cpcv_not_cancelled(self.cancel, "fold train boundary")?;
-        let model = self.inner.train_fold(filter)?;
+        let model = self.inner.train_fold(request)?;
         ensure_cpcv_not_cancelled(self.cancel, "fold train completion")?;
         Ok(model)
     }
@@ -885,6 +896,7 @@ impl CpcvBacktestService {
             .run_trials(&fold_template, &replay_template, &groups, cancel)
             .await?;
         let fold_artifacts = fold_ledger.freeze()?;
+        let period_length = validation_period_length(&matrix.periods)?;
 
         progress.report(ResearchJobProgress::with_total(
             "finalize",
@@ -897,14 +909,16 @@ impl CpcvBacktestService {
             .run_offline_scoped(OfflineMemory::try_gib(2)?, cancel, || {
                 ensure_cpcv_not_cancelled(cancel, "final statistics start")?;
                 let (dsr, pbo) = compute_dsr_and_pbo(
-                    dataset,
                     &path_set,
                     &matrix,
                     trial_grid_count,
                     &self.config,
+                    period_length,
                 )?;
                 let min_track_record_length = representative_path(&path_set)
-                    .map(|path| min_trl_for_path(dataset, path, &self.config.dsr_significance))
+                    .map(|path| {
+                        min_trl_for_path(path, &self.config.dsr_significance, period_length)
+                    })
                     .transpose()?
                     .flatten();
                 ensure_cpcv_not_cancelled(cancel, "final statistics completion")?;
@@ -948,10 +962,7 @@ impl CpcvBacktestService {
             Arc::new(input.source.artifact().header().serving_contract().clone());
         let bindings = serving_contract.bindings();
         let model_family = bindings.model.model_family;
-        let label = LabelSelector {
-            name: LabelName::new(model_spec.training_contract.target_label_name.clone()),
-            horizon_secs: model_spec.training_contract.target_label_horizon_secs,
-        };
+        let label = rank_target(model_spec);
         let input_contract = &model_spec.input_contract;
         let materialization = require_dataset_materialization(dataset)?;
         self.validate_cpcv_input_contract(input_contract, materialization.feature_schema_hash)?;
@@ -997,12 +1008,11 @@ impl CpcvBacktestService {
             CpcvProgress::MATERIALIZE_TICKS.start,
             CpcvProgress::TOTAL,
         ));
-        let probe_runtime = ProbeRuntime {
-            model_version_id: bindings.model.model_version_id,
-            model_family,
-            feature_schema_hash: *materialization.feature_schema_hash,
-            input_contract: input_contract.clone(),
-        };
+        let probe_runtime = ProbeRuntime::for_cpcv(
+            bindings,
+            *materialization.feature_schema_hash,
+            input_contract.clone(),
+        );
         let source_slice = dataset
             .manifest
             .as_ref()
@@ -1035,34 +1045,39 @@ impl CpcvBacktestService {
             .map_err(|detail| ResearchError::DatasetBuild {
                 detail: format!("CPCV Source Slice profile/PIT contract failed: {detail}"),
             })?;
-        let ticks = frozen_ticks(
-            &examples,
-            &frozen_source,
-            self.config.entry_max_slippage_bps,
-            &probe_runtime,
-            &input.model_run_id,
-            cancel,
-            progress,
-        )?;
+        let ticks = self
+            .deps
+            .compute
+            .run_offline_scoped(OfflineMemory::try_gib(6)?, cancel, || {
+                frozen_ticks(FrozenTickBuild {
+                    examples: &examples,
+                    frozen_source: &frozen_source,
+                    entry_max_slippage_bps: self.config.entry_max_slippage_bps,
+                    rank_target: &label,
+                    model: &probe_runtime,
+                    model_run_id: &input.model_run_id,
+                    cancel,
+                    sink: progress,
+                })
+            })
+            .await?;
         let Some(ticks) = ticks else {
             return Err(ResearchError::Cancelled {
                 detail: "cpcv backtest cancelled during tick materialization".to_owned(),
             }
             .into());
         };
-        let ticks_by_as_of: Arc<BTreeMap<DateTime<Utc>, BacktestTick>> = Arc::new(
-            ticks
-                .into_iter()
-                .map(|tick| (tick.decision_at, tick))
-                .collect(),
-        );
         let handle = Handle::current();
-        let replay_template = Arc::new(PortfolioReplayTemplate {
+        let replay_template = self.replay_template(PortfolioReplayTemplateBuild {
             dataset_id: dataset.training_dataset_id,
-            ticks_by_as_of,
+            model_family,
+            category_scope: research_profile.spec.category,
+            ticks,
             groups: Arc::clone(&groups),
-            caps: self.caps.clone(),
+            examples: Arc::clone(&examples),
+            group_example_ranges: Arc::clone(&group_example_ranges),
             handle: handle.clone(),
+            model_run_id: input.model_run_id,
         });
         #[cfg(not(feature = "ml-classical"))]
         if model_family.is_classical() {
@@ -1090,6 +1105,33 @@ impl CpcvBacktestService {
         #[cfg(not(feature = "ml-classical"))]
         let fold_template = self.build_fold_template(fold_build)?;
         Ok((fold_template, replay_template))
+    }
+
+    fn replay_template(&self, input: PortfolioReplayTemplateBuild) -> Arc<PortfolioReplayTemplate> {
+        let weighted =
+            (input.model_family == ModelFamily::WeightedFactor).then(|| WeightedPortfolioReplay {
+                factor_engine: FactorEngine::for_model_scope(
+                    &self.replay.factors,
+                    &self.replay.features,
+                    &self.replay.domain,
+                    input.category_scope,
+                    self.replay.bias_table.clone(),
+                ),
+                factor_config: self.replay.factors.clone(),
+                examples: input.examples,
+                group_example_ranges: input.group_example_ranges,
+            });
+        Arc::new(PortfolioReplayTemplate::from_input(
+            PortfolioReplayTemplateInput {
+                dataset_id: input.dataset_id,
+                ticks: input.ticks,
+                groups: input.groups,
+                caps: self.caps.clone(),
+                handle: input.handle,
+                model_run_id: input.model_run_id,
+                weighted,
+            },
+        ))
     }
 
     fn validate_cpcv_input_contract(
@@ -1365,21 +1407,6 @@ fn methodology_hash_error(error: &CanonicalDigestError) -> QuantError {
     .into()
 }
 
-fn validated_sample_interval_secs(dataset: &TrainingDatasetInfo) -> QuantResult<u64> {
-    let value = u64::try_from(dataset.sample_interval_secs).map_err(|error| {
-        ResearchError::DatasetBuild {
-            detail: format!("dataset sample_interval_secs is invalid: {error}"),
-        }
-    })?;
-    if value == 0 {
-        return Err(ResearchError::DatasetBuild {
-            detail: "dataset sample_interval_secs must be positive".to_owned(),
-        }
-        .into());
-    }
-    Ok(value)
-}
-
 fn validated_pbo_block_count(block_count: u32) -> QuantResult<usize> {
     usize::try_from(block_count).map_err(|error| {
         ResearchError::ValidationMethodology {
@@ -1389,9 +1416,36 @@ fn validated_pbo_block_count(block_count: u32) -> QuantResult<usize> {
     })
 }
 
-fn validated_period_length(dataset: &TrainingDatasetInfo) -> QuantResult<ChronoDuration> {
-    validated_sample_interval_secs(dataset)?;
-    Ok(ChronoDuration::seconds(dataset.sample_interval_secs))
+fn validation_period_length(periods: &[DateTime<Utc>]) -> QuantResult<ChronoDuration> {
+    let first = periods
+        .first()
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: "validation timeline has no return periods".to_owned(),
+        })?;
+    let last = periods
+        .last()
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: "validation timeline has no return periods".to_owned(),
+        })?;
+    if periods.len() < 2 || periods.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(ResearchError::ValidationMethodology {
+            detail: "validation timeline requires at least two strictly ascending periods"
+                .to_owned(),
+        }
+        .into());
+    }
+    let interval_count =
+        i32::try_from(periods.len() - 1).map_err(|error| ResearchError::ValidationMethodology {
+            detail: format!("validation interval count does not fit i32: {error}"),
+        })?;
+    let period_length = last.signed_duration_since(*first) / interval_count;
+    if period_length <= ChronoDuration::zero() {
+        return Err(ResearchError::ValidationMethodology {
+            detail: "validation timeline has a non-positive effective period length".to_owned(),
+        }
+        .into());
+    }
+    Ok(period_length)
 }
 
 /// A minimal, never-scored [`QuantModelRuntime`] used only to determine
@@ -1404,6 +1458,21 @@ struct ProbeRuntime {
     model_family: ModelFamily,
     feature_schema_hash: ContentHash,
     input_contract: ModelInputContract,
+}
+
+impl ProbeRuntime {
+    const fn for_cpcv(
+        bindings: &ModelServingBindings,
+        feature_schema_hash: ContentHash,
+        input_contract: ModelInputContract,
+    ) -> Self {
+        Self {
+            model_version_id: bindings.model.model_version_id,
+            model_family: bindings.model.model_family,
+            feature_schema_hash,
+            input_contract,
+        }
+    }
 }
 
 #[async_trait]
@@ -1534,7 +1603,7 @@ struct FoldArtifactLedger {
 impl FoldArtifactLedger {
     fn record(
         &self,
-        role: CpcvFoldRole,
+        identity: FoldTrainingIdentity<'_>,
         group_indices: &[usize],
         artifact: &ModelArtifact,
     ) -> QuantResult<()> {
@@ -1549,9 +1618,48 @@ impl FoldArtifactLedger {
             group_indices,
         )
         .map_err(|error| methodology_hash_error(&error))?;
+        let identity = match identity {
+            FoldTrainingIdentity::Validation {
+                combination_index,
+                test_partitions,
+                test_groups,
+            } => {
+                let test_partition_count =
+                    u64::try_from(test_partitions.len()).map_err(|error| {
+                        ResearchError::ValidationMethodology {
+                            detail: format!("CPCV test partition count does not fit u64: {error}"),
+                        }
+                    })?;
+                let test_group_count = u64::try_from(test_groups.len()).map_err(|error| {
+                    ResearchError::ValidationMethodology {
+                        detail: format!("CPCV test group count does not fit u64: {error}"),
+                    }
+                })?;
+                let test_partitions_hash = CanonicalDigest::content_hash_typed(
+                    "quant-pivot/cpcv-fold-test-partitions",
+                    1,
+                    test_partitions,
+                )
+                .map_err(|error| methodology_hash_error(&error))?;
+                let test_groups_hash = CanonicalDigest::content_hash_typed(
+                    "quant-pivot/cpcv-fold-test-groups",
+                    1,
+                    test_groups,
+                )
+                .map_err(|error| methodology_hash_error(&error))?;
+                CpcvEstimatorIdentity::Validation {
+                    combination_index,
+                    test_partitions_hash,
+                    test_partition_count,
+                    test_groups_hash,
+                    test_group_count,
+                }
+            }
+            FoldTrainingIdentity::Trial { trial_id } => CpcvEstimatorIdentity::Trial { trial_id },
+        };
         let serving_contract_hash = artifact.header().serving_contract().contract_hash();
         let evidence = CpcvFoldArtifact {
-            role,
+            identity,
             training_groups_hash,
             training_group_count,
             model_artifact_hash: artifact.content_hash()?,
@@ -1701,9 +1809,6 @@ impl FoldTemplate {
                 Ok(Box::new(WeightedFactorFoldSource {
                     template,
                     objective,
-                    role: trial.map_or(CpcvFoldRole::Validation, |trial| CpcvFoldRole::Trial {
-                        trial_id: trial.trial_id,
-                    }),
                 }))
             }
             #[cfg(feature = "ml-classical")]
@@ -1722,13 +1827,135 @@ impl FoldTemplate {
                 Ok(Box::new(ClassicalFoldSource {
                     template,
                     params_override,
-                    role: trial.map_or(CpcvFoldRole::Validation, |trial| CpcvFoldRole::Trial {
-                        trial_id: trial.trial_id,
-                    }),
                 }))
             }
         }
     }
+}
+
+struct WeightedPortfolioReplay {
+    factor_engine: FactorEngine,
+    factor_config: FactorsConfig,
+    examples: Arc<[TrainingExample]>,
+    group_example_ranges: Arc<[Range<usize>]>,
+}
+
+impl WeightedPortfolioReplay {
+    fn model_input(
+        &self,
+        model: &dyn QuantModelRuntime,
+        model_run_id: &ModelRunId,
+        group_index: usize,
+    ) -> QuantResult<ModelRuntimeInput> {
+        let range = self.group_example_ranges.get(group_index).ok_or_else(|| {
+            ResearchError::ValidationMethodology {
+                detail: format!(
+                    "weighted CPCV replay group {group_index} has no frozen example range"
+                ),
+            }
+        })?;
+        let examples = self.examples.get(range.clone()).ok_or_else(|| {
+            ResearchError::ValidationMethodology {
+                detail: format!(
+                    "weighted CPCV replay group {group_index} has an invalid frozen example range"
+                ),
+            }
+        })?;
+        if examples.is_empty() {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!("weighted CPCV replay group {group_index} is empty"),
+            }
+            .into());
+        }
+        if examples.iter().any(|example| {
+            example.token_id != example.selected_market.primary_token_id
+                || example.market_id != example.selected_market.market_id
+        }) {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "weighted CPCV replay group {group_index} is not bound to canonical primary-token examples"
+                ),
+            }
+            .into());
+        }
+
+        let runtime_plane =
+            model
+                .factor_serving_plane()
+                .ok_or_else(|| ResearchError::InvalidModelArtifact {
+                    detail: format!(
+                        "weighted CPCV runtime {} has no factor serving plane",
+                        model.model_version_id()
+                    ),
+                })?;
+        if self.factor_engine.serving_plane()? != runtime_plane {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "weighted CPCV runtime {} factor plane differs from the frozen replay engine",
+                    model.model_version_id()
+                ),
+            }
+            .into());
+        }
+        let references = model.frozen_reference_quantiles().ok_or_else(|| {
+            ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "weighted CPCV runtime {} has no frozen reference distributions",
+                    model.model_version_id()
+                ),
+            }
+        })?;
+        let mut factor_config = self.factor_config.clone();
+        factor_config.cross_section = model.factor_cross_section().cloned().ok_or_else(|| {
+            ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "weighted CPCV runtime {} has no cross-section transform",
+                    model.model_version_id()
+                ),
+            }
+        })?;
+        let vectors = examples
+            .iter()
+            .map(|example| example.feature_vector.clone())
+            .collect::<Vec<_>>();
+        let markets = examples
+            .iter()
+            .map(|example| example.selected_market.clone())
+            .collect::<Vec<_>>();
+        let outcomes =
+            self.factor_engine
+                .compute_batch_with_refs(&vectors, &factor_config, references)?;
+        Ok(build_runtime_input(
+            model,
+            model_run_id,
+            examples[0].decision_at(),
+            &markets,
+            &vectors,
+            &outcomes,
+        ))
+    }
+}
+
+struct PortfolioReplayTemplateBuild {
+    dataset_id: TrainingDatasetId,
+    model_family: ModelFamily,
+    category_scope: Option<MarketCategory>,
+    ticks: Vec<BacktestTick>,
+    groups: Arc<[TimelineGroup]>,
+    examples: Arc<[TrainingExample]>,
+    group_example_ranges: Arc<[Range<usize>]>,
+    handle: Handle,
+    model_run_id: ModelRunId,
+}
+
+struct PortfolioReplayTemplateInput {
+    dataset_id: TrainingDatasetId,
+    ticks: Vec<BacktestTick>,
+    groups: Arc<[TimelineGroup]>,
+    caps: PortfolioCaps,
+    handle: Handle,
+    model_run_id: ModelRunId,
+    weighted: Option<WeightedPortfolioReplay>,
 }
 
 struct PortfolioReplayTemplate {
@@ -1737,16 +1964,55 @@ struct PortfolioReplayTemplate {
     groups: Arc<[TimelineGroup]>,
     caps: PortfolioCaps,
     handle: Handle,
+    model_run_id: ModelRunId,
+    weighted: Option<WeightedPortfolioReplay>,
 }
 
-/// Per-`as_of` accumulator for [`evaluate_portfolio_groups`]'s group-return
-/// derivation.
-#[derive(Default, Clone)]
-struct TickAccumulator {
-    allocated: Decimal,
-    pnl: Decimal,
-    scores: Vec<Decimal>,
-    realized_bps: Vec<Decimal>,
+impl PortfolioReplayTemplate {
+    fn from_input(input: PortfolioReplayTemplateInput) -> Self {
+        Self {
+            dataset_id: input.dataset_id,
+            ticks_by_as_of: Arc::new(
+                input
+                    .ticks
+                    .into_iter()
+                    .map(|tick| (tick.decision_at, tick))
+                    .collect(),
+            ),
+            groups: input.groups,
+            caps: input.caps,
+            handle: input.handle,
+            model_run_id: input.model_run_id,
+            weighted: input.weighted,
+        }
+    }
+
+    fn tick_for(
+        &self,
+        group_index: usize,
+        model: &dyn QuantModelRuntime,
+    ) -> QuantResult<BacktestTick> {
+        let group =
+            self.groups
+                .get(group_index)
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: format!("CPCV replay group index {group_index} is out of range"),
+                })?;
+        let mut tick = self
+            .ticks_by_as_of
+            .get(&group.decision_at)
+            .cloned()
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: format!(
+                    "CPCV replay has no frozen economic tick for group {group_index} at {}",
+                    group.decision_at
+                ),
+            })?;
+        if let Some(weighted) = &self.weighted {
+            tick.model_input = weighted.model_input(model, &self.model_run_id, group_index)?;
+        }
+        Ok(tick)
+    }
 }
 
 /// [`FoldModelSource`] for the `WeightedFactor` family: filters `template`'s
@@ -1755,7 +2021,6 @@ struct TickAccumulator {
 struct WeightedFactorFoldSource<'a> {
     template: &'a FoldTrainTemplate,
     objective: &'a TrainingObjectiveSpec,
-    role: CpcvFoldRole,
 }
 
 fn validated_group_indices(filter: &GroupRowFilter, range_count: usize) -> QuantResult<&[usize]> {
@@ -1785,7 +2050,8 @@ fn validated_group_indices(filter: &GroupRowFilter, range_count: usize) -> Quant
 }
 
 impl FoldModelSource for WeightedFactorFoldSource<'_> {
-    fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<FoldRuntime> {
+    fn train_fold(&self, request: FoldTrainingRequest<'_>) -> QuantResult<FoldRuntime> {
+        let FoldTrainingRequest { identity, filter } = request;
         let group_indices =
             validated_group_indices(filter, self.template.group_example_ranges.len())?;
         let capacity = group_indices
@@ -1832,7 +2098,7 @@ impl FoldModelSource for WeightedFactorFoldSource<'_> {
         .seal()?;
         self.template
             .fold_ledger
-            .record(self.role, group_indices, &artifact)?;
+            .record(identity, group_indices, &artifact)?;
         let runtime = WeightedFactorRuntime::new(artifact, None)?;
         Ok(FoldRuntime::Buy(Box::new(runtime)))
     }
@@ -1869,12 +2135,12 @@ struct ClassicalFoldTemplate {
 struct ClassicalFoldSource<'a> {
     template: &'a ClassicalFoldTemplate,
     params_override: Option<&'a ClassicalParams>,
-    role: CpcvFoldRole,
 }
 
 #[cfg(feature = "ml-classical")]
 impl FoldModelSource for ClassicalFoldSource<'_> {
-    fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<FoldRuntime> {
+    fn train_fold(&self, request: FoldTrainingRequest<'_>) -> QuantResult<FoldRuntime> {
+        let FoldTrainingRequest { identity, filter } = request;
         let group_indices =
             validated_group_indices(filter, self.template.group_example_ranges.len())?;
         let matrix = model_training::build_classical_matrix(
@@ -1945,7 +2211,7 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
         .seal()?;
         self.template
             .fold_ledger
-            .record(self.role, group_indices, &artifact)?;
+            .record(identity, group_indices, &artifact)?;
         let runtime = ClassicalRuntime::load(artifact, &output.model_bytes)?;
         Ok(FoldRuntime::Buy(Box::new(runtime)))
     }
@@ -1967,36 +2233,30 @@ impl ReplayEngine for FoldReplayEngineAdapter<'_> {
 }
 
 /// Scores the model over `filter`'s groups' pre-materialized ticks, then
-/// derives one [`GroupEvaluation`] per group from the resulting per-sample
-/// outcomes (grouped back by `as_of`; `return_value = tick_pnl /
-/// tick_allocated`, mirroring [`quant_pivot_research::backtest::runner`]'s
-/// own Sharpe-input convention; `rank_observations` carries every scored
-/// candidate's `(composite_score, realized_return_bps)` pair, pooled at the
-/// path level by [`quant_pivot_research::validation::cpcv::build_path`]).
+/// derives one [`GroupEvaluation`] per group from the resulting canonical
+/// portfolio-return observation (`return_value = tick_pnl / total_budget`,
+/// exactly matching [`quant_pivot_research::backtest::runner`]'s capital-base
+/// convention); `rank_observations` carries every resolved model score's
+/// allocation-independent `(composite_score, token_payout_ratio)` pair,
+/// pooled at the path level by
+/// [`quant_pivot_research::validation::cpcv::build_path`]). Portfolio
+/// selection and executable economics must not censor the model-quality
+/// population used by rank IC.
 fn evaluate_portfolio_groups(
     template: &PortfolioReplayTemplate,
     model: &dyn QuantModelRuntime,
     filter: &GroupRowFilter,
 ) -> QuantResult<Vec<GroupEvaluation>> {
-    let mut ticks: Vec<BacktestTick> = filter
+    let mut ticks = filter
         .group_indices
         .iter()
-        .filter_map(|&idx| {
-            template
-                .ticks_by_as_of
-                .get(&template.groups[idx].decision_at)
-                .cloned()
-        })
-        .collect();
+        .map(|&group_index| template.tick_for(group_index, model))
+        .collect::<QuantResult<Vec<_>>>()?;
     ticks.sort_by_key(|tick| tick.decision_at);
-    // Distinguish an explicitly materialized no-trade/no-fill tick (zero
-    // strategy PnL) from a missing replay tick (methodology failure). This is
-    // calendar-time CPCV, so silently dropping flat periods would inflate the
-    // activity-conditioned Sharpe distribution.
-    let mut by_as_of = ticks
+    let tick_decision_times = ticks
         .iter()
-        .map(|tick| (tick.decision_at, TickAccumulator::default()))
-        .collect::<BTreeMap<_, _>>();
+        .map(|tick| tick.decision_at)
+        .collect::<Vec<_>>();
 
     let request = BacktestRequest {
         backtest_report_id: BacktestReportId::from_v7(),
@@ -2014,20 +2274,68 @@ fn evaluate_portfolio_groups(
             ticks,
             caps: template.caps.clone(),
         }))?;
-
-    for sample in &result.sample_outcomes {
-        let entry = by_as_of.entry(sample.decision_at).or_default();
-        entry.allocated += sample.allocated_usd.inner();
-        entry.pnl +=
-            sample.allocated_usd.inner() * sample.realized_return_bps / Decimal::from(10_000);
-        entry.scores.push(sample.composite_score.inner());
-        entry.realized_bps.push(sample.realized_return_bps);
+    if result.tick_weights.len() != tick_decision_times.len()
+        || result.portfolio_returns.len() != tick_decision_times.len()
+    {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "CPCV replay returned {} allocation-weight rows and {} portfolio-return rows for {} decision ticks",
+                result.tick_weights.len(),
+                result.portfolio_returns.len(),
+                tick_decision_times.len()
+            ),
+        }
+        .into());
     }
+    let mut replay_by_as_of = BTreeMap::new();
+    for ((decision_at, observation), weights) in tick_decision_times
+        .into_iter()
+        .zip(&result.portfolio_returns)
+        .zip(&result.tick_weights)
+    {
+        if observation.decision_at != decision_at {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "CPCV replay portfolio return at {} differs from expected decision tick {}",
+                    observation.decision_at, decision_at
+                ),
+            }
+            .into());
+        }
+        if observation.capital_base_usd.inner() != template.caps.total_budget_usd {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "CPCV replay capital base {} differs from frozen portfolio budget {} at {}",
+                    observation.capital_base_usd, template.caps.total_budget_usd, decision_at
+                ),
+            }
+            .into());
+        }
+        let return_value = observation.net_return_bps.inner() / Decimal::from(10_000);
+        if replay_by_as_of
+            .insert(decision_at, (return_value, weights.clone()))
+            .is_some()
+        {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!("CPCV replay returned duplicate decision tick {decision_at}"),
+            }
+            .into());
+        }
+    }
+    if replay_by_as_of.len() != result.tick_weights.len() {
+        return Err(ResearchError::ValidationMethodology {
+            detail: "CPCV replay returned duplicate decision ticks for turnover reconstruction"
+                .to_owned(),
+        }
+        .into());
+    }
+
+    let rank_observations_by_as_of = rank_observations_by_tick(&result.rank_outcomes);
 
     let mut evaluations = Vec::with_capacity(filter.group_indices.len());
     for &group_index in &filter.group_indices {
         let as_of = template.groups[group_index].decision_at;
-        let Some(accumulator) = by_as_of.get(&as_of) else {
+        let Some((return_value, allocation_weights)) = replay_by_as_of.get(&as_of) else {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
                     "CPCV replay missing materialized tick for group as_of={as_of} \
@@ -2036,24 +2344,34 @@ fn evaluate_portfolio_groups(
             }
             .into());
         };
-        let return_value = if accumulator.allocated > Decimal::ZERO {
-            accumulator.pnl / accumulator.allocated
-        } else {
-            Decimal::ZERO
-        };
-        let rank_observations = accumulator
-            .scores
-            .iter()
-            .zip(&accumulator.realized_bps)
-            .map(|(&score, &realized)| RankObservation { score, realized })
-            .collect();
+        let rank_observations = rank_observations_by_as_of
+            .get(&as_of)
+            .cloned()
+            .unwrap_or_default();
         evaluations.push(GroupEvaluation {
             group_index,
-            return_value,
+            return_value: *return_value,
             rank_observations,
+            allocation_weights: Some(allocation_weights.clone()),
         });
     }
     Ok(evaluations)
+}
+
+fn rank_observations_by_tick(
+    outcomes: &[ModelRankOutcome],
+) -> BTreeMap<DateTime<Utc>, Vec<RankObservation>> {
+    let mut by_as_of = BTreeMap::new();
+    for outcome in outcomes {
+        by_as_of
+            .entry(outcome.decision_at)
+            .or_insert_with(Vec::new)
+            .push(RankObservation {
+                score: outcome.score,
+                realized: outcome.realized,
+            });
+    }
+    by_as_of
 }
 
 /// Run every trial's **full-window** (no purge/embargo) train + evaluate,
@@ -2079,7 +2397,12 @@ fn run_trial_grid(
         .map(|trial| -> QuantResult<Vec<Decimal>> {
             ensure_cpcv_not_cancelled(cancel, "trial train boundary")?;
             let fold_source = fold_template.fold_source(Some(trial))?;
-            let model = fold_source.train_fold(&all_indices)?;
+            let model = fold_source.train_fold(FoldTrainingRequest {
+                identity: FoldTrainingIdentity::Trial {
+                    trial_id: trial.trial_id,
+                },
+                filter: &all_indices,
+            })?;
             ensure_cpcv_not_cancelled(cancel, "trial replay boundary")?;
             let evaluations = replay_engine.evaluate(&model, &all_indices)?;
             let mut by_group = vec![None; groups.len()];
@@ -2143,11 +2466,11 @@ fn representative_path(path_set: &BacktestPathSet) -> Option<&BacktestPath> {
 }
 
 fn compute_dsr_and_pbo(
-    dataset: &TrainingDatasetInfo,
     path_set: &BacktestPathSet,
     matrix: &TrialPerformanceMatrix,
     trial_grid_count: u32,
     config: &CpcvBacktestConfig,
+    period_length: ChronoDuration,
 ) -> QuantResult<(DsrReport, Decimal)> {
     let Some(path) = representative_path(path_set) else {
         return Err(ResearchError::ValidationMethodology {
@@ -2164,7 +2487,7 @@ fn compute_dsr_and_pbo(
     let dsr_input = DsrInput {
         observed_sharpe: path.sharpe,
         returns_period_count,
-        period_length: validated_period_length(dataset)?,
+        period_length,
         skewness: stats::skewness(&path.group_returns),
         kurtosis: stats::kurtosis(&path.group_returns),
         // Bailey multiple-testing N/V: same population — the governed trial
@@ -2190,9 +2513,9 @@ fn trial_sharpe_series(matrix: &TrialPerformanceMatrix) -> Vec<Decimal> {
 }
 
 fn min_trl_for_path(
-    dataset: &TrainingDatasetInfo,
     path: &BacktestPath,
     dsr_significance: &Decimal,
+    period_length: ChronoDuration,
 ) -> QuantResult<Option<ChronoDuration>> {
     let returns_period_count = u64::try_from(path.group_returns.len()).map_err(|error| {
         ResearchError::ValidationMethodology {
@@ -2202,7 +2525,7 @@ fn min_trl_for_path(
     let input = DsrInput {
         observed_sharpe: path.sharpe,
         returns_period_count,
-        period_length: validated_period_length(dataset)?,
+        period_length,
         skewness: stats::skewness(&path.group_returns),
         kurtosis: stats::kurtosis(&path.group_returns),
         trial_count: 1,
@@ -2213,11 +2536,41 @@ fn min_trl_for_path(
 
 #[cfg(test)]
 mod tests {
+    use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_error::{QuantError, research::ResearchError};
-    use quant_pivot_models::enums::model::ModelFamily;
-    use quant_pivot_research::validation::GroupRowFilter;
+    use quant_pivot_models::{
+        enums::model::ModelFamily,
+        types::{MarketId, TokenId},
+    };
+    use quant_pivot_research::{
+        backtest::ModelRankOutcome, model::ModelRankTarget, training::TOKEN_PAYOUT_RATIO,
+        validation::GroupRowFilter,
+    };
+    use rust_decimal_macros::dec;
 
-    use super::{CpcvBacktestService, validated_group_indices};
+    use super::{
+        CpcvBacktestService, rank_observations_by_tick, validated_group_indices,
+        validation_period_length,
+    };
+
+    #[test]
+    fn event_period_elapsed_mean() {
+        let periods = [
+            Utc.timestamp_opt(0, 0).single().expect("first period"),
+            Utc.timestamp_opt(60, 0).single().expect("second period"),
+            Utc.timestamp_opt(240, 0).single().expect("third period"),
+        ];
+        assert_eq!(
+            validation_period_length(&periods).expect("effective period length"),
+            Duration::seconds(120)
+        );
+    }
+
+    #[test]
+    fn event_period_rejects_duplicates() {
+        let period = Utc.timestamp_opt(0, 0).single().expect("period");
+        assert!(validation_period_length(&[period, period]).is_err());
+    }
 
     #[test]
     fn precomputed_group_unique_bounded() {
@@ -2246,6 +2599,48 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn rank_uses_canonical_scores() {
+        let decision_at = Utc
+            .timestamp_opt(1_700_000_000, 0)
+            .single()
+            .expect("valid decision time");
+        let outcomes = [
+            ModelRankOutcome {
+                decision_at,
+                market_id: MarketId::new("winner"),
+                token_id: TokenId::new("winner-yes"),
+                score: dec!(0.9),
+                target: ModelRankTarget {
+                    label_name: TOKEN_PAYOUT_RATIO,
+                    label_horizon_secs: 0,
+                },
+                realized: dec!(1),
+            },
+            ModelRankOutcome {
+                decision_at,
+                market_id: MarketId::new("loser"),
+                token_id: TokenId::new("loser-yes"),
+                score: dec!(-0.9),
+                target: ModelRankTarget {
+                    label_name: TOKEN_PAYOUT_RATIO,
+                    label_horizon_secs: 0,
+                },
+                realized: dec!(0),
+            },
+        ];
+
+        let grouped = rank_observations_by_tick(&outcomes);
+        let observations = grouped
+            .get(&decision_at)
+            .expect("decision-time observations");
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].score, dec!(0.9));
+        assert_eq!(observations[0].realized, dec!(1));
+        assert_eq!(observations[1].score, dec!(-0.9));
+        assert_eq!(observations[1].realized, dec!(0));
     }
 
     #[test]

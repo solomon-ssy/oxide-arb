@@ -136,40 +136,6 @@ pub async fn inspect_preproduction_postgres(
     })
 }
 
-/// Destructively recreate only the exact project-owned preproduction database.
-///
-/// Active sessions are never terminated implicitly; any connection makes the
-/// reset fail closed and the operator must stop its owner first.
-pub async fn reset_preproduction_postgres(
-    config: &PostgresConfig,
-    lease: &SchemaMutationLease,
-) -> Result<(), StorageError> {
-    lease.ensure_active()?;
-    let inventory = inspect_preproduction_postgres(config).await?;
-    if inventory.connection_count != 0 {
-        return Err(StorageError::Migration(format!(
-            "{} PostgreSQL target connections remain; stop their owners before reset",
-            inventory.connection_count
-        )));
-    }
-    let maintenance_url = config
-        .try_database_url("postgres")
-        .map_err(|error| StorageError::Migration(format!("build PG maintenance URL: {error}")))?;
-    let maintenance = PgPool::connect(&maintenance_url)
-        .await
-        .map_err(migration_error("connect PostgreSQL maintenance database"))?;
-    sqlx::query("DROP DATABASE IF EXISTS quant_pivot")
-        .execute(&maintenance)
-        .await
-        .map_err(migration_error("drop PostgreSQL preproduction database"))?;
-    sqlx::query("CREATE DATABASE quant_pivot OWNER quant_pivot")
-        .execute(&maintenance)
-        .await
-        .map_err(migration_error("create PostgreSQL preproduction database"))?;
-    maintenance.close().await;
-    lease.ensure_active()
-}
-
 fn validate_preproduction_postgres_target(config: &PostgresConfig) -> Result<(), StorageError> {
     if config.database != PREPRODUCTION_DATABASE
         || config.user != PREPRODUCTION_DATABASE_USER
@@ -213,6 +179,52 @@ impl SchemaMutationLease {
     #[must_use]
     pub const fn backend_pid(&self) -> i32 {
         self.backend_pid
+    }
+
+    /// Destructively recreate only the exact project-owned preproduction database.
+    ///
+    /// The same maintenance session owns the advisory lease, performs the final
+    /// active-session check, and executes the DDL. The inspection therefore does
+    /// not create a target-database connection that can race with the subsequent
+    /// `DROP DATABASE`. Unknown sessions are never terminated; any such session
+    /// keeps the operation fail-closed.
+    pub async fn reset_preproduction_postgres(
+        &self,
+        config: &PostgresConfig,
+    ) -> Result<(), StorageError> {
+        validate_preproduction_postgres_target(config)?;
+        self.ensure_active()?;
+        let connection = self.connection.as_ref().ok_or_else(|| {
+            StorageError::Migration(
+                "PostgreSQL schema mutation lease connection is absent".to_owned(),
+            )
+        })?;
+        let mut connection = connection.lock().await;
+        self.ensure_active()?;
+        let connection_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::bigint FROM pg_stat_activity WHERE datname = $1",
+        )
+        .bind(PREPRODUCTION_DATABASE)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(migration_error(
+            "count PostgreSQL target connections before reset",
+        ))?;
+        if connection_count != 0 {
+            return Err(StorageError::Migration(format!(
+                "{connection_count} PostgreSQL target connections remain; stop their owners before reset"
+            )));
+        }
+        sqlx::query("DROP DATABASE IF EXISTS quant_pivot")
+            .execute(&mut *connection)
+            .await
+            .map_err(migration_error("drop PostgreSQL preproduction database"))?;
+        sqlx::query("CREATE DATABASE quant_pivot OWNER quant_pivot")
+            .execute(&mut *connection)
+            .await
+            .map_err(migration_error("create PostgreSQL preproduction database"))?;
+        drop(connection);
+        self.ensure_active()
     }
 }
 

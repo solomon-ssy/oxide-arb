@@ -20,6 +20,8 @@ pub struct WebConfig {
     pub serve_static_ui: bool,
     /// Directory of the built SPA assets (default `static/ui`).
     pub static_ui_dir: String,
+    /// Admission and deadline budget for Argon2 password work.
+    pub password_crypto: PasswordCryptoConfig,
     /// JWT signing/expiry parameters.
     pub jwt: JwtConfig,
 }
@@ -32,7 +34,28 @@ impl Default for WebConfig {
             cors_allowed_origins: Vec::new(),
             serve_static_ui: false,
             static_ui_dir: default_static_ui_dir(),
+            password_crypto: PasswordCryptoConfig::default(),
             jwt: JwtConfig::default(),
+        }
+    }
+}
+
+/// Bounded admission contract for password hashing and verification.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PasswordCryptoConfig {
+    /// Maximum admitted operations, including the one executing on the
+    /// isolated security pool. Excess requests fail fast with HTTP 429.
+    pub max_in_flight: usize,
+    /// End-to-end queue plus computation deadline.
+    pub deadline_ms: u64,
+}
+
+impl Default for PasswordCryptoConfig {
+    fn default() -> Self {
+        Self {
+            max_in_flight: 8,
+            deadline_ms: 15_000,
         }
     }
 }
@@ -132,6 +155,8 @@ mod tests {
         assert_eq!(cfg.listen_host, "0.0.0.0");
         assert_eq!(cfg.listen_port, 8080);
         assert!(!cfg.serve_static_ui);
+        assert_eq!(cfg.password_crypto.max_in_flight, 8);
+        assert_eq!(cfg.password_crypto.deadline_ms, 15_000);
         assert_eq!(cfg.jwt.issuer, "quant-pivot");
         assert_eq!(cfg.jwt.audience, "quant-pivot-web");
         assert_eq!(cfg.jwt.access_ttl_secs, 900);

@@ -75,13 +75,17 @@ pub use feedback::{
     FeedbackCandidateComparisonView, FeedbackCandidateReadyView, FeedbackCandidateShadowView,
     FeedbackCohortCountsView, FeedbackCoverageDecision, FeedbackCoverageView,
     FeedbackCycleDetailView, FeedbackCycleListQuery, FeedbackCycleMutationView,
-    FeedbackCycleTriggerView, FeedbackCycleView, FeedbackEvaluationUseView, FeedbackOverviewView,
-    FeedbackProfileOverviewView, FeedbackQueueView, FeedbackReadinessView, FeedbackRouteDiffView,
+    FeedbackCycleTriggerRequest, FeedbackCycleTriggerView, FeedbackCycleView,
+    FeedbackEvaluationUseView, FeedbackOverviewView, FeedbackProfileOverviewView,
+    FeedbackQueueView, FeedbackReadinessView, FeedbackRouteDiffView,
     FeedbackSchedulerControlRequest, FeedbackSchedulerListView, FeedbackSchedulerMutationView,
     FeedbackSchedulerStateView, FeedbackStageEventView, FeedbackTriggerEventView,
-    FeedbackTruthOperationsView, IssuePromotionPermitRequest, ModelRouteActivationReceiptView,
-    ModelRouteBootstrapReceiptView, PromotionPermitListQuery, PromotionPermitMutationView,
-    PromotionPermitView, RevokePromotionPermitRequest, TriggerFeedbackCycleRequest,
+    FeedbackTruthOperationsView, IssuePromotionPermitRequest, ModelRouteActivationMutationView,
+    ModelRouteActivationReceiptView, ModelRouteBootstrapReceiptView, ModelRouteRollbackTargetView,
+    PromotionPermitListQuery, PromotionPermitMutationView, PromotionPermitView,
+    RejectShadowBindingRequest, RemediateResolutionProjectionRequest,
+    ResolutionProjectionRemediationView, RevokePromotionPermitRequest,
+    ShadowBindingRejectionReceiptView,
 };
 pub use health::{DependencyCheck, HealthStatus, ReadinessReport, ReadinessStatus};
 pub use market::{
@@ -92,6 +96,7 @@ pub use market::{
 };
 pub use market_linkage::{
     AcknowledgeBasisAlertRequest, BasisAlertListQuery, BasisAlertView, DomainSourceExpectationView,
+    DomainSourceFamilySummary, DomainSourceSnapshotStatus, DomainSourcesSnapshot,
     LinkageResolveSummaryView, MarketLinkageDetailView, MarketLinkageHistoryEntryView,
     MarketLinkageListQuery, MarketLinkageSummaryView, OverrideLinkageRequest,
     OverrideSourceBindingInput, ResolveLinkagesRequest,

@@ -12,7 +12,7 @@ use std::string::ToString;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::quant::MarketCandidate,
-    types::{ContentHash, DecisionPolicySnapshotId, SelectionExclusionSummary},
+    types::{ContentHash, DecisionPolicySnapshotId, Price, SelectionExclusionSummary, Usd},
 };
 use serde::Serialize;
 
@@ -31,9 +31,9 @@ pub struct SelectorHashInput {
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Sorted enabled category slugs.
     pub enabled_categories: Vec<String>,
-    /// Minimum liquidity threshold, as the verbatim config string.
+    /// Minimum liquidity threshold, as a scale-independent decimal string.
     pub min_liquidity_usd: String,
-    /// Minimum 24h volume threshold, as the verbatim config string.
+    /// Minimum 24h volume threshold, as a scale-independent decimal string.
     pub min_volume_24h_usd: String,
     /// Maximum spread threshold in basis points.
     pub max_spread_bps: u32,
@@ -89,8 +89,19 @@ impl SelectorHashInput {
         enabled_categories.sort();
 
         let mut candidates = candidates.to_vec();
+        for candidate in &mut candidates {
+            candidate.liquidity_usd = candidate.liquidity_usd.map(Usd::normalized);
+            candidate.volume_24h_usd = candidate.volume_24h_usd.map(Usd::normalized);
+            candidate.best_bid = candidate.best_bid.map(Price::normalized);
+            candidate.best_ask = candidate.best_ask.map(Price::normalized);
+            candidate.depth_usd = candidate.depth_usd.map(Usd::normalized);
+        }
         candidates.sort_by(|left, right| left.market_id.cmp(&right.market_id));
         let mut included = included.to_vec();
+        for market in &mut included {
+            market.liquidity_usd = market.liquidity_usd.map(Usd::normalized);
+            market.volume_24h_usd = market.volume_24h_usd.map(Usd::normalized);
+        }
         included.sort_by(|left, right| left.market_id.cmp(&right.market_id));
         let mut excluded = excluded.to_vec();
         excluded.sort_by(|left, right| left.market_id.cmp(&right.market_id));
@@ -99,8 +110,8 @@ impl SelectorHashInput {
             decision_at: request.decision_at.timestamp_millis(),
             decision_policy_snapshot_id: request.decision_policy_snapshot_id,
             enabled_categories,
-            min_liquidity_usd: selection.min_liquidity_usd.value.to_string(),
-            min_volume_24h_usd: selection.min_volume_24h_usd.value.to_string(),
+            min_liquidity_usd: selection.min_liquidity_usd.value.normalize().to_string(),
+            min_volume_24h_usd: selection.min_volume_24h_usd.value.normalize().to_string(),
             max_spread_bps: selection.max_spread_bps,
             allow_near_resolution: selection.allow_near_resolution,
             min_time_to_resolution_secs: selection.min_time_to_resolution_secs,

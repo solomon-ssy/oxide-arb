@@ -20,7 +20,7 @@ use crate::{
     enums::quant::{AttributionArtifactKind, AttributionCohort, FeedbackStage},
     hashing::CanonicalDigest,
     types::{
-        ArtifactUri, AttributionArtifactId, ContentHash, FeedbackAttributionPlanArtifactId,
+        ArtifactUri, AttributionArtifactId, ContentHash, FeedbackAttributionManifestId,
         FeedbackCycleId, FeedbackTruthFreezeArtifactId, FeedbackValidationArtifactId,
         ModelVersionId, OrderIntentId, RecommendationId, ResearchJobId,
         model_quality::{
@@ -194,12 +194,13 @@ impl FeedbackAttributionProduced {
     const fn subject_is_valid(&self) -> bool {
         match self.artifact_kind {
             AttributionArtifactKind::PredictionExplanation
-            | AttributionArtifactKind::DecisionCounterfactual => {
+            | AttributionArtifactKind::DecisionInterventionReplay => {
                 self.model_version_id.is_some()
                     && self.recommendation_id.is_some()
                     && self.order_intent_id.is_none()
             }
-            AttributionArtifactKind::OutcomeAssociation => {
+            AttributionArtifactKind::ResolutionOutcomeAssociation
+            | AttributionArtifactKind::ExecutionOutcomeAssociation => {
                 self.model_version_id.is_some()
                     && self.recommendation_id.is_none()
                     && self.order_intent_id.is_none()
@@ -214,20 +215,20 @@ impl FeedbackAttributionProduced {
     }
 }
 
-/// Frozen `AttributionPlan` job input.
+/// Frozen `AttributionManifest` job input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FeedbackAttributionPlanJobParams {
+pub struct FeedbackAttributionJobParams {
     pub feedback_cycle_id: FeedbackCycleId,
     pub cycle_idempotency_hash: ContentHash,
-    pub artifact_id: FeedbackAttributionPlanArtifactId,
+    pub artifact_id: FeedbackAttributionManifestId,
     pub cutoff: DateTime<Utc>,
     pub generated_at: DateTime<Utc>,
     pub window: FeedbackCohortWindow,
     pub truth_artifact: ResearchJobArtifactRef,
 }
 
-impl FeedbackAttributionPlanJobParams {
+impl FeedbackAttributionJobParams {
     pub fn try_new(
         feedback_cycle_id: FeedbackCycleId,
         cycle_idempotency_hash: ContentHash,
@@ -239,7 +240,7 @@ impl FeedbackAttributionPlanJobParams {
         let params = Self {
             feedback_cycle_id,
             cycle_idempotency_hash,
-            artifact_id: FeedbackAttributionPlanArtifactId::from_cycle_id(feedback_cycle_id),
+            artifact_id: FeedbackAttributionManifestId::from_cycle_id(feedback_cycle_id),
             cutoff,
             generated_at,
             window,
@@ -253,12 +254,12 @@ impl FeedbackAttributionPlanJobParams {
         if FeedbackCycleId::from_idempotency_hash(&self.cycle_idempotency_hash)
             != self.feedback_cycle_id
             || self.artifact_id
-                != FeedbackAttributionPlanArtifactId::from_cycle_id(self.feedback_cycle_id)
+                != FeedbackAttributionManifestId::from_cycle_id(self.feedback_cycle_id)
             || self.window.cutoff() > self.cutoff
             || self.generated_at < self.cutoff
         {
             return Err(invalid(
-                "attribution-plan cycle or artifact identity differs",
+                "attribution-manifest cycle or artifact identity differs",
             ));
         }
         Ok(())
@@ -273,16 +274,16 @@ impl FeedbackAttributionPlanJobParams {
     }
 
     pub fn input_hash(&self) -> Result<ContentHash, FeedbackError> {
-        governance_hash("attribution_plan", self)
+        governance_hash("attribution_manifest", self)
     }
 }
 
-/// Immutable PIT-safe attribution input plan.
+/// Immutable PIT-safe attribution evidence manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FeedbackAttributionPlanArtifact {
+pub struct FeedbackAttributionManifest {
     pub format_version: u32,
-    pub artifact_id: FeedbackAttributionPlanArtifactId,
+    pub artifact_id: FeedbackAttributionManifestId,
     pub feedback_cycle_id: FeedbackCycleId,
     pub cycle_idempotency_hash: ContentHash,
     pub input_hash: ContentHash,
@@ -294,9 +295,9 @@ pub struct FeedbackAttributionPlanArtifact {
     pub produced_set_hash: ContentHash,
 }
 
-impl FeedbackAttributionPlanArtifact {
+impl FeedbackAttributionManifest {
     pub fn try_new(
-        params: &FeedbackAttributionPlanJobParams,
+        params: &FeedbackAttributionJobParams,
         mut uses: Vec<FeedbackAttributionUse>,
         mut produced: Vec<FeedbackAttributionProduced>,
     ) -> Result<Self, FeedbackError> {
@@ -326,7 +327,7 @@ impl FeedbackAttributionPlanArtifact {
             || FeedbackCycleId::from_idempotency_hash(&self.cycle_idempotency_hash)
                 != self.feedback_cycle_id
             || self.artifact_id
-                != FeedbackAttributionPlanArtifactId::from_cycle_id(self.feedback_cycle_id)
+                != FeedbackAttributionManifestId::from_cycle_id(self.feedback_cycle_id)
             || self.uses.iter().any(|use_| {
                 use_.source_feedback_cycle_id == self.feedback_cycle_id
                     || use_.source_cutoff >= self.cutoff
@@ -352,7 +353,7 @@ impl FeedbackAttributionPlanArtifact {
                 != self.produced_set_hash
         {
             return Err(invalid(
-                "attribution plan contains adaptive, late, duplicated, or non-canonical evidence",
+                "attribution manifest contains adaptive, late, duplicated, or non-canonical evidence",
             ));
         }
         Ok(())
@@ -601,12 +602,12 @@ pub trait FeedbackGovernanceExecutionPort: Send + Sync {
         cancel: CancellationToken,
     ) -> QuantResult<FeedbackGovernanceExecutionResult<FeedbackTruthFreezeArtifactId>>;
 
-    async fn plan_attribution(
+    async fn materialize_attribution(
         &self,
-        params: FeedbackAttributionPlanJobParams,
+        params: FeedbackAttributionJobParams,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
-    ) -> QuantResult<FeedbackGovernanceExecutionResult<FeedbackAttributionPlanArtifactId>>;
+    ) -> QuantResult<FeedbackGovernanceExecutionResult<FeedbackAttributionManifestId>>;
 
     async fn validate_candidates(
         &self,

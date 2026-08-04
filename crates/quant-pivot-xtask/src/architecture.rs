@@ -1040,9 +1040,9 @@ fn validate_category_owner(
         (
             owner_path,
             owner,
-            "pub fn active_pointer(&self, route: BuyModelRoute)",
+            "pub fn champion(&self, route: BuyModelRoute)",
             1,
-            "exact pointer lookup must belong to ModelConfig",
+            "exact route champion lookup must belong to ModelConfig",
         ),
         (
             validation_path,
@@ -1094,7 +1094,7 @@ fn validate_category_runtime(
         (
             runner_path,
             runner,
-            "let run_version_id = request.serving.active_model_version_id();",
+            "let run_version_id = request.serving.champion_model_version_id();",
             1,
             "model-run persistence must consume the route snapshot pinned before selection",
         ),
@@ -1224,9 +1224,9 @@ fn validate_generation_owner(source: ArchitectureSource<'_>) -> Vec<String> {
             "durable activation must publish the complete generation in one store",
         ),
         (
-            "does not match selected report route",
+            "let shadow = generation.shadow.get(&route).cloned();",
             1,
-            "the global shadow must be rejected unless it matches the selected route",
+            "a route snapshot must load only that route's optional shadow",
         ),
     ] {
         require_exact_occurrences(
@@ -1396,8 +1396,8 @@ fn validate_category_governance(
             generation_path,
             generation,
             "if route != expected {",
-            1,
-            "config activation must reject a runtime whose sealed scope differs from its route",
+            2,
+            "config activation must reject any champion or shadow runtime whose sealed scope differs from its route",
         ),
         (
             generation_path,
@@ -1409,9 +1409,9 @@ fn validate_category_governance(
         (
             generation_path,
             generation,
-            "validate_policy_profiles(snapshot, *shadow_route, &shadow_model.loaded)?;",
+            "validate_policy_profiles(snapshot, *route, &shadow_model.loaded)?;",
             1,
-            "the configured shadow must bind the same candidate policy profiles",
+            "every route-owned shadow must bind the same candidate policy profiles",
         ),
         (
             policy_path,
@@ -1438,15 +1438,15 @@ fn validate_category_readiness(
             preflight_path,
             preflight,
             "BuyModelRoute::try_from(&config.recommendation.selection)",
-            2,
+            3,
             "mode preflight must check the exact governed report route",
         ),
         (
             preflight_path,
             preflight,
-            ".active_pointer(route)",
+            ".champion(",
             2,
-            "mode preflight must not accept an unrelated active pointer",
+            "mode preflight must not accept an unrelated route champion",
         ),
         (
             capability_path,
@@ -1458,9 +1458,9 @@ fn validate_category_readiness(
         (
             capability_path,
             capability,
-            ".active_pointer(route)",
+            ".champion(",
             1,
-            "system readiness must not infer capability from an unrelated pointer",
+            "system readiness must not infer capability from an unrelated route champion",
         ),
     ] {
         require_exact_occurrences(&mut violations, path, source, needle, expected, invariant);
@@ -2677,11 +2677,14 @@ fn validate_compute_runtime_contract(root: &Path, violations: &mut Vec<String>) 
     for fragment in [
         "pub const SERVING_THREADS: usize = 2;",
         "pub const OFFLINE_THREADS: usize = 2;",
+        "pub const SECURITY_THREADS: usize = 1;",
         "pub const OFFLINE_MEMORY_BYTES: usize = 10 * 1024 * 1024 * 1024;",
+        "security_cpu: Arc<Semaphore>",
         "offline_jobs: Arc<Semaphore>",
         "offline_memory: Arc<Semaphore>",
         "run_offline_cancellable",
         "run_serving_scoped",
+        "run_security",
     ] {
         if !compute.contains(fragment) {
             violations.push(format!(

@@ -5,8 +5,11 @@ use sea_orm::entity::prelude::*;
 
 use super::{quant_feedback_cycle, user};
 use crate::{
-    enums::quant::FeedbackTriggerFamily,
-    types::{ContentHash, FeedbackCycleId, FeedbackTriggerEventId, RoleCode, UserId},
+    enums::quant::{FeedbackEvaluationMode, FeedbackTriggerFamily},
+    types::{
+        ContentHash, FeedbackCycleId, FeedbackTriggerEventId, PolicyIdempotencyKey, RoleCode,
+        UserId,
+    },
 };
 
 #[sea_orm::model]
@@ -17,6 +20,8 @@ pub struct Model {
     pub feedback_trigger_event_id: FeedbackTriggerEventId,
     pub feedback_cycle_id: FeedbackCycleId,
     pub trigger_family: FeedbackTriggerFamily,
+    pub evaluation_mode: FeedbackEvaluationMode,
+    pub idempotency_key: PolicyIdempotencyKey,
     pub actor_user_id: Option<UserId>,
     pub actor_label: String,
     pub actor_role: Option<RoleCode>,

@@ -70,6 +70,30 @@ impl ReliabilityReport {
         })
     }
 
+    /// Resolve a positive downside estimate for one calibrated probability.
+    ///
+    /// Reliability bins intentionally omit empty equal-width buckets. A
+    /// monotone calibrator can still interpolate through such a bucket, so an
+    /// exact lookup is not a total serving function. Exact occupied buckets
+    /// use their own frozen mean MAE. Sparse gaps and tails use the worst
+    /// absolute mean MAE across all occupied buckets, forming a conservative
+    /// envelope from observed evidence instead of inventing a business zero
+    /// or degrading an otherwise valid shadow inference.
+    #[must_use]
+    pub fn conservative_downside_bps(&self, calibrated_probability: Decimal) -> Option<Decimal> {
+        if let Some(exact) = self
+            .bin_for(calibrated_probability)
+            .and_then(|bin| bin.mean_adverse_excursion_bps)
+        {
+            return Some(exact.abs());
+        }
+        self.bins
+            .iter()
+            .filter_map(|bin| bin.mean_adverse_excursion_bps)
+            .map(|value| value.abs())
+            .max()
+    }
+
     /// Validate the complete reliability contract against the persisted
     /// artifact sample count.
     pub fn validate(&self, expected_samples: u64) -> Result<(), String> {
@@ -220,7 +244,17 @@ impl ModelScoreCalibrationPayload {
     pub fn validate(&self, expected_samples: u64) -> Result<(), String> {
         self.validate_contract()?;
         self.mapping.validate()?;
-        self.reliability.validate(expected_samples)
+        self.reliability.validate(expected_samples)?;
+        if self.reliability.bins.iter().any(|bin| {
+            bin.mean_adverse_excursion_bps
+                .is_none_or(|value| value > Decimal::ZERO)
+        }) {
+            return Err(
+                "model-score calibration requires non-positive frozen MAE evidence in every occupied reliability bin"
+                    .to_owned(),
+            );
+        }
+        Ok(())
     }
 
     /// Compute the canonical artifact hash from every immutable persisted

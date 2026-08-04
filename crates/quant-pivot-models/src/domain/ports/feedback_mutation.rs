@@ -7,26 +7,50 @@ use crate::{
     domain::{
         api::{
             ActivateModelRouteRequest, BootstrapModelRouteRequest, CancelFeedbackCycleRequest,
-            FeedbackCycleMutationView, FeedbackCycleTriggerView, FeedbackSchedulerControlRequest,
-            FeedbackSchedulerMutationView, IssuePromotionPermitRequest,
+            FeedbackCycleMutationView, FeedbackCycleTriggerRequest, FeedbackCycleTriggerView,
+            FeedbackSchedulerControlRequest, FeedbackSchedulerMutationView,
+            IssuePromotionPermitRequest, ModelRouteActivationMutationView,
             ModelRouteActivationReceiptView, ModelRouteBootstrapReceiptView,
             PromotionPermitListQuery, PromotionPermitMutationView, PromotionPermitView,
-            RevokePromotionPermitRequest, TriggerFeedbackCycleRequest,
+            RejectShadowBindingRequest, RemediateResolutionProjectionRequest,
+            ResolutionProjectionRemediationView, RevokePromotionPermitRequest,
+            ShadowBindingRejectionReceiptView,
         },
         pagination::Paginated,
         quant::FeedbackCycleActor,
     },
-    types::{FeedbackCycleId, PromotionPermitId, ResearchProfileId},
+    types::{
+        FeedbackCycleId, PolicyActivationId, PromotionPermitId, ResearchProfileId,
+        ResolutionObservationId, ShadowBindingArtifactId,
+    },
 };
 
-/// Dependency-inversion boundary for the four governed feedback mutations and
-/// the permit catalog they update.
+/// Read-only boundary for immutable model-route activation receipts.
 #[async_trait]
-pub trait FeedbackMutationPort: Send + Sync {
+pub trait FeedbackActivationReadPort: Send + Sync {
+    /// Read one immutable model-route activation and its sanitized rollback
+    /// target by canonical activation identity.
+    async fn get_activation(
+        &self,
+        policy_activation_id: PolicyActivationId,
+    ) -> QuantResult<Option<ModelRouteActivationReceiptView>>;
+
+    /// Resolve the immutable model-route activation committed for one exact
+    /// feedback cycle through its permit-bound promotion graph.
+    async fn get_cycle_activation(
+        &self,
+        feedback_cycle_id: FeedbackCycleId,
+    ) -> QuantResult<Option<ModelRouteActivationReceiptView>>;
+}
+
+/// Dependency-inversion boundary for governed feedback mutations and the
+/// permit catalog they update.
+#[async_trait]
+pub trait FeedbackMutationPort: FeedbackActivationReadPort {
     /// Freeze and atomically record one manual cycle.
     async fn trigger_cycle(
         &self,
-        request: TriggerFeedbackCycleRequest,
+        request: FeedbackCycleTriggerRequest,
         actor: FeedbackCycleActor,
     ) -> QuantResult<FeedbackCycleTriggerView>;
 
@@ -73,7 +97,25 @@ pub trait FeedbackMutationPort: Send + Sync {
         &self,
         request: ActivateModelRouteRequest,
         actor: FeedbackCycleActor,
-    ) -> QuantResult<ModelRouteActivationReceiptView>;
+    ) -> QuantResult<ModelRouteActivationMutationView>;
+
+    /// Reject one exact `CandidateReady` shadow binding and converge the route
+    /// to its champion-only policy projection.
+    async fn reject_shadow(
+        &self,
+        binding_id: ShadowBindingArtifactId,
+        request: RejectShadowBindingRequest,
+        actor: FeedbackCycleActor,
+    ) -> QuantResult<ShadowBindingRejectionReceiptView>;
+
+    /// Apply one governed Requeue/Exclude transition to a blocked resolution
+    /// projection using observation-revision CAS.
+    async fn remediate_resolution(
+        &self,
+        observation_id: ResolutionObservationId,
+        request: RemediateResolutionProjectionRequest,
+        actor: FeedbackCycleActor,
+    ) -> QuantResult<ResolutionProjectionRemediationView>;
 
     /// Establish the first champion for one previously empty vertical route.
     async fn bootstrap_route(

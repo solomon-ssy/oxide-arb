@@ -12,23 +12,28 @@ use quant_pivot_models::{
         api::{BuildTrainingDatasetRequest, DriftReportListQuery, FeedbackCycleListQuery},
         pagination::PageRequest,
         quant::{
-            FeedbackCycleActor, FeedbackCycleTerminal, FeedbackOutboxSource,
-            FeedbackStageEventInput, FeedbackStageJobIdentity, GovernedFeedbackCancellation,
-            GovernedFeedbackTrigger, NewFeedbackSchedulerState, NewFeedbackStageEvent,
-            NewResearchJob,
+            FeedbackCycleActor, FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackCycleTerminal,
+            FeedbackOutboxSource, FeedbackStageEventInput, FeedbackStageJobIdentity,
+            GovernedFeedbackCancellation, GovernedFeedbackTrigger, NewFeedbackCycle,
+            NewFeedbackSchedulerState, NewFeedbackStageEvent, NewResearchJob,
         },
         rbac::{AssignPermissions, AssignRoles, NewRole, NewUser, Permission},
     },
     entities::quant_feedback_cycle::Entity as QuantFeedbackCycleEntity,
-    enums::quant::{
-        DatasetPurpose, FeedbackCycleStatus, FeedbackDecision, FeedbackDriftKind,
-        FeedbackDriftMetric, FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily,
-        ResearchJobKind, ResearchJobStatus,
-    },
     enums::rbac::{Operation, ResourceType, RoleKind, RoleStatus, UserStatus},
+    enums::{
+        model::ModelFamily,
+        quant::{
+            DatasetPurpose, FeedbackCycleStatus, FeedbackDecision, FeedbackDriftKind,
+            FeedbackDriftMetric, FeedbackEvaluationMode, FeedbackStage, FeedbackStageEventKind,
+            FeedbackTriggerFamily, ResearchJobKind, ResearchJobStatus,
+        },
+    },
+    runtime_config::BuyModelRoute,
     types::{
-        DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId, ModelVersionId, ResearchJobId,
-        ResearchJobParams, ResearchProfileId, RoleCode, RoleId, SchemaVersion, TrainingDatasetId,
+        DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId, ModelVersionId,
+        PolicyBundleGeneration, PolicyIdempotencyKey, ResearchJobId, ResearchJobParams,
+        ResearchProfileId, RoleCode, RoleId, SchemaVersion, TrainingDatasetId,
         TrainingSampleSources, UserId, WorkerId,
     },
 };
@@ -67,8 +72,8 @@ macro_rules! assert_cycle_conflict {
     };
 }
 
-fn cancellation_event(
-    fixture: &FeedbackSchemaFixture,
+async fn cancellation_event(
+    repository: &PgFeedbackCycleRepository,
     cycle_id: FeedbackCycleId,
     sequence: i64,
 ) -> NewFeedbackStageEvent {
@@ -83,7 +88,10 @@ fn cancellation_event(
         reason_code: Some("operator_cancelled".to_owned()),
         evidence_uri: None,
         evidence_hash: None,
-        occurred_at: fixture.observed_at,
+        occurred_at: repository
+            .database_time()
+            .await
+            .expect("read cancellation database time"),
     })
     .expect("seal cancellation request")
 }
@@ -334,6 +342,8 @@ async fn assert_trigger_contracts(
     let trigger = GovernedFeedbackTrigger {
         actor: owner.clone(),
         cycle: fixture.cycle.clone(),
+        idempotency_key: PolicyIdempotencyKey::parse("operator-retrain-owner")
+            .expect("owner idempotency key"),
         reason_code: "operator_retrain".to_owned(),
     };
 
@@ -341,6 +351,8 @@ async fn assert_trigger_contracts(
         repo.record_governed_trigger(GovernedFeedbackTrigger {
             actor: reader.clone(),
             cycle: fixture.cycle.clone(),
+            idempotency_key: PolicyIdempotencyKey::parse("operator-retrain-reader")
+                .expect("reader idempotency key"),
             reason_code: "operator_retrain".to_owned(),
         })
         .await,
@@ -392,6 +404,8 @@ async fn assert_trigger_contracts(
         repo.record_governed_trigger(GovernedFeedbackTrigger {
             actor: second_owner.clone(),
             cycle: fixture.cycle.clone(),
+            idempotency_key: PolicyIdempotencyKey::parse("operator-retrain-second-owner")
+                .expect("second owner idempotency key"),
             reason_code: "operator_retrain".to_owned(),
         })
         .await
@@ -532,6 +546,178 @@ pub async fn governed_mutation_contracts() {
     let triggered_generation =
         assert_trigger_contracts(&repo, &fixture, &owner, &second_owner, &reader).await;
     assert_cancel_contracts(&repo, &fixture, &owner, &reader, triggered_generation).await;
+}
+
+fn forced_cycle(
+    fixture: &FeedbackSchemaFixture,
+    parent_cycle_id: FeedbackCycleId,
+    idempotency_key: PolicyIdempotencyKey,
+) -> NewFeedbackCycle {
+    let profile = fixture
+        .profile_ref
+        .resolve_builtin_research_profile()
+        .expect("resolve forced-child profile");
+    let evaluation = fixture.candidate_family.shared_evaluation();
+    NewFeedbackCycle::try_seal(
+        FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
+            profile_ref: fixture.profile_ref.clone(),
+            feedback_policy_hash: profile
+                .spec
+                .feedback_policy
+                .content_hash()
+                .expect("hash forced-child feedback policy"),
+            label_cutoff: fixture.label_cutoff,
+            champion_model_version_id: fixture.champion_model_version_id,
+            champion_serving_contract_hash: fixture.champion_serving_contract_hash,
+            champion_model_spec_id: evaluation.model_spec_id,
+            champion_model_spec_definition_hash: evaluation.model_spec_definition_hash,
+            champion_model_family: ModelFamily::WeightedFactor,
+            route: BuyModelRoute::Pooled,
+            decision_policy_snapshot_id: evaluation.source_lineage.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: evaluation.source_lineage.runtime_config_hash,
+            policy_bundle_generation: PolicyBundleGeneration::FIRST,
+            route_generation: 1,
+            evaluation_mode: FeedbackEvaluationMode::ForcedRetraining,
+            parent_cycle_id: Some(parent_cycle_id),
+            forced_idempotency_key: Some(idempotency_key),
+        })
+        .expect("freeze forced-child identity"),
+    )
+    .expect("seal forced-child cycle")
+}
+
+pub async fn forced_child_contracts() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let fixture = Box::pin(prepare_fixture(&db)).await;
+    let repository = PgFeedbackCycleRepository::new(db.clone());
+    let profile = fixture
+        .profile_ref
+        .resolve_builtin_research_profile()
+        .expect("resolve forced-child scheduler profile");
+    PgFeedbackSchedulerRepository::new(db.clone())
+        .sync_state(
+            NewFeedbackSchedulerState::try_new(
+                &profile,
+                repository
+                    .database_time()
+                    .await
+                    .expect("read forced-child scheduler clock"),
+            )
+            .expect("derive forced-child scheduler state"),
+        )
+        .await
+        .expect("persist forced-child scheduler state");
+    let owner = feedback_actor(&db, "forced_owner", &[Operation::Create]).await;
+    repository
+        .record_trigger(
+            fixture.cycle.clone(),
+            fixture.stage_event(fixture.cycle_id, "scheduler"),
+        )
+        .await
+        .expect("persist conditional parent");
+
+    let forced_key = PolicyIdempotencyKey::parse("forced-child-attempt-1")
+        .expect("forced child idempotency key");
+    let child = forced_cycle(&fixture, fixture.cycle_id, forced_key.clone());
+    let premature = repository
+        .record_governed_trigger(GovernedFeedbackTrigger {
+            actor: owner.clone(),
+            cycle: child.clone(),
+            idempotency_key: forced_key.clone(),
+            reason_code: "force_retraining".to_owned(),
+        })
+        .await
+        .expect_err("running parent cannot spawn forced retraining");
+    assert!(matches!(
+        premature,
+        FeedbackCycleCommandError::Storage(StorageError::StateConflict {
+            entity: owner,
+            ..
+        }) if owner == entity::QUANT_FEEDBACK_CYCLE
+    ));
+
+    let claim = repository
+        .claim_cycle(WorkerId::from_v7(), 30)
+        .await
+        .expect("claim conditional parent")
+        .expect("conditional parent is queued");
+    repository
+        .finalize_cycle(
+            claim.lease,
+            FeedbackCycleTerminal::try_succeeded(
+                FeedbackDecision::NoAction,
+                "conditional_no_action".to_owned(),
+            )
+            .expect("seal parent NoAction terminal"),
+        )
+        .await
+        .expect("finalize conditional parent NoAction");
+    let scheduler_repository = PgFeedbackSchedulerRepository::new(db.clone());
+    let scheduler_before = scheduler_repository
+        .find_state(&fixture.profile_ref.id)
+        .await
+        .expect("load pre-forced scheduler state")
+        .expect("pre-forced scheduler state exists");
+
+    let first = repository
+        .record_governed_trigger(GovernedFeedbackTrigger {
+            actor: owner.clone(),
+            cycle: child.clone(),
+            idempotency_key: forced_key.clone(),
+            reason_code: "force_retraining".to_owned(),
+        })
+        .await
+        .expect("persist explicit forced child");
+    let FeedbackTriggerCommit {
+        cycle: FeedbackCycleWriteOutcome::Inserted(stored),
+        stage: FeedbackStageWriteOutcome::Inserted(_),
+        trigger: FeedbackTriggerWriteOutcome::Inserted(provenance),
+    } = first
+    else {
+        panic!("first forced child must insert all durable identities");
+    };
+    assert_eq!(stored.parent_cycle_id, Some(fixture.cycle_id));
+    assert_eq!(stored.forced_idempotency_key.as_ref(), Some(&forced_key));
+    assert_eq!(
+        stored.evaluation_mode,
+        FeedbackEvaluationMode::ForcedRetraining
+    );
+    assert_eq!(stored.label_cutoff, fixture.label_cutoff);
+    assert_eq!(
+        provenance.evaluation_mode,
+        FeedbackEvaluationMode::ForcedRetraining
+    );
+    assert_eq!(provenance.idempotency_key, forced_key);
+    let scheduler_after = scheduler_repository
+        .find_state(&fixture.profile_ref.id)
+        .await
+        .expect("load post-forced scheduler state")
+        .expect("post-forced scheduler state exists");
+    assert_eq!(scheduler_after.next_due_at, scheduler_before.next_due_at);
+    assert_eq!(
+        scheduler_after.last_cycle_id,
+        scheduler_before.last_cycle_id
+    );
+    assert_eq!(scheduler_after.last_cutoff, scheduler_before.last_cutoff);
+    assert!(scheduler_after.cooldown_until.is_some());
+
+    assert!(matches!(
+        repository
+            .record_governed_trigger(GovernedFeedbackTrigger {
+                actor: owner,
+                cycle: child,
+                idempotency_key: provenance.idempotency_key,
+                reason_code: "force_retraining".to_owned(),
+            })
+            .await
+            .expect("replay exact forced child"),
+        FeedbackTriggerCommit {
+            cycle: FeedbackCycleWriteOutcome::AlreadyPresent(_),
+            stage: FeedbackStageWriteOutcome::AlreadyPresent(_),
+            trigger: FeedbackTriggerWriteOutcome::AlreadyPresent(_),
+        }
+    ));
 }
 
 pub async fn read_page_contracts() {
@@ -828,7 +1014,7 @@ pub async fn lease_cas_recovery() {
         .renew_cycle_lease(recovered.lease, 30)
         .await
         .expect("renew current lease");
-    let cancel_event = cancellation_event(&fixture, renewed.feedback_cycle_id, 2);
+    let cancel_event = cancellation_event(&repo, renewed.feedback_cycle_id, 2).await;
     let cancel = repo
         .request_cancel(
             FeedbackCycleGeneration::from(&renewed),
@@ -867,7 +1053,7 @@ pub async fn lease_cas_recovery() {
         .expect("terminalize cancelled cycle");
     assert!(matches!(finalized, FeedbackCycleCasOutcome::Applied(_)));
 
-    let queued_cancel = cancellation_event(&fixture, fixture.second_cycle_id, 2);
+    let queued_cancel = cancellation_event(&repo, fixture.second_cycle_id, 2).await;
     let queued = repo
         .find_cycle(&fixture.second_cycle_id)
         .await

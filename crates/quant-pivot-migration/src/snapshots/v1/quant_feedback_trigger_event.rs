@@ -2,7 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::QpFeedbackTriggerFamily;
+use super::sea_orm_active_enums::{QpFeedbackEvaluationMode, QpFeedbackTriggerFamily};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -12,6 +12,9 @@ pub struct Model {
     pub feedback_trigger_event_id: Uuid,
     pub feedback_cycle_id: Uuid,
     pub trigger_family: QpFeedbackTriggerFamily,
+    pub evaluation_mode: QpFeedbackEvaluationMode,
+    #[sea_orm(column_type = "Text")]
+    pub idempotency_key: String,
     pub actor_user_id: Option<Uuid>,
     pub actor_label: String,
     pub actor_role: Option<String>,

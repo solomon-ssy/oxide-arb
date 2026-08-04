@@ -13,8 +13,6 @@
 //! - **`/me`** never exposes the password hash; it projects [`UserInfo`] into a
 //!   credential-free view plus roles and the role-accessible menu tree.
 
-use std::sync::OnceLock;
-
 use actix_web::{
     HttpRequest, HttpResponse,
     cookie::{Cookie, SameSite, time::Duration as CookieDuration},
@@ -29,7 +27,6 @@ use quant_pivot_models::{
         rbac::UserInfo,
     },
     enums::{operation_log::OperationCategory, rbac::UserStatus},
-    security::{hash_password, verify_password},
     types::UserId,
 };
 use uuid::Uuid;
@@ -74,11 +71,11 @@ pub async fn login(
 
     // Always run a verification so an unknown username takes the same time as a
     // wrong password (constant-time-ish defense against enumeration).
-    let stored_hash = match candidate.as_ref() {
-        Some(user) => user.password_hash.clone(),
-        None => dummy_hash()?.to_owned(),
-    };
-    let verified = verify_password(&request.password, &stored_hash);
+    let stored_hash = candidate.as_ref().map(|user| user.password_hash.clone());
+    let verified = state
+        .password_crypto
+        .verify(request.password, stored_hash)
+        .await?;
 
     let user = match candidate {
         Some(user) if verified && user.status == UserStatus::Active => user,
@@ -280,22 +277,4 @@ fn expired_refresh_cookie() -> Cookie<'static> {
         .path("/api/auth")
         .max_age(CookieDuration::ZERO)
         .finish()
-}
-
-/// A lazily-computed argon2id hash of a throwaway password.
-///
-/// Used as the verification target when a username is unknown, so the login
-/// path performs the same hashing work regardless of account existence.
-fn dummy_hash() -> Result<&'static str, WebError> {
-    static HASH: OnceLock<String> = OnceLock::new();
-    if let Some(hash) = HASH.get() {
-        return Ok(hash.as_str());
-    }
-
-    let generated = hash_password("quant-pivot::login-timing-guard")
-        .map_err(|error| WebError::Internal(error.to_string()))?;
-    let _already_initialized = HASH.set(generated);
-    HASH.get()
-        .map(String::as_str)
-        .ok_or_else(|| WebError::Internal("login timing guard initialization failed".to_owned()))
 }

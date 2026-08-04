@@ -340,8 +340,10 @@ fn negative_logit(
         .map(|(index, _)| index)
         .ok_or_else(|| methodology("PBO produced no in-sample Sharpe values".to_owned()))?;
 
-    // Competition rank with average ties: count strictly worse + half of ties.
-    // Strict `<` alone inflated ω (and understated PBO) when Sharpes tied.
+    // Bailey et al. define the OOS rank on the one-based interval 1..N and
+    // normalize it by N + 1. Average ties therefore occupy their one-based
+    // midrank: strictly-worse + (ties + 1) / 2. Omitting the one-based offset
+    // incorrectly classifies a completely tied trial grid as overfit.
     let champion_sharpe = oos_sharpes[champion];
     let worse = oos_sharpes
         .iter()
@@ -355,7 +357,7 @@ fn negative_logit(
         .map_err(|error| methodology(format!("PBO tie count does not fit u32: {error}")))?;
     let worse = u32::try_from(worse)
         .map_err(|error| methodology(format!("PBO worse-rank count does not fit u32: {error}")))?;
-    let rank = 0.5f64.mul_add(f64::from(ties), f64::from(worse));
+    let rank = 0.5f64.mul_add(f64::from(ties) + 1.0, f64::from(worse));
     let omega = rank / f64::from(trial_count).mul_add(1.0, 1.0);
     if !(0.0..1.0).contains(&omega) {
         return Err(methodology(format!(
@@ -499,6 +501,20 @@ mod tests {
             .map(|i| {
                 let wobble = Decimal::from(i % 3 - 1) * dec!(0.005);
                 vec![dec!(0.05) + wobble, dec!(-0.01) + wobble]
+            })
+            .collect();
+        let m = matrix(32, rows);
+        let pbo =
+            probability_of_backtest_overfitting(&m, &PboInput { block_count: 8 }).expect("pbo");
+        assert_eq!(pbo, Decimal::ZERO);
+    }
+
+    #[test]
+    fn pbo_equal_trials_neutral() {
+        let rows = (0..32)
+            .map(|period| {
+                let value = Decimal::from(period % 5) * dec!(0.001) - dec!(0.002);
+                vec![value; 6]
             })
             .collect();
         let m = matrix(32, rows);

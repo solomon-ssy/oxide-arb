@@ -95,6 +95,18 @@ fn drift_metrics_are_typed() {
 }
 
 #[test]
+fn ks_extreme_is_finite() {
+    let baseline = vec![Decimal::ZERO; 500];
+    let evaluation = vec![Decimal::ONE; 500];
+    let drift = numeric_drift(&baseline, &evaluation)
+        .expect("extreme KS separation must remain evaluable")
+        .expect("large samples provide sufficient KS evidence");
+
+    assert_eq!(drift.kolmogorov_smirnov_statistic, Decimal::ONE);
+    assert_eq!(drift.kolmogorov_smirnov_p_value, Decimal::ZERO);
+}
+
+#[test]
 fn population_drift_keeps_missing() {
     let baseline = [
         Some(FeatureValue::Bool(false)),

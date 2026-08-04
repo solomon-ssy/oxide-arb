@@ -80,7 +80,7 @@ pub fn category_breakdown(samples: &[SampleOutcome]) -> Vec<CategoryMetric> {
         .collect()
 }
 
-/// Conditional mean of the worst-decile realized returns (tail loss, bps).
+/// Conditional mean return of the worst realized-return decile, in bps.
 ///
 /// `quantile` is the lower tail fraction (e.g. `0.10`); the result is the mean
 /// realized return of the worst `ceil(n · quantile)` samples (≤ 0 for losses).

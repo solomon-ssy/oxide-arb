@@ -33,10 +33,9 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType, RoleKind, RoleStatus, UserStatus},
     },
     types::{
-        BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, FeatureParityRunId,
-        FeatureParityStateId, FeedbackCycleId, ModelCandidateManifestId, ModelVersionId,
-        PolicyBundleGeneration, PolicyIdempotencyKey, PromotionPermitId, ResearchProfileId,
-        ResearchProfileRef, RoleCode, RoleId, UserId,
+        BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, FeedbackCycleId,
+        ModelCandidateManifestId, ModelVersionId, PolicyBundleGeneration, PolicyIdempotencyKey,
+        PromotionPermitId, ResearchProfileId, ResearchProfileRef, RoleCode, RoleId, UserId,
     },
 };
 use quant_pivot_repository::{
@@ -180,9 +179,6 @@ impl PermitContext {
             .expect("derive permit candidate explanation validation");
         let cpcv_path_set_id = BacktestPathSetId::from_v7();
         let cpcv_path_set_hash = content_hash('c');
-        let feature_parity_run_id = FeatureParityRunId::from_v7();
-        let feature_parity_state_id = FeatureParityStateId::from_v7();
-        let feature_parity_evidence_hash = content_hash('d');
         let promotion_gate = PromotionGateArtifact::try_seal(PromotionGateArtifactInput {
             feedback_cycle_id,
             candidate_recipe_hash: content_hash('b'),
@@ -192,18 +188,13 @@ impl PermitContext {
             feedback_policy_hash,
             decision_policy_snapshot_hash: bindings.policy_snapshot.snapshot_hash,
             truth_freeze_hash: content_hash('1'),
-            attribution_plan_hash: content_hash('2'),
+            attribution_manifest_hash: content_hash('2'),
             validation_artifact_hash: content_hash('3'),
             quality_gate_report_hash: content_hash('4'),
             comparison_artifact_hash: content_hash('5'),
-            shadow_artifact_hash: content_hash('6'),
-            decision_artifact_hash: content_hash('7'),
             cpcv_path_set_id,
             cpcv_path_set_hash,
             explanation_validation_hash: explanation.report_hash,
-            feature_parity_run_id,
-            feature_parity_state_id,
-            feature_parity_evidence_hash,
         })
         .expect("seal permit promotion gate");
         let calibration = bindings
@@ -260,6 +251,7 @@ impl PermitContext {
             expected_runtime_control_revision: 0,
             expected_decision_policy_snapshot_id: self.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: self.expected_snapshot_hash,
+            expected_route_generation: 1,
             champion_model_version_id: self.champion_model_version_id,
             champion_serving_contract_hash: self.champion_serving_contract_hash,
             candidate_model_version_id: self.candidate_model_version_id,
@@ -705,7 +697,10 @@ impl PermitServiceFixture {
     async fn verify_rbac_state(&self, database_now: DateTime<Utc>) {
         let roles = PgRoleRepository::new(self.db.clone());
         let disabled = self
-            .actor("permit_disabled", &[Operation::Publish, Operation::Retire])
+            .actor(
+                "permit_disabled",
+                &[Operation::Authorize, Operation::Retire],
+            )
             .await;
         let disabled_role = roles
             .find_by_code(disabled.acting_role.as_str())
@@ -730,7 +725,10 @@ impl PermitServiceFixture {
 
         let users = PgUserRepository::new(self.db.clone());
         let inactive = self
-            .actor("permit_inactive", &[Operation::Publish, Operation::Retire])
+            .actor(
+                "permit_inactive",
+                &[Operation::Authorize, Operation::Retire],
+            )
             .await;
         users
             .change_status(&inactive.user_id, UserStatus::Disabled)
@@ -994,10 +992,10 @@ pub async fn governed_service_contracts() {
     let db = pool.connection().clone();
     let fixture = PermitServiceFixture::prepare(db.clone()).await;
     let owner = fixture
-        .actor("permit_owner", &[Operation::Publish, Operation::Retire])
+        .actor("permit_owner", &[Operation::Authorize, Operation::Retire])
         .await;
     let publish_only = fixture
-        .actor("permit_issuer", slice::from_ref(&Operation::Publish))
+        .actor("permit_issuer", slice::from_ref(&Operation::Authorize))
         .await;
     let no_publish = fixture
         .actor("permit_reader", slice::from_ref(&Operation::Read))

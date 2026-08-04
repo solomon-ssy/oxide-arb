@@ -3,7 +3,7 @@
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     hashing::CanonicalDigest,
-    types::{ContentHash, ModelLearningCohortArtifact},
+    types::{ContentHash, ModelLearningCohortArtifact, ModelScoreCohortArtifact},
 };
 
 /// Strict canonical-JSON codec for included `ModelLearning` rows.
@@ -49,6 +49,54 @@ impl ModelLearningCohortCodec {
         ModelLearningCohortArtifact::schema_hash()
             .map_err(|error| ResearchError::Serialization {
                 detail: format!("derive model-learning cohort schema hash: {error}"),
+            })
+            .map_err(Into::into)
+    }
+}
+
+/// Strict canonical-JSON codec for complete scored-serving rows.
+pub struct ModelScoreCohortCodec;
+
+impl ModelScoreCohortCodec {
+    pub fn encode(artifact: &ModelScoreCohortArtifact) -> QuantResult<Vec<u8>> {
+        artifact
+            .validate()
+            .map_err(|error| ResearchError::Serialization {
+                detail: format!("invalid model-score cohort artifact: {error}"),
+            })?;
+        CanonicalDigest::canonical_json_bytes(artifact).map_err(Into::into)
+    }
+
+    pub fn decode(bytes: &[u8]) -> QuantResult<ModelScoreCohortArtifact> {
+        let artifact =
+            serde_json::from_slice::<ModelScoreCohortArtifact>(bytes).map_err(|error| {
+                ResearchError::Serialization {
+                    detail: format!("decode model-score cohort artifact: {error}"),
+                }
+            })?;
+        artifact
+            .validate()
+            .map_err(|error| ResearchError::Serialization {
+                detail: format!("invalid model-score cohort artifact: {error}"),
+            })?;
+        let canonical = Self::encode(&artifact)?;
+        if canonical != bytes {
+            return Err(ResearchError::Serialization {
+                detail: "model-score cohort artifact is not canonical JSON".to_owned(),
+            }
+            .into());
+        }
+        Ok(artifact)
+    }
+
+    pub fn bytes_hash(bytes: &[u8]) -> ContentHash {
+        CanonicalDigest::content_hash_bytes(bytes)
+    }
+
+    pub fn schema_hash() -> QuantResult<ContentHash> {
+        ModelScoreCohortArtifact::schema_hash()
+            .map_err(|error| ResearchError::Serialization {
+                detail: format!("derive model-score cohort schema hash: {error}"),
             })
             .map_err(Into::into)
     }

@@ -13,6 +13,7 @@ pub mod catalog_fixtures;
 pub mod execution_pg_seed;
 pub mod fact_sink;
 pub mod factor_definitions;
+pub mod feedback_closure_seed;
 pub mod model_serving_fixtures;
 pub mod model_serving_runtime;
 pub mod model_spec_fixtures;

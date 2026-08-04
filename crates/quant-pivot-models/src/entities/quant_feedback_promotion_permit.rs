@@ -36,6 +36,7 @@ pub struct Model {
     pub expected_runtime_control_revision: i64,
     pub expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub expected_snapshot_hash: ContentHash,
+    pub expected_route_generation: i64,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
     pub candidate_model_version_id: ModelVersionId,

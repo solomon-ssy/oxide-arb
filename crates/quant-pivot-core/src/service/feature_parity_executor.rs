@@ -13,14 +13,14 @@ use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     domain::{
         api::{FeatureParityJobParams, FeatureParityRunView},
-        ports::FeatureParityExecutionPort,
+        ports::{FeatureParityExecutionOutcome, FeatureParityExecutionPort},
         quant::{CompleteFeatureParityRun, FeatureParityRunInfo, JobProgressSink},
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
         quant::{
             FeatureCellState, FeatureParityEventStatus, FeatureParityRunKind,
-            FeatureParityRunStatus, FeatureParityStage, FeatureParityStateTransition,
+            FeatureParityRunStatus, FeatureParityStage,
         },
     },
     types::{
@@ -149,6 +149,7 @@ pub trait FeatureParityReplaySource: Send + Sync {
         &self,
         run: &FeatureParityRunInfo,
         candidates: &[FeatureParityCandidate],
+        cancel: &CancellationToken,
     ) -> QuantResult<FeatureParityReplayAttempt>;
 }
 
@@ -359,7 +360,7 @@ impl FeatureParityExecutor {
         params: &FeatureParityJobParams,
         progress: &Arc<dyn JobProgressSink>,
         cancel: &CancellationToken,
-    ) -> QuantResult<FeatureParityRunView> {
+    ) -> QuantResult<FeatureParityExecutionOutcome> {
         let queued = self
             .parity
             .find_run(&params.parity_run_id)
@@ -370,7 +371,11 @@ impl FeatureParityExecutor {
         validate_job_binding(&queued, params)?;
         let pending_timeout = pending_timeout(params, self.minimum_pending_timeout)?;
         if queued.status.is_terminal() {
-            return self.resume_terminal(queued).await;
+            return self
+                .resume_terminal(queued)
+                .await
+                .map(Box::new)
+                .map(FeatureParityExecutionOutcome::Completed);
         }
         let run = if queued.status == FeatureParityRunStatus::Running {
             queued
@@ -378,7 +383,7 @@ impl FeatureParityExecutor {
             self.parity.mark_running(&params.parity_run_id).await?
         };
         let selected = self.discover_candidates(&run, progress).await?;
-        self.replay_until_terminal(run, selected, pending_timeout, progress, cancel)
+        self.replay_or_defer(run, selected, pending_timeout, progress, cancel)
             .await
     }
 
@@ -460,39 +465,31 @@ impl FeatureParityExecutor {
         Ok(selected)
     }
 
-    async fn replay_until_terminal(
+    async fn replay_or_defer(
         &self,
-        mut run: FeatureParityRunInfo,
+        run: FeatureParityRunInfo,
         selected: Vec<FeatureParityCandidate>,
         pending_timeout: Duration,
         progress: &Arc<dyn JobProgressSink>,
         cancel: &CancellationToken,
-    ) -> QuantResult<FeatureParityRunView> {
-        loop {
-            if cancel.is_cancelled() {
-                return self
-                    .fail_integrity(
-                        &run,
-                        "cancelled",
-                        "feature parity execution was cancelled before a complete comparison",
-                    )
-                    .await;
+    ) -> QuantResult<FeatureParityExecutionOutcome> {
+        if cancel.is_cancelled() {
+            return Err(ResearchError::Cancelled {
+                detail: "feature parity execution cancelled before a complete comparison"
+                    .to_owned(),
             }
-            let outcome = self.replay_once(&run, &selected, progress).await?;
-            if outcome.completion.status == FeatureParityRunStatus::PendingMaterialization {
-                run = self
-                    .await_pending_materialization(
-                        run,
-                        outcome.completion,
-                        pending_timeout,
-                        progress,
-                        cancel,
-                    )
-                    .await?;
-                continue;
-            }
-            return self.complete_outcome(&run, outcome, progress).await;
+            .into());
         }
+        let outcome = self.replay_once(&run, &selected, progress, cancel).await?;
+        if outcome.completion.status == FeatureParityRunStatus::PendingMaterialization {
+            return self
+                .defer_pending(run, outcome.completion, pending_timeout, progress)
+                .await;
+        }
+        self.complete_outcome(&run, outcome, progress)
+            .await
+            .map(Box::new)
+            .map(FeatureParityExecutionOutcome::Completed)
     }
 
     async fn replay_once(
@@ -500,14 +497,18 @@ impl FeatureParityExecutor {
         run: &FeatureParityRunInfo,
         selected: &[FeatureParityCandidate],
         progress: &Arc<dyn JobProgressSink>,
+        cancel: &CancellationToken,
     ) -> QuantResult<BuiltOutcome> {
         progress.report(ResearchJobProgress::with_total(
             "replay",
             0,
             count_to_u64(selected.len(), "selected parity candidates")?,
         ));
-        let attempt = match self.source.replay(run, selected).await {
+        let attempt = match self.source.replay(run, selected, cancel).await {
             Ok(attempt) => attempt,
+            Err(error @ QuantError::Research(ResearchError::Cancelled { .. })) => {
+                return Err(error);
+            }
             Err(error) => {
                 return self
                     .fail_integrity(run, "replay_failed", &error.to_string())
@@ -548,15 +549,15 @@ impl FeatureParityExecutor {
         })
     }
 
-    async fn await_pending_materialization(
+    async fn defer_pending(
         &self,
         run: FeatureParityRunInfo,
         completion: CompleteFeatureParityRun,
         timeout: Duration,
         progress: &Arc<dyn JobProgressSink>,
-        cancel: &CancellationToken,
-    ) -> QuantResult<FeatureParityRunInfo> {
-        let pending_since = run.pending_since.unwrap_or_else(Utc::now);
+    ) -> QuantResult<FeatureParityExecutionOutcome> {
+        let now = self.parity.database_time().await?;
+        let pending_since = run.pending_since.unwrap_or(now);
         let deadline = pending_since.checked_add_signed(timeout).ok_or_else(|| {
             ResearchError::Determinism {
                 detail: format!(
@@ -565,7 +566,7 @@ impl FeatureParityExecutor {
                 ),
             }
         })?;
-        if Utc::now() >= deadline {
+        if now >= deadline {
             return self
                 .fail_integrity_with_counts(
                     &run,
@@ -582,21 +583,17 @@ impl FeatureParityExecutor {
             "pending_materialization",
             0,
         ));
-        tokio::select! {
-            () = cancel.cancelled() => {
-                let running = self.parity.mark_running(&pending.run_id).await?;
-                return self.fail_integrity(
-                    &running,
-                    "cancelled",
-                    "feature parity execution was cancelled while awaiting source materialization",
-                ).await;
-            }
-            () = tokio::time::sleep(self.pending_retry_interval) => {}
-        }
-        self.parity
-            .mark_running(&pending.run_id)
-            .await
-            .map_err(QuantError::from)
+        let remaining = (deadline - now)
+            .to_std()
+            .map_err(|error| ResearchError::Determinism {
+                detail: format!(
+                    "materialization remainder is invalid for parity run {}: {error}",
+                    pending.run_id
+                ),
+            })?;
+        Ok(FeatureParityExecutionOutcome::AwaitingMaterialization {
+            retry_after: self.pending_retry_interval.min(remaining),
+        })
     }
 
     async fn complete_outcome(
@@ -666,13 +663,6 @@ impl FeatureParityExecutor {
         let failed = self.parity.complete_run(&run.run_id, completion).await?;
         self.metrics
             .record_feature_parity_run(failed.kind.as_str(), failed.status.as_str());
-        self.parity
-            .open_latch(
-                &failed.run_id,
-                FeatureParityStateTransition::IntegrityFailure,
-                detail.to_owned(),
-            )
-            .await?;
         self.metrics.set_parity_latch_open(true);
         if let Err(containment_error) = self.ensure_containment(&failed, &[]).await {
             return Err(ResearchError::Determinism {
@@ -758,7 +748,7 @@ impl FeatureParityExecutionPort for FeatureParityExecutor {
         params: FeatureParityJobParams,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
-    ) -> QuantResult<FeatureParityRunView> {
+    ) -> QuantResult<FeatureParityExecutionOutcome> {
         self.execute_inner(&params, &progress, &cancel).await
     }
 }
@@ -1343,8 +1333,8 @@ mod tests {
                 NewFrozenModelParitySubject, NewResearchJob, NoopProgressSink, ResearchJobInfo,
             },
         },
-        enums::quant::FeatureParityLatchState,
-        types::{FeatureParityRunId, FeatureParityStateId, FeatureVectorId, RoleCode},
+        enums::quant::FeatureParityStateTransition,
+        types::{FeatureParityRunId, FeatureVectorId, RoleCode},
     };
     use quant_pivot_repository::traits::{
         EnqueueFrozenFeatureParityOutcome, FeatureParityLatchActor,
@@ -1366,8 +1356,7 @@ mod tests {
     #[derive(Default)]
     struct ParityRepoState {
         run: Option<FeatureParityRunInfo>,
-        mismatch_latch_opens: usize,
-        explicit_latch_opens: Vec<FeatureParityStateTransition>,
+        latch_opens: Vec<FeatureParityStateTransition>,
         containment_marks: usize,
     }
 
@@ -1393,6 +1382,13 @@ mod tests {
 
     #[async_trait]
     impl FeatureParityRepository for InMemoryParityRepository {
+        async fn database_time(&self) -> Result<DateTime<Utc>, StorageError> {
+            Ok(lock(&self.state)
+                .run
+                .as_ref()
+                .map_or_else(Utc::now, |run| run.updated_at))
+        }
+
         async fn create_run(
             &self,
             _run: NewFeatureParityRun,
@@ -1506,8 +1502,17 @@ mod tests {
         ) -> Result<FeatureParityRunInfo, StorageError> {
             let updated = {
                 let mut state = lock(&self.state);
-                if result.status == FeatureParityRunStatus::Mismatched {
-                    state.mismatch_latch_opens += 1;
+                match result.status {
+                    FeatureParityRunStatus::Mismatched => state
+                        .latch_opens
+                        .push(FeatureParityStateTransition::DeterministicMismatch),
+                    FeatureParityRunStatus::Failed => state
+                        .latch_opens
+                        .push(FeatureParityStateTransition::IntegrityFailure),
+                    FeatureParityRunStatus::Queued
+                    | FeatureParityRunStatus::Running
+                    | FeatureParityRunStatus::PendingMaterialization
+                    | FeatureParityRunStatus::Passed => {}
                 }
                 let run = state
                     .run
@@ -1563,27 +1568,6 @@ mod tests {
             Ok(None)
         }
 
-        async fn open_latch(
-            &self,
-            cause_run_id: &FeatureParityRunId,
-            transition: FeatureParityStateTransition,
-            reason: String,
-        ) -> Result<FeatureParityStateInfo, StorageError> {
-            lock(&self.state).explicit_latch_opens.push(transition);
-            Ok(FeatureParityStateInfo {
-                state_id: FeatureParityStateId::from_v7(),
-                state: FeatureParityLatchState::Open,
-                transition,
-                cause_run_id: Some(*cause_run_id),
-                recovery_run_id: None,
-                previous_state_id: None,
-                actor: None,
-                acting_role: None,
-                reason,
-                created_at: Utc::now(),
-            })
-        }
-
         async fn acknowledge_latch(
             &self,
             _recovery_run_id: &FeatureParityRunId,
@@ -1611,6 +1595,7 @@ mod tests {
             &self,
             _run: &FeatureParityRunInfo,
             _candidates: &[FeatureParityCandidate],
+            _cancel: &CancellationToken,
         ) -> QuantResult<FeatureParityReplayAttempt> {
             lock(&self.attempts).pop_front().ok_or_else(|| {
                 ResearchError::Determinism {
@@ -1803,7 +1788,7 @@ mod tests {
             incidents,
             Arc::new(MetricsHub::new()),
             Duration::minutes(10),
-            StdDuration::ZERO,
+            StdDuration::from_millis(1),
         )
     }
 
@@ -2008,6 +1993,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_releases_worker() {
+        let database_now = Utc::now() - Duration::hours(1);
+        let mut run = run(database_now);
+        run.pending_since = Some(database_now - Duration::minutes(5));
+        let candidate = FeatureParityCandidate {
+            sampling_key: "report-a/market-001".to_owned(),
+            subject: FeatureParitySubject::ModelRun(ModelRunId::from_v7()),
+            market_id: Some(MarketId::new("market-001")),
+            decision_at: database_now,
+        };
+        let pending = PendingFeatureParityComparison {
+            sampling_key: candidate.sampling_key.clone(),
+            decision_at: database_now,
+            stage: FeatureParityStage::ModelInput,
+            report_id: None,
+            model_run_id: match &candidate.subject {
+                FeatureParitySubject::ModelRun(run_id) => Some(*run_id),
+                FeatureParitySubject::PreInferenceReport(_) => None,
+            },
+            model_version_id: None,
+            training_dataset_id: None,
+            market_id: candidate.market_id.clone(),
+            feature_name: None,
+            reason: "serving_evidence_completion_missing".to_owned(),
+            online: None,
+            required_watermark: database_now,
+            observed_watermark: None,
+        };
+        let parity = Arc::new(InMemoryParityRepository::with_run(run.clone()));
+        let source = Arc::new(FixedReplaySource {
+            candidates: vec![candidate],
+            attempts: Mutex::new(VecDeque::from([FeatureParityReplayAttempt {
+                comparisons: Vec::new(),
+                pending: vec![pending],
+            }])),
+        });
+
+        let outcome = executor(
+            Arc::clone(&parity),
+            source,
+            Arc::new(RecordingFactWriter::default()),
+            Arc::new(RecordingIncidentPort::default()),
+        )
+        .execute(
+            params(&run),
+            Arc::new(NoopProgressSink),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("pending evidence should defer without occupying the worker");
+
+        assert!(matches!(
+            outcome,
+            FeatureParityExecutionOutcome::AwaitingMaterialization { retry_after }
+                if retry_after == StdDuration::from_millis(1)
+        ));
+        let pending_run = parity.run();
+        assert_eq!(
+            pending_run.status,
+            FeatureParityRunStatus::PendingMaterialization
+        );
+        assert!(pending_run.pending_since.is_some());
+        assert!(pending_run.finished_at.is_none());
+    }
+
+    #[tokio::test]
     async fn deterministic_mismatch_contains_stamp() {
         let now = Utc::now();
         let run = run(now);
@@ -2038,7 +2089,7 @@ mod tests {
         let writer = Arc::new(RecordingFactWriter::default());
         let incidents = Arc::new(RecordingIncidentPort::default());
 
-        let result = executor(
+        let outcome = executor(
             Arc::clone(&parity),
             source,
             Arc::clone(&writer),
@@ -2052,11 +2103,18 @@ mod tests {
         .await
         .expect("mismatch completes after containment");
 
+        let FeatureParityExecutionOutcome::Completed(result) = outcome else {
+            panic!("mismatch must be terminal after containment");
+        };
+
         assert_eq!(result.status, FeatureParityRunStatus::Mismatched);
         assert_eq!(result.mismatched_count, 1);
         assert!(result.containment_completed_at.is_some());
         let repo_state = lock(&parity.state);
-        assert_eq!(repo_state.mismatch_latch_opens, 1);
+        assert_eq!(
+            repo_state.latch_opens,
+            vec![FeatureParityStateTransition::DeterministicMismatch]
+        );
         assert_eq!(repo_state.containment_marks, 1);
         drop(repo_state);
         assert_eq!(lock(&writer.rows).len(), 1);
@@ -2131,7 +2189,7 @@ mod tests {
         assert!(failed.containment_completed_at.is_some());
         let repo_state = lock(&parity.state);
         assert_eq!(
-            repo_state.explicit_latch_opens,
+            repo_state.latch_opens,
             vec![FeatureParityStateTransition::IntegrityFailure]
         );
         assert_eq!(repo_state.containment_marks, 1);

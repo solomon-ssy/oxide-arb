@@ -168,10 +168,16 @@ impl SourceSliceManifest {
             );
         }
         let mut uris = BTreeSet::new();
+        let mut object_kinds = BTreeSet::new();
         let mut prior = None;
         for object in &self.objects {
             if !uris.insert(object.uri.as_str()) {
                 return Err("source-slice object URI must be unique".to_owned());
+            }
+            if !object_kinds.insert(object.kind) {
+                return Err(
+                    "source-slice must contain exactly one object per object family".to_owned(),
+                );
             }
             let key = (object.kind, object.uri.as_str());
             if prior.is_some_and(|value| value >= key) {
@@ -236,6 +242,45 @@ impl SourceSliceManifest {
         self.validate()?;
         CanonicalDigest::content_hash_json(self)
             .map_err(|error| format!("source-slice manifest hash failed: {error}"))
+    }
+
+    /// Exact object-family contract consumed by one profile's source reader.
+    #[must_use]
+    pub fn required_object_kinds(
+        profile: &ResearchProfileArtifact,
+    ) -> BTreeSet<SourceSliceObjectKind> {
+        let mut required = BTreeSet::from([
+            SourceSliceObjectKind::CatalogMarket,
+            SourceSliceObjectKind::CatalogEvent,
+            SourceSliceObjectKind::ClobMarketInfo,
+            SourceSliceObjectKind::L2Ledger,
+            SourceSliceObjectKind::L2Session,
+            SourceSliceObjectKind::L2Gap,
+            SourceSliceObjectKind::BookMicrostructure,
+            SourceSliceObjectKind::TradeTape,
+            SourceSliceObjectKind::Resolution,
+        ]);
+        let crypto_required = profile
+            .required_sources_contains(ResearchProfileDataSource::BinanceMarketData)
+            || profile.required_sources_contains(ResearchProfileDataSource::PolymarketRtds);
+        let weather_required = profile
+            .required_sources_contains(ResearchProfileDataSource::AviationWeather)
+            || profile.required_sources_contains(ResearchProfileDataSource::GefsEnsemble);
+        if crypto_required || weather_required {
+            required.insert(SourceSliceObjectKind::MarketLinkage);
+            required.insert(SourceSliceObjectKind::DomainObservation);
+        }
+        if crypto_required {
+            required.insert(SourceSliceObjectKind::CryptoPriceReport);
+        }
+        if weather_required {
+            required.insert(SourceSliceObjectKind::WeatherObservation);
+            required.insert(SourceSliceObjectKind::WeatherForecast);
+        }
+        if profile.required_sources_contains(ResearchProfileDataSource::GhcnhCalibration) {
+            required.insert(SourceSliceObjectKind::CalibrationReference);
+        }
+        required
     }
 
     /// Validate the complete immutable binding before a dataset, fitter, or
@@ -317,30 +362,17 @@ impl SourceSliceManifest {
             .iter()
             .map(|object| object.kind)
             .collect::<BTreeSet<_>>();
-        let mut required = BTreeSet::from([
-            SourceSliceObjectKind::CatalogMarket,
-            SourceSliceObjectKind::CatalogEvent,
-            SourceSliceObjectKind::ClobMarketInfo,
-            SourceSliceObjectKind::L2Ledger,
-            SourceSliceObjectKind::L2Session,
-            SourceSliceObjectKind::L2Gap,
-            SourceSliceObjectKind::BookMicrostructure,
-            SourceSliceObjectKind::TradeTape,
-            SourceSliceObjectKind::Resolution,
-        ]);
-        if weather_required {
-            required.insert(SourceSliceObjectKind::MarketLinkage);
-            required.insert(SourceSliceObjectKind::DomainObservation);
-            required.insert(SourceSliceObjectKind::WeatherObservation);
-            required.insert(SourceSliceObjectKind::WeatherForecast);
-        }
-        if profile.required_sources_contains(ResearchProfileDataSource::GhcnhCalibration) {
-            required.insert(SourceSliceObjectKind::CalibrationReference);
-        }
+        let required = Self::required_object_kinds(profile);
         let missing = required.difference(&kinds).copied().collect::<Vec<_>>();
         if !missing.is_empty() {
             return Err(format!(
                 "source-slice is missing required object families: {missing:?}"
+            ));
+        }
+        let unexpected = kinds.difference(&required).copied().collect::<Vec<_>>();
+        if !unexpected.is_empty() {
+            return Err(format!(
+                "source-slice contains object families outside the profile contract: {unexpected:?}"
             ));
         }
         Ok(kinds)
@@ -533,6 +565,57 @@ mod tests {
         assert!(
             short
                 .validate_for_profile(&profile, &program_hash, fit_start, fit_end, pit_cutoff,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn profile_object_contracts() {
+        let profiles = builtin_research_profiles().expect("profiles");
+        let pooled = profiles
+            .iter()
+            .find(|profile| profile.profile_ref.id.as_str() == "pooled_1h_control")
+            .expect("pooled profile");
+        let crypto = profiles
+            .iter()
+            .find(|profile| profile.profile_ref.id.as_str() == "crypto_price_15m")
+            .expect("crypto profile");
+        let weather = profiles
+            .iter()
+            .find(|profile| profile.profile_ref.id.as_str() == "weather_forecast_24h")
+            .expect("weather profile");
+
+        let pooled_kinds = SourceSliceManifest::required_object_kinds(pooled);
+        let crypto_kinds = SourceSliceManifest::required_object_kinds(crypto);
+        let weather_kinds = SourceSliceManifest::required_object_kinds(weather);
+        assert_eq!(pooled_kinds.len(), 9);
+        assert_eq!(crypto_kinds.len(), 12);
+        assert_eq!(weather_kinds.len(), 14);
+        assert!(crypto_kinds.contains(&SourceSliceObjectKind::CryptoPriceReport));
+        assert!(!crypto_kinds.contains(&SourceSliceObjectKind::WeatherForecast));
+        assert!(weather_kinds.contains(&SourceSliceObjectKind::WeatherForecast));
+        assert!(!weather_kinds.contains(&SourceSliceObjectKind::CryptoPriceReport));
+    }
+
+    #[test]
+    fn weather_rejects_crypto_object() {
+        let pit_cutoff = Utc::now();
+        let fit_start = pit_cutoff - Duration::days(91);
+        let fit_end = pit_cutoff - Duration::days(1);
+        let (mut manifest, profile, program_hash) =
+            weather_manifest(fit_start, pit_cutoff, pit_cutoff);
+        let mut unexpected = manifest.objects[0].clone();
+        unexpected.kind = SourceSliceObjectKind::CryptoPriceReport;
+        unexpected.uri = ArtifactUri::parse("s3://worm/source-slice/crypto.parquet?versionId=1")
+            .expect("unexpected object URI");
+        manifest.objects.push(unexpected);
+        manifest.objects.sort_by(|left, right| {
+            (left.kind, left.uri.as_str()).cmp(&(right.kind, right.uri.as_str()))
+        });
+
+        assert!(
+            manifest
+                .validate_for_profile(&profile, &program_hash, fit_start, fit_end, pit_cutoff)
                 .is_err()
         );
     }

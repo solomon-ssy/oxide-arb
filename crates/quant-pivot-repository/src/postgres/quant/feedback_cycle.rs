@@ -8,9 +8,10 @@ use quant_pivot_error::{
     storage::{
         StorageError,
         entity::{
-            QUANT_DRIFT_REPORT, QUANT_FEEDBACK_CYCLE, QUANT_FEEDBACK_EVALUATION_USE,
-            QUANT_FEEDBACK_EVENT_OUTBOX, QUANT_FEEDBACK_SCHEDULER_STATE,
-            QUANT_FEEDBACK_STAGE_EVENT, QUANT_FEEDBACK_TRIGGER_EVENT,
+            QUANT_DRIFT_REPORT, QUANT_FEEDBACK_COORDINATOR_FAULT, QUANT_FEEDBACK_CYCLE,
+            QUANT_FEEDBACK_EVALUATION_USE, QUANT_FEEDBACK_EVENT_OUTBOX,
+            QUANT_FEEDBACK_SCHEDULER_STATE, QUANT_FEEDBACK_STAGE_EVENT,
+            QUANT_FEEDBACK_TRIGGER_EVENT,
         },
     },
 };
@@ -19,18 +20,25 @@ use quant_pivot_models::{
         api::{DriftReportListQuery, FeedbackCycleListQuery},
         pagination::{PageRequest, PageWindow, Paginated},
         quant::{
-            DriftReportInfo, FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
-            FeedbackOutboxEntry, FeedbackOutboxSource, FeedbackQueueSnapshot,
-            FeedbackSchedulerStateInfo, FeedbackStageEventInfo, FeedbackStageEventInput,
-            FeedbackTriggerEventInfo, GovernedFeedbackCancellation, GovernedFeedbackTrigger,
-            NewDriftReport, NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent,
-            NewFeedbackTriggerEvent, cadence_cutoff,
+            DriftReportInfo, FeedbackCoordinatorFaultInfo, FeedbackCoordinatorFaultInput,
+            FeedbackCoordinatorFaultReason, FeedbackCoordinatorTimelineHead, FeedbackCycleInfo,
+            FeedbackCycleTerminal, FeedbackEvaluationUseInfo, FeedbackOutboxEntry,
+            FeedbackOutboxSource, FeedbackQueueSnapshot, FeedbackSchedulerStateInfo,
+            FeedbackStageEventInfo, FeedbackStageEventInput, FeedbackTriggerEventInfo,
+            FeedbackTriggerEventInput, GovernedFeedbackCancellation, GovernedFeedbackTrigger,
+            NewDriftReport, NewFeedbackCoordinatorFault, NewFeedbackCycle,
+            NewFeedbackEvaluationUse, NewFeedbackStageEvent, NewFeedbackTriggerEvent,
+            cadence_cutoff, next_cadence_after,
         },
     },
     entities::{
         quant_drift_report::{
             Column as DriftColumn, Entity as DriftEntity, Model as DriftModel,
             Relation as DriftRelation,
+        },
+        quant_feedback_coordinator_fault::{
+            Column as CoordinatorFaultColumn, Entity as CoordinatorFaultEntity,
+            Model as CoordinatorFaultModel,
         },
         quant_feedback_cycle::{
             Column as CycleColumn, Entity as CycleEntity, Model as CycleModel,
@@ -54,13 +62,14 @@ use quant_pivot_models::{
     },
     enums::{
         quant::{
-            FeedbackCycleStatus, FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily,
+            FeedbackCycleStatus, FeedbackDecision, FeedbackEvaluationMode, FeedbackStage,
+            FeedbackStageEventKind, FeedbackTriggerFamily,
         },
         rbac::{Operation, ResourceType},
     },
     types::{
         FeedbackCycleId, FeedbackStageEventId, FeedbackTriggerEventId, ModelVersionId,
-        ResearchProfileId, WorkerId,
+        PolicyIdempotencyKey, ResearchProfileId, WorkerId,
     },
 };
 use sea_orm::{
@@ -75,7 +84,8 @@ use sea_orm::{
 use crate::{
     postgres::{authorization, primitives, query::paginate_mapped},
     traits::{
-        DriftReportWriteOutcome, FeedbackCycleCasOutcome, FeedbackCycleClaim,
+        DriftReportWriteOutcome, FeedbackCoordinatorFaultWriteOutcome,
+        FeedbackCoordinatorQuarantine, FeedbackCycleCasOutcome, FeedbackCycleClaim,
         FeedbackCycleClaimMode, FeedbackCycleGeneration, FeedbackCycleLeaseGuard,
         FeedbackCycleRepository, FeedbackCycleWriteOutcome, FeedbackEvaluationWriteOutcome,
         FeedbackOutboxRepository, FeedbackStageWriteOutcome, FeedbackTriggerCommit,
@@ -154,6 +164,19 @@ impl PgFeedbackCycleRepository {
             )
         })?;
         Ok(cycle)
+    }
+
+    fn coordinator_fault_info(
+        row: CoordinatorFaultModel,
+    ) -> Result<FeedbackCoordinatorFaultInfo, StorageError> {
+        let fault: FeedbackCoordinatorFaultInfo = row.into();
+        fault.validate().map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_FEEDBACK_COORDINATOR_FAULT),
+                format!("stored coordinator fault failed integrity validation: {error}"),
+            )
+        })?;
+        Ok(fault)
     }
 
     fn stage_info(row: StageModel) -> Result<FeedbackStageEventInfo, StorageError> {
@@ -353,24 +376,61 @@ impl PgFeedbackCycleRepository {
 }
 
 impl PgFeedbackCycleRepository {
+    async fn verify_forced_parent(
+        transaction: &DatabaseTransaction,
+        cycle: &NewFeedbackCycle,
+    ) -> Result<(), StorageError> {
+        if cycle.evaluation_mode() == FeedbackEvaluationMode::Conditional {
+            return Ok(());
+        }
+        let parent_cycle_id = cycle.parent_cycle_id().ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(QUANT_FEEDBACK_CYCLE),
+                "forced retraining has no parent cycle",
+            )
+        })?;
+        let parent = CycleEntity::find_by_id(parent_cycle_id)
+            .lock_shared()
+            .one(transaction)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_FEEDBACK_CYCLE, parent_cycle_id))?;
+        let parent = Self::cycle_info(parent)?;
+        if parent.evaluation_mode != FeedbackEvaluationMode::Conditional
+            || parent.status != FeedbackCycleStatus::Succeeded
+            || parent.decision != Some(FeedbackDecision::NoAction)
+            || parent.profile_ref != *cycle.profile_ref()
+            || parent.label_cutoff != cycle.label_cutoff()
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_FEEDBACK_CYCLE,
+                Some(parent_cycle_id),
+                "forced retraining parent must be the same profile/cutoff terminal Conditional NoAction cycle",
+            ));
+        }
+        Ok(())
+    }
+
     async fn cycle_candidate(
         transaction: &DatabaseTransaction,
         cycle: &NewFeedbackCycle,
     ) -> Result<Option<FeedbackCycleInfo>, StorageError> {
-        CycleEntity::find()
-            .filter(
-                Condition::any()
-                    .add(CycleColumn::FeedbackCycleId.eq(cycle.feedback_cycle_id()))
-                    .add(CycleColumn::IdempotencyHash.eq(cycle.idempotency_hash()))
+        let mut identity = Condition::any()
+            .add(CycleColumn::FeedbackCycleId.eq(cycle.feedback_cycle_id()))
+            .add(CycleColumn::IdempotencyHash.eq(cycle.idempotency_hash()));
+        if cycle.evaluation_mode() == FeedbackEvaluationMode::Conditional {
+            identity = identity.add(
+                Condition::all()
                     .add(
-                        Condition::all()
-                            .add(
-                                CycleColumn::ResearchProfileArtifactId
-                                    .eq(cycle.research_profile_artifact_id().clone()),
-                            )
-                            .add(CycleColumn::LabelCutoff.eq(cycle.label_cutoff())),
-                    ),
-            )
+                        CycleColumn::ResearchProfileArtifactId
+                            .eq(cycle.research_profile_artifact_id().clone()),
+                    )
+                    .add(CycleColumn::LabelCutoff.eq(cycle.label_cutoff()))
+                    .add(CycleColumn::EvaluationMode.eq(FeedbackEvaluationMode::Conditional)),
+            );
+        }
+        CycleEntity::find()
+            .filter(identity)
             .one(transaction)
             .await
             .map_err(StorageError::from)?
@@ -889,17 +949,24 @@ impl PgFeedbackCycleRepository {
         scheduler: &FeedbackSchedulerStateInfo,
         now: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        if scheduler
-            .lease_expires_at
-            .is_some_and(|expires_at| expires_at > now)
-            || scheduler
-                .cooldown_until
-                .is_some_and(|cooldown_until| cooldown_until > now)
+        if let Some(lease_expires_at) = scheduler.lease_expires_at
+            && lease_expires_at > now
         {
             return Err(StorageError::state_conflict(
                 QUANT_FEEDBACK_SCHEDULER_STATE,
                 Some(&cycle.profile_ref().id),
-                "manual feedback trigger is blocked by a live scheduler lease or cooldown",
+                format!(
+                    "manual feedback trigger is blocked by a live scheduler lease until {lease_expires_at}"
+                ),
+            ));
+        }
+        if let Some(cooldown_until) = scheduler.cooldown_until
+            && cooldown_until > now
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_FEEDBACK_SCHEDULER_STATE,
+                Some(&cycle.profile_ref().id),
+                format!("feedback retraining cooldown remains active until {cooldown_until}"),
             ));
         }
         let revision = scheduler.revision.checked_add(1).ok_or_else(|| {
@@ -908,15 +975,6 @@ impl PgFeedbackCycleRepository {
                 "feedback scheduler revision overflowed",
             )
         })?;
-        let next_due_at = cycle
-            .label_cutoff()
-            .checked_add_signed(Duration::seconds(scheduler.cadence_secs))
-            .ok_or_else(|| {
-                StorageError::invariant_violation(
-                    Some(QUANT_FEEDBACK_SCHEDULER_STATE),
-                    "feedback scheduler next due time overflowed",
-                )
-            })?;
         let cooldown_until = now
             .checked_add_signed(Duration::seconds(scheduler.cooldown_secs))
             .ok_or_else(|| {
@@ -926,9 +984,53 @@ impl PgFeedbackCycleRepository {
                 )
             })?;
         let mut active = scheduler_row.into_active_model();
-        active.last_cycle_id = Set(Some(cycle.feedback_cycle_id()));
-        active.last_cutoff = Set(Some(cycle.label_cutoff()));
-        active.next_due_at = Set(next_due_at);
+        if cycle.evaluation_mode() == FeedbackEvaluationMode::Conditional {
+            let gap_seconds = cycle
+                .label_cutoff()
+                .signed_duration_since(scheduler.next_due_at)
+                .num_seconds();
+            if gap_seconds < 0 || gap_seconds.rem_euclid(scheduler.cadence_secs) != 0 {
+                return Err(StorageError::state_conflict(
+                    QUANT_FEEDBACK_SCHEDULER_STATE,
+                    Some(&cycle.profile_ref().id),
+                    "manual Conditional cutoff regresses or is not aligned with the due cursor",
+                ));
+            }
+            let skipped = gap_seconds.div_euclid(scheduler.cadence_secs);
+            if skipped > 0 {
+                active.coalesced_gap_count = Set(scheduler
+                    .coalesced_gap_count
+                    .checked_add(skipped)
+                    .ok_or_else(|| {
+                        StorageError::invariant_violation(
+                            Some(QUANT_FEEDBACK_SCHEDULER_STATE),
+                            "manual scheduler coalesced gap counter overflowed",
+                        )
+                    })?);
+                active.last_coalesced_from = Set(Some(scheduler.next_due_at));
+                active.last_coalesced_to = Set(Some(
+                    cycle
+                        .label_cutoff()
+                        .checked_sub_signed(Duration::seconds(scheduler.cadence_secs))
+                        .ok_or_else(|| {
+                            StorageError::invariant_violation(
+                                Some(QUANT_FEEDBACK_SCHEDULER_STATE),
+                                "manual scheduler coalesced gap range underflowed",
+                            )
+                        })?,
+                ));
+            }
+            active.last_cycle_id = Set(Some(cycle.feedback_cycle_id()));
+            active.last_cutoff = Set(Some(cycle.label_cutoff()));
+            active.next_due_at = Set(next_cadence_after(now, scheduler.cadence_secs).map_err(
+                |error| {
+                    StorageError::invariant_violation(
+                        Some(QUANT_FEEDBACK_SCHEDULER_STATE),
+                        error.to_string(),
+                    )
+                },
+            )?);
+        }
         active.cooldown_until = Set(Some(cooldown_until));
         active.attempt = Set(0);
         active.retry_at = Set(None);
@@ -963,10 +1065,11 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
         })?;
         if trigger.feedback_cycle_id() != cycle.feedback_cycle_id()
             || trigger.event_kind() != FeedbackStageEventKind::Triggered
+            || cycle.evaluation_mode() != FeedbackEvaluationMode::Conditional
         {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_FEEDBACK_STAGE_EVENT),
-                "record_trigger requires matching Triggered evidence",
+                "record_trigger requires matching Conditional Triggered evidence",
             ));
         }
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
@@ -978,11 +1081,22 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             ));
         }
         let cycle_outcome = Self::persist_cycle(&transaction, &cycle).await?;
-        let provenance = NewFeedbackTriggerEvent::try_seal(
-            cycle.feedback_cycle_id(),
+        let idempotency_key = format!(
+            "system-{}-{}",
+            trigger_family.as_str(),
+            cycle.feedback_cycle_id()
+        )
+        .parse::<PolicyIdempotencyKey>()
+        .map_err(|error| {
+            StorageError::invariant_violation(Some(QUANT_FEEDBACK_TRIGGER_EVENT), error.to_string())
+        })?;
+        let provenance = NewFeedbackTriggerEvent::try_seal(FeedbackTriggerEventInput {
+            feedback_cycle_id: cycle.feedback_cycle_id(),
             trigger_family,
-            None,
-            trigger
+            evaluation_mode: cycle.evaluation_mode(),
+            idempotency_key,
+            actor_user_id: None,
+            actor_label: trigger
                 .actor()
                 .ok_or_else(|| {
                     StorageError::invariant_violation(
@@ -991,8 +1105,8 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
                     )
                 })?
                 .to_owned(),
-            None,
-            trigger
+            actor_role: None,
+            reason_code: trigger
                 .reason_code()
                 .ok_or_else(|| {
                     StorageError::invariant_violation(
@@ -1001,7 +1115,7 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
                     )
                 })?
                 .to_owned(),
-        )
+        })
         .map_err(|error| {
             StorageError::invariant_violation(Some(QUANT_FEEDBACK_TRIGGER_EVENT), error.to_string())
         })?;
@@ -1042,6 +1156,7 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             )
             .into());
         }
+        Self::verify_forced_parent(&transaction, &command.cycle).await?;
         let scheduler_row = SchedulerEntity::find_by_id(command.cycle.profile_ref().id.clone())
             .lock_exclusive()
             .one(&transaction)
@@ -1076,14 +1191,16 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
         let cycle_id = command.cycle.feedback_cycle_id();
         let _cycle_lock = Self::lock_cycle(&transaction, &cycle_id).await?;
         let actor = format!("{}@{}", authorized.username, authorized.role);
-        let provenance = NewFeedbackTriggerEvent::try_seal(
-            cycle_id,
-            FeedbackTriggerFamily::Manual,
-            Some(authorized.user_id),
-            authorized.username.clone(),
-            Some(authorized.role.clone()),
-            command.reason_code.clone(),
-        )?;
+        let provenance = NewFeedbackTriggerEvent::try_seal(FeedbackTriggerEventInput {
+            feedback_cycle_id: cycle_id,
+            trigger_family: FeedbackTriggerFamily::Manual,
+            evaluation_mode: command.cycle.evaluation_mode(),
+            idempotency_key: command.idempotency_key.clone(),
+            actor_user_id: Some(authorized.user_id),
+            actor_label: authorized.username.clone(),
+            actor_role: Some(authorized.role.clone()),
+            reason_code: command.reason_code.clone(),
+        })?;
         let trigger_outcome = Self::persist_trigger_event(&transaction, &provenance).await?;
         let trigger_event_id = match &trigger_outcome {
             FeedbackTriggerWriteOutcome::Inserted(event)
@@ -1232,7 +1349,15 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             .add(
                 Condition::all()
                     .add(CycleColumn::Status.eq(FeedbackCycleStatus::Running))
-                    .add(CycleColumn::LeaseExpiresAt.lte(now)),
+                    .add(
+                        Condition::any()
+                            .add(CycleColumn::LeaseExpiresAt.lte(now))
+                            .add(
+                                Condition::all()
+                                    .add(CycleColumn::LeaseOwner.is_null())
+                                    .add(CycleColumn::StageResumeAfter.lte(now)),
+                            ),
+                    ),
             );
         let Some(row) = CycleEntity::find()
             .filter(eligible)
@@ -1248,6 +1373,9 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
         };
         let mode = match row.status {
             FeedbackCycleStatus::Queued => FeedbackCycleClaimMode::Started,
+            FeedbackCycleStatus::Running if row.stage_resume_after.is_some() => {
+                FeedbackCycleClaimMode::StageResumed
+            }
             FeedbackCycleStatus::Running => FeedbackCycleClaimMode::LeaseRecovered,
             status => {
                 return Err(StorageError::state_conflict(
@@ -1265,6 +1393,7 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
         active.generation = Set(generation);
         active.lease_owner = Set(Some(worker_id));
         active.lease_expires_at = Set(Some(now + lease_duration));
+        active.stage_resume_after = Set(None);
         active.started_at = Set(started_at);
         let updated = active
             .update(&transaction)
@@ -1323,6 +1452,160 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
         let released = Self::cycle_info(updated)?;
         transaction.commit().await.map_err(StorageError::from)?;
         Ok(released)
+    }
+
+    async fn defer_cycle(
+        &self,
+        lease: FeedbackCycleLeaseGuard,
+        resume_after: DateTime<Utc>,
+    ) -> Result<FeedbackCycleInfo, StorageError> {
+        let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        let row = Self::lock_cycle(&transaction, &lease.feedback_cycle_id).await?;
+        let cycle = Self::cycle_info(row.clone())?;
+        let now = primitives::statement_timestamp(&transaction).await?;
+        Self::ensure_live_lease(&cycle, lease, now)?;
+        if resume_after <= now {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_FEEDBACK_CYCLE),
+                "deferred feedback stage must resume in the database future",
+            ));
+        }
+        let mut active = row.into_active_model();
+        active.generation = Set(Self::next_generation(cycle.generation)?);
+        active.lease_owner = Set(None);
+        active.lease_expires_at = Set(None);
+        active.stage_resume_after = Set(Some(resume_after));
+        let updated = active
+            .update(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        let deferred = Self::cycle_info(updated)?;
+        transaction.commit().await.map_err(StorageError::from)?;
+        Ok(deferred)
+    }
+
+    async fn quarantine_cycle(
+        &self,
+        lease: FeedbackCycleLeaseGuard,
+        reason: FeedbackCoordinatorFaultReason,
+    ) -> Result<FeedbackCoordinatorQuarantine, StorageError> {
+        let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        let row = Self::lock_cycle(&transaction, &lease.feedback_cycle_id).await?;
+        let current = Self::cycle_info(row.clone())?;
+        let stored_fault = CoordinatorFaultEntity::find()
+            .filter(CoordinatorFaultColumn::FeedbackCycleId.eq(lease.feedback_cycle_id))
+            .one(&transaction)
+            .await
+            .map_err(StorageError::from)?
+            .map(Self::coordinator_fault_info)
+            .transpose()?;
+        if current.status == FeedbackCycleStatus::Quarantined {
+            let fault = stored_fault.ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some(QUANT_FEEDBACK_COORDINATOR_FAULT),
+                    "quarantined feedback cycle has no WORM coordinator fault",
+                )
+            })?;
+            let expected_generation = Self::next_generation(lease.expected_generation)?;
+            if current.generation != expected_generation
+                || fault.lease_generation != lease.expected_generation
+                || fault.worker_id != lease.worker_id
+                || fault.detail != reason.detail()
+            {
+                return Err(StorageError::state_conflict(
+                    QUANT_FEEDBACK_COORDINATOR_FAULT,
+                    Some(current.feedback_cycle_id),
+                    "quarantine retry differs from the committed fault",
+                ));
+            }
+            transaction.commit().await.map_err(StorageError::from)?;
+            return Ok(FeedbackCoordinatorQuarantine {
+                cycle: FeedbackCycleCasOutcome::AlreadyApplied(current),
+                fault: FeedbackCoordinatorFaultWriteOutcome::AlreadyPresent(fault),
+            });
+        }
+        if stored_fault.is_some() {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_FEEDBACK_COORDINATOR_FAULT),
+                "non-quarantined feedback cycle already has coordinator fault evidence",
+            ));
+        }
+        let now = primitives::statement_timestamp(&transaction).await?;
+        Self::ensure_live_lease(&current, lease, now)?;
+        let last_event = StageEntity::find()
+            .filter(StageColumn::FeedbackCycleId.eq(lease.feedback_cycle_id))
+            .order_by_desc(StageColumn::EventSequence)
+            .one(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        let timeline_head = last_event.map_or(
+            FeedbackCoordinatorTimelineHead {
+                active_stage: None,
+                last_event_sequence: None,
+                last_stage_event_id: None,
+                last_stage_event_hash: None,
+            },
+            |event| FeedbackCoordinatorTimelineHead {
+                active_stage: Some(event.stage),
+                last_event_sequence: Some(event.event_sequence),
+                last_stage_event_id: Some(event.feedback_stage_event_id),
+                last_stage_event_hash: Some(event.event_hash),
+            },
+        );
+        let fault = NewFeedbackCoordinatorFault::try_seal(FeedbackCoordinatorFaultInput {
+            feedback_cycle_id: lease.feedback_cycle_id,
+            lease_generation: lease.expected_generation,
+            worker_id: lease.worker_id,
+            timeline_head,
+            reason,
+            observed_at: now,
+        })
+        .map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_FEEDBACK_COORDINATOR_FAULT),
+                format!("coordinator fault could not be sealed: {error}"),
+            )
+        })?;
+        let mut fault_active = fault.clone().into_active_model();
+        fault_active.created_at = Set(now);
+        let inserted = CoordinatorFaultEntity::insert(fault_active)
+            .exec_with_returning(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        let fault_info = Self::coordinator_fault_info(inserted)?;
+
+        let mut active = row.into_active_model();
+        active.status = Set(FeedbackCycleStatus::Quarantined);
+        active.decision = Set(None);
+        active.terminal_reason_code = Set(Some("invalid_coordinator_state".to_owned()));
+        active.generation = Set(Self::next_generation(current.generation)?);
+        active.lease_owner = Set(None);
+        active.lease_expires_at = Set(None);
+        active.stage_resume_after = Set(None);
+        active.completed_at = Set(Some(now));
+        let updated = active
+            .update(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        let quarantined = Self::cycle_info(updated)?;
+        transaction.commit().await.map_err(StorageError::from)?;
+        Ok(FeedbackCoordinatorQuarantine {
+            cycle: FeedbackCycleCasOutcome::Applied(quarantined),
+            fault: FeedbackCoordinatorFaultWriteOutcome::Inserted(fault_info),
+        })
+    }
+
+    async fn find_coordinator_fault(
+        &self,
+        cycle_id: &FeedbackCycleId,
+    ) -> Result<Option<FeedbackCoordinatorFaultInfo>, StorageError> {
+        CoordinatorFaultEntity::find()
+            .filter(CoordinatorFaultColumn::FeedbackCycleId.eq(*cycle_id))
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .map(Self::coordinator_fault_info)
+            .transpose()
     }
 
     async fn request_cancel(
@@ -1451,6 +1734,12 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             FeedbackCycleStatus::Queued => {
                 active.status = Set(FeedbackCycleStatus::Cancelled);
                 active.terminal_reason_code = Set(Some(command.reason_code));
+                active.completed_at = Set(Some(now));
+            }
+            FeedbackCycleStatus::Running if current.stage_resume_after.is_some() => {
+                active.status = Set(FeedbackCycleStatus::Cancelled);
+                active.terminal_reason_code = Set(Some(command.reason_code));
+                active.stage_resume_after = Set(None);
                 active.completed_at = Set(Some(now));
             }
             FeedbackCycleStatus::Running => {}
@@ -1886,12 +2175,13 @@ impl PgFeedbackCycleRepository {
         let row = Self::lock_cycle(&transaction, &generation.feedback_cycle_id).await?;
         let current = Self::cycle_info(row.clone())?;
         let now = primitives::statement_timestamp(&transaction).await?;
-        if event.occurred_at() > now {
+        if event.occurred_at() < current.created_at || event.occurred_at() > now {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_FEEDBACK_STAGE_EVENT),
-                "cancellation occurrence cannot be in the database future",
+                "cancellation occurrence must be within the durable cycle lifetime",
             ));
         }
+        let cancel_requested_at = event.occurred_at();
         if let Some(stored) = Self::stage_candidate(&transaction, &event).await? {
             let stored = Self::exact_stage(stored, &event)?;
             if current.cancel_requested_at.is_none()
@@ -1912,11 +2202,17 @@ impl PgFeedbackCycleRepository {
         let next_generation = Self::next_generation(current.generation)?;
         let mut active = row.into_active_model();
         active.generation = Set(next_generation);
-        active.cancel_requested_at = Set(Some(now));
+        active.cancel_requested_at = Set(Some(cancel_requested_at));
         match current.status {
             FeedbackCycleStatus::Queued => {
                 active.status = Set(FeedbackCycleStatus::Cancelled);
                 active.terminal_reason_code = Set(Some(reason_code));
+                active.completed_at = Set(Some(now));
+            }
+            FeedbackCycleStatus::Running if current.stage_resume_after.is_some() => {
+                active.status = Set(FeedbackCycleStatus::Cancelled);
+                active.terminal_reason_code = Set(Some(reason_code));
+                active.stage_resume_after = Set(None);
                 active.completed_at = Set(Some(now));
             }
             FeedbackCycleStatus::Running => {}
@@ -1984,6 +2280,7 @@ impl PgFeedbackCycleRepository {
         active.generation = Set(Self::next_generation(current.generation)?);
         active.lease_owner = Set(None);
         active.lease_expires_at = Set(None);
+        active.stage_resume_after = Set(None);
         active.completed_at = Set(Some(now));
         let updated = active
             .update(&transaction)

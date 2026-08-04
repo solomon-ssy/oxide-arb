@@ -64,10 +64,10 @@ pub struct ExactDecisionIdentifiers {
     pub policy_activation_id: Option<String>,
     pub promotion_transaction_hash: Option<String>,
     pub target_category: Option<String>,
-    pub route_pointer_before: Option<String>,
-    pub route_pointer_after: Option<String>,
-    pub global_shadow_before: Option<String>,
-    pub global_shadow_after: Option<String>,
+    pub route_champion_before: Option<String>,
+    pub route_champion_after: Option<String>,
+    pub route_shadow_before: Option<String>,
+    pub route_shadow_after: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -302,7 +302,7 @@ impl DecisionPathEvidence {
             .expect("restart read-back hash uses canonical BLAKE3 text");
     }
 
-    pub fn validate(&self) {
+    fn validate_identity(&self) {
         assert_eq!(self.decision, self.path.expected_decision());
         assert!(!self.decision_reason.trim().is_empty());
         assert!(!self.exact_ids.feedback_cycle_id.trim().is_empty());
@@ -321,20 +321,23 @@ impl DecisionPathEvidence {
             self.exact_ids.promotion_transaction_hash.is_some(),
             self.path.requires_promotion()
         );
+    }
+
+    fn validate_route_state(&self) {
         if self.path.requires_promotion() {
             assert_eq!(
-                self.exact_ids.route_pointer_before,
+                self.exact_ids.route_champion_before,
                 Some(self.exact_ids.champion_model_version_id.clone())
             );
             assert_eq!(
-                self.exact_ids.route_pointer_after,
+                self.exact_ids.route_champion_after,
                 Some(self.exact_ids.candidate_model_version_id.clone())
             );
             assert_eq!(
-                self.exact_ids.global_shadow_before,
+                self.exact_ids.route_shadow_before,
                 Some(self.exact_ids.candidate_model_version_id.clone())
             );
-            assert!(self.exact_ids.global_shadow_after.is_none());
+            assert!(self.exact_ids.route_shadow_after.is_none());
             assert_ne!(
                 self.exact_ids.policy_generation_before,
                 self.exact_ids.policy_generation_after
@@ -349,12 +352,12 @@ impl DecisionPathEvidence {
             );
         } else {
             assert_eq!(
-                self.exact_ids.route_pointer_before,
-                self.exact_ids.route_pointer_after
+                self.exact_ids.route_champion_before,
+                self.exact_ids.route_champion_after
             );
             assert_eq!(
-                self.exact_ids.global_shadow_before,
-                self.exact_ids.global_shadow_after
+                self.exact_ids.route_shadow_before,
+                self.exact_ids.route_shadow_after
             );
             assert_eq!(
                 self.exact_ids.policy_generation_before,
@@ -369,6 +372,9 @@ impl DecisionPathEvidence {
                 self.exact_ids.model_routing_revision_after
             );
         }
+    }
+
+    fn validate_permit(&self) {
         assert_eq!(
             self.fault_injection_rollback_verified,
             self.path.requires_promotion()
@@ -382,6 +388,9 @@ impl DecisionPathEvidence {
             assert!(permit.bindings.preflight_hash_exact);
             assert!(permit.bindings.runtime_mode_exact);
         }
+    }
+
+    fn validate_replay(&self) {
         assert!(self.restart_read_back.fresh_repository_owners);
         assert!(self.restart_read_back.fresh_stage_adapter);
         assert!(self.restart_read_back.exact_match);
@@ -391,24 +400,78 @@ impl DecisionPathEvidence {
                 .values()
                 .all(|count| *count == 0)
         );
+    }
+
+    fn validate_timeline(&self) {
         assert!(!self.worm_timeline.is_empty());
         assert!(
             self.worm_timeline
                 .windows(2)
                 .all(|events| events[0].sequence < events[1].sequence)
         );
-        let decision_event = self
+        let expected_stages = match self.path {
+            DecisionPath::NoAction | DecisionPath::CandidateReady | DecisionPath::Promoted => [
+                "trigger",
+                "truth_freeze",
+                "coverage",
+                "attribution",
+                "drift",
+                "recipe_plan",
+                "dataset_seal",
+                "training",
+                "calibration",
+                "cpcv",
+                "validation",
+                "comparison",
+                "shadow_bind",
+                "shadow",
+                "decision",
+            ]
+            .as_slice(),
+            DecisionPath::ChallengerRejected => [
+                "trigger",
+                "truth_freeze",
+                "coverage",
+                "attribution",
+                "drift",
+                "recipe_plan",
+                "dataset_seal",
+                "training",
+                "calibration",
+                "cpcv",
+                "validation",
+                "comparison",
+            ]
+            .as_slice(),
+        };
+        assert_eq!(self.worm_timeline.len(), expected_stages.len());
+        for (index, (event, expected_stage)) in
+            self.worm_timeline.iter().zip(expected_stages).enumerate()
+        {
+            assert_eq!(
+                event.sequence,
+                i64::try_from(index + 1).expect("timeline sequence fits i64")
+            );
+            assert_eq!(&event.stage, expected_stage);
+        }
+        let terminal_event = self
             .worm_timeline
             .last()
-            .expect("W4-E04 timeline has a Decision event");
-        let expected_decision_sequence = if self.path.requires_permit() { 8 } else { 5 };
-        assert_eq!(decision_event.sequence, expected_decision_sequence);
-        assert_eq!(decision_event.stage, "decision");
-        assert_eq!(decision_event.event_kind, "succeeded");
+            .expect("W4-E04 timeline has a terminal event");
+        let expected_terminal_stage = if self.path == DecisionPath::ChallengerRejected {
+            "comparison"
+        } else {
+            "decision"
+        };
+        assert_eq!(terminal_event.stage, expected_terminal_stage);
+        assert_eq!(terminal_event.event_kind, "succeeded");
         assert_eq!(
-            decision_event.evidence_hash.as_deref(),
+            terminal_event.evidence_hash.as_deref(),
             Some(self.decision_artifact.bytes_hash.as_str())
         );
+    }
+
+    fn validate_insertions(&self) {
         let nonzero_insertions = self
             .replay
             .inserted_by_first
@@ -417,11 +480,12 @@ impl DecisionPathEvidence {
             .map(|(table, count)| (table.as_str(), *count))
             .collect::<BTreeMap<_, _>>();
         let expected_insertions = match self.path {
-            DecisionPath::NoAction | DecisionPath::ChallengerRejected => BTreeMap::from([
+            DecisionPath::NoAction => BTreeMap::from([
                 ("quant_feedback_event_outbox", 1),
                 ("quant_feedback_stage_event", 1),
                 ("quant_research_job", 1),
             ]),
+            DecisionPath::ChallengerRejected => BTreeMap::new(),
             DecisionPath::CandidateReady => BTreeMap::from([
                 ("quant_feedback_event_outbox", 1),
                 ("quant_feedback_promotion_permit", 1),
@@ -439,6 +503,9 @@ impl DecisionPathEvidence {
             ]),
         };
         assert_eq!(nonzero_insertions, expected_insertions);
+    }
+
+    fn validate_invariants(&self) {
         let recomputed = InvariantDiff::between(&self.before, &self.after);
         assert_eq!(recomputed, self.invariant_diff);
         assert_eq!(
@@ -449,6 +516,16 @@ impl DecisionPathEvidence {
             self.after.deployment_authority,
             DeploymentAuthorityBoundary::default()
         );
+    }
+
+    pub fn validate(&self) {
+        self.validate_identity();
+        self.validate_route_state();
+        self.validate_permit();
+        self.validate_replay();
+        self.validate_timeline();
+        self.validate_insertions();
+        self.validate_invariants();
     }
 }
 

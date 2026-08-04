@@ -4,7 +4,12 @@ use std::{env, fs, path::PathBuf, sync::Arc, time::Duration as StdDuration};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::service::{
+    feedback_coordinator::FeedbackStagePreparation,
+    feedback_recipe_stage::{FeedbackRecipeStageAdapter, FeedbackRecipeStageDeps},
     feedback_shadow::{FeedbackShadowExecutionDeps, FeedbackShadowExecutionService},
+    feedback_shadow_binding_stage::{
+        FeedbackShadowBindingStageAdapter, FeedbackShadowBindingStageDeps,
+    },
     feedback_shadow_stage::{FeedbackShadowStageAdapter, FeedbackShadowStageDeps},
     model_serving_generation::{ModelServingGenerationStore, PublishedShadowRouteIdentity},
     model_serving_registry::ModelServingRuntimeRegistry,
@@ -14,10 +19,11 @@ use quant_pivot_models::{
     config::{ArtifactStoreDeployConfig, ClickHouseConfig},
     domain::{
         ports::{
-            FeedbackComparisonCandidateRef, FeedbackComparisonJobInput,
-            FeedbackComparisonJobParams, FeedbackEvaluationUseRef,
+            FeedbackComparisonArtifactRef, FeedbackComparisonCandidateRef,
+            FeedbackComparisonJobInput, FeedbackComparisonJobParams, FeedbackEvaluationUseRef,
             FeedbackLearningStageArtifactRef, FeedbackShadowExecutionPort, FeedbackShadowSubject,
-            FeedbackValidationArtifactRef,
+            FeedbackValidationArtifactRef, ShadowBindingArtifact, ShadowBindingJobInput,
+            ShadowBindingJobParams, ShadowBindingReceipt, ShadowBindingReceiptInput,
         },
         quant::{
             FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackEvaluationUseInput,
@@ -32,21 +38,25 @@ use quant_pivot_models::{
         common::MarketCategory,
         model::ModelFamily,
         quant::{
-            DatasetPurpose, FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily,
-            ModelWeightSource, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
+            DatasetPurpose, FeedbackEvaluationMode, FeedbackStage, FeedbackStageEventKind,
+            FeedbackTriggerFamily, ModelWeightSource, ResearchJobKind, ResearchJobResultKind,
+            ResearchJobStatus,
         },
         runtime_config::ConfigResourceKind,
     },
+    hashing::CanonicalDigest,
     runtime_config::{
-        BuyModelRoute, DecisionPolicySnapshot, FactorCrossSectionConfig, FactorHeadConfig,
-        ModelVersionRef,
+        BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot, FactorCrossSectionConfig,
+        FactorHeadConfig, ModelBinding, ModelBindingSource,
     },
     types::{
-        ArtifactUri, BacktestPathSetId, BacktestReportId, Bps, ContentHash,
-        DecisionPolicySnapshotId, FeedbackComparisonArtifactId, FeedbackLearningStageArtifactId,
-        FeedbackValidationArtifactId, ModelInputContract, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, Probability, ResearchJobId, ResearchJobParams,
-        ResearchProfileRef, RoleCode, SchemaVersion, ShadowComparisonId, Usd, WorkerId,
+        ArtifactUri, AuditEventId, BacktestPathSetId, BacktestReportId, Bps, ContentHash,
+        DecisionPolicySnapshotId, FeedbackComparisonArtifactId, FeedbackCycleId,
+        FeedbackLearningStageArtifactId, FeedbackValidationArtifactId, ModelCandidateManifestId,
+        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        PolicyActivationId, PolicyBundleGeneration, PolicyRevisionId, Probability, ResearchJobId,
+        ResearchJobParams, ResearchProfileRef, RoleCode, SchemaVersion, ShadowComparisonId, Usd,
+        WorkerId,
         factor::FactorServingPlane,
         model_metrics::ModelVersionMetrics,
         model_training::ModelTrainingObjective,
@@ -55,8 +65,8 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgFeedbackCycleRepository, PgModelRegistryRepository, PgPolicyRepository,
-        PgResearchJobRepository, PgShadowComparisonRepository,
+        PgFeedbackCycleRepository, PgModelCandidateManifestRepository, PgModelRegistryRepository,
+        PgPolicyRepository, PgResearchJobRepository, PgShadowComparisonRepository,
     },
     traits::{
         FeedbackCycleClaim, FeedbackCycleRepository, FeedbackEvaluationWriteOutcome,
@@ -75,6 +85,7 @@ use quant_pivot_research::{
         RomanoWolfStepdown,
     },
     feedback_shadow::{FeedbackShadowCodec, FeedbackShadowOutcome},
+    feedback_shadow_binding::ShadowBindingCodec,
     hashing::ResearchHasher,
     model::ReturnModelSpec,
 };
@@ -88,9 +99,7 @@ use quant_pivot_system_tests::{
         },
         model_serving_runtime::ModelServingRegistryFixture,
         model_spec_fixtures,
-        policy_fixtures::{
-            activate_policy_bundle, bootstrap_default_policy_bundle, bootstrap_policy_bundle,
-        },
+        policy_fixtures::{activate_policy_bundle, bootstrap_policy_bundle},
     },
 };
 use rust_decimal::Decimal;
@@ -99,12 +108,56 @@ use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
 use tokio_util::sync::CancellationToken;
 
 use super::feedback_boot_schema::{
-    FeedbackSchemaFixture, content_hash, prepare_fixture, prepare_profile_fixture,
+    FeedbackSchemaFixture, content_hash, persist_recipe_plan_fixture, prepare_fixture,
+    prepare_profile_fixture,
 };
 
 const JOB_LEASE_SECS: i64 = 90;
 const OBSERVATION_COUNT: usize = 500;
 const SHADOW_OBSERVATION_COUNT: usize = 1_000;
+const SHADOW_MODEL_BUDGET_BYTES: u64 = 1 << 30;
+
+fn shadow_stage(
+    db: &DatabaseConnection,
+    cycles: &Arc<PgFeedbackCycleRepository>,
+    jobs: &Arc<PgResearchJobRepository>,
+    store: Arc<dyn ArtifactStore>,
+    generations: Arc<ModelServingGenerationStore>,
+) -> FeedbackShadowStageAdapter {
+    let recipes = Arc::new(
+        FeedbackRecipeStageAdapter::try_new(FeedbackRecipeStageDeps {
+            cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
+            jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
+            artifacts: Arc::clone(&store),
+            max_recovery_attempts: 3,
+        })
+        .expect("build F10 RecipePlan stage"),
+    );
+    let shadow_bindings = Arc::new(
+        FeedbackShadowBindingStageAdapter::try_new(FeedbackShadowBindingStageDeps {
+            cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
+            jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
+            models: Arc::new(PgModelRegistryRepository::new(db.clone())),
+            policies: Arc::new(PgPolicyRepository::new(db.clone())),
+            manifests: Arc::new(PgModelCandidateManifestRepository::new(db.clone())),
+            artifacts: Arc::clone(&store),
+            recipes: Arc::clone(&recipes),
+            total_shadow_model_budget_bytes: SHADOW_MODEL_BUDGET_BYTES,
+            max_recovery_attempts: 3,
+        })
+        .expect("build F10 ShadowBind stage"),
+    );
+    FeedbackShadowStageAdapter::try_new(FeedbackShadowStageDeps {
+        cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
+        jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
+        artifacts: store,
+        serving_generations: generations,
+        recipes,
+        shadow_bindings,
+        max_recovery_attempts: 3,
+    })
+    .expect("build F10 Shadow stage")
+}
 
 pub struct ArtifactRoot {
     pub path: PathBuf,
@@ -327,10 +380,17 @@ async fn build_scoped_models(
 }
 
 pub async fn build_models(db: &DatabaseConnection, store: &Arc<dyn ArtifactStore>) -> ShadowModels {
-    let policy_id = bootstrap_default_policy_bundle(
-        db,
+    let mut policy = DecisionPolicySnapshot::default();
+    policy
+        .profile_artifacts
+        .research_method
+        .model_promotion
+        .required_shadow_window_secs = 10;
+    let policy_id = bootstrap_policy_bundle(
+        &PgPolicyRepository::new(db.clone()),
+        &policy,
         "f10-shadow-stage",
-        "bootstrap exact F10 serving dependencies",
+        "bootstrap bounded F10 shadow-window fixture",
     )
     .await;
     Box::pin(build_scoped_models(
@@ -353,7 +413,7 @@ pub async fn build_crypto_models(
         .profile_artifacts
         .research_method
         .model_promotion
-        .required_shadow_window_secs = 1;
+        .required_shadow_window_secs = 2;
     let policy_id = bootstrap_policy_bundle(
         &PgPolicyRepository::new(db.clone()),
         &policy,
@@ -377,7 +437,7 @@ pub struct ActivatedServing {
     pub generations: Arc<ModelServingGenerationStore>,
 }
 
-async fn build_serving(
+pub async fn build_serving(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
 ) -> ActivatedServing {
@@ -428,10 +488,27 @@ pub async fn activate_generation(
         "f10-shadow-stage",
         "publish exact active and shadow routes",
         move |snapshot| {
-            snapshot.model_routing.model.active_model_version_id =
-                Some(ModelVersionRef::new(champion_id));
-            snapshot.model_routing.model.shadow_model_version_id =
-                Some(ModelVersionRef::new(candidate_id));
+            snapshot.model_routing.model.buy_routes.insert(
+                BuyModelRoute::Pooled,
+                BuyRouteBinding {
+                    champion: ModelBinding::new(
+                        champion_id,
+                        ModelBindingSource::Bootstrap,
+                        Utc::now(),
+                        PolicyBundleGeneration::FIRST,
+                        1,
+                    ),
+                    shadow: Some(ModelBinding::new(
+                        candidate_id,
+                        ModelBindingSource::Feedback {
+                            feedback_cycle_id: FeedbackCycleId::from_v7(),
+                        },
+                        Utc::now(),
+                        PolicyBundleGeneration::FIRST,
+                        2,
+                    )),
+                },
+            );
         },
     )
     .await;
@@ -451,20 +528,25 @@ pub async fn activate_crypto_generation(
 ) -> ActivatedServing {
     let policy_repo = PgPolicyRepository::new(db.clone());
     let champion_id = models.champion.model_version_id;
-    let candidate_id = models.candidate.model_version_id;
     let snapshot_id = activate_policy_bundle(
         &policy_repo,
         ConfigResourceKind::ModelRouting,
         "p03-promotion-preflight",
-        "publish exact Crypto champion and global shadow",
+        "publish exact Crypto champion before coordinator ShadowBind",
         move |snapshot| {
-            snapshot
-                .model_routing
-                .model
-                .category_model_pointers
-                .insert(MarketCategory::Crypto, ModelVersionRef::new(champion_id));
-            snapshot.model_routing.model.shadow_model_version_id =
-                Some(ModelVersionRef::new(candidate_id));
+            snapshot.model_routing.model.buy_routes.insert(
+                BuyModelRoute::Crypto,
+                BuyRouteBinding {
+                    champion: ModelBinding::new(
+                        champion_id,
+                        ModelBindingSource::Bootstrap,
+                        Utc::now(),
+                        PolicyBundleGeneration::FIRST,
+                        1,
+                    ),
+                    shadow: None,
+                },
+            );
         },
     )
     .await;
@@ -487,8 +569,20 @@ async fn record_prepared_cycle(
         .profile_ref
         .resolve_builtin_research_profile()
         .expect("resolve F10 profile");
-    let family = schema.candidate_family.clone();
-    let source = &family.shared_evaluation().source_lineage;
+    let source = &schema.candidate_family.shared_evaluation().source_lineage;
+    let policy = PgPolicyRepository::new(db.clone())
+        .load_current_bundle()
+        .await
+        .expect("load F10 policy bundle")
+        .expect("F10 active policy bundle");
+    let route =
+        BuyModelRoute::try_from(models.champion.category_scope).expect("derive F10 champion route");
+    let binding = policy
+        .snapshot
+        .model_routing
+        .model
+        .route_binding(route)
+        .expect("load F10 route binding");
     let cycle = NewFeedbackCycle::try_seal(
         FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
             profile_ref: schema.profile_ref.clone(),
@@ -498,10 +592,19 @@ async fn record_prepared_cycle(
                 .content_hash()
                 .expect("F10 feedback-policy hash"),
             label_cutoff: source.pit_cutoff,
-            capability_registry_hashes: source.capability_registry_hashes.clone(),
             champion_model_version_id: models.champion.model_version_id,
             champion_serving_contract_hash: models.champion.serving_contract_hash,
-            candidate_family: family,
+            champion_model_spec_id: models.champion.model_spec_id,
+            champion_model_spec_definition_hash: models.champion.model_spec_definition_hash,
+            champion_model_family: models.champion.model_family,
+            route,
+            decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: policy.snapshot_hash,
+            policy_bundle_generation: policy.generation,
+            route_generation: binding.champion.generation,
+            evaluation_mode: FeedbackEvaluationMode::Conditional,
+            parent_cycle_id: None,
+            forced_idempotency_key: None,
         })
         .expect("freeze F10 cycle key"),
     )
@@ -630,8 +733,8 @@ pub async fn comparison_params_with_validation(
         label_cutoff: schema.label_cutoff,
         champion_model_version_id: models.champion.model_version_id,
         champion_serving_contract_hash: models.champion.serving_contract_hash,
-        candidate_family_hash: cycle.candidate_family_hash,
-        comparison_contract_hash: cycle
+        candidate_family_hash: schema.candidate_family_hash,
+        comparison_contract_hash: schema
             .candidate_family
             .comparison_contract()
             .comparison_contract_hash(),
@@ -647,20 +750,16 @@ pub async fn comparison_params_with_validation(
         FeedbackEvaluationWriteOutcome::Inserted(info)
         | FeedbackEvaluationWriteOutcome::AlreadyPresent(info) => info,
     };
-    let candidate_recipe_hash = cycle.candidate_family.candidates()[0].candidate_recipe_hash();
+    let candidate_recipe_hash = schema.candidate_family.candidates()[0].candidate_recipe_hash();
     let artifact_id = FeedbackComparisonArtifactId::from_cycle_id(cycle.feedback_cycle_id);
     FeedbackComparisonJobParams::try_new(FeedbackComparisonJobInput {
         feedback_cycle_id: cycle.feedback_cycle_id,
         cycle_idempotency_hash: cycle.idempotency_hash,
-        candidate_family_hash: cycle.candidate_family_hash,
+        candidate_family_hash: schema.candidate_family_hash,
         validation,
         evaluation_use: FeedbackEvaluationUseRef::from(&evaluation),
-        comparison_contract: cycle.candidate_family.comparison_contract().clone(),
-        decision_policy_snapshot_id: cycle
-            .candidate_family
-            .shared_evaluation()
-            .source_lineage
-            .decision_policy_snapshot_id,
+        comparison_contract: schema.candidate_family.comparison_contract().clone(),
+        decision_policy_snapshot_id: cycle.decision_policy_snapshot_id,
         champion_model_version_id: models.champion.model_version_id,
         champion_serving_contract_hash: models.champion.serving_contract_hash,
         candidates: vec![FeedbackComparisonCandidateRef {
@@ -784,7 +883,7 @@ pub async fn record_comparison(
     params: FeedbackComparisonJobParams,
     candidate_return_bps: Decimal,
     event_sequence: i64,
-) {
+) -> FeedbackComparisonArtifactRef {
     let identity = FeedbackStageJobIdentity::try_root(
         claim.cycle.feedback_cycle_id,
         FeedbackStage::Comparison,
@@ -796,13 +895,7 @@ pub async fn record_comparison(
         feedback_stage: None,
         kind: ResearchJobKind::FeedbackComparison,
         status: ResearchJobStatus::Queued,
-        model_spec_id: Some(
-            claim
-                .cycle
-                .candidate_family
-                .shared_evaluation()
-                .model_spec_id,
-        ),
+        model_spec_id: Some(claim.cycle.champion_model_spec_id),
         decision_policy_snapshot_id: Some(params.decision_policy_snapshot_id),
         params_json: ResearchJobParams::FeedbackComparison(Box::new(params.clone())),
         requested_by: None,
@@ -842,6 +935,15 @@ pub async fn record_comparison(
         )
         .await
         .expect("finalize F09 job");
+    let reference = FeedbackComparisonArtifactRef {
+        feedback_cycle_id: claim.cycle.feedback_cycle_id,
+        job_id: identity.job_id(),
+        artifact_id: params.artifact_id,
+        input_hash: params.input_hash().expect("F09 input hash"),
+        candidate_family_hash: params.candidate_family_hash,
+        decision_policy_snapshot_id: params.decision_policy_snapshot_id,
+        artifact: artifact.clone(),
+    };
     PgFeedbackCycleRepository::new(db.clone())
         .append_stage(
             claim.lease,
@@ -862,16 +964,235 @@ pub async fn record_comparison(
         )
         .await
         .expect("append F09 success event");
+    reference
+}
+
+struct BindingFixtureInput<'a> {
+    db: &'a DatabaseConnection,
+    store: &'a Arc<dyn ArtifactStore>,
+    cycles: &'a PgFeedbackCycleRepository,
+    jobs: &'a PgResearchJobRepository,
+    claim: &'a FeedbackCycleClaim,
+    comparison: &'a FeedbackComparisonArtifactRef,
+    candidate_recipe_hash: ContentHash,
+    models: &'a ShadowModels,
+    generations: &'a ModelServingGenerationStore,
+    event_sequence: i64,
+}
+
+struct BindingArtifactFixture {
+    params: ShadowBindingJobParams,
+    artifact: ShadowBindingArtifact,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+}
+
+impl BindingFixtureInput<'_> {
+    async fn prepare(&self) -> BindingArtifactFixture {
+        let published = self
+            .generations
+            .current_route(self.claim.cycle.route)
+            .expect("ShadowBind fixture route exists")
+            .published_shadow_identity()
+            .expect("ShadowBind fixture route has a shadow");
+        let bundle = PgPolicyRepository::new(self.db.clone())
+            .load_current_bundle()
+            .await
+            .expect("load ShadowBind fixture policy")
+            .expect("ShadowBind fixture policy exists");
+        let committed_model_routing_revision_id = bundle
+            .revision_vector
+            .model_routing
+            .expect("ShadowBind fixture ModelRouting revision");
+        let expected_policy_generation = PolicyBundleGeneration::try_new(
+            published
+                .policy_bundle_generation
+                .get()
+                .checked_sub(1)
+                .expect("ShadowBind fixture has a predecessor policy generation"),
+        )
+        .expect("valid ShadowBind predecessor policy generation");
+        let expected_snapshot_hash = content_hash('f');
+        let expected_model_routing_revision_id = PolicyRevisionId::from_v7();
+        assert_ne!(
+            expected_model_routing_revision_id,
+            committed_model_routing_revision_id
+        );
+        let params = ShadowBindingJobParams::try_new(ShadowBindingJobInput {
+            feedback_cycle_id: self.claim.cycle.feedback_cycle_id,
+            cycle_idempotency_hash: self.claim.cycle.idempotency_hash,
+            prepared_at: published.shadow_bound_at - Duration::milliseconds(1),
+            profile_ref: self.claim.cycle.profile_ref.clone(),
+            route: self.claim.cycle.route,
+            comparison: self.comparison.clone(),
+            candidate_recipe_hash: self.candidate_recipe_hash,
+            champion_model_version_id: self.models.champion.model_version_id,
+            champion_serving_contract_hash: self.models.champion.serving_contract_hash,
+            candidate_model_version_id: self.models.candidate.model_version_id,
+            candidate_artifact_hash: self.models.candidate.artifact_hash,
+            candidate_serving_contract_hash: self.models.candidate.serving_contract_hash,
+            candidate_manifest_id: ModelCandidateManifestId::from_v7(),
+            candidate_manifest_hash: content_hash('c'),
+            candidate_training_dataset_id: self
+                .models
+                .candidate
+                .training_dataset_id
+                .expect("ShadowBind candidate Training Dataset"),
+            expected_policy_generation,
+            expected_snapshot_id: DecisionPolicySnapshotId::from_content_hash(
+                &expected_snapshot_hash,
+            ),
+            expected_snapshot_hash,
+            expected_model_routing_revision_id,
+            expected_route_generation: published
+                .route_generation
+                .checked_sub(1)
+                .expect("ShadowBind fixture has a predecessor route generation"),
+            reserved_model_bytes: 16 * 1024 * 1024,
+            total_shadow_model_budget_bytes: SHADOW_MODEL_BUDGET_BYTES,
+        })
+        .expect("seal ShadowBind fixture params");
+        let receipt = ShadowBindingReceipt::try_seal(ShadowBindingReceiptInput {
+            params: params.clone(),
+            bound_at: published.shadow_bound_at,
+            binding_generation: published.route_generation,
+            committed_policy_generation: published.policy_bundle_generation,
+            committed_snapshot_id: published.decision_policy_snapshot_id,
+            committed_snapshot_hash: published.decision_policy_snapshot_hash,
+            committed_model_routing_revision_id,
+            policy_activation_id: PolicyActivationId::from_v7(),
+            audit_event_id: AuditEventId::from_v7(),
+        })
+        .expect("seal ShadowBind fixture receipt");
+        let artifact = ShadowBindingArtifact::try_seal(&params, receipt)
+            .expect("seal ShadowBind fixture artifact");
+        BindingArtifactFixture {
+            params,
+            artifact,
+            decision_policy_snapshot_id: published.decision_policy_snapshot_id,
+        }
+    }
+
+    async fn persist(&self, fixture: &BindingArtifactFixture) -> ResearchJobArtifactRef {
+        let bytes =
+            ShadowBindingCodec::encode(&fixture.artifact).expect("encode ShadowBind fixture");
+        let artifact_hash = CanonicalDigest::content_hash_bytes(&bytes);
+        let uri = self
+            .store
+            .put(
+                ArtifactKey::new(
+                    ArtifactNamespace::FeedbackShadowBinding,
+                    fixture.artifact.artifact_id.to_string(),
+                    "json",
+                )
+                .expect("ShadowBind fixture key"),
+                &bytes,
+            )
+            .await
+            .expect("persist ShadowBind fixture");
+        ResearchJobArtifactRef {
+            uri,
+            content_hash: artifact_hash,
+        }
+    }
+
+    async fn record(&self, fixture: BindingArtifactFixture, artifact_ref: ResearchJobArtifactRef) {
+        let identity = FeedbackStageJobIdentity::try_root(
+            self.claim.cycle.feedback_cycle_id,
+            FeedbackStage::ShadowBind,
+        )
+        .expect("ShadowBind fixture identity");
+        let job = NewResearchJob {
+            job_id: identity.job_id(),
+            feedback_cycle_id: None,
+            feedback_stage: None,
+            kind: ResearchJobKind::FeedbackShadowBind,
+            status: ResearchJobStatus::Queued,
+            model_spec_id: Some(self.claim.cycle.champion_model_spec_id),
+            decision_policy_snapshot_id: Some(fixture.decision_policy_snapshot_id),
+            params_json: ResearchJobParams::FeedbackShadowBind(Box::new(fixture.params)),
+            requested_by: None,
+            acting_role: RoleCode::new("system"),
+            parent_job_id: None,
+            recovery_attempt: 0,
+            max_recovery_attempts: 3,
+        }
+        .try_bind_feedback(identity)
+        .expect("bind ShadowBind fixture job");
+        match self
+            .jobs
+            .enqueue(job)
+            .await
+            .expect("enqueue ShadowBind fixture")
+        {
+            ResearchJobEnqueueOutcome::Inserted(_)
+            | ResearchJobEnqueueOutcome::AlreadyPresent(_) => {}
+        }
+        let worker = WorkerId::from_v7();
+        let leased = self
+            .jobs
+            .lease_next(
+                &[ResearchJobKind::FeedbackShadowBind],
+                &worker,
+                Utc::now() + Duration::seconds(JOB_LEASE_SECS),
+            )
+            .await
+            .expect("lease ShadowBind fixture")
+            .expect("queued ShadowBind fixture");
+        assert_eq!(leased.job_id, identity.job_id());
+        let info = self
+            .jobs
+            .finalize(
+                &identity.job_id(),
+                &worker,
+                ResearchJobFinalization::succeeded(
+                    Some(ResearchJobResultRef {
+                        kind: ResearchJobResultKind::ShadowBindingArtifact,
+                        id: fixture.artifact.artifact_id.as_uuid(),
+                    }),
+                    Some(artifact_ref.clone()),
+                    None,
+                ),
+            )
+            .await
+            .expect("finalize ShadowBind fixture");
+        self.cycles
+            .append_stage(
+                self.claim.lease,
+                NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+                    feedback_cycle_id: self.claim.cycle.feedback_cycle_id,
+                    event_sequence: self.event_sequence,
+                    stage: FeedbackStage::ShadowBind,
+                    event_kind: FeedbackStageEventKind::Succeeded,
+                    trigger_family: None,
+                    research_job_id: Some(identity.job_id()),
+                    actor: None,
+                    reason_code: None,
+                    evidence_uri: Some(artifact_ref.uri),
+                    evidence_hash: Some(artifact_ref.content_hash),
+                    occurred_at: info.finished_at.expect("ShadowBind fixture terminal time"),
+                })
+                .expect("seal ShadowBind fixture event"),
+            )
+            .await
+            .expect("append ShadowBind fixture event");
+    }
+
+    async fn execute(&self) {
+        let fixture = self.prepare().await;
+        let artifact_ref = self.persist(&fixture).await;
+        self.record(fixture, artifact_ref).await;
+    }
 }
 
 pub async fn insert_observation(
     db: &DatabaseConnection,
     cycles: &PgFeedbackCycleRepository,
     generations: &Arc<ModelServingGenerationStore>,
+    route: BuyModelRoute,
 ) {
     let identity = generations
-        .current_route(BuyModelRoute::Pooled)
-        .expect("current pooled route")
+        .current_route(route)
+        .expect("current route")
         .published_shadow_identity()
         .expect("published F10 shadow identity");
     let decision_at = cycles.database_time().await.expect("F10 decision clock");
@@ -892,10 +1213,10 @@ fn shadow_observation(
 ) -> NewShadowComparison {
     NewShadowComparison {
         shadow_comparison_id: ShadowComparisonId::from_v7(),
-        active_model_version_id: identity.active_model_version_id,
-        shadow_model_version_id: identity.shadow_model_version_id,
-        active_serving_contract_hash: identity.active_serving_contract_hash,
-        shadow_serving_contract_hash: identity.shadow_serving_contract_hash,
+        champion_model_version_id: identity.champion_model_version_id,
+        candidate_model_version_id: identity.candidate_model_version_id,
+        champion_serving_contract_hash: identity.champion_serving_contract_hash,
+        candidate_serving_contract_hash: identity.candidate_serving_contract_hash,
         research_profile_artifact_id: identity.research_profile_artifact_id.clone(),
         category_scope: identity.category_scope,
         decision_policy_snapshot_id: identity.decision_policy_snapshot_id,
@@ -903,7 +1224,7 @@ fn shadow_observation(
         policy_bundle_generation: identity.policy_bundle_generation,
         weight_source: ModelWeightSource::Artifact,
         decision_at,
-        topn_overlap: Probability::new(dec!(0.90)),
+        topn_decision_overlap: Probability::new(dec!(0.90)),
         rank_delta_json: ShadowRankDelta {
             mean_abs_rank_delta: dec!(0.1),
             max_rank_delta: 1,
@@ -924,7 +1245,6 @@ fn shadow_observation(
 pub async fn insert_stable_observations(
     db: &DatabaseConnection,
     generations: &Arc<ModelServingGenerationStore>,
-    window_start: DateTime<Utc>,
 ) {
     let identity = generations
         .current_route(BuyModelRoute::Crypto)
@@ -940,9 +1260,13 @@ pub async fn insert_stable_observations(
         profile.spec.feedback_policy.shadow_minimum_observations,
         u64::try_from(SHADOW_OBSERVATION_COUNT).expect("shadow observation count")
     );
+    assert_eq!(identity.required_shadow_window_secs, 2);
+    let window_start = identity.shadow_bound_at;
+    tokio::time::sleep(StdDuration::from_millis(1_100)).await;
     let rows = (0..SHADOW_OBSERVATION_COUNT).map(|index| {
-        let decision_at =
-            window_start + Duration::milliseconds(i64::try_from(index).expect("shadow index") * 2);
+        let offset_micros = i64::try_from(index).expect("shadow index") * 1_000_000
+            / i64::try_from(SHADOW_OBSERVATION_COUNT - 1).expect("shadow observation denominator");
+        let decision_at = window_start + Duration::microseconds(offset_micros);
         let comparison_hash = ResearchHasher::canonical(&(
             "p03-stable-published-shadow-v1",
             identity.policy_bundle_generation,
@@ -951,11 +1275,11 @@ pub async fn insert_stable_observations(
         .expect("P03 stable comparison hash");
         shadow_observation(&identity, decision_at, comparison_hash).into_active_model()
     });
-    tokio::time::sleep(StdDuration::from_millis(2_100)).await;
     ShadowComparisonEntity::insert_many(rows)
         .exec(db)
         .await
         .expect("persist complete P03 production shadow window");
+    tokio::time::sleep(StdDuration::from_millis(1_100)).await;
 }
 
 pub async fn terminal_restart_tamper() {
@@ -967,27 +1291,71 @@ pub async fn terminal_restart_tamper() {
     let models = Box::pin(build_models(&db, &store)).await;
     let generations = activate_generation(&db, &store, &models).await;
     let (schema, claim) = record_cycle(&db, &models).await;
-    let comparison = comparison_params(&db, &schema, &claim, &models).await;
-    record_comparison(&db, &store, &claim, comparison, dec!(100), 2).await;
-
     let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
-    insert_observation(&db, cycles.as_ref(), &generations).await;
     let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
-    let stage = FeedbackShadowStageAdapter::try_new(FeedbackShadowStageDeps {
-        cycles: Arc::clone(&cycles) as Arc<dyn FeedbackCycleRepository>,
-        jobs: Arc::clone(&jobs) as Arc<dyn ResearchJobRepository>,
-        artifacts: Arc::clone(&store),
-        serving_generations: Arc::clone(&generations),
-        max_recovery_attempts: 3,
-    })
-    .expect("build F10 stage");
+    persist_recipe_plan_fixture(
+        cycles.as_ref(),
+        jobs.as_ref(),
+        &store,
+        claim.lease,
+        &claim.cycle,
+        &schema.candidate_family,
+        2,
+    )
+    .await;
+    let comparison = comparison_params(&db, &schema, &claim, &models).await;
+    let comparison = record_comparison(&db, &store, &claim, comparison, dec!(100), 3).await;
+    BindingFixtureInput {
+        db: &db,
+        store: &store,
+        cycles: cycles.as_ref(),
+        jobs: jobs.as_ref(),
+        claim: &claim,
+        comparison: &comparison,
+        candidate_recipe_hash: schema.candidate_family.candidates()[0].candidate_recipe_hash(),
+        models: &models,
+        generations: generations.as_ref(),
+        event_sequence: 4,
+    }
+    .execute()
+    .await;
+
+    insert_observation(&db, cycles.as_ref(), &generations, BuyModelRoute::Pooled).await;
+    let stage = shadow_stage(
+        &db,
+        &cycles,
+        &jobs,
+        Arc::clone(&store),
+        Arc::clone(&generations),
+    );
     let identity =
         FeedbackStageJobIdentity::try_root(claim.cycle.feedback_cycle_id, FeedbackStage::Shadow)
             .expect("F10 job identity");
-    let job = stage
+    let first_preparation = stage
         .prepare_shadow(&claim.cycle, claim.lease, identity)
         .await
-        .expect("prepare exact F10 job");
+        .expect("defer immature F10 window");
+    let FeedbackStagePreparation::Deferred {
+        resume_after,
+        reason_code,
+    } = first_preparation
+    else {
+        panic!("immature F10 fixture must defer its shadow window");
+    };
+    assert_eq!(reason_code, "feedback_shadow_window_pending");
+    let database_time = cycles.database_time().await.expect("F10 database clock");
+    let remaining = resume_after
+        .signed_duration_since(database_time)
+        .to_std()
+        .expect("F10 resume boundary remains in the future");
+    tokio::time::sleep(remaining + StdDuration::from_millis(10)).await;
+    let preparation = stage
+        .prepare_shadow(&claim.cycle, claim.lease, identity)
+        .await
+        .expect("prepare mature F10 job");
+    let FeedbackStagePreparation::Ready(job) = preparation else {
+        panic!("mature F10 fixture must not defer its shadow window");
+    };
     let params = match &job.params_json {
         ResearchJobParams::FeedbackShadow(params) => params.as_ref().clone(),
         _ => panic!("F10 stage emitted another job kind"),
@@ -999,7 +1367,7 @@ pub async fn terminal_restart_tamper() {
         contract.candidate_model_version_id(),
         models.candidate.model_version_id
     );
-    match jobs.enqueue(job).await.expect("enqueue F10 job") {
+    match jobs.enqueue(*job).await.expect("enqueue F10 job") {
         ResearchJobEnqueueOutcome::Inserted(_) | ResearchJobEnqueueOutcome::AlreadyPresent(_) => {}
     }
     let worker = WorkerId::from_v7();
@@ -1012,7 +1380,7 @@ pub async fn terminal_restart_tamper() {
     .expect("lease F10 job")
     .expect("queued F10 job");
     let executor = FeedbackShadowExecutionService::new(FeedbackShadowExecutionDeps {
-        observations: Arc::new(PgShadowComparisonRepository::new(db)),
+        observations: Arc::new(PgShadowComparisonRepository::new(db.clone())),
         artifacts: Arc::clone(&store),
     });
     let result = executor
@@ -1058,15 +1426,8 @@ pub async fn terminal_restart_tamper() {
         result.artifact.uri,
         b"{}".to_vec(),
     ));
-    FeedbackShadowStageAdapter::try_new(FeedbackShadowStageDeps {
-        cycles: Arc::clone(&cycles) as Arc<dyn FeedbackCycleRepository>,
-        jobs: Arc::clone(&jobs) as Arc<dyn ResearchJobRepository>,
-        artifacts: tampered_store,
-        serving_generations: generations,
-        max_recovery_attempts: 3,
-    })
-    .expect("build restarted F10 stage")
-    .succeeded_shadow(&claim.cycle, &info)
-    .await
-    .expect_err("F10 restart must reject tampered object bytes");
+    shadow_stage(&db, &cycles, &jobs, tampered_store, generations)
+        .succeeded_shadow(&claim.cycle, &info)
+        .await
+        .expect_err("F10 restart must reject tampered object bytes");
 }

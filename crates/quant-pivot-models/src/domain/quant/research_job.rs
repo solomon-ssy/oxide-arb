@@ -238,6 +238,8 @@ pub struct ResearchJobInfo {
     pub parent_job_id: Option<ResearchJobId>,
     pub recovery_attempt: i32,
     pub max_recovery_attempts: i32,
+    /// DB-clock deadline after which a typed retry may be leased.
+    pub next_attempt_at: Option<DateTime<Utc>>,
     pub lease_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
@@ -268,6 +270,7 @@ info_from_model!(ResearchJobInfo, crate::entities::quant_research_job::Model, {
     parent_job_id,
     recovery_attempt,
     max_recovery_attempts,
+    next_attempt_at,
     lease_owner,
     lease_expires_at,
     started_at,

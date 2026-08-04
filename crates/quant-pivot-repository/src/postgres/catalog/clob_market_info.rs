@@ -93,11 +93,12 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
             created_at: ActiveValue::NotSet,
         };
         Entity::insert(active)
-            .on_conflict(
-                OnConflict::columns([Column::MarketId, Column::PayloadHash])
-                    .do_nothing()
-                    .to_owned(),
-            )
+            // An exact concurrent retry conflicts on both the content key and
+            // the caller-supplied version primary key. Untargeted Postgres
+            // `ON CONFLICT DO NOTHING` covers every unique arbiter; the
+            // content-key read-back below still rejects a version-id collision
+            // that does not resolve to the requested observation.
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
             .exec_without_returning(&self.db)
             .await
             .map_err(StorageError::from)?;

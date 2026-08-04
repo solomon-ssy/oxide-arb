@@ -1,5 +1,7 @@
 //! Quant-pivot `ClickHouse` fact rows.
 
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -10,11 +12,13 @@ use crate::{
         ChFeatureValueKind, ChNormalizationSource, ChOutcomeSide, ChPositionLedgerState,
         ChQuantLedgerEventKind,
     },
+    hashing::CanonicalDigest,
     types::{
-        CapitalAllocationId, DecisionPolicySnapshotId, EventId, ExecutionOrderId,
+        CapitalAllocationId, ContentHash, DecisionPolicySnapshotId, EventId, ExecutionOrderId,
         FeatureParityEventId, FeatureParityRunId, FeatureVectorId, MarketId, MarketSelectionId,
         ModelRunId, ModelVersionId, OrderId, OrderIntentId, PositionId, RecommendationId,
-        RecommendationReportId, SignalCandidateId, TokenId, TrainingDatasetId,
+        RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
+        ResearchProfileId, ResearchProfileRef, SignalCandidateId, TokenId, TrainingDatasetId,
     },
 };
 
@@ -24,7 +28,7 @@ use crate::{
 /// vectors rejected by model-required input checks. Missing and structurally
 /// not-applicable cells remain explicit. `raw_value` is the exact typed value
 /// text and is `None` only for states that carry no value.
-#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, clickhouse::Row, Serialize, Deserialize)]
 pub struct QuantFeatureEventRow {
     pub event_time: i64,
     pub feature_vector_id: FeatureVectorId,
@@ -67,9 +71,11 @@ pub struct QuantFeatureEventRow {
 /// round-tripping, making byte-level training/serving comparisons possible. It
 /// is `None` only for a weighted factor whose explicit state has no normalized
 /// score; no numeric sentinel is written.
-#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, clickhouse::Row, Serialize, Deserialize)]
 pub struct QuantModelInputEventRow {
     pub event_time: i64,
+    /// Version of the run-scoped serving-evidence wire contract.
+    pub format_version: u32,
     pub decision_at: i64,
     pub knowledge_cutoff: i64,
     pub model_run_id: ModelRunId,
@@ -97,7 +103,7 @@ pub struct QuantModelInputEventRow {
 /// run may transition to `Succeeded` only after this marker is acknowledged.
 /// Replay therefore reasons about this run-scoped marker instead of an
 /// unrelated global ingestion watermark.
-#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, clickhouse::Row, Serialize, Deserialize)]
 pub struct QuantServingEvidenceCompletionRow {
     pub event_time: i64,
     pub format_version: u32,
@@ -229,7 +235,10 @@ pub struct ReportMarketFunnelRow {
     pub model_run_id: Option<ModelRunId>,
     pub market_id: MarketId,
     pub event_id: EventId,
-    pub token_id: TokenId,
+    /// Primary selection token used by feature construction and model input.
+    /// A published recommendation may target the complementary outcome token;
+    /// that action token lives in `quant_report_recommendation_fact`.
+    pub primary_token_id: TokenId,
     pub terminal_stage: String,
     pub primary_reason: String,
     pub secondary_diagnostics_json: String,
@@ -238,6 +247,114 @@ pub struct ReportMarketFunnelRow {
     pub recommendation_id: Option<RecommendationId>,
     pub row_hash: String,
     pub ingestion_time: i64,
+}
+
+/// Stable contract failure for a conserved report-market funnel row.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid report-market funnel row: {detail}")]
+pub struct ReportMarketFunnelRowError {
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct ReportMarketFunnelHashInput<'a> {
+    event_time: i64,
+    recommendation_report_id: &'a RecommendationReportId,
+    market_selection_id: &'a MarketSelectionId,
+    profile_ref: &'a ResearchProfileRef,
+    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
+    model_version_id: &'a ModelVersionId,
+    model_run_id: &'a Option<ModelRunId>,
+    market_id: &'a MarketId,
+    event_id: &'a EventId,
+    primary_token_id: &'a TokenId,
+    terminal_stage: ReportFunnelStage,
+    primary_reason: ReportFunnelReason,
+    secondary_diagnostics: &'a ReportFunnelDiagnostics,
+    feature_vector_id: &'a Option<FeatureVectorId>,
+    signal_candidate_id: &'a Option<SignalCandidateId>,
+    recommendation_id: &'a Option<RecommendationId>,
+}
+
+impl ReportMarketFunnelRow {
+    /// Recompute the semantic hash of every immutable business field.
+    pub fn expected_row_hash(&self) -> Result<ContentHash, ReportMarketFunnelRowError> {
+        if self.ingestion_time < self.event_time {
+            return Err(Self::invalid("ingestion time precedes event time"));
+        }
+        let profile_content_hash = ContentHash::from_str(&self.profile_content_hash)
+            .map_err(|error| Self::invalid(format!("profile content hash: {error}")))?;
+        if profile_content_hash.to_string() != self.profile_content_hash {
+            return Err(Self::invalid("profile content hash is not canonical"));
+        }
+        let profile_ref = ResearchProfileRef {
+            id: ResearchProfileId::new(&self.profile_id),
+            version: self.profile_version,
+            content_hash: profile_content_hash,
+        };
+        profile_ref
+            .validate()
+            .map_err(|error| Self::invalid(format!("profile reference: {error}")))?;
+        let terminal_stage = ReportFunnelStage::from_str(&self.terminal_stage)
+            .map_err(|error| Self::invalid(format!("terminal stage: {error}")))?;
+        let primary_reason = ReportFunnelReason::from_str(&self.primary_reason)
+            .map_err(|error| Self::invalid(format!("primary reason: {error}")))?;
+        let secondary_diagnostics =
+            serde_json::from_str::<ReportFunnelDiagnostics>(&self.secondary_diagnostics_json)
+                .map_err(|error| Self::invalid(format!("secondary diagnostics: {error}")))?;
+        secondary_diagnostics
+            .validate_for(primary_reason)
+            .map_err(Self::invalid)?;
+        let canonical_diagnostics = serde_json::to_string(&secondary_diagnostics)
+            .map_err(|error| Self::invalid(format!("secondary diagnostics: {error}")))?;
+        if canonical_diagnostics != self.secondary_diagnostics_json {
+            return Err(Self::invalid("secondary diagnostics JSON is not canonical"));
+        }
+        CanonicalDigest::content_hash_json(&ReportMarketFunnelHashInput {
+            event_time: self.event_time,
+            recommendation_report_id: &self.recommendation_report_id,
+            market_selection_id: &self.market_selection_id,
+            profile_ref: &profile_ref,
+            decision_policy_snapshot_id: &self.decision_policy_snapshot_id,
+            model_version_id: &self.model_version_id,
+            model_run_id: &self.model_run_id,
+            market_id: &self.market_id,
+            event_id: &self.event_id,
+            primary_token_id: &self.primary_token_id,
+            terminal_stage,
+            primary_reason,
+            secondary_diagnostics: &secondary_diagnostics,
+            feature_vector_id: &self.feature_vector_id,
+            signal_candidate_id: &self.signal_candidate_id,
+            recommendation_id: &self.recommendation_id,
+        })
+        .map_err(|error| Self::invalid(format!("canonical hash: {error}")))
+    }
+
+    /// Seal a newly constructed row. Existing hash text is rejected.
+    pub fn seal_hash(&mut self) -> Result<(), ReportMarketFunnelRowError> {
+        if !self.row_hash.is_empty() {
+            return Err(Self::invalid("row is already sealed"));
+        }
+        self.row_hash = self.expected_row_hash()?.to_string();
+        Ok(())
+    }
+
+    /// Verify stored hash text against the complete row contract.
+    pub fn verify_hash(&self) -> Result<(), ReportMarketFunnelRowError> {
+        let stored = ContentHash::from_str(&self.row_hash)
+            .map_err(|error| Self::invalid(format!("stored row hash: {error}")))?;
+        if stored.to_string() != self.row_hash || stored != self.expected_row_hash()? {
+            return Err(Self::invalid("stored row hash does not match row content"));
+        }
+        Ok(())
+    }
+
+    fn invalid(detail: impl Into<String>) -> ReportMarketFunnelRowError {
+        ReportMarketFunnelRowError {
+            detail: detail.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
@@ -333,4 +450,60 @@ pub struct QuantExitSignalEvaluationEventRow {
     /// Human-readable verdict detail / reason.
     pub detail: String,
     pub ingestion_time: i64,
+}
+
+#[cfg(test)]
+mod report_market_funnel_tests {
+    use std::error::Error;
+
+    use super::ReportMarketFunnelRow;
+    use crate::types::{
+        ContentHash, DecisionPolicySnapshotId, EventId, FeatureVectorId, MarketId,
+        MarketSelectionId, ModelRunId, ModelVersionId, RecommendationReportId, TokenId,
+    };
+
+    fn funnel_row(event_time: i64) -> ReportMarketFunnelRow {
+        ReportMarketFunnelRow {
+            event_time,
+            recommendation_report_id: RecommendationReportId::from_v7(),
+            market_selection_id: MarketSelectionId::from_v7(),
+            profile_id: "pooled_binary_market".to_owned(),
+            profile_version: 1,
+            profile_content_hash: ContentHash::from_bytes([7; 32]).to_string(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            model_version_id: ModelVersionId::from_v7(),
+            model_run_id: Some(ModelRunId::from_v7()),
+            market_id: MarketId::new("market-1"),
+            event_id: EventId::new("event-1"),
+            primary_token_id: TokenId::new("101"),
+            terminal_stage: "model_scored".to_owned(),
+            primary_reason: "no_positive_signal".to_owned(),
+            secondary_diagnostics_json: r#"{"kind":"none"}"#.to_owned(),
+            feature_vector_id: Some(FeatureVectorId::from_v7()),
+            signal_candidate_id: None,
+            recommendation_id: None,
+            row_hash: String::new(),
+            ingestion_time: event_time,
+        }
+    }
+
+    #[test]
+    fn semantic_hash_detects_tampering() -> Result<(), Box<dyn Error>> {
+        let mut row = funnel_row(1_700_000_000_000);
+        row.seal_hash()?;
+        row.verify_hash()?;
+
+        let mut tampered = row.clone();
+        tampered.market_id = MarketId::new("market-2");
+        assert!(tampered.verify_hash().is_err());
+        assert!(row.seal_hash().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn seal_rejects_noncanonical_diagnostics() {
+        let mut row = funnel_row(1_700_000_000_000);
+        row.secondary_diagnostics_json = r#"{ "kind": "none" }"#.to_owned();
+        assert!(row.seal_hash().is_err());
+    }
 }

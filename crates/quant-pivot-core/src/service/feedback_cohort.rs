@@ -55,6 +55,9 @@ pub fn evaluate_feedback_cohort(
         FeedbackCohort::ModelLearning => {
             evaluate_model_learning(snapshot, context, resolution_outcome)
         }
+        FeedbackCohort::ModelScoreLearning => {
+            Err(FeedbackCohortContractError::InvalidCandidateTruthPlane { cohort })
+        }
         FeedbackCohort::ExecutionLearning => {
             evaluate_execution_learning(snapshot, context, published_at, execution_rollup)
         }

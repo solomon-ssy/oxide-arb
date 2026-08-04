@@ -5,20 +5,23 @@
 
 use std::{collections::BTreeMap, str::FromStr, sync::Arc};
 
+use anyhow::{Result, ensure};
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::governance::model_score_content_hash;
 use quant_pivot_models::{
+    config::ClickHouseConfig,
     domain::{
         governance::{NewOperationLog, RuntimeControlUpdate},
         market::fee::BuilderFeeAttribution,
         quant::{
             ApproveOrderIntent, CalibrationArtifactPayload, CapitalSettlement, EntryConditionClaim,
-            ExecutionIdentityRefs, ExitLedgerWrite, ModelScoreCalibrationCommit, ModelVersionInfo,
-            NewAccountSnapshot, NewCalibrationArtifact, NewCapitalAllocation,
-            NewEntryConditionArtifact, NewEntryConditionInstance, NewEquitySnapshot,
-            NewExecutionAccount, NewExecutionOrder, NewFactorDefinition, NewFeatureParityState,
-            NewMarketSelection, NewModelRun, NewModelVersion, NewOrderIntent, NewPortfolioPlan,
-            NewRecommendation, NewRecommendationReport, NewReconciliation,
+            ExecutionIdentityRefs, ExitLedgerWrite, MarketSelectionModel,
+            ModelScoreCalibrationCommit, ModelVersionInfo, NewAccountSnapshot,
+            NewCalibrationArtifact, NewCapitalAllocation, NewEntryConditionArtifact,
+            NewEntryConditionInstance, NewEquitySnapshot, NewExecutionAccount, NewExecutionOrder,
+            NewFactorDefinition, NewFeatureParityState, NewMarketSelection,
+            NewMarketSelectionMember, NewModelRun, NewModelVersion, NewOrderIntent,
+            NewPortfolioPlan, NewRecommendation, NewRecommendationReport, NewReconciliation,
             NewReportDataQualitySnapshot, NewReportTransaction, PositionExit, PositionFill,
             SubmissionLedgerWrite, TrainingDatasetInfo,
         },
@@ -54,7 +57,10 @@ use quant_pivot_models::{
         rbac::ResourceType,
     },
     hashing::CanonicalDigest,
-    runtime_config::{DecisionPolicySnapshot, ModelVersionRef},
+    runtime_config::{
+        BuyModelRoute, BuyRouteBinding, DecimalValue, DecisionPolicySnapshot, FactorHeadConfig,
+        ModelBinding, ModelBindingSource,
+    },
     types::{
         AccountPositions, AccountSnapshotId, ArtifactUri, BookSnapshotRef, Bps,
         CalibrationArtifactId, CapitalAllocationId, ConditionTruth, ConfidenceSummary,
@@ -68,16 +74,17 @@ use quant_pivot_models::{
         FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
         ModelRunId, ModelSpecId, ModelVersionId, OperationDetailDocument, OperationLogId,
         OpportunisticExitPolicy, OrderAmount, OrderId, OrderIntentId, PendingScaleOut,
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, PreparedFeeSchedule,
-        PreparedVenueOrder, Price, PriceCondition, Probability, RecommendationFactorBreakdown,
-        RecommendationId, RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
-        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
-        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
-        ResearchEvaluationTrack, ResearchProfileRef, RiskEnvelope, RoleCode, SchemaVersion,
-        SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, SourceSliceManifestRef,
-        ThesisInvalidationPolicy, TokenId, TradePolicyCohortProvenance, TrainingDatasetId, Usd,
-        UserId, VenueOrderAmount, builtin_research_profiles,
+        PolicyBundleGeneration, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot,
+        PreparedFeeSchedule, PreparedVenueOrder, Price, PriceCondition, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, ReportSummary, ResearchEvaluationTrack, ResearchProfileRef,
+        RiskEnvelope, RoleCode, SchemaVersion, SelectionExclusionSummary, Shares,
+        SignalCandidateId, SizingPlan, SourceSliceManifestRef, ThesisInvalidationPolicy, TokenId,
+        TradePolicyCohortProvenance, TrainingDatasetId, Usd, UserId, VenueOrderAmount,
+        builtin_research_profiles,
         calibration::{
             IsotonicKnot, MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
             ModelScoreCalibrationDatasetBinding, ModelScoreCalibrationFitContract,
@@ -89,6 +96,7 @@ use quant_pivot_models::{
         model_metrics::ModelVersionMetrics,
         model_serving::ModelServingTradePolicyBinding,
         model_training::ModelTrainingObjective,
+        stable_name::FactorName,
     },
 };
 use quant_pivot_repository::{
@@ -134,7 +142,7 @@ use super::{
     model_spec_fixtures::{new_model_spec_fixture, weather_horizon_secs},
     policy_fixtures::bootstrap_policy_bundle,
     report_fixtures,
-    report_lifecycle_seed::persist_and_publish_report,
+    report_lifecycle_seed::{materialize_report_facts, persist_and_publish_report},
     seeded_uuid,
     trade_policy_fixtures::PublishedTradePolicyFixture,
 };
@@ -290,7 +298,7 @@ pub struct SharedDemoInfra {
 /// governed-feedback production fixture.
 pub struct GovernedFeedbackInfra {
     pub template: SharedDemoInfra,
-    pub active_model_version_id: ModelVersionId,
+    pub champion_model_version_id: ModelVersionId,
 }
 
 /// Immutable inputs for one calibrated system-test model chain.
@@ -298,6 +306,69 @@ pub struct CalibratedModelSeed {
     pub model_version_id: ModelVersionId,
     pub training_dataset_id: TrainingDatasetId,
     pub training_input_hash: ContentHash,
+    pub head: CalibratedModelHead,
+}
+
+/// Frozen alpha-head source for a calibrated system-test model.
+#[derive(Clone)]
+pub enum CalibratedModelHead {
+    /// Use the exact head frozen in the governing policy snapshot.
+    Policy,
+    /// Build an explicit alpha simplex; every unlisted alpha factor receives zero weight.
+    AlphaSimplex(BTreeMap<FactorName, Decimal>),
+}
+
+impl CalibratedModelHead {
+    /// Validate and freeze an explicit alpha-factor simplex.
+    pub fn alpha_simplex(weights: impl IntoIterator<Item = (FactorName, Decimal)>) -> Result<Self> {
+        let mut simplex = BTreeMap::new();
+        for (factor, weight) in weights {
+            ensure!(
+                Decimal::ZERO <= weight && weight <= Decimal::ONE,
+                "fixture alpha weight for `{factor}` must be within [0, 1], got {weight}"
+            );
+            ensure!(
+                simplex.insert(factor.clone(), weight).is_none(),
+                "fixture alpha simplex duplicates factor `{factor}`"
+            );
+        }
+        ensure!(!simplex.is_empty(), "fixture alpha simplex is empty");
+        let total = simplex.values().copied().sum::<Decimal>();
+        ensure!(
+            total == Decimal::ONE,
+            "fixture alpha simplex must sum exactly to 1, got {total}"
+        );
+        Ok(Self::AlphaSimplex(simplex))
+    }
+
+    fn resolve(
+        &self,
+        plane: &FactorServingPlane,
+        policy: &FactorHeadConfig,
+    ) -> Result<FactorHeadConfig> {
+        let Self::AlphaSimplex(simplex) = self else {
+            return Ok(policy.clone());
+        };
+        let mut matched = 0_usize;
+        let mut config = policy.clone();
+        config.alpha_seed_weights = plane
+            .definitions()
+            .iter()
+            .filter(|revision| revision.definition().is_outcome_alpha())
+            .map(|revision| {
+                let name = &revision.definition().name;
+                let weight = simplex.get(name).copied().unwrap_or(Decimal::ZERO);
+                matched += usize::from(simplex.contains_key(name));
+                (name.to_string(), DecimalValue::new(weight))
+            })
+            .collect();
+        ensure!(
+            matched == simplex.len(),
+            "fixture alpha simplex references {} factor(s) outside the sealed plane",
+            simplex.len() - matched
+        );
+        Ok(config)
+    }
 }
 
 /// Exact parent → calibrator → derived-child fixture.
@@ -351,6 +422,34 @@ pub struct ReportSeedConfig {
     pub market_slug: String,
     pub token_id: String,
     pub trigger_key: String,
+}
+
+/// Immutable member payload used to create one atomic market-selection snapshot.
+pub struct ReportSelectionMemberSeed {
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub category: MarketCategory,
+    pub status: MarketStatus,
+    pub primary_token_id: TokenId,
+    pub secondary_token_id: Option<TokenId>,
+    pub liquidity_usd: Option<Usd>,
+    pub volume_24h_usd: Option<Usd>,
+}
+
+impl ReportSelectionMemberSeed {
+    fn bind(self, market_selection_id: MarketSelectionId) -> NewMarketSelectionMember {
+        NewMarketSelectionMember {
+            market_selection_id,
+            market_id: self.market_id,
+            event_id: self.event_id,
+            category: self.category,
+            status: self.status,
+            primary_token_id: self.primary_token_id,
+            secondary_token_id: self.secondary_token_id,
+            liquidity_usd: self.liquidity_usd,
+            volume_24h_usd: self.volume_24h_usd,
+        }
+    }
 }
 
 /// Overrides when composing a [`NewReportTransaction`] for UI demo fixtures.
@@ -414,7 +513,14 @@ pub async fn seed_demo_with_store(
 pub async fn seed_feedback_serving_infra(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
+    required_shadow_window_secs: u64,
+    shadow_diff_threshold: Decimal,
+    feedback_budget_usd: Decimal,
 ) -> GovernedFeedbackInfra {
+    assert!(
+        feedback_budget_usd > Decimal::ZERO,
+        "governed-feedback budget must be positive"
+    );
     let policy = PgPolicyRepository::new(db.clone());
     assert!(
         policy
@@ -424,11 +530,47 @@ pub async fn seed_feedback_serving_infra(
             .is_none(),
         "governed-feedback serving fixture requires a fresh policy database"
     );
-    let active_model_version_id = ModelVersionId::from_v7();
+    let champion_model_version_id = ModelVersionId::from_v7();
     let mut snapshot = DecisionPolicySnapshot::default();
-    snapshot.model_routing.model.category_model_pointers.insert(
-        MarketCategory::Weather,
-        ModelVersionRef::new(active_model_version_id),
+    snapshot
+        .profile_artifacts
+        .research_method
+        .model_promotion
+        .required_shadow_window_secs = required_shadow_window_secs;
+    // Governed feedback evidence must exercise executable CPCV/comparison
+    // economics. A small per-observation notional funds the complete frozen
+    // cohort without weakening any sample-count or quality gate.
+    snapshot.execution_risk.portfolio.budget.total_budget_usd =
+        DecimalValue::new(feedback_budget_usd);
+    snapshot
+        .execution_risk
+        .portfolio
+        .budget
+        .min_recommendation_usd = DecimalValue::new(dec!(1));
+    snapshot
+        .execution_risk
+        .portfolio
+        .budget
+        .max_single_recommendation_usd = DecimalValue::new(dec!(1));
+    snapshot
+        .execution_risk
+        .portfolio
+        .kelly_safety
+        .max_aggregate_exposure_pct = DecimalValue::new(Decimal::ONE);
+    snapshot.recommendation.selection.enabled_categories = vec![MarketCategory::Weather];
+    snapshot.model_routing.model.shadow_diff_threshold = DecimalValue::new(shadow_diff_threshold);
+    snapshot.model_routing.model.buy_routes.insert(
+        BuyModelRoute::Weather,
+        BuyRouteBinding {
+            champion: ModelBinding::new(
+                champion_model_version_id,
+                ModelBindingSource::Bootstrap,
+                Utc::now(),
+                PolicyBundleGeneration::FIRST,
+                1,
+            ),
+            shadow: None,
+        },
     );
     let decision_policy_snapshot_id = bootstrap_policy_bundle(
         &policy,
@@ -455,7 +597,7 @@ pub async fn seed_feedback_serving_infra(
             trade_policy,
             factor_serving_plane,
         },
-        active_model_version_id,
+        champion_model_version_id,
     }
 }
 
@@ -593,10 +735,26 @@ pub async fn seed_report_on_infra(
     infra: &SharedDemoInfra,
     config: ReportSeedConfig,
 ) -> ExecutionTxnIds {
-    let ids = prepare_report_on_infra(db, infra, &config).await;
+    let ids = prepare_report_on_infra(db, infra, &config, db.statement_time().await).await;
     ids.complete_model_run(db).await;
     persist_and_publish_report(db, ids.build_report_transaction(), &config.trigger_key, 10).await;
     ids
+}
+
+/// Seed a report with a production-format S3 bundle and exact `ClickHouse` facts.
+pub async fn seed_production_report(
+    db: &DatabaseConnection,
+    clickhouse: &ClickHouseConfig,
+    artifacts: &Arc<dyn ArtifactStore>,
+    infra: &SharedDemoInfra,
+    config: ReportSeedConfig,
+) -> Result<ExecutionTxnIds> {
+    let ids = prepare_report_on_infra(db, infra, &config, db.statement_time().await).await;
+    let mut transaction = ids.build_report_transaction();
+    materialize_report_facts(artifacts, clickhouse, &mut transaction).await?;
+    ids.complete_model_run(db).await;
+    persist_and_publish_report(db, transaction, &config.trigger_key, 10).await;
+    Ok(ids)
 }
 
 /// Seed a report whose recommendation waits for a continuously satisfied
@@ -626,7 +784,7 @@ async fn seed_price_by_mode(
     config: ReportSeedConfig,
     runtime_mode: QuantRuntimeMode,
 ) -> ExecutionTxnIds {
-    let ids = prepare_report_on_infra(db, infra, &config).await;
+    let ids = prepare_report_on_infra(db, infra, &config, db.statement_time().await).await;
     let mut options = ReportBuildOptions::published_single(&ids);
     options.runtime_mode = runtime_mode;
     let artifact = ids.price_condition_artifact();
@@ -667,21 +825,89 @@ pub async fn prepare_report_on_infra(
     db: &DatabaseConnection,
     infra: &SharedDemoInfra,
     config: &ReportSeedConfig,
+    decision_at: DateTime<Utc>,
 ) -> ExecutionTxnIds {
-    let execution_account = ensure_fixture_execution_account(db).await;
-    seed_market_catalog(
+    let no_token_id = fixture_no_token_id(&config.market_id, &config.token_id);
+    seed_report_catalog(
         db,
         &config.event_id,
         &config.market_id,
         &config.market_question,
         &config.market_slug,
         &config.token_id,
+        &no_token_id,
     )
     .await;
-    let market_selection_id =
-        seed_market_selection(db, &infra.decision_policy_snapshot_id, &config.market_id).await;
-    let decision_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
-        .expect("execution fixture decision time must fit millisecond precision");
+    prepare_report_lineage(
+        db,
+        infra,
+        config,
+        decision_at,
+        vec![ReportSelectionMemberSeed {
+            market_id: MarketId::new(&config.market_id),
+            event_id: EventId::new(&config.event_id),
+            category: MarketCategory::Weather,
+            status: MarketStatus::Active,
+            primary_token_id: TokenId::new(&config.token_id),
+            secondary_token_id: Some(no_token_id),
+            liquidity_usd: Some(Usd::new(dec!(5000))),
+            volume_24h_usd: Some(Usd::new(dec!(10000))),
+        }],
+    )
+    .await
+}
+
+/// Prepare immutable report lineage after the complete catalog membership is present.
+pub async fn prepare_report_lineage(
+    db: &DatabaseConnection,
+    infra: &SharedDemoInfra,
+    config: &ReportSeedConfig,
+    decision_at: DateTime<Utc>,
+    selection_members: Vec<ReportSelectionMemberSeed>,
+) -> ExecutionTxnIds {
+    let market_selection_id = seed_market_selection(
+        db,
+        &infra.decision_policy_snapshot_id,
+        decision_at,
+        selection_members,
+    )
+    .await;
+    finish_report_lineage(db, infra, config, decision_at, market_selection_id).await
+}
+
+/// Prepare immutable report lineage from an already materialized production
+/// selection model.
+pub async fn prepare_report_lineage_model(
+    db: &DatabaseConnection,
+    infra: &SharedDemoInfra,
+    config: &ReportSeedConfig,
+    decision_at: DateTime<Utc>,
+    selection: MarketSelectionModel,
+) -> ExecutionTxnIds {
+    let market_selection_id = selection.snapshot.market_selection_id;
+    assert_eq!(
+        selection.snapshot.decision_at, decision_at,
+        "report selection decision time must match its report lineage"
+    );
+    assert_eq!(
+        selection.snapshot.decision_policy_snapshot_id, infra.decision_policy_snapshot_id,
+        "report selection policy must match its report lineage"
+    );
+    PgMarketSelectionRepository::new(db.clone())
+        .create_snapshot(selection.snapshot, selection.members)
+        .await
+        .expect("persist exact market selection");
+    finish_report_lineage(db, infra, config, decision_at, market_selection_id).await
+}
+
+async fn finish_report_lineage(
+    db: &DatabaseConnection,
+    infra: &SharedDemoInfra,
+    config: &ReportSeedConfig,
+    decision_at: DateTime<Utc>,
+    market_selection_id: MarketSelectionId,
+) -> ExecutionTxnIds {
+    let execution_account = ensure_fixture_execution_account(db).await;
     let model_run_id = seed_report_model_run(db, infra, &market_selection_id, decision_at).await;
     ExecutionTxnIds {
         decision_at,
@@ -959,6 +1185,7 @@ pub fn demo_recommendation(
     event_id: &str,
     token_id: &str,
 ) -> NewRecommendation {
+    let token_id = TokenId::new(token_id);
     NewRecommendation {
         recommendation_id,
         research_profile_artifact_id: fixture_profile_ref().artifact_id(),
@@ -966,7 +1193,7 @@ pub fn demo_recommendation(
         rank,
         market_id: MarketId::new(market_id),
         event_id: EventId::new(event_id),
-        token_id: TokenId::new(token_id),
+        token_id: token_id.clone(),
         outcome_side: OutcomeSide::Yes,
         composite_score: Probability::new(dec!(0.7)),
         risk_adjusted_score: Probability::new(dec!(0.65)),
@@ -981,7 +1208,7 @@ pub fn demo_recommendation(
         model_score_percentile: Probability::new(dec!(0.75)),
         trade_plan: trade_plan(&ids.trade_policy),
         factor_breakdown: ids.factor_breakdown(),
-        evidence_refs: (ids).evidence_refs(),
+        evidence_refs: ids.evidence_refs(&token_id),
         execution_eligibility: execution_eligibility(),
         valid_from: Utc::now(),
         valid_until: Utc::now() + Duration::hours(1),
@@ -1307,7 +1534,7 @@ impl ExecutionTxnIds {
     }
 }
 
-fn new_order_intent(
+pub(super) fn new_order_intent(
     order_intent_id: OrderIntentId,
     ids: &ExecutionTxnIds,
     status: OrderIntentStatus,
@@ -1385,7 +1612,7 @@ fn new_order_intent(
     }
 }
 
-fn new_capital_allocation(
+pub(super) fn new_capital_allocation(
     order_intent_id: OrderIntentId,
     ids: &ExecutionTxnIds,
 ) -> NewCapitalAllocation {
@@ -1469,7 +1696,10 @@ pub fn prepared_order(
     }
 }
 
-fn new_execution_order(intent_id: &OrderIntentId, ids: &ExecutionTxnIds) -> NewExecutionOrder {
+pub(super) fn new_execution_order(
+    intent_id: &OrderIntentId,
+    ids: &ExecutionTxnIds,
+) -> NewExecutionOrder {
     NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
         order_intent_id: *intent_id,
@@ -1539,7 +1769,7 @@ pub fn position_fill_public(
     }
 }
 
-fn reconciliation_row(
+pub(super) fn reconciliation_row(
     execution_order_id: &ExecutionOrderId,
     intent_id: &OrderIntentId,
     resolved_at: DateTime<Utc>,
@@ -1571,7 +1801,7 @@ fn reconciliation_row(
     }
 }
 
-fn exit_reconciliation_row(
+pub(super) fn exit_reconciliation_row(
     execution_order_id: &ExecutionOrderId,
     intent_id: &OrderIntentId,
     filled_shares: Shares,
@@ -1605,7 +1835,7 @@ fn exit_reconciliation_row(
     }
 }
 
-fn exit_order(
+pub(super) fn exit_order(
     intent_id: &OrderIntentId,
     ids: &ExecutionTxnIds,
     shares: Decimal,
@@ -1642,13 +1872,14 @@ fn exit_order(
     }
 }
 
-async fn seed_market_catalog(
+pub async fn seed_report_catalog(
     db: &DatabaseConnection,
     event_id: &str,
     market_id: &str,
     market_question: &str,
     market_slug: &str,
     token_id: &str,
+    no_token_id: &TokenId,
 ) {
     PgEventRepository::new(db.clone())
         .upsert(make_event(
@@ -1668,7 +1899,7 @@ async fn seed_market_catalog(
         None,
     );
     market.yes_token_id = TokenId::new(token_id);
-    market.no_token_id = fixture_no_token_id(market_id, token_id);
+    market.no_token_id = no_token_id.clone();
     PgMarketRepository::new(db.clone())
         .upsert(market)
         .await
@@ -1978,12 +2209,16 @@ pub async fn seed_calibrated_model(
     let input_contract = model_spec.input_contract.clone();
     let plane = dataset.factor_serving_plane.clone();
     let scoring = &policy.snapshot.profile_artifacts.scoring.definition;
+    let factor_head = seed
+        .head
+        .resolve(&plane, &scoring.factor_head)
+        .expect("resolve calibrated model factor head");
     let metrics = ModelVersionMetrics::not_measured("calibrated model fixture");
     let training_objective = ModelTrainingObjective::hand_authored("calibrated model fixture");
     let parent_model_version_id = ModelVersionId::from_v7();
     let parent_payload = ModelPayloadFixture::weighted(
         &plane,
-        &scoring.factor_head,
+        &factor_head,
         input_contract.clone(),
         ReturnModelSpec::heuristic_default(),
         scoring.cross_section.clone(),
@@ -2049,7 +2284,7 @@ pub async fn seed_calibrated_model(
         .expect("activate execution calibration");
     let payload = ModelPayloadFixture::weighted(
         &plane,
-        &scoring.factor_head,
+        &factor_head,
         input_contract,
         ReturnModelSpec::Calibrated(CalibratedReturnModel {
             calibrator_ref: calibration_id,
@@ -2214,6 +2449,7 @@ async fn seed_model_version_named(
             model_version_id,
             training_dataset_id: dataset.training_dataset_id,
             training_input_hash: content_hash('7'),
+            head: CalibratedModelHead::Policy,
         },
     ))
     .await;
@@ -2253,20 +2489,26 @@ async fn seed_model_version_named(
 async fn seed_market_selection(
     db: &DatabaseConnection,
     rc_id: &DecisionPolicySnapshotId,
-    _market_id: &str,
+    decision_at: DateTime<Utc>,
+    members: Vec<ReportSelectionMemberSeed>,
 ) -> MarketSelectionId {
     let id = MarketSelectionId::from_v7();
+    let members = members
+        .into_iter()
+        .map(|member| member.bind(id))
+        .collect::<Vec<_>>();
+    let market_count = i32::try_from(members.len()).expect("market selection exceeds i32");
     PgMarketSelectionRepository::new(db.clone())
         .create_snapshot(
             NewMarketSelection {
                 market_selection_id: id,
-                decision_at: Utc::now(),
+                decision_at,
                 decision_policy_snapshot_id: *rc_id,
                 selector_hash: content_hash('b'),
-                market_count: 1,
+                market_count,
                 exclusion_summary: SelectionExclusionSummary::default(),
             },
-            Vec::new(),
+            members,
         )
         .await
         .expect("market selection");
@@ -2683,7 +2925,7 @@ impl ExecutionTxnIds {
         )
     }
 
-    fn evidence_refs(&self) -> EvidenceRefs {
+    fn evidence_refs(&self, token_id: &TokenId) -> EvidenceRefs {
         EvidenceRefs {
         signal_candidate_id: SignalCandidateId::from_v7(),
         feature_vector_id: FeatureVectorId::from_v7(),
@@ -2691,7 +2933,7 @@ impl ExecutionTxnIds {
         market_selection_id: self.market_selection,
         book_snapshot_ref: BookSnapshotRef::from_str(&format!(
             "book:l2|{}|00000000-0000-0000-0000-000000000001|1|blake3:{}|1700000000|1700000000@blake3:{}",
-            self.token,
+            token_id,
             "1".repeat(64),
             "0".repeat(64)
         ))

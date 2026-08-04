@@ -6,9 +6,9 @@ use quant_pivot_error::{QuantError, QuantResult, feedback::FeedbackError, storag
 use quant_pivot_models::{
     domain::{
         ports::{
-            FeedbackAttributionPlanArtifact, FeedbackAttributionPlanJobParams,
-            FeedbackCandidateValidation, FeedbackLearningStageArtifactRef,
-            FeedbackTruthFreezeArtifact, FeedbackTruthFreezeJobParams, FeedbackValidationArtifact,
+            FeedbackAttributionJobParams, FeedbackAttributionManifest, FeedbackCandidateValidation,
+            FeedbackLearningStageArtifactRef, FeedbackTruthFreezeArtifact,
+            FeedbackTruthFreezeJobParams, FeedbackValidationArtifact,
             FeedbackValidationArtifactRef, FeedbackValidationJobParams,
             FeedbackValidationTrialOutcome,
         },
@@ -26,6 +26,7 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{FeedbackCycleRepository, ResearchJobRepository};
 use quant_pivot_research::{
     artifact::ArtifactStore,
+    feedback::{FeedbackCoverageArtifact, FeedbackCoverageCodec},
     feedback_governance::FeedbackGovernanceCodec,
     feedback_learning::{
         FeedbackCpcvStageResult, FeedbackLearningStageArtifact, FeedbackLearningStageResults,
@@ -98,7 +99,7 @@ impl FeedbackGovernanceStageAdapter {
         cycle: &FeedbackCycleInfo,
         identity: FeedbackStageJobIdentity,
     ) -> QuantResult<NewResearchJob> {
-        Self::require_identity(cycle, identity, FeedbackStage::AttributionPlan)?;
+        Self::require_identity(cycle, identity, FeedbackStage::Attribution)?;
         let (job, result) = self
             .load_stage_job(
                 cycle,
@@ -108,16 +109,17 @@ impl FeedbackGovernanceStageAdapter {
             )
             .await?;
         self.verify_truth(cycle, &job, &result).await?;
+        let coverage = self.load_coverage(cycle).await?;
         let generated_at = self.cycles.database_time().await?;
-        let params = FeedbackAttributionPlanJobParams::try_new(
+        let params = FeedbackAttributionJobParams::try_new(
             cycle.feedback_cycle_id,
             cycle.idempotency_hash,
             cycle.label_cutoff,
             generated_at,
-            cycle.candidate_family.shared_evaluation().window.clone(),
+            coverage.evaluation_window,
             result,
         )?;
-        self.bind_job(identity, ResearchJobParams::FeedbackAttributionPlan(params))
+        self.bind_job(identity, ResearchJobParams::FeedbackAttribution(params))
     }
 
     pub async fn prepare_validation(
@@ -164,9 +166,9 @@ impl FeedbackGovernanceStageAdapter {
         let result = Self::require_result(
             cycle,
             job,
-            FeedbackStage::AttributionPlan,
-            ResearchJobKind::FeedbackAttributionPlan,
-            ResearchJobResultKind::FeedbackAttributionPlanArtifact,
+            FeedbackStage::Attribution,
+            ResearchJobKind::FeedbackAttribution,
+            ResearchJobResultKind::FeedbackAttributionManifest,
         )?;
         self.verify_attribution(cycle, job, &result).await?;
         Ok(FeedbackStageSuccess::advance(
@@ -278,10 +280,10 @@ impl FeedbackGovernanceStageAdapter {
         cycle: &FeedbackCycleInfo,
         job: &ResearchJobInfo,
         result: &ResearchJobArtifactRef,
-    ) -> QuantResult<FeedbackAttributionPlanArtifact> {
-        let ResearchJobParams::FeedbackAttributionPlan(params) = &job.params_json else {
+    ) -> QuantResult<FeedbackAttributionManifest> {
+        let ResearchJobParams::FeedbackAttribution(params) = &job.params_json else {
             return Err(Self::invalid(
-                "AttributionPlan job lost its typed parameters",
+                "AttributionManifest job lost its typed parameters",
             ));
         };
         params.validate()?;
@@ -298,7 +300,7 @@ impl FeedbackGovernanceStageAdapter {
         Self::require_hash(
             result,
             FeedbackGovernanceCodec::bytes_hash(&bytes),
-            "AttributionPlan",
+            "AttributionManifest",
         )?;
         let artifact = FeedbackGovernanceCodec::decode_attribution(&bytes)?;
         let job_matches_cycle = (
@@ -329,7 +331,7 @@ impl FeedbackGovernanceStageAdapter {
             || artifact.truth_artifact != truth_ref
         {
             return Err(Self::invalid(
-                "AttributionPlan artifact differs from its cycle, job, or TruthFreeze lineage",
+                "AttributionManifest artifact differs from its cycle, job, or TruthFreeze lineage",
             ));
         }
         Ok(artifact)
@@ -414,6 +416,42 @@ impl FeedbackGovernanceStageAdapter {
         };
         let artifact = self.learning.verify_reference(cycle, &reference).await?;
         Ok((reference, artifact))
+    }
+
+    async fn load_coverage(
+        &self,
+        cycle: &FeedbackCycleInfo,
+    ) -> QuantResult<FeedbackCoverageArtifact> {
+        let (job, result) = self
+            .load_stage_job(
+                cycle,
+                FeedbackStage::Coverage,
+                ResearchJobKind::FeedbackCoverage,
+                ResearchJobResultKind::FeedbackCoverageArtifact,
+            )
+            .await?;
+        let ResearchJobParams::FeedbackCoverage(params) = &job.params_json else {
+            return Err(Self::invalid(
+                "Coverage predecessor lost its typed parameters",
+            ));
+        };
+        let bytes = self.artifacts.get(&result.uri).await?;
+        Self::require_hash(
+            &result,
+            FeedbackCoverageCodec::bytes_hash(&bytes),
+            "Coverage",
+        )?;
+        let artifact = FeedbackCoverageCodec::decode(&bytes)?;
+        let cycle_identity_exact = artifact.cycle_idempotency_hash == cycle.idempotency_hash;
+        if artifact.feedback_cycle_id != cycle.feedback_cycle_id
+            || !cycle_identity_exact
+            || artifact.artifact_id != params.artifact_id
+        {
+            return Err(Self::invalid(
+                "Coverage predecessor differs from the cycle lineage",
+            ));
+        }
+        Ok(artifact)
     }
 
     async fn load_stage_job(
@@ -552,10 +590,12 @@ impl FeedbackGovernanceStageAdapter {
             (ResearchJobParams::FeedbackTruthFreeze(params), FeedbackStage::TruthFreeze) => {
                 params.artifact_id.as_uuid()
             }
-            (
-                ResearchJobParams::FeedbackAttributionPlan(params),
-                FeedbackStage::AttributionPlan,
-            ) => params.artifact_id.as_uuid(),
+            (ResearchJobParams::FeedbackCoverage(params), FeedbackStage::Coverage) => {
+                params.artifact_id.as_uuid()
+            }
+            (ResearchJobParams::FeedbackAttribution(params), FeedbackStage::Attribution) => {
+                params.artifact_id.as_uuid()
+            }
             (ResearchJobParams::FeedbackCpcv(params), FeedbackStage::Cpcv) => {
                 params.artifact_id.as_uuid()
             }
@@ -592,5 +632,32 @@ impl FeedbackGovernanceStageAdapter {
             detail: detail.into(),
         }
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_models::{
+        domain::api::FeedbackCoverageJobParams,
+        enums::quant::FeedbackStage,
+        types::{ContentHash, FeedbackCoverageArtifactId, FeedbackCycleId, ResearchJobParams},
+    };
+
+    use super::FeedbackGovernanceStageAdapter;
+
+    #[test]
+    fn coverage_result_id_matches() {
+        let feedback_cycle_id = FeedbackCycleId::from_v7();
+        let artifact_id = FeedbackCoverageArtifactId::from_cycle_id(feedback_cycle_id);
+        let params = ResearchJobParams::FeedbackCoverage(FeedbackCoverageJobParams {
+            feedback_cycle_id,
+            cycle_idempotency_hash: ContentHash::from_bytes([7; 32]),
+            artifact_id,
+        });
+
+        let result = FeedbackGovernanceStageAdapter::result_id(&params, FeedbackStage::Coverage)
+            .expect("coverage result identity must remain typed");
+
+        assert_eq!(result, artifact_id.as_uuid());
     }
 }

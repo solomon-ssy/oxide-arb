@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
 use parking_lot::Mutex;
 use quant_pivot_error::{QuantError, QuantResult, control::ControlError, research::ResearchError};
@@ -17,7 +18,8 @@ use quant_pivot_models::{
     domain::{governance::DecisionPolicySnapshotInfo, quant::ModelVersionInfo},
     enums::{common::MarketCategory, model::ModelFamily},
     runtime_config::{
-        ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, PolicyBundleIdentity,
+        ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, ModelBinding,
+        PolicyBundleIdentity,
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration, Probability,
@@ -56,7 +58,7 @@ struct ModelInferencePolicy {
     min_model_confidence: Decimal,
     candidate_score_floor: Decimal,
     shadow_diff_threshold: Decimal,
-    minimum_shadow_overlap: Probability,
+    minimum_shadow_decision_overlap: Probability,
     required_shadow_window_secs: u64,
 }
 
@@ -67,6 +69,7 @@ enum ModelServingGenerationAuthority {
 }
 
 struct ServingModel {
+    binding: ModelBinding,
     version: ModelVersionInfo,
     loaded: Arc<LoadedModelServingRuntime>,
 }
@@ -76,7 +79,7 @@ pub struct ModelServingGeneration {
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     snapshot_hash: ContentHash,
     active: BTreeMap<BuyModelRoute, Arc<ServingModel>>,
-    shadow: Option<(BuyModelRoute, Arc<ServingModel>)>,
+    shadow: BTreeMap<BuyModelRoute, Arc<ServingModel>>,
     inference_policy: ModelInferencePolicy,
     authority: ModelServingGenerationAuthority,
 }
@@ -87,11 +90,7 @@ impl ModelServingGeneration {
         route: BuyModelRoute,
     ) -> Option<ModelServingRouteSnapshot> {
         let active = generation.active.get(&route).cloned()?;
-        let shadow = generation
-            .shadow
-            .as_ref()
-            .filter(|(shadow_route, _)| *shadow_route == route)
-            .map(|(_, model)| Arc::clone(model));
+        let shadow = generation.shadow.get(&route).cloned();
         Some(ModelServingRouteSnapshot {
             generation,
             route,
@@ -108,12 +107,12 @@ impl ModelServingGeneration {
             .map(|model| model.loaded.contract_hash())
     }
 
-    /// Route and contract hash of the configured shadow, when present.
+    /// Contract hash of one route-owned shadow, when present.
     #[must_use]
-    pub fn shadow_contract(&self) -> Option<(BuyModelRoute, ContentHash)> {
+    pub fn shadow_contract(&self, route: BuyModelRoute) -> Option<ContentHash> {
         self.shadow
-            .as_ref()
-            .map(|(route, model)| (*route, model.loaded.contract_hash()))
+            .get(&route)
+            .map(|model| model.loaded.contract_hash())
     }
 
     /// Durable policy snapshot represented by every route in this generation.
@@ -138,12 +137,30 @@ pub struct PublishedShadowRouteIdentity {
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub decision_policy_snapshot_hash: ContentHash,
     pub policy_bundle_generation: PolicyBundleGeneration,
-    pub active_model_version_id: ModelVersionId,
-    pub active_serving_contract_hash: ContentHash,
-    pub shadow_model_version_id: ModelVersionId,
-    pub shadow_serving_contract_hash: ContentHash,
-    pub minimum_topn_overlap: Probability,
+    pub champion_model_version_id: ModelVersionId,
+    pub champion_serving_contract_hash: ContentHash,
+    pub candidate_model_version_id: ModelVersionId,
+    pub candidate_serving_contract_hash: ContentHash,
+    pub shadow_bound_at: DateTime<Utc>,
+    pub route_generation: u64,
+    pub minimum_topn_decision_overlap: Probability,
     pub required_shadow_window_secs: u64,
+}
+
+/// Exact champion identity used to freeze one feedback occurrence before a
+/// challenger recipe exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedChampionRouteIdentity {
+    pub route: BuyModelRoute,
+    pub category_scope: Option<MarketCategory>,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub decision_policy_snapshot_hash: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub champion_model_version_id: ModelVersionId,
+    pub champion_serving_contract_hash: ContentHash,
+    pub champion_bound_at: DateTime<Utc>,
+    pub route_generation: u64,
 }
 
 /// One route pinned to an owned immutable generation across await boundaries.
@@ -162,8 +179,41 @@ impl ModelServingRouteSnapshot {
     }
 
     #[must_use]
-    pub fn active_model_version_id(&self) -> ModelVersionId {
+    pub fn champion_model_version_id(&self) -> ModelVersionId {
         self.active.version.model_version_id
+    }
+
+    /// Freeze the exact route-owned champion without requiring a Shadow.
+    pub fn published_champion_identity(
+        &self,
+    ) -> Result<PublishedChampionRouteIdentity, ControlError> {
+        let ModelServingGenerationAuthority::Activated(policy_bundle_generation) =
+            self.generation.authority
+        else {
+            return Err(ControlError::Precondition(
+                "historical serving snapshots cannot start feedback cycles".to_owned(),
+            ));
+        };
+        let contract_hash = self.active.loaded.contract_hash();
+        if self.active.binding.model_version_id != self.active.version.model_version_id
+            || self.active.version.category_scope != self.route.category()
+        {
+            return Err(ControlError::Precondition(
+                "published champion binding differs from its model or route".to_owned(),
+            ));
+        }
+        Ok(PublishedChampionRouteIdentity {
+            route: self.route,
+            category_scope: self.route.category(),
+            research_profile_artifact_id: self.active.version.profile_ref.artifact_id(),
+            decision_policy_snapshot_id: self.generation.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: self.generation.snapshot_hash,
+            policy_bundle_generation,
+            champion_model_version_id: self.active.version.model_version_id,
+            champion_serving_contract_hash: contract_hash,
+            champion_bound_at: self.active.binding.bound_at,
+            route_generation: self.active.binding.generation,
+        })
     }
 
     /// Require this route to contain two distinct contracts from the current
@@ -185,6 +235,8 @@ impl ModelServingRouteSnapshot {
         let active_contract = self.active.loaded.contract_hash();
         let shadow_contract = shadow.loaded.contract_hash();
         if self.active.version.model_version_id == shadow.version.model_version_id
+            || self.active.binding.model_version_id != self.active.version.model_version_id
+            || shadow.binding.model_version_id != shadow.version.model_version_id
             || active_contract == shadow_contract
             || self.active.version.profile_ref != shadow.version.profile_ref
             || self.active.version.category_scope != self.route.category()
@@ -202,11 +254,16 @@ impl ModelServingRouteSnapshot {
             decision_policy_snapshot_id: self.generation.decision_policy_snapshot_id,
             decision_policy_snapshot_hash: self.generation.snapshot_hash,
             policy_bundle_generation,
-            active_model_version_id: self.active.version.model_version_id,
-            active_serving_contract_hash: active_contract,
-            shadow_model_version_id: shadow.version.model_version_id,
-            shadow_serving_contract_hash: shadow_contract,
-            minimum_topn_overlap: self.generation.inference_policy.minimum_shadow_overlap,
+            champion_model_version_id: self.active.version.model_version_id,
+            champion_serving_contract_hash: active_contract,
+            candidate_model_version_id: shadow.version.model_version_id,
+            candidate_serving_contract_hash: shadow_contract,
+            shadow_bound_at: shadow.binding.bound_at,
+            route_generation: shadow.binding.generation,
+            minimum_topn_decision_overlap: self
+                .generation
+                .inference_policy
+                .minimum_shadow_decision_overlap,
             required_shadow_window_secs: self
                 .generation
                 .inference_policy
@@ -307,28 +364,26 @@ impl ModelServingRouteSnapshot {
 #[derive(Clone, Copy)]
 enum ServingRole {
     Active(BuyModelRoute),
-    Shadow,
+    Shadow(BuyModelRoute),
 }
 
 impl ServingRole {
     fn path(self) -> String {
         match self {
-            Self::Active(BuyModelRoute::Pooled) => "model.active_model_version_id".to_owned(),
-            Self::Active(BuyModelRoute::Crypto) => {
-                "model.category_model_pointers[Crypto]".to_owned()
-            }
-            Self::Active(BuyModelRoute::Weather) => {
-                "model.category_model_pointers[Weather]".to_owned()
-            }
-            Self::Shadow => "model.shadow_model_version_id".to_owned(),
+            Self::Active(BuyModelRoute::Pooled) => "model.buy_routes.pooled.champion".to_owned(),
+            Self::Active(BuyModelRoute::Crypto) => "model.buy_routes.crypto.champion".to_owned(),
+            Self::Active(BuyModelRoute::Weather) => "model.buy_routes.weather.champion".to_owned(),
+            Self::Shadow(BuyModelRoute::Pooled) => "model.buy_routes.pooled.shadow".to_owned(),
+            Self::Shadow(BuyModelRoute::Crypto) => "model.buy_routes.crypto.shadow".to_owned(),
+            Self::Shadow(BuyModelRoute::Weather) => "model.buy_routes.weather.shadow".to_owned(),
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ServingPointer {
     role: ServingRole,
-    model_version_id: ModelVersionId,
+    binding: ModelBinding,
 }
 
 struct LoadedServingPointer {
@@ -359,23 +414,23 @@ impl ModelServingPointerResolver for RepositoryServingPointerResolver {
         let path = pointer.role.path();
         let version = self
             .model_registry
-            .find_model_version(&pointer.model_version_id)
+            .find_model_version(&pointer.binding.model_version_id)
             .await
             .map_err(|error| ControlError::Precondition(format!("{path} load failed: {error}")))?
             .ok_or_else(|| {
                 ControlError::Precondition(format!(
                     "{path} = `{}` not found",
-                    pointer.model_version_id
+                    pointer.binding.model_version_id
                 ))
             })?;
         let load_result = match pointer.role {
             ServingRole::Active(_) => active_load_ok(&version),
-            ServingRole::Shadow => shadow_load_ok(&version),
+            ServingRole::Shadow(_) => shadow_load_ok(&version),
         };
         if let Err(reason) = load_result {
             return Err(ControlError::Precondition(format!(
                 "{path} = `{}` load denied: {reason}",
-                pointer.model_version_id
+                pointer.binding.model_version_id
             )));
         }
         let loaded = self
@@ -385,7 +440,7 @@ impl ModelServingPointerResolver for RepositoryServingPointerResolver {
             .map_err(|error| {
                 ControlError::Precondition(format!(
                     "{path} = `{}` serving preimage failed: {error}",
-                    pointer.model_version_id
+                    pointer.binding.model_version_id
                 ))
             })?;
         let runtime = loaded.runtime();
@@ -396,17 +451,28 @@ impl ModelServingPointerResolver for RepositoryServingPointerResolver {
                 if route != expected {
                     return Err(ControlError::Precondition(format!(
                         "{path} = `{}` resolved route {route:?}; expected {expected:?}",
-                        pointer.model_version_id
+                        pointer.binding.model_version_id
                     )));
                 }
                 ensure_active_family(runtime.model_family(), &path)?;
             }
-            ServingRole::Shadow => ensure_shadow_family(runtime.model_family(), &path)?,
+            ServingRole::Shadow(expected) => {
+                if route != expected {
+                    return Err(ControlError::Precondition(format!(
+                        "{path} resolved route {route:?}; expected {expected:?}"
+                    )));
+                }
+                ensure_shadow_family(runtime.model_family(), &path)?;
+            }
         }
         Ok(LoadedServingPointer {
             role: pointer.role,
             route,
-            model: ServingModel { version, loaded },
+            model: ServingModel {
+                binding: pointer.binding,
+                version,
+                loaded,
+            },
         })
     }
 }
@@ -415,7 +481,7 @@ impl ModelServingPointerResolver for RepositoryServingPointerResolver {
 pub(crate) struct PreparedModelServingGeneration {
     snapshot_hash: ContentHash,
     active: BTreeMap<BuyModelRoute, Arc<ServingModel>>,
-    shadow: Option<(BuyModelRoute, Arc<ServingModel>)>,
+    shadow: BTreeMap<BuyModelRoute, Arc<ServingModel>>,
     inference_policy: ModelInferencePolicy,
 }
 
@@ -612,31 +678,23 @@ impl ModelServingGenerationStore {
             snapshot
                 .model_routing
                 .model
-                .active_pointer(route)
+                .champion(route)
                 .map_err(|error| ControlError::Precondition(error.to_string()))?;
         }
 
         let model = &snapshot.model_routing.model;
-        let mut pointers = Vec::with_capacity(model.category_model_pointers.len() + 2);
-        if let Some(reference) = &model.active_model_version_id {
+        let mut pointers = Vec::with_capacity(model.buy_routes.len().saturating_mul(2));
+        for (route, binding) in &model.buy_routes {
             pointers.push(ServingPointer {
-                role: ServingRole::Active(BuyModelRoute::Pooled),
-                model_version_id: reference.id,
+                role: ServingRole::Active(*route),
+                binding: binding.champion.clone(),
             });
-        }
-        for (category, reference) in &model.category_model_pointers {
-            let route = BuyModelRoute::try_from(Some(*category))
-                .map_err(|error| ControlError::Precondition(error.to_string()))?;
-            pointers.push(ServingPointer {
-                role: ServingRole::Active(route),
-                model_version_id: reference.id,
-            });
-        }
-        if let Some(reference) = &model.shadow_model_version_id {
-            pointers.push(ServingPointer {
-                role: ServingRole::Shadow,
-                model_version_id: reference.id,
-            });
+            if let Some(shadow) = &binding.shadow {
+                pointers.push(ServingPointer {
+                    role: ServingRole::Shadow(*route),
+                    binding: shadow.clone(),
+                });
+            }
         }
 
         let loaded = join_all(
@@ -648,7 +706,7 @@ impl ModelServingGenerationStore {
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
         let mut active = BTreeMap::new();
-        let mut shadow = None;
+        let mut shadow = BTreeMap::new();
         for pointer in loaded {
             match pointer.role {
                 ServingRole::Active(route) => {
@@ -658,15 +716,14 @@ impl ModelServingGenerationStore {
                         )));
                     }
                 }
-                ServingRole::Shadow => {
-                    if shadow
-                        .replace((pointer.route, Arc::new(pointer.model)))
-                        .is_some()
+                ServingRole::Shadow(route) => {
+                    if route != pointer.route
+                        || shadow.insert(route, Arc::new(pointer.model)).is_some()
                     {
-                        return Err(ControlError::Precondition(
-                            "serving generation contains multiple global shadow pointers"
-                                .to_owned(),
-                        ));
+                        return Err(ControlError::Precondition(format!(
+                            "serving generation contains duplicate or mismatched shadow route \
+                             {route:?}"
+                        )));
                     }
                 }
             }
@@ -675,8 +732,8 @@ impl ModelServingGenerationStore {
         for (route, active_model) in &active {
             validate_policy_profiles(snapshot, *route, &active_model.loaded)?;
         }
-        if let Some((shadow_route, shadow_model)) = &shadow {
-            validate_policy_profiles(snapshot, *shadow_route, &shadow_model.loaded)?;
+        for (route, shadow_model) in &shadow {
+            validate_policy_profiles(snapshot, *route, &shadow_model.loaded)?;
         }
 
         if let Some(route) = selected_route {
@@ -685,14 +742,6 @@ impl ModelServingGenerationStore {
                     "selected report route {route:?} has no loaded active model"
                 ))
             })?;
-            if let Some((shadow_route, _)) = &shadow
-                && *shadow_route != route
-            {
-                return Err(ControlError::Precondition(format!(
-                    "global shadow route {shadow_route:?} does not match selected report route \
-                     {route:?}"
-                )));
-            }
         }
 
         Ok(PreparedModelServingGeneration {
@@ -741,12 +790,12 @@ const fn inference_policy(snapshot: &DecisionPolicySnapshot) -> ModelInferencePo
         min_model_confidence: model.min_model_confidence.value(),
         candidate_score_floor: model.candidate_score_floor.value(),
         shadow_diff_threshold: model.shadow_diff_threshold.value(),
-        minimum_shadow_overlap: Probability::new(
+        minimum_shadow_decision_overlap: Probability::new(
             snapshot
                 .profile_artifacts
                 .research_method
                 .model_promotion
-                .min_shadow_overlap_stability
+                .min_shadow_decision_overlap
                 .value,
         ),
         required_shadow_window_secs: snapshot
@@ -816,6 +865,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use chrono::Utc;
     use parking_lot::Mutex;
     use quant_pivot_error::{
         QuantResult,
@@ -828,8 +878,9 @@ mod tests {
         },
         enums::{common::MarketCategory, model::ModelFamily, quant::ModelWeightSource},
         runtime_config::{
-            ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, FactorCrossSectionConfig,
-            ModelVersionRef, PolicyApplyDegradedCause, PolicyApplyReadiness, PolicyBundleIdentity,
+            ActivePolicyBundle, BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot,
+            FactorCrossSectionConfig, ModelBinding, ModelBindingSource, PolicyApplyDegradedCause,
+            PolicyApplyReadiness, PolicyBundleIdentity,
         },
         types::{
             ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration,
@@ -901,6 +952,8 @@ mod tests {
 
         async fn infer_batch(&self, _input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
             Ok(ModelRuntimeOutput {
+                calibration_scores: Vec::new(),
+                rank_scores: Vec::new(),
                 candidates: Vec::new(),
                 runtime_metrics: ModelRuntimeMetrics {
                     markets_scored: 0,
@@ -958,39 +1011,45 @@ mod tests {
             self.max_in_flight.fetch_max(active, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(10)).await;
             let result = async {
-                if self.failures.lock().contains(&pointer.model_version_id) {
+                if self
+                    .failures
+                    .lock()
+                    .contains(&pointer.binding.model_version_id)
+                {
                     return Err(ControlError::Precondition(format!(
                         "injected serving failure for {}",
-                        pointer.model_version_id
+                        pointer.binding.model_version_id
                     )));
                 }
                 let entry = self
                     .entries
-                    .get(&pointer.model_version_id)
+                    .get(&pointer.binding.model_version_id)
                     .cloned()
                     .ok_or_else(|| {
                         ControlError::Precondition(format!(
                             "missing stub model {}",
-                            pointer.model_version_id
+                            pointer.binding.model_version_id
                         ))
                     })?;
                 let route = BuyModelRoute::try_from(entry.version.category_scope)
                     .map_err(|error| ControlError::Precondition(format!("stub route: {error}")))?;
-                if let ServingRole::Active(expected) = pointer.role
-                    && route != expected
-                {
-                    Err(ControlError::Precondition(format!(
-                        "stub route {route:?} differs from {expected:?}"
-                    )))
-                } else {
+                let expected = match pointer.role {
+                    ServingRole::Active(expected) | ServingRole::Shadow(expected) => expected,
+                };
+                if route == expected {
                     Ok(LoadedServingPointer {
                         role: pointer.role,
                         route,
                         model: ServingModel {
+                            binding: pointer.binding,
                             version: entry.version,
                             loaded: entry.loaded,
                         },
                     })
+                } else {
+                    Err(ControlError::Precondition(format!(
+                        "stub route {route:?} differs from {expected:?}"
+                    )))
                 }
             }
             .await;
@@ -1049,24 +1108,56 @@ mod tests {
         }
     }
 
-    fn policy(inventory: &VersionInventory, shadow: ModelVersionId) -> DecisionPolicySnapshot {
+    fn binding(model_version_id: ModelVersionId, generation: u64) -> ModelBinding {
+        ModelBinding::new(
+            model_version_id,
+            ModelBindingSource::Bootstrap,
+            Utc::now(),
+            PolicyBundleGeneration::FIRST,
+            generation,
+        )
+    }
+
+    fn policy(
+        inventory: &VersionInventory,
+        shadow: Option<(BuyModelRoute, ModelVersionId)>,
+    ) -> DecisionPolicySnapshot {
         let mut snapshot = DecisionPolicySnapshot::default();
         snapshot.recommendation.selection.enabled_categories = vec![MarketCategory::Politics];
-        snapshot.model_routing.model.active_model_version_id =
-            Some(ModelVersionRef::new(inventory.pooled.model_version_id));
-        snapshot.model_routing.model.category_model_pointers = [
+        snapshot.model_routing.model.buy_routes = [
             (
-                MarketCategory::Crypto,
-                ModelVersionRef::new(inventory.crypto.model_version_id),
+                BuyModelRoute::Pooled,
+                BuyRouteBinding {
+                    champion: binding(inventory.pooled.model_version_id, 1),
+                    shadow: None,
+                },
             ),
             (
-                MarketCategory::Weather,
-                ModelVersionRef::new(inventory.weather.model_version_id),
+                BuyModelRoute::Crypto,
+                BuyRouteBinding {
+                    champion: binding(inventory.crypto.model_version_id, 1),
+                    shadow: None,
+                },
+            ),
+            (
+                BuyModelRoute::Weather,
+                BuyRouteBinding {
+                    champion: binding(inventory.weather.model_version_id, 1),
+                    shadow: None,
+                },
             ),
         ]
         .into_iter()
         .collect();
-        snapshot.model_routing.model.shadow_model_version_id = Some(ModelVersionRef::new(shadow));
+        if let Some((route, model_version_id)) = shadow {
+            snapshot
+                .model_routing
+                .model
+                .buy_routes
+                .get_mut(&route)
+                .expect("route fixture")
+                .shadow = Some(binding(model_version_id, 2));
+        }
         snapshot
     }
 
@@ -1126,7 +1217,10 @@ mod tests {
         let resolver = Arc::new(StubPointerResolver::new(versions.entries()));
         let active = bundle(
             PolicyBundleGeneration::FIRST,
-            policy(&versions, versions.shadow.model_version_id),
+            policy(
+                &versions,
+                Some((BuyModelRoute::Pooled, versions.shadow.model_version_id)),
+            ),
         );
         let store = ModelServingGenerationStore::bootstrap_with_resolver(
             active,
@@ -1149,8 +1243,8 @@ mod tests {
             Some(versions.weather.serving_contract_hash)
         );
         assert_eq!(
-            current.shadow_contract(),
-            Some((BuyModelRoute::Pooled, versions.shadow.serving_contract_hash))
+            current.shadow_contract(BuyModelRoute::Pooled),
+            Some(versions.shadow.serving_contract_hash)
         );
         assert!(
             resolver.max_in_flight() >= 4,
@@ -1164,7 +1258,10 @@ mod tests {
         let resolver = Arc::new(StubPointerResolver::new(versions.entries()));
         let active = bundle(
             PolicyBundleGeneration::FIRST,
-            policy(&versions, versions.shadow.model_version_id),
+            policy(
+                &versions,
+                Some((BuyModelRoute::Pooled, versions.shadow.model_version_id)),
+            ),
         );
         let store = ModelServingGenerationStore::bootstrap_with_resolver(
             active.clone(),
@@ -1178,11 +1275,11 @@ mod tests {
             .published_shadow_identity()
             .expect("published shadow identity");
         assert_eq!(
-            published.active_model_version_id,
+            published.champion_model_version_id,
             versions.pooled.model_version_id
         );
         assert_eq!(
-            published.shadow_model_version_id,
+            published.candidate_model_version_id,
             versions.shadow.model_version_id
         );
         assert_eq!(
@@ -1212,26 +1309,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_shadow_route_rejected() {
+    async fn unselected_shadow_is_allowed() {
         let versions = VersionInventory::fixture();
         let resolver = Arc::new(StubPointerResolver::new(versions.entries()));
         let active = bundle(
             PolicyBundleGeneration::FIRST,
-            policy(&versions, versions.weather.model_version_id),
+            policy(
+                &versions,
+                Some((
+                    BuyModelRoute::Weather,
+                    versions.weather_shadow.model_version_id,
+                )),
+            ),
         );
-        let result = ModelServingGenerationStore::bootstrap_with_resolver(
+        let store = ModelServingGenerationStore::bootstrap_with_resolver(
             active,
             resolver as Arc<dyn ModelServingPointerResolver>,
         )
-        .await;
-
-        let Err(error) = result else {
-            panic!("wrong-route global shadow must reject the full generation");
-        };
+        .await
+        .expect("unselected route shadow is independently valid");
         assert!(
-            error
-                .to_string()
-                .contains("does not match selected report route")
+            store
+                .current_route(BuyModelRoute::Pooled)
+                .expect("pooled route")
+                .shadow()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .current_route(BuyModelRoute::Weather)
+                .expect("weather route")
+                .shadow()
+                .map(|(version, _)| version.model_version_id),
+            Some(versions.weather_shadow.model_version_id)
         );
     }
 
@@ -1241,7 +1351,10 @@ mod tests {
         let resolver = Arc::new(StubPointerResolver::new(versions.entries()));
         let active = bundle(
             PolicyBundleGeneration::FIRST,
-            policy(&versions, versions.shadow.model_version_id),
+            policy(
+                &versions,
+                Some((BuyModelRoute::Pooled, versions.shadow.model_version_id)),
+            ),
         );
         let store = ModelServingGenerationStore::bootstrap_with_resolver(
             active.clone(),
@@ -1267,7 +1380,13 @@ mod tests {
     async fn weather_route_resolves_exactly() {
         let versions = VersionInventory::fixture();
         let resolver = Arc::new(StubPointerResolver::new(versions.entries()));
-        let mut snapshot = policy(&versions, versions.weather_shadow.model_version_id);
+        let mut snapshot = policy(
+            &versions,
+            Some((
+                BuyModelRoute::Weather,
+                versions.weather_shadow.model_version_id,
+            )),
+        );
         snapshot.recommendation.selection.enabled_categories = vec![MarketCategory::Weather];
         let active = bundle(PolicyBundleGeneration::FIRST, snapshot);
         let store = ModelServingGenerationStore::bootstrap_with_resolver(
@@ -1287,7 +1406,7 @@ mod tests {
 
         assert_eq!(route.route(), BuyModelRoute::Weather);
         assert_eq!(
-            route.active_model_version_id(),
+            route.champion_model_version_id(),
             versions.weather.model_version_id
         );
         assert_eq!(
@@ -1305,7 +1424,10 @@ mod tests {
         let resolver = Arc::new(StubPointerResolver::new(entries));
         let old_bundle = bundle(
             PolicyBundleGeneration::FIRST,
-            policy(&old, old.shadow.model_version_id),
+            policy(
+                &old,
+                Some((BuyModelRoute::Pooled, old.shadow.model_version_id)),
+            ),
         );
         let store = Arc::new(
             ModelServingGenerationStore::bootstrap_with_resolver(
@@ -1336,7 +1458,10 @@ mod tests {
             PolicyBundleGeneration::FIRST
                 .checked_next()
                 .expect("next generation"),
-            policy(&new, new.shadow.model_version_id),
+            policy(
+                &new,
+                Some((BuyModelRoute::Pooled, new.shadow.model_version_id)),
+            ),
         );
         resolver.fail(new.weather.model_version_id);
         let error = applicator
@@ -1388,7 +1513,7 @@ mod tests {
             Some(new.weather.serving_contract_hash)
         );
         assert_eq!(
-            old_route.active_model_version_id(),
+            old_route.champion_model_version_id(),
             old.pooled.model_version_id,
             "a concurrent reader must remain pinned to the old generation"
         );

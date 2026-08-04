@@ -180,8 +180,12 @@ impl ModelRouteBootstrapService {
             feature_parity_state_id: parity.state_id,
             feature_parity_evidence_hash: parity.evidence_hash,
         })?;
-        let projection =
-            ModelBootstrapPolicyProjection::try_new(&bundle, route, model.model_version_id)?;
+        let projection = ModelBootstrapPolicyProjection::try_new(
+            &bundle,
+            route,
+            model.model_version_id,
+            evaluated_at,
+        )?;
         let expected_model_routing_revision_id = bundle
             .snapshot
             .resource_revision_id(ConfigResourceKind::ModelRouting)

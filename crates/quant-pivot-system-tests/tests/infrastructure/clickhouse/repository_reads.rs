@@ -228,7 +228,7 @@ async fn insert_funnel_revisions(
         model_run_id: Some(ModelRunId::from_v7()),
         market_id: market_id.to_owned(),
         event_id: EventId::new("replacing-contract"),
-        token_id: token_id.to_owned(),
+        primary_token_id: token_id.to_owned(),
         terminal_stage: "eligible".to_owned(),
         primary_reason: "initial".to_owned(),
         secondary_diagnostics_json: "[]".to_owned(),

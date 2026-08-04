@@ -304,11 +304,18 @@ impl ResearchJobPort for CoreResearchJobPort {
             // Idempotent no-op: already terminal.
             return Ok(ResearchJobView::from(info));
         }
-        if info.kind == ResearchJobKind::FeatureParity && info.status == ResearchJobStatus::Queued {
+        if info.kind == ResearchJobKind::FeatureParity
+            && matches!(
+                info.status,
+                ResearchJobStatus::Queued
+                    | ResearchJobStatus::AwaitingEvidence
+                    | ResearchJobStatus::RetryScheduled
+            )
+        {
             return Err(QuantError::from(StorageError::state_conflict(
                 QUANT_RESEARCH_JOB,
                 Some(job_id),
-                "queued feature parity jobs are safety-critical and cannot be cancelled",
+                "pending feature parity jobs are safety-critical and cannot be cancelled",
             )));
         }
         let error = ResearchJobError::new(ResearchJobErrorCode::Cancelled, &reason);
@@ -316,7 +323,7 @@ impl ResearchJobPort for CoreResearchJobPort {
         if self
             .engine
             .repo()
-            .cancel_if_queued(job_id, error)
+            .cancel_if_pending(job_id, error)
             .await
             .map_err(QuantError::from)?
         {

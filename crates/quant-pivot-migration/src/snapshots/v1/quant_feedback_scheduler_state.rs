@@ -2,6 +2,8 @@
 
 use sea_orm::entity::prelude::*;
 
+use super::sea_orm_active_enums::QpFeedbackSchedulerFailureKind;
+
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_feedback_scheduler_state")]
@@ -17,14 +19,23 @@ pub struct Model {
     pub cadence_secs: i64,
     pub cooldown_secs: i64,
     pub next_due_at: DateTimeWithTimeZone,
+    pub pending_cutoff: Option<DateTimeWithTimeZone>,
+    pub pending_started_at: Option<DateTimeWithTimeZone>,
     pub last_cycle_id: Option<Uuid>,
     pub last_cutoff: Option<DateTimeWithTimeZone>,
     pub cooldown_until: Option<DateTimeWithTimeZone>,
+    pub coalesced_gap_count: i64,
+    pub last_coalesced_from: Option<DateTimeWithTimeZone>,
+    pub last_coalesced_to: Option<DateTimeWithTimeZone>,
     pub lease_owner: Option<Uuid>,
     pub lease_expires_at: Option<DateTimeWithTimeZone>,
     pub attempt: i32,
     pub retry_at: Option<DateTimeWithTimeZone>,
+    pub last_failure_kind: Option<QpFeedbackSchedulerFailureKind>,
     pub last_error: Option<String>,
+    pub settlement_failure_count: i64,
+    pub last_settlement_failed_at: Option<DateTimeWithTimeZone>,
+    pub last_settlement_error: Option<String>,
     pub paused: bool,
     pub pause_revision: i64,
     pub pause_reason_code: Option<String>,

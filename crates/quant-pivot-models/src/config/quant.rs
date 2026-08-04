@@ -43,12 +43,20 @@ pub struct ResearchJobsConfig {
     pub cpcv_backtest_concurrency: usize,
     /// Per-kind cap for deterministic feature-parity replay.
     pub feature_parity_concurrency: usize,
+    /// Mandatory page, concurrency, memory, and deadline envelope for durable
+    /// feature-parity replay.
+    #[serde(default = "FeatureParityComputeConfig::missing")]
+    pub feature_parity_compute: FeatureParityComputeConfig,
     /// Per-kind cap for frozen feedback coverage scans.
     pub feedback_coverage_concurrency: usize,
     /// Per-kind cap for statistical drift computation.
     pub feedback_drift_concurrency: usize,
     /// Per-kind cap for each bounded feedback learning-stage batch.
     pub feedback_learning_concurrency: usize,
+    /// Mandatory CPU/memory/deadline envelope for attribution and decision
+    /// intervention replay.
+    #[serde(default = "FeedbackAttributionComputeConfig::missing")]
+    pub feedback_attribution_compute: FeedbackAttributionComputeConfig,
     /// Maximum feedback cycles concurrently owned by one resident coordinator.
     pub feedback_cycle_concurrency: usize,
     /// Per-kind cap for executable trade-policy fits.
@@ -63,6 +71,10 @@ pub struct ResearchJobsConfig {
     pub poll_secs: u64,
     /// Bounded automatic crash-recovery re-queues before a job is quarantined.
     pub max_recovery_attempts: i32,
+    /// Initial durable retry delay for typed transient execution failures.
+    pub execution_retry_initial_secs: u64,
+    /// Maximum durable retry delay after exponential backoff.
+    pub execution_retry_max_secs: u64,
     /// Hard cap on the deterministic historical spine (selection × instants):
     /// a dry-run `plan` beyond this flags `hard_cap_exceeded`; a `build` fails closed.
     pub max_spine_samples: u64,
@@ -100,9 +112,11 @@ impl Default for ResearchJobsConfig {
             model_calibration_fit_concurrency: 1,
             cpcv_backtest_concurrency: 1,
             feature_parity_concurrency: 1,
+            feature_parity_compute: FeatureParityComputeConfig::default(),
             feedback_coverage_concurrency: 1,
             feedback_drift_concurrency: 1,
             feedback_learning_concurrency: 1,
+            feedback_attribution_compute: FeedbackAttributionComputeConfig::default(),
             feedback_cycle_concurrency: 2,
             trade_policy_fit_concurrency: 1,
             trade_policy_validation_concurrency: 1,
@@ -110,6 +124,8 @@ impl Default for ResearchJobsConfig {
             heartbeat_secs: 30,
             poll_secs: 3,
             max_recovery_attempts: 3,
+            execution_retry_initial_secs: 2,
+            execution_retry_max_secs: 60,
             max_spine_samples: 2_000_000,
             plan_sample_slices: 5,
             plan_sample_markets: 200,
@@ -118,6 +134,79 @@ impl Default for ResearchJobsConfig {
             feedback_alert_timeout_secs: 2,
             feedback_alert_dedupe_secs: 900,
             shutdown_drain_secs: 3,
+        }
+    }
+}
+
+/// Mandatory deploy-time compute envelope for durable feature-parity replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeatureParityComputeConfig {
+    /// Maximum frozen serving subjects replayed in one bounded page.
+    pub page_size: u32,
+    /// Maximum replay kernels admitted concurrently by the source.
+    pub max_concurrency: usize,
+    /// Logical peak working set reserved for each replay kernel.
+    pub max_working_set_bytes: u64,
+    /// End-to-end wall-clock deadline for one replay attempt.
+    pub deadline_secs: u64,
+}
+
+impl Default for FeatureParityComputeConfig {
+    fn default() -> Self {
+        Self {
+            page_size: 100,
+            max_concurrency: 1,
+            max_working_set_bytes: 4 * 1024 * 1024 * 1024,
+            deadline_secs: 1_800,
+        }
+    }
+}
+
+impl FeatureParityComputeConfig {
+    const fn missing() -> Self {
+        Self {
+            page_size: 0,
+            max_concurrency: 0,
+            max_working_set_bytes: 0,
+            deadline_secs: 0,
+        }
+    }
+}
+
+/// Mandatory deploy-time compute envelope for attribution materialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackAttributionComputeConfig {
+    /// Maximum model-learning cohort rows loaded into one materialization page.
+    pub page_size: u32,
+    /// Maximum asynchronous attribution groups in flight. CPU kernels remain
+    /// exclusively governed by the process-wide compute executor.
+    pub max_concurrency: usize,
+    /// Logical peak working set reserved for each admitted kernel.
+    pub max_working_set_bytes: u64,
+    /// End-to-end wall-clock deadline for one attribution-manifest job.
+    pub deadline_secs: u64,
+}
+
+impl Default for FeedbackAttributionComputeConfig {
+    fn default() -> Self {
+        Self {
+            page_size: 250,
+            max_concurrency: 4,
+            max_working_set_bytes: 512 * 1024 * 1024,
+            deadline_secs: 1_800,
+        }
+    }
+}
+
+impl FeedbackAttributionComputeConfig {
+    const fn missing() -> Self {
+        Self {
+            page_size: 0,
+            max_concurrency: 0,
+            max_working_set_bytes: 0,
+            deadline_secs: 0,
         }
     }
 }
@@ -136,19 +225,36 @@ impl ResearchJobsConfig {
             ResearchJobKind::FeatureParity => self.feature_parity_concurrency,
             ResearchJobKind::FeedbackTruthFreeze
             | ResearchJobKind::FeedbackCoverage
-            | ResearchJobKind::FeedbackAttributionPlan
-            | ResearchJobKind::FeedbackDrift => self.feedback_coverage_concurrency,
+            | ResearchJobKind::FeedbackAttribution
+            | ResearchJobKind::FeedbackDrift
+            | ResearchJobKind::FeedbackRecipePlan => self.feedback_coverage_concurrency,
             ResearchJobKind::FeedbackDatasetSeal
             | ResearchJobKind::FeedbackTraining
             | ResearchJobKind::FeedbackCalibration
             | ResearchJobKind::FeedbackCpcv
             | ResearchJobKind::FeedbackValidation
             | ResearchJobKind::FeedbackComparison
+            | ResearchJobKind::FeedbackShadowBind
             | ResearchJobKind::FeedbackShadow
             | ResearchJobKind::FeedbackDecision => self.feedback_learning_concurrency,
             ResearchJobKind::TradePolicyFit => self.trade_policy_fit_concurrency,
             ResearchJobKind::TradePolicyValidation => self.trade_policy_validation_concurrency,
         }
+    }
+
+    /// Calculate the bounded delay for the next durable execution attempt.
+    #[must_use]
+    pub fn execution_retry_delay(&self, completed_attempts: i32) -> u64 {
+        let shift = if completed_attempts <= 0 {
+            0
+        } else if completed_attempts >= 63 {
+            63
+        } else {
+            completed_attempts.cast_unsigned()
+        };
+        self.execution_retry_initial_secs
+            .saturating_mul(1_u64 << shift)
+            .min(self.execution_retry_max_secs)
     }
 }
 
@@ -257,4 +363,37 @@ const fn default_breaker_tick_secs() -> u64 {
 
 const fn default_equity_snapshot_secs() -> u64 {
     300
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResearchJobsConfig;
+
+    #[test]
+    fn missing_compute_budgets_invalid() {
+        let config: ResearchJobsConfig =
+            toml::from_str("").expect("deserialize omitted attribution budget");
+        assert_eq!(config.feature_parity_compute.page_size, 0);
+        assert_eq!(config.feature_parity_compute.max_concurrency, 0);
+        assert_eq!(config.feature_parity_compute.max_working_set_bytes, 0);
+        assert_eq!(config.feature_parity_compute.deadline_secs, 0);
+        assert_eq!(config.feedback_attribution_compute.page_size, 0);
+        assert_eq!(config.feedback_attribution_compute.max_concurrency, 0);
+        assert_eq!(config.feedback_attribution_compute.max_working_set_bytes, 0);
+        assert_eq!(config.feedback_attribution_compute.deadline_secs, 0);
+    }
+
+    #[test]
+    fn execution_retry_backoff_caps() {
+        let config = ResearchJobsConfig {
+            execution_retry_initial_secs: 2,
+            execution_retry_max_secs: 10,
+            ..ResearchJobsConfig::default()
+        };
+        assert_eq!(config.execution_retry_delay(0), 2);
+        assert_eq!(config.execution_retry_delay(1), 4);
+        assert_eq!(config.execution_retry_delay(2), 8);
+        assert_eq!(config.execution_retry_delay(3), 10);
+        assert_eq!(config.execution_retry_delay(i32::MAX), 10);
+    }
 }

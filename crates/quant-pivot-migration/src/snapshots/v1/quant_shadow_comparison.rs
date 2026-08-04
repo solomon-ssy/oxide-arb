@@ -10,12 +10,12 @@ use super::sea_orm_active_enums::{QpMarketCategory, QpModelWeightSource};
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub shadow_comparison_id: Uuid,
-    pub active_model_version_id: Uuid,
-    pub shadow_model_version_id: Uuid,
+    pub champion_model_version_id: Uuid,
+    pub candidate_model_version_id: Uuid,
     #[sea_orm(column_type = "Text")]
-    pub active_serving_contract_hash: String,
+    pub champion_serving_contract_hash: String,
     #[sea_orm(column_type = "Text")]
-    pub shadow_serving_contract_hash: String,
+    pub candidate_serving_contract_hash: String,
     #[sea_orm(column_type = "Text")]
     pub research_profile_artifact_id: String,
     #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
@@ -26,7 +26,7 @@ pub struct Model {
     pub policy_bundle_generation: i64,
     pub weight_source: QpModelWeightSource,
     pub decision_at: DateTimeWithTimeZone,
-    pub topn_overlap: Decimal,
+    pub topn_decision_overlap: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
     pub rank_delta_json: Json,
     #[sea_orm(column_type = "JsonBinary")]
@@ -40,7 +40,7 @@ pub struct Model {
     #[sea_orm(
         belongs_to,
         relation_enum = "QuantModelVersion2",
-        from = "active_model_version_id",
+        from = "champion_model_version_id",
         to = "model_version_id",
         on_update = "NoAction",
         on_delete = "NoAction"
@@ -49,7 +49,7 @@ pub struct Model {
     #[sea_orm(
         belongs_to,
         relation_enum = "QuantModelVersion1",
-        from = "shadow_model_version_id",
+        from = "candidate_model_version_id",
         to = "model_version_id",
         on_update = "NoAction",
         on_delete = "NoAction"

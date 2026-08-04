@@ -25,7 +25,6 @@ use quant_pivot_models::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType, UserStatus},
     },
-    security::hash_password,
     types::UserId,
 };
 
@@ -109,8 +108,7 @@ pub async fn create(
     body: ValidatedJson<CreateUserRequest>,
 ) -> Result<WebResponse<UserView>, WebError> {
     let request = body.into_inner();
-    let password_hash = hash_password(&request.password)
-        .map_err(|error| WebError::Internal(format!("password hashing failed: {error}")))?;
+    let password_hash = state.password_crypto.hash(request.password).await?;
     let new = NewUser {
         id: UserId::from_v7(),
         username: request.username,
@@ -195,8 +193,10 @@ pub async fn change_password(
     op_ctx: OperationCtx,
     body: ValidatedJson<ChangePasswordRequest>,
 ) -> Result<WebResponse<()>, WebError> {
-    let password_hash = hash_password(&body.into_inner().password)
-        .map_err(|error| WebError::Internal(format!("password hashing failed: {error}")))?;
+    let password_hash = state
+        .password_crypto
+        .hash(body.into_inner().password)
+        .await?;
     state.jwt.revoke_subject_sessions(&id.to_string()).await?;
     state
         .users

@@ -7,9 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     entities::quant_feedback_trigger_event,
-    enums::quant::FeedbackTriggerFamily,
+    enums::quant::{FeedbackEvaluationMode, FeedbackTriggerFamily},
     hashing::CanonicalDigest,
-    types::{ContentHash, FeedbackCycleId, FeedbackTriggerEventId, RoleCode, UserId},
+    types::{
+        ContentHash, FeedbackCycleId, FeedbackTriggerEventId, PolicyIdempotencyKey, RoleCode,
+        UserId,
+    },
 };
 
 const FORMAT_VERSION: u32 = 1;
@@ -22,10 +25,25 @@ struct TriggerEventPreimage<'a> {
     format_version: u32,
     feedback_cycle_id: FeedbackCycleId,
     trigger_family: FeedbackTriggerFamily,
+    evaluation_mode: FeedbackEvaluationMode,
+    idempotency_key: &'a PolicyIdempotencyKey,
     actor_user_id: Option<UserId>,
     actor_label: &'a str,
     actor_role: Option<&'a RoleCode>,
     reason_code: &'a str,
+}
+
+/// Complete trigger provenance supplied to the immutable event sealer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedbackTriggerEventInput {
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub trigger_family: FeedbackTriggerFamily,
+    pub evaluation_mode: FeedbackEvaluationMode,
+    pub idempotency_key: PolicyIdempotencyKey,
+    pub actor_user_id: Option<UserId>,
+    pub actor_label: String,
+    pub actor_role: Option<RoleCode>,
+    pub reason_code: String,
 }
 
 /// Validated immutable insert for one manual or scheduled trigger intent.
@@ -35,6 +53,8 @@ pub struct NewFeedbackTriggerEvent {
     pub feedback_trigger_event_id: FeedbackTriggerEventId,
     pub feedback_cycle_id: FeedbackCycleId,
     pub trigger_family: FeedbackTriggerFamily,
+    pub evaluation_mode: FeedbackEvaluationMode,
+    pub idempotency_key: PolicyIdempotencyKey,
     pub actor_user_id: Option<UserId>,
     pub actor_label: String,
     pub actor_role: Option<RoleCode>,
@@ -43,41 +63,38 @@ pub struct NewFeedbackTriggerEvent {
 }
 
 impl NewFeedbackTriggerEvent {
-    pub fn try_seal(
-        feedback_cycle_id: FeedbackCycleId,
-        trigger_family: FeedbackTriggerFamily,
-        actor_user_id: Option<UserId>,
-        actor_label: String,
-        actor_role: Option<RoleCode>,
-        reason_code: String,
-    ) -> Result<Self, FeedbackError> {
+    pub fn try_seal(input: FeedbackTriggerEventInput) -> Result<Self, FeedbackError> {
         validate_actor(
-            actor_user_id,
-            &actor_label,
-            actor_role.as_ref(),
-            &reason_code,
+            input.actor_user_id,
+            &input.actor_label,
+            input.actor_role.as_ref(),
+            &input.reason_code,
         )?;
         let event_hash = CanonicalDigest::content_hash_typed(
             HASH_DOMAIN,
             FORMAT_VERSION,
             &TriggerEventPreimage {
                 format_version: FORMAT_VERSION,
-                feedback_cycle_id,
-                trigger_family,
-                actor_user_id,
-                actor_label: &actor_label,
-                actor_role: actor_role.as_ref(),
-                reason_code: &reason_code,
+                feedback_cycle_id: input.feedback_cycle_id,
+                trigger_family: input.trigger_family,
+                evaluation_mode: input.evaluation_mode,
+                idempotency_key: &input.idempotency_key,
+                actor_user_id: input.actor_user_id,
+                actor_label: &input.actor_label,
+                actor_role: input.actor_role.as_ref(),
+                reason_code: &input.reason_code,
             },
         )?;
         Ok(Self {
             feedback_trigger_event_id: FeedbackTriggerEventId::from_event_hash(&event_hash),
-            feedback_cycle_id,
-            trigger_family,
-            actor_user_id,
-            actor_label,
-            actor_role,
-            reason_code,
+            feedback_cycle_id: input.feedback_cycle_id,
+            trigger_family: input.trigger_family,
+            evaluation_mode: input.evaluation_mode,
+            idempotency_key: input.idempotency_key,
+            actor_user_id: input.actor_user_id,
+            actor_label: input.actor_label,
+            actor_role: input.actor_role,
+            reason_code: input.reason_code,
             event_hash,
         })
     }
@@ -90,6 +107,8 @@ pub struct FeedbackTriggerEventInfo {
     pub feedback_trigger_event_id: FeedbackTriggerEventId,
     pub feedback_cycle_id: FeedbackCycleId,
     pub trigger_family: FeedbackTriggerFamily,
+    pub evaluation_mode: FeedbackEvaluationMode,
+    pub idempotency_key: PolicyIdempotencyKey,
     pub actor_user_id: Option<UserId>,
     pub actor_label: String,
     pub actor_role: Option<RoleCode>,
@@ -106,6 +125,8 @@ info_from_model!(
         feedback_trigger_event_id,
         feedback_cycle_id,
         trigger_family,
+        evaluation_mode,
+        idempotency_key,
         actor_user_id,
         actor_label,
         actor_role,
@@ -131,6 +152,8 @@ impl FeedbackTriggerEventInfo {
                 format_version: FORMAT_VERSION,
                 feedback_cycle_id: self.feedback_cycle_id,
                 trigger_family: self.trigger_family,
+                evaluation_mode: self.evaluation_mode,
+                idempotency_key: &self.idempotency_key,
                 actor_user_id: self.actor_user_id,
                 actor_label: &self.actor_label,
                 actor_role: self.actor_role.as_ref(),
@@ -153,6 +176,8 @@ impl FeedbackTriggerEventInfo {
         self.feedback_trigger_event_id == event.feedback_trigger_event_id
             && self.feedback_cycle_id == event.feedback_cycle_id
             && self.trigger_family == event.trigger_family
+            && self.evaluation_mode == event.evaluation_mode
+            && self.idempotency_key == event.idempotency_key
             && self.actor_user_id == event.actor_user_id
             && self.actor_label == event.actor_label
             && self.actor_role == event.actor_role

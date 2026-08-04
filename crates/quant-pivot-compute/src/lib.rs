@@ -20,10 +20,12 @@ use tokio_util::sync::CancellationToken;
 
 pub const SERVING_THREADS: usize = 2;
 pub const OFFLINE_THREADS: usize = 2;
+pub const SECURITY_THREADS: usize = 1;
 pub const OFFLINE_MEMORY_BYTES: usize = 10 * 1024 * 1024 * 1024;
 
 const SERVING_CPU_PERMITS: u32 = 2;
 const OFFLINE_CPU_PERMITS: u32 = 2;
+const SECURITY_CPU_PERMITS: u32 = 1;
 const MIB_BYTES: usize = 1024 * 1024;
 const OFFLINE_MEMORY_MIB: usize = 10 * 1024;
 const OFFLINE_MEMORY_PERMITS: u32 = 10 * 1024;
@@ -99,8 +101,10 @@ struct OfflineLeases {
 pub struct ComputeExecutor {
     serving_pool: ThreadPool,
     offline_pool: ThreadPool,
+    security_pool: ThreadPool,
     serving_cpu: Arc<Semaphore>,
     offline_cpu: Arc<Semaphore>,
+    security_cpu: Arc<Semaphore>,
     offline_jobs: Arc<Semaphore>,
     offline_memory: Arc<Semaphore>,
 }
@@ -109,11 +113,14 @@ impl ComputeExecutor {
     pub fn new() -> QuantResult<Self> {
         let serving_pool = build_pool("quant-serving", SERVING_THREADS)?;
         let offline_pool = build_pool("quant-offline", OFFLINE_THREADS)?;
+        let security_pool = build_pool("quant-security", SECURITY_THREADS)?;
         Ok(Self {
             serving_pool,
             offline_pool,
+            security_pool,
             serving_cpu: Arc::new(Semaphore::new(SERVING_THREADS)),
             offline_cpu: Arc::new(Semaphore::new(OFFLINE_THREADS)),
+            security_cpu: Arc::new(Semaphore::new(SECURITY_THREADS)),
             offline_jobs: Arc::new(Semaphore::new(1)),
             offline_memory: Arc::new(Semaphore::new(OFFLINE_MEMORY_MIB)),
         })
@@ -156,6 +163,26 @@ impl ComputeExecutor {
         };
         drop(cpu);
         result
+    }
+
+    /// Run credential hashing or verification on the isolated single-thread
+    /// security pool. Authentication never occupies an Actix/Tokio worker and
+    /// cannot queue behind report-serving or offline research computations.
+    pub async fn run_security<T, F>(&self, work: F) -> QuantResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QuantResult<T> + Send + 'static,
+    {
+        let cpu = Arc::clone(&self.security_cpu)
+            .acquire_many_owned(SECURITY_CPU_PERMITS)
+            .await
+            .map_err(|_| compute_closed("security CPU"))?;
+        let (sender, result) = oneshot::channel();
+        self.security_pool.spawn(move || {
+            let _cpu = cpu;
+            let _ = sender.send(catch_compute(work));
+        });
+        ComputeTask { result }.join().await
     }
 
     /// Run one exclusive offline job and retain its CPU/memory leases until
@@ -484,6 +511,45 @@ mod tests {
             detail: "serving work was starved by an offline reservation".to_owned(),
         })??;
         assert!(thread_name.starts_with("quant-serving-"));
+
+        release_tx
+            .send(())
+            .map_err(|error| InfraError::ComputeExecution {
+                detail: format!("release offline worker: {error}"),
+            })?;
+        offline.join().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn security_pool_stays_isolated() -> QuantResult<()> {
+        let executor = ComputeExecutor::new()?;
+        let (release_tx, release_rx) = mpsc::channel();
+        let offline = executor
+            .spawn_offline(OfflineMemory::try_gib(10)?, move || {
+                release_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .map_err(|error| InfraError::ComputeExecution {
+                        detail: format!("wait for offline release: {error}"),
+                    })?;
+                Ok(())
+            })
+            .await?;
+
+        let thread_name = tokio::time::timeout(
+            Duration::from_millis(100),
+            executor.run_security(|| {
+                Ok(thread::current()
+                    .name()
+                    .map(str::to_owned)
+                    .unwrap_or_default())
+            }),
+        )
+        .await
+        .map_err(|_| InfraError::ComputeExecution {
+            detail: "security work was starved by an offline reservation".to_owned(),
+        })??;
+        assert!(thread_name.starts_with("quant-security-"));
 
         release_tx
             .send(())

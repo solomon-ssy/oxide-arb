@@ -556,6 +556,19 @@ impl FeedbackCycleId {
     }
 }
 
+/// Content-addressed WORM evidence for one quarantined coordinator cycle.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackCoordinatorFaultId(Uuid);
+
+impl FeedbackCoordinatorFaultId {
+    /// Project the complete immutable fault hash into its stable UUID domain.
+    #[must_use]
+    pub fn from_fault_hash(fault_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f223);
+        Self::new(uuid_v5_for_content(&NAMESPACE, fault_hash))
+    }
+}
+
 /// Immutable coverage artifact produced once per feedback cycle.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FeedbackCoverageArtifactId(Uuid);
@@ -587,14 +600,49 @@ impl FeedbackTruthFreezeArtifactId {
     }
 }
 
-/// Immutable PIT attribution-consumption plan for one feedback cycle.
+/// Immutable PIT attribution evidence manifest for one feedback cycle.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FeedbackAttributionPlanArtifactId(Uuid);
+pub struct FeedbackAttributionManifestId(Uuid);
 
-impl FeedbackAttributionPlanArtifactId {
+impl FeedbackAttributionManifestId {
     #[must_use]
     pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
         const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f21b);
+        Self::new(Uuid::new_v5(
+            &NAMESPACE,
+            feedback_cycle_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
+/// Immutable catalog identity for one governed feedback recipe template.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FeedbackRecipeTemplateId(Uuid);
+
+/// Immutable recipe-plan artifact produced after conditional trigger
+/// evaluation.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CandidateRecipePlanArtifactId(Uuid);
+
+impl CandidateRecipePlanArtifactId {
+    #[must_use]
+    pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f21c);
+        Self::new(Uuid::new_v5(
+            &NAMESPACE,
+            feedback_cycle_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
+/// Immutable artifact sealing one route-owned Shadow CAS.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShadowBindingArtifactId(Uuid);
+
+impl ShadowBindingArtifactId {
+    #[must_use]
+    pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f21d);
         Self::new(Uuid::new_v5(
             &NAMESPACE,
             feedback_cycle_id.as_uuid().as_bytes(),
@@ -933,6 +981,19 @@ impl ResolutionObservationId {
     pub fn from_checkpoint_hash(checkpoint_hash: &ContentHash) -> Self {
         const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f210);
         Self::new(uuid_v5_for_content(&NAMESPACE, checkpoint_hash))
+    }
+}
+
+/// One append-only governed resolution-projection remediation.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResolutionRemediationId(Uuid);
+
+impl ResolutionRemediationId {
+    /// Project a canonical remediation request into an exact-retry identity.
+    #[must_use]
+    pub fn from_request_hash(request_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f211);
+        Self::new(uuid_v5_for_content(&NAMESPACE, request_hash))
     }
 }
 

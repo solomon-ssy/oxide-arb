@@ -4,8 +4,9 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{quant_feedback_cycle, research_profile_artifact};
-use crate::types::{
-    ContentHash, FeedbackCycleId, ResearchProfileArtifactId, ResearchProfileId, WorkerId,
+use crate::{
+    enums::quant::FeedbackSchedulerFailureKind,
+    types::{ContentHash, FeedbackCycleId, ResearchProfileArtifactId, ResearchProfileId, WorkerId},
 };
 
 #[sea_orm::model]
@@ -20,14 +21,23 @@ pub struct Model {
     pub cadence_secs: i64,
     pub cooldown_secs: i64,
     pub next_due_at: DateTime<Utc>,
+    pub pending_cutoff: Option<DateTime<Utc>>,
+    pub pending_started_at: Option<DateTime<Utc>>,
     pub last_cycle_id: Option<FeedbackCycleId>,
     pub last_cutoff: Option<DateTime<Utc>>,
     pub cooldown_until: Option<DateTime<Utc>>,
+    pub coalesced_gap_count: i64,
+    pub last_coalesced_from: Option<DateTime<Utc>>,
+    pub last_coalesced_to: Option<DateTime<Utc>>,
     pub lease_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub attempt: i32,
     pub retry_at: Option<DateTime<Utc>>,
+    pub last_failure_kind: Option<FeedbackSchedulerFailureKind>,
     pub last_error: Option<String>,
+    pub settlement_failure_count: i64,
+    pub last_settlement_failed_at: Option<DateTime<Utc>>,
+    pub last_settlement_error: Option<String>,
     pub paused: bool,
     pub pause_revision: i64,
     pub pause_reason_code: Option<String>,

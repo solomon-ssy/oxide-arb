@@ -79,13 +79,7 @@ impl SystemCapabilityService {
         let has_active_model_pointer =
             BuyModelRoute::try_from(&runtime_config.recommendation.selection)
                 .ok()
-                .and_then(|route| {
-                    runtime_config
-                        .model_routing
-                        .model
-                        .active_pointer(route)
-                        .ok()
-                })
+                .and_then(|route| runtime_config.model_routing.model.champion(route).ok())
                 .is_some();
         require(
             has_active_model_pointer,

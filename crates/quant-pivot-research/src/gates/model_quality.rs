@@ -138,8 +138,8 @@ pub struct QualityGateThresholds {
     pub max_drawdown: Decimal,
     /// Minimum liquidity-exit feasibility in `[0, 1]` (auto, default 0.90).
     pub min_liquidity_exit_feasibility: Decimal,
-    /// Minimum shadow overlap stability in `[0, 1]` (publish, default 0.60).
-    pub min_shadow_overlap_stability: Decimal,
+    /// Minimum signed `TopN` shadow decision overlap in `[0, 1]` (publish, default 0.60).
+    pub min_shadow_decision_overlap: Decimal,
     /// Maximum (soft) per-category concentration in `[0, 1]` (default 0.60).
     pub max_category_concentration: Decimal,
 }
@@ -147,6 +147,8 @@ pub struct QualityGateThresholds {
 /// CPCV alpha-significance gate thresholds (`research.validation.gates.*`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationGateThresholds {
+    /// Minimum number of complete reconstructed CPCV paths (hard gate).
+    pub min_cpcv_paths: u64,
     /// Minimum CPCV path-set median rank IC (hard gate).
     pub rank_ic_min: Decimal,
     /// Target significance (`α`) the Deflated Sharpe Ratio must clear:
@@ -154,9 +156,9 @@ pub struct ValidationGateThresholds {
     pub dsr_significance: Decimal,
     /// Maximum tolerated Probability of Backtest Overfitting.
     pub max_pbo: Decimal,
-    /// Maximum tolerated single-path turnover.
+    /// Maximum tolerated OOS turnover.
     pub max_turnover: Decimal,
-    /// Minimum tolerated single-path tail loss, in bps (typically negative).
+    /// Minimum tolerated OOS tail loss, in bps (typically negative).
     pub min_tail_loss_bps: Decimal,
 }
 
@@ -165,6 +167,7 @@ impl ValidationGateThresholds {
     #[must_use]
     pub fn conservative() -> Self {
         Self {
+            min_cpcv_paths: 21,
             rank_ic_min: Decimal::new(2, 2),
             dsr_significance: Decimal::new(5, 2),
             max_pbo: Decimal::new(50, 2),
@@ -183,12 +186,17 @@ impl Default for ValidationGateThresholds {
 /// Frozen CPCV path-set metrics consumed by the alpha-significance gates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpcvPathSetGateInput {
+    /// `phi(N, k) = C(N - 1, k - 1)` complete full-timeline paths.
+    pub path_count: u64,
+    /// `C(N, k)` purge/train/evaluate folds, retained for audit context.
+    pub combination_count: u64,
     pub median_rank_ic: Decimal,
     pub deflated_sharpe: Decimal,
     pub pbo: Decimal,
     pub min_track_record_length_secs: Option<i64>,
     pub median_max_drawdown: Option<Decimal>,
     pub median_tail_loss: Option<Decimal>,
+    pub median_turnover: Option<Decimal>,
     pub baseline_uplift: Option<Decimal>,
     pub window_start: Option<DateTime<Utc>>,
     pub window_end: Option<DateTime<Utc>>,
@@ -238,7 +246,7 @@ impl QualityGateThresholds {
             min_materialization_coverage: Decimal::new(95, 2),
             max_drawdown: Decimal::new(30, 2),
             min_liquidity_exit_feasibility: Decimal::new(90, 2),
-            min_shadow_overlap_stability: Decimal::new(60, 2),
+            min_shadow_decision_overlap: Decimal::new(60, 2),
             max_category_concentration: Decimal::new(60, 2),
         }
     }
@@ -265,8 +273,8 @@ pub struct QualityGateInput {
     pub dataset: DatasetCoverage,
     /// Point-in-time leakage scan.
     pub leakage: LeakageFindings,
-    /// Shadow overlap stability over the required window (publish / auto).
-    pub shadow_stability: Option<Probability>,
+    /// Signed `TopN` shadow decision stability over the required window.
+    pub shadow_decision_stability: Option<Probability>,
     /// Governed thresholds.
     pub thresholds: QualityGateThresholds,
     /// CPCV alpha-significance thresholds.
@@ -307,16 +315,34 @@ impl ModelQualityGate for DefaultModelQualityGate {
 
         let is_exit = input.model_family.is_some_and(ModelFamily::is_exit_scorer);
         evaluate_coverage_gates(&input, is_exit, &mut ledger);
+        evaluate_validation_evidence_presence(&input, &mut ledger);
         if is_exit {
             evaluate_sell_gates(&input, &mut ledger);
             // Sell publish is still gated on shadow overlap stability (the buy
             // liquidity-feasibility/backtest gates do not apply to exit scorers).
             evaluate_shadow_stability_gate(&input, &mut ledger);
         } else {
-            evaluate_backtest_presence(&input, &mut ledger);
-            if let Some(report) = &input.backtest {
+            if let Some(path_set) = &input.path_set {
+                evaluate_cpcv_risk_gates(
+                    path_set,
+                    &input.thresholds,
+                    &input.validation_thresholds,
+                    &mut ledger,
+                );
+                evaluate_backtest_diagnostics(
+                    input.backtest.as_ref(),
+                    &input.thresholds,
+                    &mut ledger,
+                );
+            } else if let Some(report) = &input.backtest {
                 evaluate_backtest_risk_gates(
                     report,
+                    &input.thresholds,
+                    &input.validation_thresholds,
+                    &mut ledger,
+                );
+            } else {
+                evaluate_missing_risk_gates(
                     &input.thresholds,
                     &input.validation_thresholds,
                     &mut ledger,
@@ -454,12 +480,15 @@ fn evaluate_sell_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
         input.intent,
         input.path_set.as_ref(),
         backtest_window,
-        t.rank_ic_min,
-        input.validation_thresholds.dsr_significance,
-        t.max_pbo,
+        AlphaSignificanceThresholds {
+            min_cpcv_paths: input.validation_thresholds.min_cpcv_paths,
+            rank_ic_min: t.rank_ic_min,
+            dsr_significance: input.validation_thresholds.dsr_significance,
+            max_pbo: t.max_pbo,
+        },
         ledger,
     );
-    if input.intent.requires_backtest() {
+    if input.intent.requires_validation_evidence() {
         evaluate_sell_risk_gates(
             input.path_set.as_ref(),
             &input.thresholds,
@@ -523,7 +552,7 @@ fn evaluate_sell_risk_gates(
                 tail_loss_bps >= validation.min_tail_loss_bps,
                 tail_loss_bps.to_string(),
                 validation.min_tail_loss_bps.to_string(),
-                "Sell CPCV median calendarized tail loss exceeds budget",
+                "Sell CPCV median calendarized lower-tail mean return is below minimum",
             );
         }
         None => ledger.hard(
@@ -531,7 +560,7 @@ fn evaluate_sell_risk_gates(
             false,
             "none",
             validation.min_tail_loss_bps.to_string(),
-            "Sell CPCV path set is missing median tail loss",
+            "Sell CPCV path set is missing median lower-tail mean return",
         ),
     }
 
@@ -553,19 +582,112 @@ fn evaluate_sell_risk_gates(
     }
 }
 
-/// Hard gate: model intents that consume backtest metrics must carry a report.
-fn evaluate_backtest_presence(input: &QualityGateInput, ledger: &mut GateLedger) {
-    if !input.intent.requires_backtest() {
+/// Hard gate: every governed model intent carries immutable OOS validation evidence.
+fn evaluate_validation_evidence_presence(input: &QualityGateInput, ledger: &mut GateLedger) {
+    if !input.intent.requires_validation_evidence() {
         return;
     }
-    let present = input.backtest.is_some();
+    let observed = if input.path_set.is_some() {
+        "cpcv_path_set"
+    } else if input.backtest.is_some() {
+        "single_path_backtest"
+    } else {
+        "none"
+    };
     ledger.hard(
-        GateId::BacktestRequired,
-        present,
-        if present { "present" } else { "none" },
-        "required",
-        "a frozen backtest report is required before advancing this model",
+        GateId::ValidationEvidenceRequired,
+        observed != "none",
+        observed,
+        "frozen_oos_evidence",
+        "frozen OOS validation evidence is required before advancing this model",
     );
+}
+
+/// CPCV path-distribution risk gates. Every value is computed from complete
+/// reconstructed OOS paths, never from an in-sample training statistic.
+fn evaluate_cpcv_risk_gates(
+    path_set: &CpcvPathSetGateInput,
+    thresholds: &QualityGateThresholds,
+    validation: &ValidationGateThresholds,
+    ledger: &mut GateLedger,
+) {
+    match path_set.median_max_drawdown {
+        Some(max_drawdown) => ledger.hard(
+            GateId::MaxDrawdown,
+            max_drawdown <= thresholds.max_drawdown,
+            max_drawdown.to_string(),
+            thresholds.max_drawdown.to_string(),
+            "CPCV median OOS max drawdown exceeds budget",
+        ),
+        None => ledger.hard(
+            GateId::MaxDrawdown,
+            false,
+            "none",
+            thresholds.max_drawdown.to_string(),
+            "CPCV path set is missing median OOS max drawdown",
+        ),
+    }
+    match path_set.median_turnover {
+        Some(turnover) => ledger.hard(
+            GateId::TurnoverBudget,
+            turnover <= validation.max_turnover,
+            turnover.to_string(),
+            validation.max_turnover.to_string(),
+            "CPCV median OOS turnover exceeds budget",
+        ),
+        None => ledger.hard(
+            GateId::TurnoverBudget,
+            false,
+            "none",
+            validation.max_turnover.to_string(),
+            "CPCV path set is missing median OOS turnover",
+        ),
+    }
+    match path_set.median_tail_loss {
+        Some(tail_loss) => {
+            let tail_loss_bps = tail_loss * Decimal::from(10_000);
+            ledger.hard(
+                GateId::TailLossBudget,
+                tail_loss_bps >= validation.min_tail_loss_bps,
+                tail_loss_bps.to_string(),
+                validation.min_tail_loss_bps.to_string(),
+                "CPCV median OOS lower-tail mean return is below minimum",
+            );
+        }
+        None => ledger.hard(
+            GateId::TailLossBudget,
+            false,
+            "none",
+            validation.min_tail_loss_bps.to_string(),
+            "CPCV path set is missing median OOS lower-tail mean return",
+        ),
+    }
+}
+
+fn evaluate_missing_risk_gates(
+    thresholds: &QualityGateThresholds,
+    validation: &ValidationGateThresholds,
+    ledger: &mut GateLedger,
+) {
+    ledger.not_applicable(
+        GateId::MaxDrawdown,
+        GateClass::Hard,
+        thresholds.max_drawdown.to_string(),
+        "requires frozen OOS validation evidence",
+    );
+    ledger.not_applicable(
+        GateId::TurnoverBudget,
+        GateClass::Hard,
+        validation.max_turnover.to_string(),
+        "requires frozen OOS validation evidence",
+    );
+    ledger.not_applicable(
+        GateId::TailLossBudget,
+        GateClass::Hard,
+        validation.min_tail_loss_bps.to_string(),
+        "requires frozen OOS validation evidence",
+    );
+    evaluate_backtest_diagnostics(None, thresholds, ledger);
 }
 
 /// Single-path risk/execution realism gates plus soft alpha diagnostics.
@@ -594,8 +716,31 @@ fn evaluate_backtest_risk_gates(
         report.tail_loss >= validation.min_tail_loss_bps,
         report.tail_loss.to_string(),
         validation.min_tail_loss_bps.to_string(),
-        "tail loss exceeds budget",
+        "lower-tail mean return is below minimum",
     );
+    evaluate_backtest_diagnostics(Some(report), t, ledger);
+}
+
+fn evaluate_backtest_diagnostics(
+    report: Option<&BacktestReport>,
+    thresholds: &QualityGateThresholds,
+    ledger: &mut GateLedger,
+) {
+    let Some(report) = report else {
+        ledger.not_applicable(
+            GateId::HitRate,
+            GateClass::Soft,
+            "0.5",
+            "single-path diagnostic backtest is not present",
+        );
+        ledger.not_applicable(
+            GateId::CategoryConcentration,
+            GateClass::Soft,
+            thresholds.max_category_concentration.to_string(),
+            "single-path diagnostic backtest is not present",
+        );
+        return;
+    };
     let hit_rate = report.hit_rate.inner();
     ledger.soft(
         GateId::HitRate,
@@ -604,12 +749,12 @@ fn evaluate_backtest_risk_gates(
         "0.5",
         "directional hit rate below 0.5",
     );
-    let concentration = (report).max_category_concentration();
+    let concentration = report.max_category_concentration();
     ledger.soft(
         GateId::CategoryConcentration,
-        concentration <= t.max_category_concentration,
+        concentration <= thresholds.max_category_concentration,
         concentration.to_string(),
-        t.max_category_concentration.to_string(),
+        thresholds.max_category_concentration.to_string(),
         "samples concentrated in a single category",
     );
 }
@@ -620,18 +765,36 @@ fn evaluate_backtest_risk_gates(
 fn evaluate_cpcv_alpha_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
     let validation = &input.validation_thresholds;
     let backtest_window = input
-        .backtest
+        .path_set
         .as_ref()
-        .map(|report| (report.window_start, report.window_end));
+        .and_then(|path_set| path_set.window_start.zip(path_set.window_end))
+        .or_else(|| {
+            input
+                .backtest
+                .as_ref()
+                .map(|report| (report.window_start, report.window_end))
+        });
     evaluate_alpha_significance_gates(
         input.intent,
         input.path_set.as_ref(),
         backtest_window,
-        validation.rank_ic_min,
-        validation.dsr_significance,
-        validation.max_pbo,
+        AlphaSignificanceThresholds {
+            min_cpcv_paths: validation.min_cpcv_paths,
+            rank_ic_min: validation.rank_ic_min,
+            dsr_significance: validation.dsr_significance,
+            max_pbo: validation.max_pbo,
+        },
         ledger,
     );
+}
+
+/// Family-resolved alpha-significance thresholds frozen for one gate run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AlphaSignificanceThresholds {
+    min_cpcv_paths: u64,
+    rank_ic_min: Decimal,
+    dsr_significance: Decimal,
+    max_pbo: Decimal,
 }
 
 /// CPCV/lot-replay alpha-significance gates (hard) plus `MinTRL` advisory
@@ -650,15 +813,13 @@ fn evaluate_alpha_significance_gates(
     intent: GateIntent,
     path_set: Option<&CpcvPathSetGateInput>,
     backtest_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
-    rank_ic_min: Decimal,
-    dsr_significance: Decimal,
-    max_pbo: Decimal,
+    thresholds: AlphaSignificanceThresholds,
     ledger: &mut GateLedger,
 ) {
-    if !intent.requires_backtest() {
+    if !intent.requires_validation_evidence() {
         return;
     }
-    let dsr_floor = Decimal::ONE - dsr_significance;
+    let dsr_floor = Decimal::ONE - thresholds.dsr_significance;
     if let Some(path_set) = path_set {
         ledger.hard(
             GateId::CpcvRequired,
@@ -668,10 +829,17 @@ fn evaluate_alpha_significance_gates(
             "a persisted CPCV path set is required before advancing this model",
         );
         ledger.hard(
+            GateId::CpcvPathCount,
+            path_set.path_count >= thresholds.min_cpcv_paths,
+            path_set.path_count.to_string(),
+            thresholds.min_cpcv_paths.to_string(),
+            "complete reconstructed CPCV path count below minimum",
+        );
+        ledger.hard(
             GateId::RankIc,
-            path_set.median_rank_ic >= rank_ic_min,
+            path_set.median_rank_ic >= thresholds.rank_ic_min,
             path_set.median_rank_ic.to_string(),
-            rank_ic_min.to_string(),
+            thresholds.rank_ic_min.to_string(),
             "CPCV median rank IC below minimum",
         );
         ledger.hard(
@@ -683,9 +851,9 @@ fn evaluate_alpha_significance_gates(
         );
         ledger.hard(
             GateId::Pbo,
-            path_set.pbo <= max_pbo,
+            path_set.pbo <= thresholds.max_pbo,
             path_set.pbo.to_string(),
-            max_pbo.to_string(),
+            thresholds.max_pbo.to_string(),
             "probability of backtest overfitting above maximum",
         );
         if let (Some(mintrl_secs), Some((window_start, window_end))) =
@@ -720,9 +888,15 @@ fn evaluate_alpha_significance_gates(
         "a persisted CPCV path set is required before advancing this model",
     );
     ledger.not_applicable(
+        GateId::CpcvPathCount,
+        GateClass::Hard,
+        thresholds.min_cpcv_paths.to_string(),
+        "requires a CPCV path set",
+    );
+    ledger.not_applicable(
         GateId::RankIc,
         GateClass::Hard,
-        rank_ic_min.to_string(),
+        thresholds.rank_ic_min.to_string(),
         "requires a CPCV path set",
     );
     ledger.not_applicable(
@@ -734,7 +908,7 @@ fn evaluate_alpha_significance_gates(
     ledger.not_applicable(
         GateId::Pbo,
         GateClass::Hard,
-        max_pbo.to_string(),
+        thresholds.max_pbo.to_string(),
         "requires a CPCV path set",
     );
     ledger.not_applicable(
@@ -853,33 +1027,33 @@ fn evaluate_calibration_gate(input: &QualityGateInput, is_exit: bool, ledger: &m
     );
 }
 
-/// Hard gate: publish / auto intents require an established shadow-overlap
-/// stability. Family-agnostic, so both Buy and Sell publishes are gated on it.
+/// Hard gate: publish / auto intents require established signed `TopN` shadow
+/// decision stability. Family-agnostic, so both Buy and Sell publishes use it.
 fn evaluate_shadow_stability_gate(input: &QualityGateInput, ledger: &mut GateLedger) {
     let t = &input.thresholds;
     if !input.intent.requires_shadow_stability() {
         ledger.not_applicable(
-            GateId::ShadowOverlapStability,
+            GateId::ShadowDecisionOverlap,
             GateClass::Hard,
-            t.min_shadow_overlap_stability.to_string(),
+            t.min_shadow_decision_overlap.to_string(),
             "only evaluated for publish / auto-execution",
         );
         return;
     }
-    match input.shadow_stability {
+    match input.shadow_decision_stability {
         Some(stability) => ledger.hard(
-            GateId::ShadowOverlapStability,
-            stability.inner() >= t.min_shadow_overlap_stability,
+            GateId::ShadowDecisionOverlap,
+            stability.inner() >= t.min_shadow_decision_overlap,
             stability.inner().to_string(),
-            t.min_shadow_overlap_stability.to_string(),
-            "shadow overlap stability below minimum",
+            t.min_shadow_decision_overlap.to_string(),
+            "signed TopN shadow decision overlap is below minimum",
         ),
         None => ledger.hard(
-            GateId::ShadowOverlapStability,
+            GateId::ShadowDecisionOverlap,
             false,
             "none",
-            t.min_shadow_overlap_stability.to_string(),
-            "shadow stability not established over the required window",
+            t.min_shadow_decision_overlap.to_string(),
+            "signed TopN shadow decision stability is not established over the required window",
         ),
     }
 }
@@ -992,12 +1166,15 @@ mod tests {
     impl CpcvPathSetGateInput {
         fn passing_fixture() -> Self {
             Self {
+                path_count: 21,
+                combination_count: 56,
                 median_rank_ic: dec!(0.15),
                 deflated_sharpe: dec!(0.97),
                 pbo: dec!(0.20),
                 min_track_record_length_secs: Some(86_400),
                 median_max_drawdown: Some(dec!(0.10)),
                 median_tail_loss: Some(dec!(-0.005)),
+                median_turnover: Some(dec!(0.2)),
                 baseline_uplift: Some(dec!(0.001)),
                 window_start: Some(Utc::now()),
                 window_end: Some(Utc::now() + Duration::hours(48)),
@@ -1013,7 +1190,7 @@ mod tests {
             backtest: Some(BacktestReport::healthy_fixture()),
             dataset: healthy_coverage(),
             leakage: LeakageFindings::default(),
-            shadow_stability: Some(Probability::new(dec!(0.80))),
+            shadow_decision_stability: Some(Probability::new(dec!(0.80))),
             thresholds: QualityGateThresholds::conservative(),
             validation_thresholds: ValidationGateThresholds::conservative(),
             path_set: Some(CpcvPathSetGateInput::passing_fixture()),
@@ -1202,7 +1379,11 @@ mod tests {
     fn quality_gate_failure_failures() {
         let mut input = passing_input(GateIntent::RouteActivation);
         input.backtest.as_mut().unwrap().sample_count = 10; // below 500
-        input.backtest.as_mut().unwrap().max_drawdown = dec!(0.90); // above budget
+        input
+            .path_set
+            .as_mut()
+            .expect("path set fixture")
+            .median_max_drawdown = Some(dec!(0.90)); // above budget
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)
             .expect("evaluate");
@@ -1247,7 +1428,7 @@ mod tests {
     #[test]
     fn activation_requires_shadow() {
         let mut input = passing_input(GateIntent::RouteActivation);
-        input.shadow_stability = None; // not established
+        input.shadow_decision_stability = None; // not established
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)
             .expect("evaluate");
@@ -1257,13 +1438,13 @@ mod tests {
                 .report()
                 .hard_failures
                 .iter()
-                .any(|failure| failure.gate == GateId::ShadowOverlapStability)
+                .any(|failure| failure.gate == GateId::ShadowDecisionOverlap)
         );
         // The candidate intent does not require shadow stability.
         let candidate = DefaultModelQualityGate::new()
             .evaluate(QualityGateInput {
                 intent: GateIntent::Candidate,
-                shadow_stability: None,
+                shadow_decision_stability: None,
                 ..passing_input(GateIntent::Candidate)
             })
             .expect("evaluate");
@@ -1291,9 +1472,20 @@ mod tests {
     }
 
     #[test]
-    fn activation_requires_backtest() {
+    fn activation_accepts_cpcv() {
         let mut input = passing_input(GateIntent::RouteActivation);
         input.backtest = None;
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+        assert!(decision.is_pass());
+    }
+
+    #[test]
+    fn activation_requires_evidence() {
+        let mut input = passing_input(GateIntent::RouteActivation);
+        input.backtest = None;
+        input.path_set = None;
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)
             .expect("evaluate");
@@ -1303,7 +1495,51 @@ mod tests {
                 .report()
                 .hard_failures
                 .iter()
-                .any(|failure| failure.gate == GateId::BacktestRequired)
+                .any(|failure| failure.gate == GateId::ValidationEvidenceRequired)
+        );
+    }
+
+    #[test]
+    fn cpcv_turnover_blocks_activation() {
+        let mut input = passing_input(GateIntent::RouteActivation);
+        input.backtest = None;
+        input
+            .path_set
+            .as_mut()
+            .expect("path set fixture")
+            .median_turnover = Some(dec!(0.75));
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+        assert!(!decision.is_pass());
+        assert!(
+            decision
+                .report()
+                .hard_failures
+                .iter()
+                .any(|failure| failure.gate == GateId::TurnoverBudget)
+        );
+    }
+
+    #[test]
+    fn cpcv_missing_risk_blocks() {
+        let mut input = passing_input(GateIntent::RouteActivation);
+        input.backtest = None;
+        input
+            .path_set
+            .as_mut()
+            .expect("path set fixture")
+            .median_tail_loss = None;
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+        assert!(!decision.is_pass());
+        assert!(
+            decision
+                .report()
+                .hard_failures
+                .iter()
+                .any(|failure| failure.gate == GateId::TailLossBudget)
         );
     }
 
@@ -1322,6 +1558,25 @@ mod tests {
                 .iter()
                 .any(|failure| failure.gate == GateId::CpcvRequired)
         );
+    }
+
+    #[test]
+    fn seven_paths_fail_gate() {
+        let mut input = passing_input(GateIntent::RouteActivation);
+        input
+            .path_set
+            .as_mut()
+            .expect("path set fixture")
+            .path_count = 7;
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+        assert!(!decision.is_pass());
+        assert!(decision.report().hard_failures.iter().any(|failure| {
+            failure.gate == GateId::CpcvPathCount
+                && failure.observed == "7"
+                && failure.threshold == "21"
+        }));
     }
 
     #[test]

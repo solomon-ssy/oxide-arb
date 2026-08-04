@@ -57,10 +57,10 @@ impl FeedbackShadowExecutionService {
             }
             FeedbackShadowSubject::Candidate { contract, .. } => {
                 let query = ShadowObservationQuery {
-                    active_model_version_id: contract.champion_model_version_id(),
-                    shadow_model_version_id: contract.candidate_model_version_id(),
-                    active_serving_contract_hash: contract.champion_serving_contract_hash(),
-                    shadow_serving_contract_hash: contract.candidate_serving_contract_hash(),
+                    champion_model_version_id: contract.champion_model_version_id(),
+                    candidate_model_version_id: contract.candidate_model_version_id(),
+                    champion_serving_contract_hash: contract.champion_serving_contract_hash(),
+                    candidate_serving_contract_hash: contract.candidate_serving_contract_hash(),
                     research_profile_artifact_id: contract.profile_ref().artifact_id(),
                     category_scope: contract.category_scope(),
                     decision_policy_snapshot_id: contract.decision_policy_snapshot_id(),
@@ -133,7 +133,7 @@ impl FeedbackShadowExecutionPort for FeedbackShadowExecutionService {
             artifact_id: params.artifact_id,
             feedback_cycle_id: params.feedback_cycle_id,
             job_input_hash: params.input_hash()?,
-            previous: params.previous.clone(),
+            binding: params.binding.clone(),
             profile_ref: params.profile_ref.clone(),
             feedback_policy_hash: params.feedback_policy_hash,
             subject: params.subject.clone(),

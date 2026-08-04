@@ -12,7 +12,8 @@ use quant_pivot_models::{
         },
     },
     enums::quant::{
-        FeedbackDecision, FeedbackStage, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
+        FeedbackDecision, FeedbackEvaluationMode, FeedbackStage, ResearchJobKind,
+        ResearchJobResultKind, ResearchJobStatus,
     },
     types::{FeedbackCoverageArtifactId, FeedbackDriftArtifactId, ResearchJobParams, RoleCode},
 };
@@ -169,15 +170,19 @@ impl FeedbackSignalStageAdapter {
         let artifact = self.load_drift(cycle, job, &result).await?;
         let reports = Self::drift_reports(cycle, &artifact, &result)?;
         let success = match artifact.gate_outcome {
-            DriftGateOutcome::Advance { .. } => {
+            DriftGateOutcome::NoAction { reason }
+                if cycle.evaluation_mode == FeedbackEvaluationMode::Conditional =>
+            {
+                FeedbackStageSuccess::try_complete(
+                    result.uri,
+                    result.content_hash,
+                    FeedbackDecision::NoAction,
+                    reason.as_str().to_owned(),
+                )?
+            }
+            DriftGateOutcome::Advance { .. } | DriftGateOutcome::NoAction { .. } => {
                 FeedbackStageSuccess::advance(result.uri, result.content_hash)
             }
-            DriftGateOutcome::NoAction { reason } => FeedbackStageSuccess::try_complete(
-                result.uri,
-                result.content_hash,
-                FeedbackDecision::NoAction,
-                reason.as_str().to_owned(),
-            )?,
         };
         success.attach_drift(reports).map_err(Into::into)
     }

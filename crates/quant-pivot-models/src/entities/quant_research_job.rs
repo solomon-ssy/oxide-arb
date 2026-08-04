@@ -43,6 +43,7 @@ pub struct Model {
     pub parent_job_id: Option<ResearchJobId>,
     pub recovery_attempt: i32,
     pub max_recovery_attempts: i32,
+    pub next_attempt_at: Option<DateTime<Utc>>,
     pub lease_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,

@@ -18,7 +18,9 @@ use quant_pivot_error::{
     research::{PitResolutionStorageError, ResearchError},
 };
 use quant_pivot_models::{
-    clickhouse::{BookL2LedgerRow, BookStreamSessionRow, ChPrice, ChShares},
+    clickhouse::{
+        BookL2LedgerRow, BookLedgerReplayAnchor, BookStreamSessionRow, ChPrice, ChShares,
+    },
     domain::{
         data_plane::{DecisionBoundary, DecisionSource},
         market::book::BookLevel,
@@ -34,7 +36,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::pit::{
     BookSnapshotAt, CanonicalBookEventRef, PointInTimeSnapshotSource, ResolvedMarketSnapshot,
-    resolve_catalog_snapshot,
+    resolve_catalog_snapshot, resolve_catalog_snapshots,
 };
 
 use crate::ingest::order_book::OrderBook;
@@ -133,11 +135,50 @@ impl PointInTimeSnapshotSource for DurablePitSource {
             )
             .await
             .map_err(PitResolutionStorageError::from)?;
+        let anchors = rows
+            .iter()
+            .map(BookLedgerReplayAnchor::from)
+            .collect::<Vec<_>>();
+        let session_ids = rows
+            .iter()
+            .map(|row| row.stream_session_id)
+            .collect::<Vec<_>>();
+        let (sessions, replay_rows) = tokio::try_join!(
+            self.fact_read
+                .book_stream_sessions(session_ids, boundary.decision_at().timestamp_millis()),
+            self.fact_read.book_l2_replay_from(
+                anchors,
+                cutoff.timestamp_millis(),
+                boundary.decision_at().timestamp_millis(),
+            ),
+        )
+        .map_err(PitResolutionStorageError::from)?;
+        let sessions = sessions
+            .into_iter()
+            .map(|session| (session.stream_session_id, session))
+            .collect::<HashMap<_, _>>();
+        let mut replay_by_token = HashMap::<TokenId, Vec<BookL2LedgerRow>>::new();
+        for row in replay_rows {
+            replay_by_token
+                .entry(row.token_id.clone())
+                .or_default()
+                .push(row);
+        }
+        for events in replay_by_token.values_mut() {
+            events.sort_unstable_by_key(|event| event.token_sequence);
+        }
         let mut books = HashMap::with_capacity(rows.len());
         for row in rows {
-            if let Some(book) = self
-                .reconstruct_book_row(row, cutoff, boundary.decision_at())
-                .await?
+            let token_id = row.token_id.clone();
+            let session = sessions
+                .get(&row.stream_session_id)
+                .ok_or_else(|| replay_error(&token_id, "stream session ledger is unavailable"))?;
+            if session.state == ChStreamSessionState::Invalidated {
+                return Err(replay_error(&token_id, "stream session is invalidated").into());
+            }
+            let events = replay_by_token.remove(&token_id).unwrap_or_default();
+            if let Some(book) =
+                reconstruct_snapshot(row, session, &events, cutoff, boundary.decision_at())?
             {
                 books.insert(book.token_id.clone(), book);
             }
@@ -197,15 +238,11 @@ impl PointInTimeSnapshotSource for DurablePitSource {
             .into_iter()
             .map(|version| (version.market_id.clone(), version.fee_schedule()))
             .collect::<HashMap<_, _>>();
-        snapshots
-            .into_iter()
-            .map(|snapshot| {
-                let mut resolved = resolve_catalog_snapshot(&snapshot, boundary)?;
-                resolved.context.fee_schedule =
-                    fee_schedules.get(&resolved.context.market_id).cloned();
-                Ok(resolved)
-            })
-            .collect()
+        let mut resolved = resolve_catalog_snapshots(&snapshots, boundary)?;
+        for snapshot in &mut resolved {
+            snapshot.context.fee_schedule = fee_schedules.get(&snapshot.context.market_id).cloned();
+        }
+        Ok(resolved)
     }
 }
 

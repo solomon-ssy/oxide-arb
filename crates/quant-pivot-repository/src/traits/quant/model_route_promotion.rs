@@ -7,7 +7,7 @@ use quant_pivot_models::{
         quant::{CommitModelRoutePromotion, ModelGovernanceAuditInfo},
     },
     runtime_config::ActivePolicyBundle,
-    types::{ContentHash, FeedbackCycleId, PromotionPermitId},
+    types::{ContentHash, FeedbackCycleId, PolicyActivationId, PromotionPermitId},
 };
 
 /// Durable outcome of one promotion command.
@@ -30,6 +30,19 @@ pub struct ModelRoutePromotionCommit {
 /// Sole owner of the model, route, audit, outbox, and generation transaction.
 #[async_trait::async_trait]
 pub trait ModelRoutePromotionRepository: Send + Sync {
+    /// Resolve one persisted activation receipt by its canonical activation ID.
+    async fn find_activation(
+        &self,
+        policy_activation_id: &PolicyActivationId,
+    ) -> Result<Option<ModelRoutePromotionCommit>, PromotionCommitError>;
+
+    /// Resolve the unique committed promotion graph for one feedback cycle.
+    /// Revoked or expired unconsumed permits do not constitute activations.
+    async fn find_cycle_activation(
+        &self,
+        feedback_cycle_id: &FeedbackCycleId,
+    ) -> Result<Option<ModelRoutePromotionCommit>, PromotionCommitError>;
+
     /// Resolve a historical exact commit before a fresh preflight. A permit
     /// that was revoked or expired after commit remains replayable.
     async fn find_committed(

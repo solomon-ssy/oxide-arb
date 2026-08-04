@@ -68,7 +68,8 @@ impl FeedbackEvaluationReservationService {
             ));
         }
 
-        let plan = cycle.candidate_family.shared_evaluation();
+        let family = self.learning_stages.family(&cycle).await?;
+        let plan = family.shared_evaluation();
         let dataset = self
             .datasets
             .find_by_id(&plan.training_dataset_id)
@@ -114,8 +115,8 @@ impl FeedbackEvaluationReservationService {
             label_cutoff: cycle.label_cutoff,
             champion_model_version_id: cycle.champion_model_version_id,
             champion_serving_contract_hash: cycle.champion_serving_contract_hash,
-            candidate_family_hash: cycle.candidate_family_hash,
-            comparison_contract_hash: cycle.candidate_family.comparison_contract_hash(),
+            candidate_family_hash: family.candidate_family_hash(),
+            comparison_contract_hash: family.comparison_contract_hash(),
             cpcv_artifact_uri: cpcv.artifact.uri,
             cpcv_artifact_hash: cpcv.artifact.content_hash,
         })?;

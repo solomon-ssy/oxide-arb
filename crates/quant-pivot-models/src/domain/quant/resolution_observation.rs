@@ -8,12 +8,18 @@ use thiserror::Error;
 
 use crate::{
     domain::data_plane::DomainSourceCursorInfo,
-    entities::{quant_resolution_observation_inbox, quant_resolution_observation_projection},
-    enums::quant::ResolutionProjectionStatus,
+    entities::{
+        quant_resolution_observation_inbox, quant_resolution_observation_projection,
+        quant_resolution_projection_remediation,
+    },
+    enums::quant::{
+        ResolutionProjectionErrorCode, ResolutionProjectionStatus, ResolutionRemediationAction,
+    },
     hashing::CanonicalDigest,
     types::{
         ArtifactUri, ContentHash, DomainInstrumentKey, DomainSourceId, EvmAddress, EvmBlockHash,
-        EvmTransactionHash, EvmUint256, MarketId, PayoutRatio, ResolutionObservationId, WorkerId,
+        EvmTransactionHash, EvmUint256, MarketId, PayoutRatio, PolicyIdempotencyKey,
+        ResolutionObservationId, ResolutionRemediationId, RoleCode, UserId, WorkerId,
     },
 };
 
@@ -208,10 +214,12 @@ pub struct ResolutionObservationProjectionInfo {
     pub resolution_observation_id: ResolutionObservationId,
     pub source_checkpoint_hash: ContentHash,
     pub status: ResolutionProjectionStatus,
+    pub revision: i64,
     pub attempt_count: i32,
     pub claim_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub next_attempt_at: Option<DateTime<Utc>>,
+    pub last_error_code: Option<ResolutionProjectionErrorCode>,
     pub last_error: Option<String>,
     pub canonical_fact_hash: Option<ContentHash>,
     pub verified_at: Option<DateTime<Utc>>,
@@ -226,10 +234,12 @@ info_from_model!(
         resolution_observation_id,
         source_checkpoint_hash,
         status,
+        revision,
         attempt_count,
         claim_owner,
         lease_expires_at,
         next_attempt_at,
+        last_error_code,
         last_error,
         canonical_fact_hash,
         verified_at,
@@ -250,16 +260,20 @@ pub struct ResolutionProjectionClaim {
 pub struct ResolutionProjectionBarrier {
     pub cutoff: DateTime<Utc>,
     pub unresolved_count: u64,
+    pub mapping_blocked_count: u64,
     pub quarantined_count: u64,
+    pub excluded_count: u64,
     pub oldest_unresolved_at: Option<DateTime<Utc>>,
-    pub verified_through: DateTime<Utc>,
+    pub terminal_through: DateTime<Utc>,
 }
 
 impl ResolutionProjectionBarrier {
-    /// Whether every source observation visible at the cutoff is canonical.
+    /// Whether every source observation visible at the cutoff is terminally
+    /// accounted for. Governed exclusions remain missing-label evidence and
+    /// are deliberately not described as canonical facts.
     #[must_use]
     pub fn is_complete(self) -> bool {
-        self.unresolved_count == 0 && self.verified_through >= self.cutoff
+        self.unresolved_count == 0 && self.terminal_through >= self.cutoff
     }
 }
 
@@ -280,17 +294,141 @@ pub enum ResolutionProjectionSettlement {
     Verified {
         canonical_fact_hash: ContentHash,
     },
-    Retry {
-        retry_at: DateTime<Utc>,
+    RetryScheduled {
+        /// Delay from the repository's `PostgreSQL` statement clock. Callers do
+        /// not choose an absolute retry timestamp because a long projection
+        /// attempt must not accidentally schedule a retry in the past.
+        retry_delay_secs: u64,
+        error_code: ResolutionProjectionErrorCode,
+        error: String,
+    },
+    MappingBlocked {
+        error_code: ResolutionProjectionErrorCode,
         error: String,
     },
     Quarantined {
-        retry_at: DateTime<Utc>,
+        error_code: ResolutionProjectionErrorCode,
         error: String,
     },
-    Failed {
-        error: String,
-    },
+}
+
+const RESOLUTION_REMEDIATION_DOMAIN: &str = "quant-pivot/resolution-projection-remediation";
+const RESOLUTION_REMEDIATION_VERSION: u32 = 1;
+const MAX_REMEDIATION_REASON_BYTES: usize = 128;
+const MAX_REMEDIATION_NOTE_BYTES: usize = 2_048;
+
+/// Authenticated exact-CAS command for one blocked resolution projection.
+#[derive(Debug, Clone)]
+pub struct RemediateResolutionProjection {
+    pub resolution_observation_id: ResolutionObservationId,
+    pub expected_revision: i64,
+    pub action: ResolutionRemediationAction,
+    pub idempotency_key: PolicyIdempotencyKey,
+    pub reason_code: String,
+    pub operator_note: String,
+    pub actor_user_id: UserId,
+    pub actor_role: RoleCode,
+}
+
+impl RemediateResolutionProjection {
+    pub fn validate(&self) -> Result<(), ResolutionObservationContractError> {
+        let valid_reason = !self.reason_code.is_empty()
+            && self.reason_code.len() <= MAX_REMEDIATION_REASON_BYTES
+            && self
+                .reason_code
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+        if self.expected_revision < 0
+            || !valid_reason
+            || self.operator_note.trim().is_empty()
+            || self.operator_note.len() > MAX_REMEDIATION_NOTE_BYTES
+            || self.operator_note.chars().any(char::is_control)
+        {
+            return Err(ResolutionObservationContractError::InvalidRemediation);
+        }
+        Ok(())
+    }
+
+    pub fn request_hash(&self) -> Result<ContentHash, ResolutionObservationContractError> {
+        self.validate()?;
+        Ok(CanonicalDigest::content_hash_typed(
+            RESOLUTION_REMEDIATION_DOMAIN,
+            RESOLUTION_REMEDIATION_VERSION,
+            &(
+                self.resolution_observation_id,
+                self.expected_revision,
+                self.action,
+                &self.idempotency_key,
+                &self.reason_code,
+                &self.operator_note,
+                self.actor_user_id,
+                &self.actor_role,
+            ),
+        )?)
+    }
+}
+
+/// Append-only audit row for one exact projection transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sea_orm::DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::quant_resolution_projection_remediation::Entity")]
+pub struct ResolutionProjectionRemediationInfo {
+    pub remediation_id: ResolutionRemediationId,
+    pub resolution_observation_id: ResolutionObservationId,
+    pub expected_revision: i64,
+    pub committed_revision: i64,
+    pub action: ResolutionRemediationAction,
+    pub prior_status: ResolutionProjectionStatus,
+    pub prior_error_code: ResolutionProjectionErrorCode,
+    pub prior_error: String,
+    pub resulting_status: ResolutionProjectionStatus,
+    pub idempotency_key: PolicyIdempotencyKey,
+    pub request_hash: ContentHash,
+    pub reason_code: String,
+    pub operator_note: String,
+    pub actor_user_id: UserId,
+    pub actor_username: String,
+    pub actor_role: RoleCode,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    ResolutionProjectionRemediationInfo,
+    quant_resolution_projection_remediation::Model,
+    {
+        remediation_id,
+        resolution_observation_id,
+        expected_revision,
+        committed_revision,
+        action,
+        prior_status,
+        prior_error_code,
+        prior_error,
+        resulting_status,
+        idempotency_key,
+        request_hash,
+        reason_code,
+        operator_note,
+        actor_user_id,
+        actor_username,
+        actor_role,
+        created_at,
+    }
+);
+
+/// Bounded operator projection containing immutable source, current state, and
+/// ordered remediation history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolutionProjectionAttentionItem {
+    pub observation: ResolutionObservationInboxInfo,
+    pub projection: ResolutionObservationProjectionInfo,
+    pub remediations: Vec<ResolutionProjectionRemediationInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionRemediationCommit {
+    pub projection: ResolutionObservationProjectionInfo,
+    pub remediation: ResolutionProjectionRemediationInfo,
+    pub replayed: bool,
 }
 
 /// Invalid resolution observation or projection lifecycle content.
@@ -311,6 +449,8 @@ pub enum ResolutionObservationContractError {
         expected: ContentHash,
         actual: ContentHash,
     },
+    #[error("resolution remediation contains an invalid revision, reason, note, or actor")]
+    InvalidRemediation,
     #[error(transparent)]
     Hashing(#[from] CanonicalDigestError),
 }

@@ -32,9 +32,9 @@ use quant_pivot_models::{
         BacktestPathSetId, BacktestReportId, ContentHash, ModelRunId, ModelVersionId,
         PolicyIdempotencyKey, Probability, RoleCode,
         backtest::{
-            BacktestPath, CategoryMetrics, CpcvFoldArtifact, CpcvFoldArtifacts,
-            CpcvFoldCalibrationPolicy, CpcvFoldRole, CpcvMethodologyBinding, CpcvPathSetSubject,
-            ExpectedVsRealized, PnlSimulation, SharpeDistribution,
+            BacktestPath, CategoryMetrics, CpcvEstimatorIdentity, CpcvFoldArtifact,
+            CpcvFoldArtifacts, CpcvFoldCalibrationPolicy, CpcvMethodologyBinding,
+            CpcvPathSetSubject, ExpectedVsRealized, PnlSimulation, SharpeDistribution,
         },
         model_lineage::ModelVersionDerivation,
         model_quality::{
@@ -102,19 +102,20 @@ fn quality_report(model_id: ModelVersionId, evaluated_at: DateTime<Utc>) -> Qual
             pass(GateId::LabelCoverage, GateClass::Hard),
             pass(GateId::MaterializationCoverage, GateClass::Hard),
             pass(GateId::NoPitLeakage, GateClass::Hard),
-            pass(GateId::BacktestRequired, GateClass::Hard),
+            pass(GateId::ValidationEvidenceRequired, GateClass::Hard),
             pass(GateId::MaxDrawdown, GateClass::Hard),
             pass(GateId::TurnoverBudget, GateClass::Hard),
             pass(GateId::TailLossBudget, GateClass::Hard),
             pass(GateId::HitRate, GateClass::Soft),
             pass(GateId::CategoryConcentration, GateClass::Soft),
             pass(GateId::CpcvRequired, GateClass::Hard),
+            pass(GateId::CpcvPathCount, GateClass::Hard),
             pass(GateId::RankIc, GateClass::Hard),
             pass(GateId::DeflatedSharpe, GateClass::Hard),
             pass(GateId::Pbo, GateClass::Hard),
             pass(GateId::MinTrackRecordLength, GateClass::Soft),
             not_applicable(GateId::LiquidityExitFeasible, GateClass::Hard),
-            not_applicable(GateId::ShadowOverlapStability, GateClass::Hard),
+            not_applicable(GateId::ShadowDecisionOverlap, GateClass::Hard),
             not_applicable(GateId::CalibrationRequired, GateClass::Hard),
             pass(GateId::ExplainabilityRequired, GateClass::Hard),
         ],
@@ -216,7 +217,13 @@ async fn seed_path_set(
         ),
         fold_artifacts: CpcvFoldArtifacts::try_new(vec![
             CpcvFoldArtifact {
-                role: CpcvFoldRole::Validation,
+                identity: CpcvEstimatorIdentity::Validation {
+                    combination_index: 0,
+                    test_partitions_hash: hash('5'),
+                    test_partition_count: 1,
+                    test_groups_hash: hash('6'),
+                    test_group_count: 1,
+                },
                 training_groups_hash: hash('5'),
                 training_group_count: 24,
                 model_artifact_hash: hash('6'),
@@ -224,7 +231,7 @@ async fn seed_path_set(
                 model_payload_hash: hash('8'),
             },
             CpcvFoldArtifact {
-                role: CpcvFoldRole::Trial { trial_id: 0 },
+                identity: CpcvEstimatorIdentity::Trial { trial_id: 0 },
                 training_groups_hash: hash('9'),
                 training_group_count: 24,
                 model_artifact_hash: hash('a'),
@@ -244,6 +251,7 @@ async fn seed_path_set(
             max: dec!(1.4),
             median_max_drawdown: Some(dec!(0.05)),
             median_tail_loss: Some(dec!(-0.02)),
+            median_turnover: Some(dec!(0.2)),
             baseline_uplift: Some(dec!(0.1)),
         },
         paths: vec![BacktestPath {
@@ -253,6 +261,7 @@ async fn seed_path_set(
             rank_ic: dec!(0.25),
             max_drawdown: dec!(0.05),
             tail_loss: dec!(-0.02),
+            turnover: Some(dec!(0.2)),
         }]
         .into(),
         deflated_sharpe: dec!(0.95),
@@ -446,12 +455,7 @@ impl BootstrapFixture {
             .expect("load first-champion policy")
             .expect("first-champion policy exists");
         assert!(
-            bundle
-                .snapshot
-                .model_routing
-                .model
-                .active_pointer(route)
-                .is_err(),
+            bundle.snapshot.model_routing.model.champion(route).is_err(),
             "fresh bootstrap fixture must have no target-route champion"
         );
         let parity = PgFeatureParityRepository::new(db.clone());
@@ -515,9 +519,13 @@ impl BootstrapFixture {
             feature_parity_evidence_hash: subjects[0].evidence_hash,
         })
         .expect("seal first-champion manifest");
-        let projection =
-            ModelBootstrapPolicyProjection::try_new(&bundle, route, model.model_version_id)
-                .expect("derive first-champion route projection");
+        let projection = ModelBootstrapPolicyProjection::try_new(
+            &bundle,
+            route,
+            model.model_version_id,
+            evaluated_at,
+        )
+        .expect("derive first-champion route projection");
         let runtime = PgRuntimeControlRepository::new(db.clone())
             .load()
             .await
@@ -726,9 +734,9 @@ pub async fn model_route_bootstrap_contracts() {
         .snapshot
         .model_routing
         .model
-        .active_pointer(fixture.route)
+        .champion(fixture.route)
         .expect("first-champion route pointer");
-    assert_eq!(*pointer.id(), fixture.model_id);
+    assert_eq!(pointer.model_version_id, fixture.model_id);
     let outbox = ActivationOutboxEntity::find_by_id(committed.activation.audit_event_id)
         .one(&fixture.db)
         .await
@@ -772,6 +780,7 @@ pub async fn model_route_bootstrap_contracts() {
             &committed.bundle,
             fixture.route,
             fixture.model_id,
+            committed.activation.activated_at,
         )
         .is_err(),
         "a populated Buy route must reject every second bootstrap"

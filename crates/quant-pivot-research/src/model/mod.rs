@@ -51,10 +51,11 @@ pub use objective::{ObjectiveComponentReport, RankingDiagnostics};
 pub use reliability::{ReliabilitySample, compute_reliability};
 pub use runtime::{
     FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow,
-    MarketInferenceContext, ModelInputAuditRow, ModelInputAuditState, ModelRuntimeInput,
-    ModelRuntimeMetrics, ModelRuntimeOutput, QuantModelRuntime,
+    MarketInferenceContext, ModelCalibrationScore, ModelInputAuditRow, ModelInputAuditState,
+    ModelRankScore, ModelRankTarget, ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput,
+    QuantModelRuntime, WeightedInputAuditContract,
 };
-pub use score_percentile::annotate;
+pub use score_percentile::finalize_candidates;
 pub use sell_scorer::{
     LotStateInput, PositionStateFeatures, SellScore, SellScoreInput, SellScorerRuntime,
     SellScorerTrainer, SellSignalPolicy, TrainSellScorerRequest, WeightedSellScorerRuntime,

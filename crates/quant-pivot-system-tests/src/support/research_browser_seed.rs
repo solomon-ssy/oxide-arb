@@ -4,14 +4,11 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::app::ports::feedback_mutation::FeedbackCycleFreezePlan;
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
         data_plane::DecisionClock,
-        ports::{
-            FeedbackCandidateFamily, FeedbackCandidateFamilyInput, FeedbackCandidateRecipe,
-            FeedbackComparisonContract, FeedbackDatasetBuildRequest,
-        },
+        ports::FeedbackDatasetBuildRequest,
         quant::{
             FeedbackCohortWindow, FeedbackCycleInfo, FeedbackCycleKey, FeedbackCycleKeyInput,
             FeedbackStageEventInput, NewBacktestReport, NewFeedbackCycle, NewFeedbackStageEvent,
@@ -22,21 +19,23 @@ use quant_pivot_models::{
         common::MarketCategory,
         model::ModelFamily,
         quant::{
-            CalibrationMethod, DataQualityStatus, DatasetPurpose, DownsideSource, FeedbackStage,
+            DataQualityStatus, DatasetPurpose, FeedbackEvaluationMode, FeedbackStage,
             FeedbackStageEventKind, FeedbackTriggerFamily, ModelRunKind, TrainingDatasetStatus,
         },
     },
     hashing::CanonicalDigest,
+    runtime_config::BuyModelRoute,
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, EventId, FeatureCell,
         FeatureStaleness, FeatureValue, FeedbackCycleId, MarketId, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, Probability, ResearchEvaluationTrack,
-        ResearchProfileArtifact, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
+        ModelTrainingContract, ModelVersionId, PolicyBundleGeneration, Probability,
+        ResearchEvaluationTrack, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
         TrainingSampleSource, TrainingSampleSources, Usd,
         backtest::{
             CategoryMetric, CategoryMetrics, ExpectedVsRealized, PnlCurvePoint, PnlSimulation,
         },
         factor::{FactorExplanation, FactorServingPlane},
+        stable_name::FactorName,
     },
 };
 use quant_pivot_repository::{
@@ -71,7 +70,8 @@ use sea_orm::DatabaseConnection;
 
 use super::{
     execution_pg_seed::{
-        CalibratedModelSeed, SharedDemoInfra, fixture_profile_ref, seed_calibrated_model,
+        CalibratedModelHead, CalibratedModelSeed, SharedDemoInfra, fixture_profile_ref,
+        seed_calibrated_model,
     },
     model_serving_fixtures::ModelVersionFixture,
     model_spec_fixtures::new_model_spec_fixture,
@@ -105,9 +105,9 @@ struct PersistedDataset {
 }
 
 struct FeedbackCycleSeed<'a> {
-    training: &'a PersistedDataset,
     evaluation: &'a PersistedDataset,
     cancellation_evaluation: Option<&'a PersistedDataset>,
+    model_family: ModelFamily,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
     observed_at: DateTime<Utc>,
@@ -146,35 +146,6 @@ impl PersistedDataset {
             feedback_request,
         })
     }
-
-    fn calibration_request(&self) -> QuantResult<FeedbackDatasetBuildRequest> {
-        let window_start = self.feedback_request.window.cutoff() + Duration::seconds(1);
-        let window_end = self.feedback_request.source_lineage.pit_cutoff;
-        if window_start >= window_end {
-            return Err(ResearchError::DatasetBuild {
-                detail: "browser Training source lineage has no calibration embargo window"
-                    .to_owned(),
-            }
-            .into());
-        }
-        let request = FeedbackDatasetBuildRequest {
-            training_dataset_id: TrainingDatasetId::from_v7(),
-            model_spec_id: self.feedback_request.model_spec_id,
-            model_spec_definition_hash: self.feedback_request.model_spec_definition_hash,
-            source_lineage: self.feedback_request.source_lineage.clone(),
-            window: FeedbackCohortWindow::try_new(
-                self.feedback_request.window.profile_ref().clone(),
-                window_start,
-                window_end,
-            )
-            .map_err(|error| ResearchError::DatasetBuild {
-                detail: format!("freeze browser Calibration window: {error}"),
-            })?,
-            purpose: DatasetPurpose::Calibration,
-        };
-        request.validate()?;
-        Ok(request)
-    }
 }
 
 struct DatasetSeed {
@@ -211,6 +182,43 @@ enum BrowserModelTarget {
     Active(ModelVersionId),
 }
 
+impl BrowserModelTarget {
+    fn head(self, source: FeedbackSourceSeed) -> QuantResult<CalibratedModelHead> {
+        if matches!(
+            (self, source),
+            (Self::Active(_), FeedbackSourceSeed::Production)
+        ) {
+            // The production closure champion is a governed control from the
+            // same stable factor family as the learned challenger. It omits
+            // mean reversion deliberately, preserving high shadow agreement
+            // while leaving one measurable source of OOS challenger uplift.
+            return CalibratedModelHead::alpha_simplex([
+                (FactorName::new("momentum_ema_slope"), dec!(0.03)),
+                (FactorName::new("momentum_macd"), dec!(0.15)),
+                (FactorName::new("momentum_roc"), dec!(0.03)),
+                (FactorName::new("momentum_vol_adjusted"), dec!(0.18)),
+                (
+                    FactorName::new("struct.resolution_proximity_regime"),
+                    dec!(0.17),
+                ),
+                (FactorName::new("struct.reversal_after_shock"), dec!(0.44)),
+            ])
+            .map_err(|error| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!("invalid closure champion alpha simplex: {error}"),
+                })
+            });
+        }
+        Ok(CalibratedModelHead::Policy)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FeedbackSourceSeed {
+    Fixture,
+    Production,
+}
+
 struct BrowserModelSeed<'a> {
     db: &'a DatabaseConnection,
     store: &'a Arc<dyn ArtifactStore>,
@@ -219,6 +227,7 @@ struct BrowserModelSeed<'a> {
     model_spec_definition_hash: ContentHash,
     training: &'a PersistedDataset,
     target: BrowserModelTarget,
+    head: CalibratedModelHead,
 }
 
 struct FeedbackTriggerSourceSeed<'a> {
@@ -249,6 +258,7 @@ impl BrowserModelSeed<'_> {
                 model_version_id,
                 training_dataset_id: self.training.id,
                 training_input_hash,
+                head: self.head.clone(),
             },
         ))
         .await;
@@ -365,6 +375,27 @@ impl FeedbackTriggerSourceSeed<'_> {
         seed_source_manifest(self.db, &stored).await?;
         Ok(())
     }
+
+    async fn persist_for(
+        &self,
+        model_target: BrowserModelTarget,
+        source_seed: FeedbackSourceSeed,
+    ) -> QuantResult<()> {
+        match (model_target, source_seed) {
+            (BrowserModelTarget::Active(_), FeedbackSourceSeed::Fixture) => self.persist().await,
+            (BrowserModelTarget::Candidate, FeedbackSourceSeed::Fixture) => {
+                Err(ResearchError::DatasetBuild {
+                    detail: "candidate-only browser research cannot seed an active-route feedback Source Slice"
+                        .to_owned(),
+                }
+                .into())
+            }
+            (
+                BrowserModelTarget::Candidate | BrowserModelTarget::Active(_),
+                FeedbackSourceSeed::Production,
+            ) => Ok(()),
+        }
+    }
 }
 
 /// Seed a loadable candidate, reusable Evaluation dataset, and immutable report.
@@ -378,6 +409,7 @@ pub async fn seed_browser_research(
         store,
         infra,
         BrowserModelTarget::Candidate,
+        FeedbackSourceSeed::Production,
     ))
     .await
 }
@@ -388,13 +420,32 @@ pub async fn seed_governed_feedback_research(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
     infra: &SharedDemoInfra,
-    active_model_version_id: ModelVersionId,
+    champion_model_version_id: ModelVersionId,
 ) -> QuantResult<BrowserResearchFixture> {
     Box::pin(seed_research(
         db,
         store,
         infra,
-        BrowserModelTarget::Active(active_model_version_id),
+        BrowserModelTarget::Active(champion_model_version_id),
+        FeedbackSourceSeed::Fixture,
+    ))
+    .await
+}
+
+/// Seed browser research around the active route while leaving the canonical
+/// feedback Source Slice for the production `DatasetSeal` stage to materialize.
+pub async fn seed_closure_feedback_research(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    infra: &SharedDemoInfra,
+    champion_model_version_id: ModelVersionId,
+) -> QuantResult<BrowserResearchFixture> {
+    Box::pin(seed_research(
+        db,
+        store,
+        infra,
+        BrowserModelTarget::Active(champion_model_version_id),
+        FeedbackSourceSeed::Production,
     ))
     .await
 }
@@ -404,6 +455,7 @@ async fn seed_research(
     store: &Arc<dyn ArtifactStore>,
     infra: &SharedDemoInfra,
     model_target: BrowserModelTarget,
+    feedback_source_seed: FeedbackSourceSeed,
 ) -> QuantResult<BrowserResearchFixture> {
     let registry = PgModelRegistryRepository::new(db.clone());
     let template = registry
@@ -475,23 +527,22 @@ async fn seed_research(
             model_spec_definition_hash: browser_model_spec_definition_hash,
             training: &training,
             target: model_target,
+            head: model_target.head(feedback_source_seed)?,
         }
         .persist(),
     )
     .await?;
-    if matches!(model_target, BrowserModelTarget::Active(_)) {
-        FeedbackTriggerSourceSeed {
-            db,
-            store,
-            model_spec_id: browser_model_spec_id,
-            model_spec_definition_hash: browser_model_spec_definition_hash,
-            decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
-            runtime_config_hash: policy_snapshot_hash,
-            factor_serving_plane: &factor_serving_plane,
-        }
-        .persist()
-        .await?;
+    FeedbackTriggerSourceSeed {
+        db,
+        store,
+        model_spec_id: browser_model_spec_id,
+        model_spec_definition_hash: browser_model_spec_definition_hash,
+        decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
+        runtime_config_hash: policy_snapshot_hash,
+        factor_serving_plane: &factor_serving_plane,
     }
+    .persist_for(model_target, feedback_source_seed)
+    .await?;
     let (evaluation, cancellation_evaluation) = BrowserEvaluationSeed {
         db,
         store,
@@ -522,9 +573,9 @@ async fn seed_research(
             detail: format!("browser candidate model {model_version_id} is missing"),
         })?;
     let feedback_cycles = FeedbackCycleSeed {
-        training: &training,
         evaluation: &evaluation,
         cancellation_evaluation: cancellation_evaluation.as_ref(),
+        model_family: candidate.model_family,
         champion_model_version_id: candidate.model_version_id,
         champion_serving_contract_hash: candidate.serving_contract_hash,
         observed_at: now,
@@ -541,48 +592,30 @@ async fn seed_research(
 }
 
 impl FeedbackCycleSeed<'_> {
-    fn candidate_family(
-        &self,
-        profile: &ResearchProfileArtifact,
-        evaluation: &PersistedDataset,
-    ) -> QuantResult<FeedbackCandidateFamily> {
-        let comparison_contract =
-            FeedbackComparisonContract::try_from_policy(&profile.spec.feedback_policy)?;
-        let recipe = FeedbackCandidateRecipe::try_seal(
-            self.training.feedback_request.clone(),
-            self.training.calibration_request()?,
-            CalibrationMethod::Platt,
-            DownsideSource::MfeMae,
-            self.training
-                .feedback_request
-                .source_lineage
-                .decision_policy_snapshot_id,
-        )?;
-        FeedbackCandidateFamily::try_seal(FeedbackCandidateFamilyInput {
-            shared_evaluation: evaluation.feedback_request.clone(),
-            comparison_contract,
-            candidates: vec![recipe],
-        })
-        .map_err(Into::into)
-    }
-
     fn seal_cycle(
         &self,
         feedback_policy_hash: ContentHash,
-        candidate_family: FeedbackCandidateFamily,
+        evaluation: &PersistedDataset,
     ) -> QuantResult<NewFeedbackCycle> {
-        let evaluation = candidate_family.shared_evaluation();
+        let request = &evaluation.feedback_request;
+        let source = &request.source_lineage;
         NewFeedbackCycle::try_seal(FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
             profile_ref: fixture_profile_ref(),
             feedback_policy_hash,
-            label_cutoff: evaluation.source_lineage.pit_cutoff,
-            capability_registry_hashes: evaluation
-                .source_lineage
-                .capability_registry_hashes
-                .clone(),
+            label_cutoff: source.pit_cutoff,
             champion_model_version_id: self.champion_model_version_id,
             champion_serving_contract_hash: self.champion_serving_contract_hash,
-            candidate_family,
+            champion_model_spec_id: request.model_spec_id,
+            champion_model_spec_definition_hash: request.model_spec_definition_hash,
+            champion_model_family: self.model_family,
+            route: BuyModelRoute::Weather,
+            decision_policy_snapshot_id: source.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: source.runtime_config_hash,
+            policy_bundle_generation: PolicyBundleGeneration::FIRST,
+            route_generation: 1,
+            evaluation_mode: FeedbackEvaluationMode::Conditional,
+            parent_cycle_id: None,
+            forced_idempotency_key: None,
         })?)
         .map_err(Into::into)
     }
@@ -641,7 +674,6 @@ impl FeedbackCycleSeed<'_> {
             .map_err(|detail| ResearchError::DatasetBuild {
                 detail: format!("resolve browser feedback profile: {detail}"),
             })?;
-        let candidate_family = self.candidate_family(&profile, self.evaluation)?;
         let feedback_policy_hash =
             profile
                 .spec
@@ -654,13 +686,14 @@ impl FeedbackCycleSeed<'_> {
         let historical = self
             .persist_trigger(
                 &repository,
-                self.seal_cycle(feedback_policy_hash, candidate_family)?,
+                self.seal_cycle(feedback_policy_hash, self.evaluation)?,
                 FeedbackTriggerFamily::Manual,
                 "browser_fixture",
                 "browser_fixture",
             )
             .await?;
         let feedback_cycle_id = historical.feedback_cycle_id;
+        let cancellation_occurred_at = db.statement_time().await;
         let cancellation = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
             feedback_cycle_id,
             event_sequence: 2,
@@ -672,7 +705,7 @@ impl FeedbackCycleSeed<'_> {
             reason_code: Some("browser_fixture_cancelled".to_owned()),
             evidence_uri: None,
             evidence_hash: None,
-            occurred_at: self.observed_at,
+            occurred_at: cancellation_occurred_at,
         })?;
         let (cycle_outcome, stage_outcome) = repository
             .request_cancel(FeedbackCycleGeneration::from(&historical), cancellation)
@@ -705,10 +738,7 @@ impl FeedbackCycleSeed<'_> {
                 let scheduled = self
                     .persist_trigger(
                         &repository,
-                        self.seal_cycle(
-                            feedback_policy_hash,
-                            self.candidate_family(&profile, cancellation_evaluation)?,
-                        )?,
+                        self.seal_cycle(feedback_policy_hash, cancellation_evaluation)?,
                         FeedbackTriggerFamily::Scheduled,
                         "browser_fixture_scheduler",
                         "browser_fixture_scheduled",
@@ -1104,9 +1134,16 @@ async fn seed_backtest_report(
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use std::collections::BTreeMap;
 
-    use super::{FactorServingPlane, model_example};
+    use chrono::Utc;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    use super::{
+        BrowserModelTarget, CalibratedModelHead, FactorName, FactorServingPlane,
+        FeedbackSourceSeed, ModelVersionId, model_example,
+    };
     use quant_pivot_models::{
         clickhouse::{MarketResolutionFactInput, MarketResolutionRow},
         types::{ContentHash, EvmBlockHash, EvmTransactionHash, PayoutRatio},
@@ -1137,5 +1174,30 @@ mod tests {
             source_checkpoint_hash: ContentHash::from_bytes([0x33; 32]),
         })
         .expect("canonical resolution tokens");
+    }
+
+    #[test]
+    fn production_control_is_constrained() {
+        let head = BrowserModelTarget::Active(ModelVersionId::from_v7())
+            .head(FeedbackSourceSeed::Production)
+            .expect("production control head");
+        let CalibratedModelHead::AlphaSimplex(weights) = head else {
+            panic!("production control must freeze an explicit alpha simplex");
+        };
+        let expected = BTreeMap::from([
+            (FactorName::new("momentum_ema_slope"), dec!(0.03)),
+            (FactorName::new("momentum_macd"), dec!(0.15)),
+            (FactorName::new("momentum_roc"), dec!(0.03)),
+            (FactorName::new("momentum_vol_adjusted"), dec!(0.18)),
+            (
+                FactorName::new("struct.resolution_proximity_regime"),
+                dec!(0.17),
+            ),
+            (FactorName::new("struct.reversal_after_shock"), dec!(0.44)),
+        ]);
+
+        assert_eq!(weights, expected);
+        assert_eq!(weights.values().copied().sum::<Decimal>(), Decimal::ONE);
+        assert!(!weights.contains_key(&FactorName::new("mean_reversion")));
     }
 }

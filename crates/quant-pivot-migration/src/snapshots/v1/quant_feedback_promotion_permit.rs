@@ -30,6 +30,7 @@ pub struct Model {
     pub expected_decision_policy_snapshot_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub expected_snapshot_hash: String,
+    pub expected_route_generation: i64,
     pub champion_model_version_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub champion_serving_contract_hash: String,

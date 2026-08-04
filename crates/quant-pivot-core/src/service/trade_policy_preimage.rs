@@ -22,7 +22,9 @@ use quant_pivot_research::{
 };
 
 use crate::service::{
-    model_serving_preimage::{ModelServingPreimageService, VerifiedModelServingPreimage},
+    model_serving_preimage::{
+        ModelServingPreimageService, PreimageVerificationDepth, VerifiedModelServingPreimage,
+    },
     trade_policy_evidence::{TradePolicyEvidenceDurability, TradePolicyEvidenceVerifier},
     training_dataset::require_dataset_materialization,
 };
@@ -320,6 +322,22 @@ impl TradePolicyPreimageVerifier {
         target: TradePolicyPreimageTarget<'_>,
         durability: TradePolicyEvidenceDurability,
     ) -> QuantResult<Option<VerifiedTradePolicyPreimage>> {
+        Box::pin(self.verify_depth(
+            serving_preimages,
+            target,
+            durability,
+            PreimageVerificationDepth::FullObjects,
+        ))
+        .await
+    }
+
+    pub(crate) async fn verify_depth(
+        &self,
+        serving_preimages: &ModelServingPreimageService,
+        target: TradePolicyPreimageTarget<'_>,
+        durability: TradePolicyEvidenceDurability,
+        depth: PreimageVerificationDepth,
+    ) -> QuantResult<Option<VerifiedTradePolicyPreimage>> {
         let manifest = require_dataset_materialization(target.dataset)?.manifest;
         let (Some(artifact_id), Some(expected_hash)) = (
             manifest.trade_policy_artifact_id,
@@ -366,7 +384,7 @@ impl TradePolicyPreimageVerifier {
                 id: source_dataset_id.to_string(),
             })?;
         serving_preimages
-            .verify_dataset_objects(&source_dataset, target.profile)
+            .verify_dataset(&source_dataset, target.profile, depth)
             .await?;
 
         let subject_id = policy.payload_json.fit_contract.model_version_id;
@@ -379,7 +397,7 @@ impl TradePolicyPreimageVerifier {
                 entity: "quant_model_version",
                 id: subject_id.to_string(),
             })?;
-        let subject_preimage = serving_preimages.load_base(&subject).await?;
+        let subject_preimage = serving_preimages.load_base(&subject, depth).await?;
         TradePolicyCrossBindings {
             policy: &policy,
             source_dataset: &source_dataset,

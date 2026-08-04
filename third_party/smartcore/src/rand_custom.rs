@@ -1,0 +1,36 @@
+#[cfg(not(feature = "std_rand"))]
+pub use rand::rngs::SmallRng as RngImpl;
+#[cfg(feature = "std_rand")]
+pub use rand::rngs::StdRng as RngImpl;
+use rand::SeedableRng;
+
+/// Custom switch for random fuctions
+pub fn get_rng_impl(seed: Option<u64>) -> RngImpl {
+    match seed {
+        Some(seed) => RngImpl::seed_from_u64(seed),
+        None => {
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "std_rand")] {
+                    use rand::Rng;
+                    // FIX: thread_rng() deprecated in rand 0.9 → use rng()
+                    // FIX: rand 0.10 no longer re-exports RngCore at root;
+                    //      import rand::Rng (supertrait) instead so next_u64() resolves
+                    RngImpl::seed_from_u64(rand::rng().next_u64())
+                } else {
+                    // no std_random feature build, use getrandom
+                    #[cfg(feature = "js")]
+                    {
+                        let mut buf = [0u8; 64];
+                        getrandom::getrandom(&mut buf).unwrap();
+                        RngImpl::seed_from_u64(buf[0] as u64)
+                    }
+                    #[cfg(not(feature = "js"))]
+                    {
+                        // Using 0 as default seed
+                        RngImpl::seed_from_u64(0)
+                    }
+                }
+            }
+        }
+    }
+}

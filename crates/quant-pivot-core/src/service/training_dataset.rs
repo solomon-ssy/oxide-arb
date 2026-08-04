@@ -47,11 +47,11 @@ use quant_pivot_models::{
     },
     types::{
         ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        DatasetCoverage, DatasetFeatureStateCounts, DatasetManifest, FeatureCellState, MarketId,
-        ModelSpecId, Price, ResearchJobProgress, ResearchProfileArtifact, SchemaVersion, Shares,
-        TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId,
-        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, Usd,
-        factor::FactorServingPlane,
+        DatasetCohortManifest, DatasetCoverage, DatasetFeatureStateCounts, DatasetManifest,
+        FeatureCellState, MarketId, ModelSpecId, Price, ResearchJobProgress,
+        ResearchProfileArtifact, SchemaVersion, Shares, TokenId, TradePolicyArtifactId,
+        TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
+        TrainingSampleSource, Usd, factor::FactorServingPlane,
     },
 };
 use quant_pivot_repository::traits::{
@@ -627,13 +627,9 @@ impl DatasetFactorEngine {
 }
 
 impl TrainingDatasetService {
-    /// Freeze a cohort-owned event-driven plan with no synthetic sample grid.
-    pub async fn plan_feedback(
-        &self,
-        request: DatasetPlanRequest,
-        factor_serving_plane: FactorServingPlane,
-    ) -> QuantResult<DatasetPlan> {
-        require_half_open_window(request.window_start, request.window_end)?;
+    fn validate_feedback_request(
+        request: &DatasetPlanRequest,
+    ) -> QuantResult<&DatasetCohortManifest> {
         let cohort =
             request
                 .cohort_manifest
@@ -646,18 +642,39 @@ impl TrainingDatasetService {
             .map_err(|error| ResearchError::DatasetPlan {
                 detail: error.to_string(),
             })?;
-        if cohort.cohort != FeedbackCohort::ModelLearning
-            || request.sample_sources.as_slice() != [TrainingSampleSource::RecommendationFeedback]
+        if cohort.cohort != FeedbackCohort::ModelScoreLearning
+            || request.sample_sources.as_slice() != [TrainingSampleSource::ModelScoreFeedback]
             || request.sample_interval_secs != 0
             || request.horizons_secs != [0]
             || request.training_dataset_id.is_none()
             || request.window_start != cohort.window.window_start()
             || request.window_end != cohort.window.cutoff()
-            || request.source_lineage.pit_cutoff != cohort.window.cutoff()
+            || request.source_lineage.pit_cutoff < cohort.window.cutoff()
         {
             return Err(ResearchError::DatasetPlan {
-                detail: "feedback plan must bind one frozen ModelLearning cohort, a preassigned dataset id, event-driven cadence, and the exact cutoff"
+                detail: "feedback plan must bind one complete model-score cohort, a preassigned dataset id, event-driven cadence, and a label-availability cutoff no earlier than the cohort cutoff"
                     .to_owned(),
+            }
+            .into());
+        }
+        Ok(cohort)
+    }
+
+    /// Freeze a cohort-owned event-driven plan with no synthetic sample grid.
+    pub async fn plan_feedback(
+        &self,
+        request: DatasetPlanRequest,
+        factor_serving_plane: FactorServingPlane,
+    ) -> QuantResult<DatasetPlan> {
+        require_half_open_window(request.window_start, request.window_end)?;
+        let cohort = Self::validate_feedback_request(&request)?;
+        if cohort.counts.included_count() > self.max_spine_samples {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "feedback cohort has {} samples, exceeding the configured hard cap {}",
+                    cohort.counts.included_count(),
+                    self.max_spine_samples
+                ),
             }
             .into());
         }
@@ -1592,9 +1609,8 @@ impl TrainingDatasetService {
             .cohort_manifest
             .as_ref()
             .map(|manifest| manifest.cohort)
-            != Some(FeedbackCohort::ModelLearning)
-            || plan.request.sample_sources.as_slice()
-                != [TrainingSampleSource::RecommendationFeedback]
+            != Some(FeedbackCohort::ModelScoreLearning)
+            || plan.request.sample_sources.as_slice() != [TrainingSampleSource::ModelScoreFeedback]
             || plan.request.sample_interval_secs != 0
             || !plan.samples.is_empty()
             || !plan.lot_samples.is_empty()
@@ -1734,16 +1750,7 @@ impl TrainingDatasetService {
                 }
             });
         let result = match result {
-            Ok(window) => {
-                Box::pin(self.materialize_window(
-                    plan,
-                    sink,
-                    cancel,
-                    window,
-                    source.clob_market_info,
-                ))
-                .await
-            }
+            Ok(window) => Box::pin(self.materialize_window(plan, sink, cancel, window)).await,
             Err(error) => Err(error),
         };
         self.persist_build_failure(&training_dataset_id, result)
@@ -1790,8 +1797,7 @@ impl TrainingDatasetService {
         let window = loader
             .load(&context.window_spec(&plan, &self.domain))
             .await?;
-        let clob_market_info = self.load_clob_market_info(&plan).await?;
-        Box::pin(self.materialize_window(plan, sink, cancel, window, clob_market_info)).await
+        Box::pin(self.materialize_window(plan, sink, cancel, window)).await
     }
 
     async fn materialize_window(
@@ -1800,7 +1806,6 @@ impl TrainingDatasetService {
         sink: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
         window: HistoricalWindow,
-        clob_market_info: Vec<ClobMarketInfoVersion>,
     ) -> QuantResult<TrainingDatasetArtifact> {
         let context = ReplayContext::new(&plan, &self.features)?;
         let coverage = DatasetCoverage {
@@ -1858,7 +1863,7 @@ impl TrainingDatasetService {
             BuildTail {
                 pit: &*pit,
                 prefetched: &prefetched,
-                clob_market_info: &clob_market_info,
+                clob_market_info: &prefetched.clob_market_info,
                 context: &context,
                 sink: &*sink,
             },
@@ -1866,34 +1871,6 @@ impl TrainingDatasetService {
             spine,
         )
         .await
-    }
-
-    async fn load_clob_market_info(
-        &self,
-        plan: &DatasetPlan,
-    ) -> QuantResult<Vec<ClobMarketInfoVersion>> {
-        let mut market_ids = plan
-            .samples
-            .iter()
-            .map(|sample| sample.market_id.clone())
-            .chain(
-                plan.lot_samples
-                    .iter()
-                    .map(|sample| sample.market_id.clone()),
-            )
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        market_ids.sort();
-        self.clob_market_info_repo
-            .window(
-                &market_ids,
-                plan.request.window_start,
-                plan.request.window_end,
-                plan.request.source_lineage.pit_cutoff,
-            )
-            .await
-            .map_err(Into::into)
     }
 
     async fn prepare_build_ledger(&self, plan: &DatasetPlan) -> QuantResult<()> {
@@ -2067,7 +2044,6 @@ impl TrainingDatasetService {
         let prefetched = loader
             .prefetch(&context.window_spec(&plan, &self.domain))
             .await?;
-        let clob_market_info = self.load_clob_market_info(&plan).await?;
         let mut coverage = DatasetCoverage {
             planned_samples: planned_historical_samples(&plan),
             ..DatasetCoverage::default()
@@ -2093,7 +2069,7 @@ impl TrainingDatasetService {
             BuildTail {
                 pit,
                 prefetched: &prefetched,
-                clob_market_info: &clob_market_info,
+                clob_market_info: &prefetched.clob_market_info,
                 context: &context,
                 sink: &NoopProgressSink,
             },
@@ -2256,6 +2232,7 @@ impl TrainingDatasetService {
         HistoricalWindowLoader::new(
             Arc::clone(&self.fact_read),
             Arc::clone(&self.catalog_repo),
+            Arc::clone(&self.clob_market_info_repo),
             Arc::clone(&self.linkage_repo),
             Arc::clone(&self.calibration_repo),
             self.max_book_staleness,
@@ -3623,6 +3600,107 @@ fn record_exit_fill_fidelity(coverage: &mut DatasetCoverage, book_fidelity: Opti
         coverage.exit_fill_l2_rows += 1;
     } else if book_fidelity.is_some() {
         coverage.exit_fill_fallback_rows += 1;
+    }
+}
+
+#[cfg(test)]
+mod feedback_plan_tests {
+    use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::quant::FeedbackCohortWindow,
+        enums::quant::{DatasetPurpose, FeedbackCohort},
+        types::{
+            ArtifactUri, CapabilityRegistryHashes, DATASET_COHORT_MANIFEST_FORMAT_VERSION,
+            DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetCohortArtifactRef, DatasetCohortCounts,
+            DatasetCohortManifest, DatasetSourceLineage, DecisionPolicySnapshotId, ModelSpecId,
+            ReaderContractVersion, ResearchProfileArtifactId, SchemaContractVersion, SchemaVersion,
+            SourceSliceId, TrainingDatasetId, TrainingSampleSource, TrainingSampleSources,
+        },
+    };
+
+    use super::{DatasetPlanRequest, TrainingDatasetService};
+    use crate::test_fixtures::execution_pg_seed::{
+        content_hash, fixture_profile_ref, source_slice_ref,
+    };
+
+    fn feedback_request() -> DatasetPlanRequest {
+        let window_start = Utc.timestamp_opt(1_000_000, 0).single().expect("start");
+        let window_end = window_start + Duration::days(30);
+        let label_cutoff = window_end + Duration::days(1);
+        let profile_ref = fixture_profile_ref();
+        let capabilities =
+            CapabilityRegistryHashes::try_new(vec![content_hash('8')]).expect("capabilities");
+        let source_lineage = DatasetSourceLineage {
+            format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            source_slice_id: SourceSliceId::from_v7(),
+            source_slice_identity_hash: content_hash('3'),
+            research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile_ref),
+            research_program_hash: content_hash('4'),
+            source_slice: source_slice_ref('5'),
+            source_window_start: window_start - Duration::days(1),
+            source_window_end: label_cutoff,
+            pit_cutoff: label_cutoff,
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            runtime_config_hash: content_hash('6'),
+            reader_contract_version: ReaderContractVersion::v1(),
+            schema_contract_version: SchemaContractVersion::v1(),
+            source_schema_hash: content_hash('7'),
+            capability_registry_hashes: capabilities.clone(),
+        };
+        let counts =
+            DatasetCohortCounts::try_new(1, 1, 1, Vec::new(), Vec::new()).expect("cohort counts");
+        let cohort_manifest = DatasetCohortManifest {
+            format_version: DATASET_COHORT_MANIFEST_FORMAT_VERSION,
+            cohort: FeedbackCohort::ModelScoreLearning,
+            window: FeedbackCohortWindow::try_new(profile_ref, window_start, window_end)
+                .expect("cohort window"),
+            artifact: DatasetCohortArtifactRef {
+                uri: ArtifactUri::parse("s3://fixture/feedback/cohort.json").expect("cohort URI"),
+                bytes_hash: content_hash('a'),
+                schema_hash: content_hash('b'),
+                source_hash: content_hash('c'),
+                row_count: 1,
+            },
+            counts,
+            capability_registry_hashes: capabilities,
+        };
+        DatasetPlanRequest {
+            model_spec_id: ModelSpecId::from_v7(),
+            source_lineage,
+            cohort_manifest: Some(cohort_manifest),
+            window_start,
+            window_end,
+            sample_interval_secs: 0,
+            horizons_secs: vec![0],
+            knowledge_lag_secs: 0,
+            feature_schema_version: SchemaVersion::FIRST,
+            sample_sources: TrainingSampleSources::from(TrainingSampleSource::ModelScoreFeedback),
+            training_dataset_id: Some(TrainingDatasetId::from_v7()),
+            purpose: DatasetPurpose::Training,
+        }
+    }
+
+    #[test]
+    fn feedback_accepts_label_cutoff() {
+        let request = feedback_request();
+        let cohort_cutoff = request
+            .cohort_manifest
+            .as_ref()
+            .expect("cohort")
+            .window
+            .cutoff();
+
+        assert!(request.source_lineage.pit_cutoff > cohort_cutoff);
+        TrainingDatasetService::validate_feedback_request(&request)
+            .expect("later label-availability cutoff must remain frozen and valid");
+    }
+
+    #[test]
+    fn feedback_rejects_early_cutoff() {
+        let mut request = feedback_request();
+        request.source_lineage.pit_cutoff = request.window_end - Duration::seconds(1);
+
+        assert!(TrainingDatasetService::validate_feedback_request(&request).is_err());
     }
 }
 

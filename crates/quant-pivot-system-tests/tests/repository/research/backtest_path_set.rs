@@ -11,8 +11,9 @@ use quant_pivot_models::{
         BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelInputContract, ModelRunId,
         ModelSpecId, ModelTrainingContract, ModelVersionId, TrainingDatasetId,
         backtest::{
-            BacktestPath, CpcvFoldArtifact, CpcvFoldArtifacts, CpcvFoldCalibrationPolicy,
-            CpcvFoldRole, CpcvMethodologyBinding, CpcvPathSetSubject, SharpeDistribution,
+            BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
+            CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
+            SharpeDistribution,
         },
     },
 };
@@ -309,7 +310,13 @@ pub async fn quant_backtest_set_crud() {
         ),
         fold_artifacts: CpcvFoldArtifacts::try_new(vec![
             CpcvFoldArtifact {
-                role: CpcvFoldRole::Validation,
+                identity: CpcvEstimatorIdentity::Validation {
+                    combination_index: 0,
+                    test_partitions_hash: content_hash('b'),
+                    test_partition_count: 1,
+                    test_groups_hash: content_hash('c'),
+                    test_group_count: 1,
+                },
                 training_groups_hash: content_hash('b'),
                 training_group_count: 2,
                 model_artifact_hash: content_hash('c'),
@@ -317,7 +324,7 @@ pub async fn quant_backtest_set_crud() {
                 model_payload_hash: content_hash('e'),
             },
             CpcvFoldArtifact {
-                role: CpcvFoldRole::Trial { trial_id: 0 },
+                identity: CpcvEstimatorIdentity::Trial { trial_id: 0 },
                 training_groups_hash: content_hash('f'),
                 training_group_count: 3,
                 model_artifact_hash: content_hash('1'),
@@ -337,6 +344,7 @@ pub async fn quant_backtest_set_crud() {
             max: dec!(1.5),
             median_max_drawdown: None,
             median_tail_loss: None,
+            median_turnover: None,
             baseline_uplift: None,
         },
         paths: vec![BacktestPath {
@@ -346,6 +354,7 @@ pub async fn quant_backtest_set_crud() {
             rank_ic: dec!(0.12),
             max_drawdown: dec!(0.005),
             tail_loss: dec!(-0.005),
+            turnover: None,
         }]
         .into(),
         deflated_sharpe: dec!(0.96),

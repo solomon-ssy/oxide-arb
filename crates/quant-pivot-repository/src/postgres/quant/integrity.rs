@@ -201,10 +201,16 @@ where
     let source_schema_matches = lineage.source_schema_hash == training_lineage.source_schema_hash;
     let capabilities_match =
         lineage.capability_registry_hashes == bindings.capability_registry_hashes;
-    let horizon_matches = materialization
-        .manifest
-        .horizons_secs
-        .contains(&bindings.model.prediction_horizon_secs);
+    // Dataset horizons govern label materialization, not the model's serving
+    // cadence. Event-driven settlement labels use the canonical `0`
+    // horizon-independent contract even when the model serves a non-zero
+    // prediction horizon.
+    let target_label_horizon = model.spec.training_contract.target_label_horizon_secs;
+    let horizon_matches = target_label_horizon == 0
+        || materialization
+            .manifest
+            .horizons_secs
+            .contains(&target_label_horizon);
     let all_match = feature_version_matches
         && feature_hash_matches
         && factor_plane_matches
@@ -219,7 +225,15 @@ where
     if !all_match {
         return Err(invariant(
             QUANT_TRAINING_DATASET,
-            "replay Dataset schema/source lineage differs from the exact source model",
+            format!(
+                "replay Dataset schema/source lineage differs from the exact source model: \
+                 feature_version={feature_version_matches}, feature_hash={feature_hash_matches}, \
+                 factor_plane={factor_plane_matches}, label_hash={label_hash_matches}, \
+                 trade_policy_id={policy_id_matches}, trade_policy_hash={policy_hash_matches}, \
+                 reader_contract={reader_contract_matches}, \
+                 schema_contract={schema_contract_matches}, source_schema={source_schema_matches}, \
+                 capabilities={capabilities_match}, target_label_horizon={horizon_matches}"
+            ),
         ));
     }
     Ok(materialization)

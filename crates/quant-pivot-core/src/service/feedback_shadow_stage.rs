@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, feedback::FeedbackError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
         ports::{
-            FeedbackComparisonArtifactRef, FeedbackShadowContract, FeedbackShadowContractInput,
-            FeedbackShadowJobParams, FeedbackShadowSubject, FeedbackShadowUnavailableReason,
+            FeedbackCandidateFamily, FeedbackComparisonArtifactRef, FeedbackShadowContract,
+            FeedbackShadowContractInput, FeedbackShadowJobParams, FeedbackShadowSubject,
+            ShadowBindingArtifact, ShadowBindingArtifactRef,
         },
         quant::{
             FeedbackCycleInfo, FeedbackStageJobIdentity, NewResearchJob, ResearchJobInfo,
@@ -19,7 +21,7 @@ use quant_pivot_models::{
         ResearchJobStatus,
     },
     runtime_config::BuyModelRoute,
-    types::{DecisionPolicySnapshotId, FeedbackShadowArtifactId, ResearchJobParams, RoleCode},
+    types::{FeedbackShadowArtifactId, ResearchJobParams, RoleCode},
 };
 use quant_pivot_repository::traits::{
     FeedbackCycleLeaseGuard, FeedbackCycleRepository, ResearchJobRepository,
@@ -31,13 +33,22 @@ use quant_pivot_research::{
 };
 
 use crate::service::{
-    feedback_coordinator::FeedbackStageSuccess,
+    feedback_coordinator::{FeedbackStagePreparation, FeedbackStageSuccess},
+    feedback_recipe_stage::FeedbackRecipeStageAdapter,
+    feedback_shadow_binding_stage::FeedbackShadowBindingStageAdapter,
     model_serving_generation::ModelServingGenerationStore,
 };
+
+const SHADOW_WINDOW_PENDING_REASON: &str = "feedback_shadow_window_pending";
 
 struct VerifiedComparison {
     reference: FeedbackComparisonArtifactRef,
     artifact: FeedbackComparisonArtifact,
+}
+
+enum ShadowSubjectPreparation {
+    Ready(FeedbackShadowSubject),
+    Deferred(DateTime<Utc>),
 }
 
 /// Dependencies for [`FeedbackShadowStageAdapter`].
@@ -46,6 +57,8 @@ pub struct FeedbackShadowStageDeps {
     pub jobs: Arc<dyn ResearchJobRepository>,
     pub artifacts: Arc<dyn ArtifactStore>,
     pub serving_generations: Arc<ModelServingGenerationStore>,
+    pub recipes: Arc<FeedbackRecipeStageAdapter>,
+    pub shadow_bindings: Arc<FeedbackShadowBindingStageAdapter>,
     pub max_recovery_attempts: i32,
 }
 
@@ -55,6 +68,8 @@ pub struct FeedbackShadowStageAdapter {
     jobs: Arc<dyn ResearchJobRepository>,
     artifacts: Arc<dyn ArtifactStore>,
     serving_generations: Arc<ModelServingGenerationStore>,
+    recipes: Arc<FeedbackRecipeStageAdapter>,
+    shadow_bindings: Arc<FeedbackShadowBindingStageAdapter>,
     max_recovery_attempts: i32,
 }
 
@@ -70,6 +85,8 @@ impl FeedbackShadowStageAdapter {
             jobs: deps.jobs,
             artifacts: deps.artifacts,
             serving_generations: deps.serving_generations,
+            recipes: deps.recipes,
+            shadow_bindings: deps.shadow_bindings,
             max_recovery_attempts: deps.max_recovery_attempts,
         })
     }
@@ -81,28 +98,61 @@ impl FeedbackShadowStageAdapter {
         cycle: &FeedbackCycleInfo,
         lease: FeedbackCycleLeaseGuard,
         identity: FeedbackStageJobIdentity,
-    ) -> QuantResult<NewResearchJob> {
+    ) -> QuantResult<FeedbackStagePreparation> {
         Self::require_identity(cycle, lease, identity)?;
         cycle.validate()?;
-        let comparison = self.load_comparison(cycle).await?;
-        let subject = self
-            .build_subject(
-                cycle,
-                &comparison.artifact,
-                comparison.reference.decision_policy_snapshot_id,
-            )
-            .await?;
+        let family = self.family(cycle).await?;
+        let binding = self.shadow_bindings.load_binding(cycle).await?;
+        let comparison = self.load_comparison(cycle, &family).await?;
+        if binding.params.comparison != comparison.reference {
+            return Err(Self::invalid(
+                "ShadowBind receipt does not carry the exact Comparison predecessor",
+            ));
+        }
+        let subject = match self
+            .build_subject(cycle, &comparison.artifact, &binding.artifact)
+            .await?
+        {
+            ShadowSubjectPreparation::Ready(subject) => subject,
+            ShadowSubjectPreparation::Deferred(resume_after) => {
+                return Ok(FeedbackStagePreparation::Deferred {
+                    resume_after,
+                    reason_code: SHADOW_WINDOW_PENDING_REASON,
+                });
+            }
+        };
+        let receipt = &binding.artifact.receipt;
         let params = FeedbackShadowJobParams {
             feedback_cycle_id: cycle.feedback_cycle_id,
             cycle_idempotency_hash: cycle.idempotency_hash,
             artifact_id: FeedbackShadowArtifactId::from_cycle_id(cycle.feedback_cycle_id),
-            previous: comparison.reference,
+            binding: ShadowBindingArtifactRef {
+                feedback_cycle_id: cycle.feedback_cycle_id,
+                job_id: binding.job_id,
+                artifact_id: binding.artifact.artifact_id,
+                input_hash: binding.artifact.job_input_hash,
+                route: receipt.route,
+                bound_at: receipt.bound_at,
+                binding_generation: receipt.binding_generation,
+                receipt_hash: receipt.receipt_hash,
+                committed_policy_generation: receipt.committed_policy_generation,
+                committed_snapshot_id: receipt.committed_snapshot_id,
+                committed_snapshot_hash: receipt.committed_snapshot_hash,
+                champion_model_version_id: receipt.champion_model_version_id,
+                champion_serving_contract_hash: receipt.champion_serving_contract_hash,
+                candidate_model_version_id: receipt.candidate_model_version_id,
+                candidate_serving_contract_hash: receipt.candidate_serving_contract_hash,
+                comparison: comparison.reference,
+                artifact: binding.reference,
+            },
             profile_ref: cycle.profile_ref.clone(),
             feedback_policy_hash: cycle.feedback_policy_hash,
             subject,
         };
         params.validate()?;
-        self.bind_job(cycle, identity, params)
+        Ok(FeedbackStagePreparation::Ready(Box::new(
+            self.bind_job(cycle, identity, params)?,
+        )))
     }
 
     /// Verify the exact terminal F10 object before the coordinator advances.
@@ -146,7 +196,11 @@ impl FeedbackShadowStageAdapter {
         ))
     }
 
-    async fn load_comparison(&self, cycle: &FeedbackCycleInfo) -> QuantResult<VerifiedComparison> {
+    async fn load_comparison(
+        &self,
+        cycle: &FeedbackCycleInfo,
+        family: &FeedbackCandidateFamily,
+    ) -> QuantResult<VerifiedComparison> {
         let events = self
             .cycles
             .list_stage_events(&cycle.feedback_cycle_id)
@@ -181,14 +235,13 @@ impl FeedbackShadowStageAdapter {
         let artifact_ref = job
             .result_artifact()
             .ok_or_else(|| Self::invalid("Comparison predecessor has no terminal artifact"))?;
-        let expected_policy_id = cycle
-            .candidate_family
+        let expected_policy_id = family
             .shared_evaluation()
             .source_lineage
             .decision_policy_snapshot_id;
         let cycle_id_matches = params.feedback_cycle_id == cycle.feedback_cycle_id;
         let cycle_hash_matches = params.cycle_idempotency_hash == cycle.idempotency_hash;
-        let family_matches = params.candidate_family_hash == cycle.candidate_family_hash;
+        let family_matches = params.candidate_family_hash == family.candidate_family_hash();
         let profile_matches = params.evaluation_use.profile_ref == cycle.profile_ref;
         let cutoff_matches = params.evaluation_use.label_cutoff == cycle.label_cutoff;
         let predecessor_matches_cycle = cycle_id_matches
@@ -245,18 +298,20 @@ impl FeedbackShadowStageAdapter {
         &self,
         cycle: &FeedbackCycleInfo,
         artifact: &FeedbackComparisonArtifact,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    ) -> QuantResult<FeedbackShadowSubject> {
+        binding: &ShadowBindingArtifact,
+    ) -> QuantResult<ShadowSubjectPreparation> {
         let RomanoWolfOutcome::Compared { .. } = artifact.outcome() else {
-            return Ok(FeedbackShadowSubject::NoEligibleCandidate {
-                reason: FeedbackShadowUnavailableReason::ComparisonInsufficientObservations,
-            });
+            return Err(Self::invalid(
+                "Shadow cannot follow Comparison without evaluated challengers",
+            ));
         };
         let Some((result, replay)) = artifact.selected_candidate() else {
-            return Ok(FeedbackShadowSubject::NoEligibleCandidate {
-                reason: FeedbackShadowUnavailableReason::AllCandidatesRejected,
-            });
+            return Err(Self::invalid(
+                "Shadow cannot follow Comparison without an eligible challenger",
+            ));
         };
+        binding.validate()?;
+        let receipt = &binding.receipt;
         let profile = cycle
             .profile_ref
             .resolve_builtin_research_profile()
@@ -279,19 +334,37 @@ impl FeedbackShadowStageAdapter {
             .published_shadow_identity()
             .map_err(QuantError::from)?;
         if feedback_policy_hash != cycle.feedback_policy_hash
+            || receipt.feedback_cycle_id != cycle.feedback_cycle_id
+            || receipt.route != route
+            || receipt.profile_ref != cycle.profile_ref
+            || receipt.candidate_recipe_hash != result.candidate_recipe_hash
+            || receipt.candidate_model_version_id != replay.model_version_id
+            || receipt.candidate_serving_contract_hash != replay.serving_contract_hash
             || generation.research_profile_artifact_id != cycle.research_profile_artifact_id
             || generation.category_scope != profile.spec.category
-            || generation.active_model_version_id != cycle.champion_model_version_id
-            || generation.active_serving_contract_hash != cycle.champion_serving_contract_hash
-            || generation.shadow_model_version_id != replay.model_version_id
-            || generation.shadow_serving_contract_hash != replay.serving_contract_hash
-            || generation.decision_policy_snapshot_id != decision_policy_snapshot_id
+            || generation.champion_model_version_id != receipt.champion_model_version_id
+            || generation.champion_serving_contract_hash != receipt.champion_serving_contract_hash
+            || generation.candidate_model_version_id != receipt.candidate_model_version_id
+            || generation.candidate_serving_contract_hash != receipt.candidate_serving_contract_hash
+            || generation.shadow_bound_at != receipt.bound_at
+            || generation.route_generation != receipt.binding_generation
+            || generation.decision_policy_snapshot_id != receipt.committed_snapshot_id
+            || generation.decision_policy_snapshot_hash != receipt.committed_snapshot_hash
+            || generation.policy_bundle_generation != receipt.committed_policy_generation
         {
             return Err(Self::invalid(
-                "published serving generation differs from eligible F09 subjects, profile, category, or policy",
+                "published serving generation differs from the committed ShadowBind receipt",
             ));
         }
-        let window_end = self.cycles.database_time().await?;
+        let window_secs = i64::try_from(generation.required_shadow_window_secs)
+            .map_err(|error| Self::invalid(format!("shadow window overflow: {error}")))?;
+        let window_end = receipt
+            .bound_at
+            .checked_add_signed(Duration::seconds(window_secs))
+            .ok_or_else(|| Self::invalid("shadow observation window end overflow"))?;
+        if self.cycles.database_time().await? < window_end {
+            return Ok(ShadowSubjectPreparation::Deferred(window_end));
+        }
         let contract = FeedbackShadowContract::try_seal(FeedbackShadowContractInput {
             profile_ref: cycle.profile_ref.clone(),
             feedback_policy_hash,
@@ -299,20 +372,22 @@ impl FeedbackShadowStageAdapter {
             decision_policy_snapshot_id: generation.decision_policy_snapshot_id,
             decision_policy_snapshot_hash: generation.decision_policy_snapshot_hash,
             policy_bundle_generation: generation.policy_bundle_generation,
-            champion_model_version_id: generation.active_model_version_id,
-            champion_serving_contract_hash: generation.active_serving_contract_hash,
-            candidate_model_version_id: generation.shadow_model_version_id,
-            candidate_serving_contract_hash: generation.shadow_serving_contract_hash,
-            observation_window_start: cycle.created_at,
+            champion_model_version_id: generation.champion_model_version_id,
+            champion_serving_contract_hash: generation.champion_serving_contract_hash,
+            candidate_model_version_id: generation.candidate_model_version_id,
+            candidate_serving_contract_hash: generation.candidate_serving_contract_hash,
+            observation_window_start: receipt.bound_at,
             observation_window_end: window_end,
             minimum_observations: profile.spec.feedback_policy.shadow_minimum_observations,
             required_window_secs: generation.required_shadow_window_secs,
-            minimum_topn_overlap: generation.minimum_topn_overlap,
+            minimum_topn_decision_overlap: generation.minimum_topn_decision_overlap,
         })?;
-        Ok(FeedbackShadowSubject::Candidate {
-            candidate_recipe_hash: result.candidate_recipe_hash,
-            contract: Box::new(contract),
-        })
+        Ok(ShadowSubjectPreparation::Ready(
+            FeedbackShadowSubject::Candidate {
+                candidate_recipe_hash: result.candidate_recipe_hash,
+                contract: Box::new(contract),
+            },
+        ))
     }
 
     fn bind_job(
@@ -327,8 +402,8 @@ impl FeedbackShadowStageAdapter {
             feedback_stage: None,
             kind: ResearchJobKind::FeedbackShadow,
             status: ResearchJobStatus::Queued,
-            model_spec_id: Some(cycle.candidate_family.shared_evaluation().model_spec_id),
-            decision_policy_snapshot_id: Some(params.previous.decision_policy_snapshot_id),
+            model_spec_id: Some(cycle.champion_model_spec_id),
+            decision_policy_snapshot_id: Some(params.binding.committed_snapshot_id),
             params_json: ResearchJobParams::FeedbackShadow(Box::new(params)),
             requested_by: None,
             acting_role: RoleCode::new("system"),
@@ -339,6 +414,16 @@ impl FeedbackShadowStageAdapter {
         .try_bind_feedback(identity)?;
         job.validate_enqueue()?;
         Ok(job)
+    }
+
+    async fn family(&self, cycle: &FeedbackCycleInfo) -> QuantResult<FeedbackCandidateFamily> {
+        self.recipes
+            .load_plan(cycle)
+            .await?
+            .artifact
+            .candidate_family()
+            .cloned()
+            .ok_or_else(|| Self::invalid("Shadow cannot follow a RecipePlan NoAction"))
     }
 
     fn require_identity(

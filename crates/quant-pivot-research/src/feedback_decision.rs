@@ -27,7 +27,7 @@ use crate::{
     },
 };
 
-const ARTIFACT_FORMAT_VERSION: u32 = 1;
+const ARTIFACT_FORMAT_VERSION: u32 = 2;
 const ARTIFACT_HASH_DOMAIN: &str = "quant-pivot/feedback-decision-artifact";
 const ARTIFACT_SCHEMA_DOMAIN: &str = "quant-pivot/feedback-decision-schema";
 
@@ -112,7 +112,7 @@ pub enum FeedbackDecisionNoActionEvidence {
         observed: u64,
         required: u64,
         window: FeedbackDecisionShadowWindow,
-        observed_window_secs: u64,
+        served_window_secs: u64,
         required_window_secs: u64,
     },
 }
@@ -209,13 +209,12 @@ impl FeedbackDecisionOutcome {
                         observed,
                         required,
                         window,
-                        observed_window_secs,
+                        served_window_secs,
                         required_window_secs,
                     },
             } => {
                 candidate.validate()?;
                 let count_insufficient = observed < required;
-                let time_insufficient = observed_window_secs < required_window_secs;
                 let window_matches = match window {
                     FeedbackDecisionShadowWindow::NoObservations => *observed == 0,
                     FeedbackDecisionShadowWindow::Observed {
@@ -223,7 +222,10 @@ impl FeedbackDecisionOutcome {
                         last_decision_at,
                     } => *observed > 0 && first_decision_at <= last_decision_at,
                 };
-                if (!count_insufficient && !time_insufficient) || !window_matches {
+                if !count_insufficient
+                    || served_window_secs < required_window_secs
+                    || !window_matches
+                {
                     return Err(invalid("decision shadow insufficiency evidence is invalid"));
                 }
                 Ok(())
@@ -412,7 +414,7 @@ impl FeedbackDecisionEvaluator {
                 required,
                 first_decision_at,
                 last_decision_at,
-                observed_window_secs,
+                served_window_secs,
                 required_window_secs,
             } => Ok(FeedbackDecisionOutcome::NoAction {
                 evidence: FeedbackDecisionNoActionEvidence::ShadowInsufficient {
@@ -423,7 +425,7 @@ impl FeedbackDecisionEvaluator {
                         *first_decision_at,
                         *last_decision_at,
                     )?,
-                    observed_window_secs: *observed_window_secs,
+                    served_window_secs: *served_window_secs,
                     required_window_secs: *required_window_secs,
                 },
             }),
@@ -480,7 +482,7 @@ impl FeedbackDecisionEvaluator {
             || shadow.feedback_cycle_id() != params.feedback_cycle_id
             || shadow.artifact_id() != params.shadow.artifact_id
             || shadow.job_input_hash() != params.shadow.input_hash
-            || shadow.previous() != &params.comparison
+            || shadow.binding() != &params.shadow.binding
             || shadow.profile_ref() != &params.profile_ref
             || shadow.feedback_policy_hash() != params.feedback_policy_hash
         {
@@ -853,7 +855,7 @@ mod tests {
             observation_window_end: instant(3_600),
             minimum_observations: profile.spec.feedback_policy.shadow_minimum_observations,
             required_window_secs: 600,
-            minimum_topn_overlap: Probability::new(dec!(0.60)),
+            minimum_topn_decision_overlap: Probability::new(dec!(0.60)),
         })
         .expect("shadow contract");
         (
@@ -871,8 +873,12 @@ mod tests {
             observed: 1_000,
             first_decision_at: instant(0),
             last_decision_at: instant(700),
-            observed_window_secs: 700,
-            mean_topn_overlap: Probability::new(if divergent { dec!(0.50) } else { dec!(0.90) }),
+            served_window_secs: 3_600,
+            mean_topn_decision_overlap: Probability::new(if divergent {
+                dec!(0.50)
+            } else {
+                dec!(0.90)
+            }),
             any_hard_divergence: divergent,
         }
     }
@@ -945,7 +951,7 @@ mod tests {
                 required: 1_000,
                 first_decision_at: Some(instant(0)),
                 last_decision_at: Some(instant(0)),
-                observed_window_secs: 0,
+                served_window_secs: 3_600,
                 required_window_secs: 600,
             },
         )
@@ -960,7 +966,7 @@ mod tests {
                 evidence: unstable_evidence,
                 reasons: vec![
                     FeedbackShadowUnstableReason::HardDivergence,
-                    FeedbackShadowUnstableReason::TopnOverlapBelowMinimum,
+                    FeedbackShadowUnstableReason::TopnDecisionOverlapBelowMinimum,
                 ],
             },
         )

@@ -42,13 +42,15 @@ use crate::{
 use super::{
     calibration_artifact::ModelCalibrationFitJobParams,
     feedback_governance::FeedbackValidationArtifactRef,
+    feedback_recipe::{FeedbackRecipeCpcvSpec, FeedbackRecipeResourceBudget},
+    feedback_shadow_binding::ShadowBindingArtifactRef,
 };
 
 const LEARNING_INPUT_VERSION: u32 = 1;
 const LEARNING_INPUT_DOMAIN: &str = "quant-pivot/feedback-learning-stage-input";
-const CANDIDATE_RECIPE_VERSION: u32 = 1;
+const CANDIDATE_RECIPE_VERSION: u32 = 3;
 const CANDIDATE_RECIPE_DOMAIN: &str = "quant-pivot/feedback-candidate-recipe";
-const CANDIDATE_FAMILY_VERSION: u32 = 1;
+const CANDIDATE_FAMILY_VERSION: u32 = 2;
 const CANDIDATE_FAMILY_DOMAIN: &str = "quant-pivot/feedback-candidate-family";
 const COMPARISON_CONTRACT_VERSION: u32 = 1;
 const COMPARISON_CONTRACT_DOMAIN: &str = "quant-pivot/feedback-comparison-contract";
@@ -157,11 +159,28 @@ impl FeedbackDatasetBuildRequest {
 pub struct FeedbackCandidateRecipe {
     format_version: u32,
     candidate_recipe_hash: ContentHash,
+    recipe_template_hash: ContentHash,
+    planner_evidence_hash: ContentHash,
+    resource_budget: FeedbackRecipeResourceBudget,
     training: FeedbackDatasetBuildRequest,
     calibration: FeedbackDatasetBuildRequest,
     calibration_method: CalibrationMethod,
+    cpcv_spec: FeedbackRecipeCpcvSpec,
     downside_source: DownsideSource,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
+}
+
+/// Complete owned input used to seal one immutable candidate recipe.
+pub struct FeedbackCandidateRecipeInput {
+    pub recipe_template_hash: ContentHash,
+    pub planner_evidence_hash: ContentHash,
+    pub resource_budget: FeedbackRecipeResourceBudget,
+    pub training: FeedbackDatasetBuildRequest,
+    pub calibration: FeedbackDatasetBuildRequest,
+    pub calibration_method: CalibrationMethod,
+    pub cpcv_spec: FeedbackRecipeCpcvSpec,
+    pub downside_source: DownsideSource,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -169,9 +188,13 @@ pub struct FeedbackCandidateRecipe {
 struct FeedbackCandidateRecipeDocument {
     format_version: u32,
     candidate_recipe_hash: ContentHash,
+    recipe_template_hash: ContentHash,
+    planner_evidence_hash: ContentHash,
+    resource_budget: FeedbackRecipeResourceBudget,
     training: FeedbackDatasetBuildRequest,
     calibration: FeedbackDatasetBuildRequest,
     calibration_method: CalibrationMethod,
+    cpcv_spec: FeedbackRecipeCpcvSpec,
     downside_source: DownsideSource,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
@@ -179,51 +202,65 @@ struct FeedbackCandidateRecipeDocument {
 #[derive(Serialize)]
 struct FeedbackCandidateRecipePreimage<'a> {
     format_version: u32,
+    recipe_template_hash: ContentHash,
+    planner_evidence_hash: ContentHash,
+    resource_budget: FeedbackRecipeResourceBudget,
     training: &'a FeedbackDatasetBuildRequest,
     calibration: &'a FeedbackDatasetBuildRequest,
     calibration_method: CalibrationMethod,
+    cpcv_spec: &'a FeedbackRecipeCpcvSpec,
     downside_source: DownsideSource,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
 
 impl FeedbackCandidateRecipe {
-    pub fn try_seal(
-        training: FeedbackDatasetBuildRequest,
-        calibration: FeedbackDatasetBuildRequest,
-        calibration_method: CalibrationMethod,
-        downside_source: DownsideSource,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    ) -> Result<Self, FeedbackError> {
-        let candidate_recipe_hash = Self::derive_hash(
-            &training,
-            &calibration,
-            calibration_method,
-            downside_source,
-            decision_policy_snapshot_id,
-        )?;
+    pub fn try_seal(input: FeedbackCandidateRecipeInput) -> Result<Self, FeedbackError> {
+        let candidate_recipe_hash = Self::derive_hash(&FeedbackCandidateRecipePreimage {
+            format_version: CANDIDATE_RECIPE_VERSION,
+            recipe_template_hash: input.recipe_template_hash,
+            planner_evidence_hash: input.planner_evidence_hash,
+            resource_budget: input.resource_budget,
+            training: &input.training,
+            calibration: &input.calibration,
+            calibration_method: input.calibration_method,
+            cpcv_spec: &input.cpcv_spec,
+            downside_source: input.downside_source,
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id,
+        })?;
         let recipe = Self {
             format_version: CANDIDATE_RECIPE_VERSION,
             candidate_recipe_hash,
-            training,
-            calibration,
-            calibration_method,
-            downside_source,
-            decision_policy_snapshot_id,
+            recipe_template_hash: input.recipe_template_hash,
+            planner_evidence_hash: input.planner_evidence_hash,
+            resource_budget: input.resource_budget,
+            training: input.training,
+            calibration: input.calibration,
+            calibration_method: input.calibration_method,
+            cpcv_spec: input.cpcv_spec,
+            downside_source: input.downside_source,
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id,
         };
         recipe.validate()?;
         Ok(recipe)
     }
 
     pub fn validate(&self) -> Result<(), FeedbackError> {
+        self.resource_budget.validate()?;
         self.training.validate()?;
         self.calibration.validate()?;
-        let exact_hash = Self::derive_hash(
-            &self.training,
-            &self.calibration,
-            self.calibration_method,
-            self.downside_source,
-            self.decision_policy_snapshot_id,
-        )?;
+        self.cpcv_spec.validate()?;
+        let exact_hash = Self::derive_hash(&FeedbackCandidateRecipePreimage {
+            format_version: CANDIDATE_RECIPE_VERSION,
+            recipe_template_hash: self.recipe_template_hash,
+            planner_evidence_hash: self.planner_evidence_hash,
+            resource_budget: self.resource_budget,
+            training: &self.training,
+            calibration: &self.calibration,
+            calibration_method: self.calibration_method,
+            cpcv_spec: &self.cpcv_spec,
+            downside_source: self.downside_source,
+            decision_policy_snapshot_id: self.decision_policy_snapshot_id,
+        })?;
         let training_lineage = &self.training.source_lineage;
         let calibration_lineage = &self.calibration.source_lineage;
         if self.format_version != CANDIDATE_RECIPE_VERSION
@@ -249,23 +286,12 @@ impl FeedbackCandidateRecipe {
     }
 
     fn derive_hash(
-        training: &FeedbackDatasetBuildRequest,
-        calibration: &FeedbackDatasetBuildRequest,
-        calibration_method: CalibrationMethod,
-        downside_source: DownsideSource,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        preimage: &FeedbackCandidateRecipePreimage<'_>,
     ) -> Result<ContentHash, FeedbackError> {
         CanonicalDigest::content_hash_typed(
             CANDIDATE_RECIPE_DOMAIN,
             CANDIDATE_RECIPE_VERSION,
-            &FeedbackCandidateRecipePreimage {
-                format_version: CANDIDATE_RECIPE_VERSION,
-                training,
-                calibration,
-                calibration_method,
-                downside_source,
-                decision_policy_snapshot_id,
-            },
+            preimage,
         )
         .map_err(Into::into)
     }
@@ -273,6 +299,21 @@ impl FeedbackCandidateRecipe {
     #[must_use]
     pub const fn candidate_recipe_hash(&self) -> ContentHash {
         self.candidate_recipe_hash
+    }
+
+    #[must_use]
+    pub const fn recipe_template_hash(&self) -> ContentHash {
+        self.recipe_template_hash
+    }
+
+    #[must_use]
+    pub const fn planner_evidence_hash(&self) -> ContentHash {
+        self.planner_evidence_hash
+    }
+
+    #[must_use]
+    pub const fn resource_budget(&self) -> FeedbackRecipeResourceBudget {
+        self.resource_budget
     }
 
     #[must_use]
@@ -288,6 +329,11 @@ impl FeedbackCandidateRecipe {
     #[must_use]
     pub const fn calibration_method(&self) -> CalibrationMethod {
         self.calibration_method
+    }
+
+    #[must_use]
+    pub const fn cpcv_spec(&self) -> &FeedbackRecipeCpcvSpec {
+        &self.cpcv_spec
     }
 
     #[must_use]
@@ -308,9 +354,13 @@ impl TryFrom<FeedbackCandidateRecipeDocument> for FeedbackCandidateRecipe {
         let recipe = Self {
             format_version: document.format_version,
             candidate_recipe_hash: document.candidate_recipe_hash,
+            recipe_template_hash: document.recipe_template_hash,
+            planner_evidence_hash: document.planner_evidence_hash,
+            resource_budget: document.resource_budget,
             training: document.training,
             calibration: document.calibration,
             calibration_method: document.calibration_method,
+            cpcv_spec: document.cpcv_spec,
             downside_source: document.downside_source,
             decision_policy_snapshot_id: document.decision_policy_snapshot_id,
         };
@@ -804,6 +854,7 @@ impl TryFrom<FeedbackCandidateFamilyDocument> for FeedbackCandidateFamily {
 #[serde(deny_unknown_fields)]
 pub struct FeedbackDatasetBuildCommand {
     pub role: FeedbackDatasetRole,
+    pub resource_budget: FeedbackRecipeResourceBudget,
     pub request: FeedbackDatasetBuildRequest,
 }
 
@@ -812,6 +863,7 @@ pub struct FeedbackDatasetBuildCommand {
 #[serde(deny_unknown_fields)]
 pub struct FeedbackTrainingCommand {
     pub candidate_recipe_hash: ContentHash,
+    pub resource_budget: FeedbackRecipeResourceBudget,
     pub params: ModelTrainJobParams,
 }
 
@@ -821,6 +873,7 @@ pub struct FeedbackTrainingCommand {
 #[serde(deny_unknown_fields)]
 pub struct FeedbackCalibrationCommand {
     pub candidate_recipe_hash: ContentHash,
+    pub resource_budget: FeedbackRecipeResourceBudget,
     pub params: ModelCalibrationFitJobParams,
 }
 
@@ -829,6 +882,8 @@ pub struct FeedbackCalibrationCommand {
 #[serde(deny_unknown_fields)]
 pub struct FeedbackCpcvCommand {
     pub candidate_recipe_hash: ContentHash,
+    pub resource_budget: FeedbackRecipeResourceBudget,
+    pub cpcv_spec: FeedbackRecipeCpcvSpec,
     pub params: CpcvBacktestJobParams,
 }
 
@@ -1348,7 +1403,7 @@ pub struct FeedbackShadowContractInput {
     pub observation_window_end: DateTime<Utc>,
     pub minimum_observations: u64,
     pub required_window_secs: u64,
-    pub minimum_topn_overlap: Probability,
+    pub minimum_topn_decision_overlap: Probability,
 }
 
 /// Versioned F10 contract. It cannot represent replay as production evidence.
@@ -1372,7 +1427,7 @@ pub struct FeedbackShadowContract {
     observation_window_end: DateTime<Utc>,
     minimum_observations: u64,
     required_window_secs: u64,
-    minimum_topn_overlap: Probability,
+    minimum_topn_decision_overlap: Probability,
 }
 
 #[derive(Serialize)]
@@ -1393,7 +1448,7 @@ struct FeedbackShadowContractPreimage<'a> {
     observation_window_end: DateTime<Utc>,
     minimum_observations: u64,
     required_window_secs: u64,
-    minimum_topn_overlap: Probability,
+    minimum_topn_decision_overlap: Probability,
 }
 
 impl FeedbackShadowContract {
@@ -1415,7 +1470,7 @@ impl FeedbackShadowContract {
             observation_window_end: input.observation_window_end,
             minimum_observations: input.minimum_observations,
             required_window_secs: input.required_window_secs,
-            minimum_topn_overlap: input.minimum_topn_overlap,
+            minimum_topn_decision_overlap: input.minimum_topn_decision_overlap,
         })?;
         let contract = Self {
             format_version: SHADOW_CONTRACT_VERSION,
@@ -1435,7 +1490,7 @@ impl FeedbackShadowContract {
             observation_window_end: input.observation_window_end,
             minimum_observations: input.minimum_observations,
             required_window_secs: input.required_window_secs,
-            minimum_topn_overlap: input.minimum_topn_overlap,
+            minimum_topn_decision_overlap: input.minimum_topn_decision_overlap,
         };
         contract.validate()?;
         Ok(contract)
@@ -1463,6 +1518,8 @@ impl FeedbackShadowContract {
             .observation_window_end
             .signed_duration_since(self.observation_window_start)
             .num_seconds();
+        let duration_covers_requirement = u64::try_from(duration_secs)
+            .is_ok_and(|duration| duration >= self.required_window_secs);
         if self.format_version != SHADOW_CONTRACT_VERSION
             || self.observation_source != FeedbackShadowObservationSource::PublishedGeneration
             || profile.spec.category != self.category_scope
@@ -1472,9 +1529,9 @@ impl FeedbackShadowContract {
             || self.champion_serving_contract_hash == self.candidate_serving_contract_hash
             || self.minimum_observations == 0
             || self.required_window_secs == 0
-            || duration_secs <= 0
-            || self.minimum_topn_overlap.inner() <= Decimal::ZERO
-            || self.minimum_topn_overlap.inner() > Decimal::ONE
+            || !duration_covers_requirement
+            || self.minimum_topn_decision_overlap.inner() <= Decimal::ZERO
+            || self.minimum_topn_decision_overlap.inner() > Decimal::ONE
             || self.contract_hash != Self::derive_hash(&self.preimage())?
         {
             return Err(FeedbackError::InvalidComparisonEvidence {
@@ -1504,7 +1561,7 @@ impl FeedbackShadowContract {
             observation_window_end: self.observation_window_end,
             minimum_observations: self.minimum_observations,
             required_window_secs: self.required_window_secs,
-            minimum_topn_overlap: self.minimum_topn_overlap,
+            minimum_topn_decision_overlap: self.minimum_topn_decision_overlap,
         }
     }
 
@@ -1595,8 +1652,8 @@ impl FeedbackShadowContract {
     }
 
     #[must_use]
-    pub const fn minimum_topn_overlap(&self) -> Probability {
-        self.minimum_topn_overlap
+    pub const fn minimum_topn_decision_overlap(&self) -> Probability {
+        self.minimum_topn_decision_overlap
     }
 }
 
@@ -1621,14 +1678,14 @@ pub enum FeedbackShadowSubject {
     },
 }
 
-/// Frozen `Shadow` stage input and exact F09 lineage.
+/// Frozen `Shadow` stage input and exact `ShadowBind` lineage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackShadowJobParams {
     pub feedback_cycle_id: FeedbackCycleId,
     pub cycle_idempotency_hash: ContentHash,
     pub artifact_id: FeedbackShadowArtifactId,
-    pub previous: FeedbackComparisonArtifactRef,
+    pub binding: ShadowBindingArtifactRef,
     pub profile_ref: ResearchProfileRef,
     pub feedback_policy_hash: ContentHash,
     pub subject: FeedbackShadowSubject,
@@ -1636,7 +1693,7 @@ pub struct FeedbackShadowJobParams {
 
 impl FeedbackShadowJobParams {
     pub fn validate(&self) -> Result<(), FeedbackError> {
-        self.previous.validate_for(self.feedback_cycle_id)?;
+        self.binding.validate_for(self.feedback_cycle_id)?;
         self.profile_ref
             .validate()
             .map_err(|error| FeedbackError::InvalidComparisonEvidence {
@@ -1654,8 +1711,16 @@ impl FeedbackShadowJobParams {
             contract.validate()?;
             if contract.profile_ref() != &self.profile_ref
                 || contract.feedback_policy_hash() != self.feedback_policy_hash
-                || contract.decision_policy_snapshot_id()
-                    != self.previous.decision_policy_snapshot_id
+                || contract.decision_policy_snapshot_id() != self.binding.committed_snapshot_id
+                || contract.decision_policy_snapshot_hash() != self.binding.committed_snapshot_hash
+                || contract.policy_bundle_generation() != self.binding.committed_policy_generation
+                || contract.champion_model_version_id() != self.binding.champion_model_version_id
+                || contract.champion_serving_contract_hash()
+                    != self.binding.champion_serving_contract_hash
+                || contract.candidate_model_version_id() != self.binding.candidate_model_version_id
+                || contract.candidate_serving_contract_hash()
+                    != self.binding.candidate_serving_contract_hash
+                || contract.observation_window_start() != self.binding.bound_at
             {
                 return Err(FeedbackError::InvalidComparisonEvidence {
                     detail: "shadow candidate contract differs from cycle profile, policy, or comparison predecessor"
@@ -1742,7 +1807,7 @@ pub struct FeedbackShadowArtifactRef {
     pub job_id: ResearchJobId,
     pub artifact_id: FeedbackShadowArtifactId,
     pub input_hash: ContentHash,
-    pub previous: FeedbackComparisonArtifactRef,
+    pub binding: ShadowBindingArtifactRef,
     pub artifact: ResearchJobArtifactRef,
 }
 
@@ -1750,14 +1815,14 @@ impl FeedbackShadowArtifactRef {
     pub fn validate_for(
         &self,
         feedback_cycle_id: FeedbackCycleId,
-        comparison: &FeedbackComparisonArtifactRef,
+        binding: &ShadowBindingArtifactRef,
     ) -> Result<(), FeedbackError> {
         if self.feedback_cycle_id != feedback_cycle_id
             || self.artifact_id != FeedbackShadowArtifactId::from_cycle_id(feedback_cycle_id)
-            || &self.previous != comparison
+            || &self.binding != binding
         {
             return Err(FeedbackError::InvalidJobContract {
-                detail: "decision shadow predecessor does not bind the exact cycle and comparison"
+                detail: "decision shadow predecessor does not bind the exact cycle and ShadowBind"
                     .to_owned(),
             });
         }
@@ -1827,12 +1892,13 @@ impl FeedbackDecisionJobParams {
         self.drift.validate_for(self.feedback_cycle_id)?;
         self.comparison.validate_for(self.feedback_cycle_id)?;
         self.shadow
-            .validate_for(self.feedback_cycle_id, &self.comparison)?;
+            .validate_for(self.feedback_cycle_id, &self.shadow.binding)?;
         if FeedbackCycleId::from_idempotency_hash(&self.cycle_idempotency_hash)
             != self.feedback_cycle_id
             || self.artifact_id != FeedbackDecisionArtifactId::from_cycle_id(self.feedback_cycle_id)
             || self.candidate_family_hash != self.comparison.candidate_family_hash
             || self.decision_policy_snapshot_id != self.comparison.decision_policy_snapshot_id
+            || self.shadow.binding.comparison != self.comparison
         {
             return Err(FeedbackError::InvalidJobContract {
                 detail: "decision identity, family, policy, or predecessor lineage is invalid"
@@ -1897,6 +1963,7 @@ fn validate_dataset_commands(
     let mut calibration = BTreeSet::new();
     let mut evaluation_count = 0_usize;
     for command in commands {
+        command.resource_budget.validate()?;
         command.request.validate()?;
         if command.role.purpose() != command.request.purpose
             || !dataset_ids.insert(command.request.training_dataset_id)
@@ -1942,6 +2009,7 @@ fn validate_training_commands(commands: &[FeedbackTrainingCommand]) -> Result<()
     let mut model_runs = HashSet::new();
     let mut datasets = HashSet::new();
     for command in commands {
+        command.resource_budget.validate()?;
         validate_reason(&command.params.request.reason, 512, "Training")?;
         if !recipes.insert(command.candidate_recipe_hash)
             || !model_versions.insert(command.params.model_version_id)
@@ -1964,6 +2032,7 @@ fn validate_calibration_commands(
     let mut model_runs = HashSet::new();
     let mut datasets = HashSet::new();
     for command in commands {
+        command.resource_budget.validate()?;
         validate_reason(
             &command.params.request.reason,
             512,
@@ -1992,6 +2061,8 @@ fn validate_cpcv_commands(commands: &[FeedbackCpcvCommand]) -> Result<(), Feedba
     let mut datasets = HashSet::new();
     let mut path_sets = HashSet::new();
     for command in commands {
+        command.resource_budget.validate()?;
+        command.cpcv_spec.validate()?;
         validate_reason(&command.params.request.reason, 512, "CPCV")?;
         let path_set_id = command.params.request.path_set_id.ok_or_else(|| {
             invalid_batch("feedback CPCV command requires a preassigned path-set id")
@@ -2142,10 +2213,10 @@ mod tests {
     use super::{
         FEEDBACK_LEARNING_MAX_CANDIDATES, FeedbackCalibrationCommand, FeedbackCalibrationJobParams,
         FeedbackCandidateFamily, FeedbackCandidateFamilyInput, FeedbackCandidateRecipe,
-        FeedbackComparisonContract, FeedbackCpcvCommand, FeedbackCpcvJobParams,
-        FeedbackDatasetBuildCommand, FeedbackDatasetBuildRequest, FeedbackDatasetRole,
-        FeedbackDatasetSealJobParams, FeedbackLearningStageArtifactRef, FeedbackTrainingCommand,
-        FeedbackTrainingJobParams,
+        FeedbackCandidateRecipeInput, FeedbackComparisonContract, FeedbackCpcvCommand,
+        FeedbackCpcvJobParams, FeedbackDatasetBuildCommand, FeedbackDatasetBuildRequest,
+        FeedbackDatasetRole, FeedbackDatasetSealJobParams, FeedbackLearningStageArtifactRef,
+        FeedbackTrainingCommand, FeedbackTrainingJobParams,
     };
     use crate::{
         domain::{
@@ -2153,10 +2224,14 @@ mod tests {
                 CpcvBacktestJobParams, FitModelCalibratorRequest, ModelTrainJobParams,
                 RunCpcvBacktestRequest, TrainModelRequest,
             },
-            ports::{GovernanceActor, ModelCalibrationFitJobParams},
+            ports::{
+                FeedbackRecipeCpcvSpec, FeedbackRecipeResourceBudget, GovernanceActor,
+                ModelCalibrationFitJobParams,
+            },
             quant::{FeedbackCohortWindow, ResearchJobArtifactRef},
         },
         enums::quant::{CalibrationMethod, DatasetPurpose, DownsideSource, FeedbackStage},
+        runtime_config::ResearchValidationConfig,
         types::{
             ArtifactUri, BacktestPathSetId, CapabilityRegistryHashes, ContentHash,
             DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetSourceLineage, DecisionPolicySnapshotId,
@@ -2175,6 +2250,17 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 7, 1, hour, 0, 0)
             .single()
             .expect("valid fixture instant")
+    }
+
+    impl FeedbackRecipeResourceBudget {
+        const fn test_fixture() -> Self {
+            Self {
+                max_concurrency: 1,
+                max_working_set_bytes: 10 * 1024 * 1024 * 1024,
+                max_resident_model_bytes: 128 * 1024 * 1024,
+                deadline_secs: 300,
+            }
+        }
     }
 
     struct FeedbackExecutionFixture {
@@ -2258,25 +2344,34 @@ mod tests {
         }
 
         fn recipe(&self, _seed: u8) -> FeedbackCandidateRecipe {
-            FeedbackCandidateRecipe::try_seal(
-                self.dataset(
+            FeedbackCandidateRecipe::try_seal(FeedbackCandidateRecipeInput {
+                recipe_template_hash: hash(91),
+                planner_evidence_hash: hash(92),
+                resource_budget: FeedbackRecipeResourceBudget::test_fixture(),
+                training: self.dataset(
                     DatasetPurpose::Training,
                     instant(0),
                     instant(2),
                     self.model_spec_id,
                     self.model_spec_definition_hash,
                 ),
-                self.dataset(
+                calibration: self.dataset(
                     DatasetPurpose::Calibration,
                     instant(3),
                     instant(5),
                     self.model_spec_id,
                     self.model_spec_definition_hash,
                 ),
-                CalibrationMethod::Platt,
-                DownsideSource::MfeMae,
-                self.decision_policy_snapshot_id,
-            )
+                calibration_method: CalibrationMethod::Platt,
+                cpcv_spec: FeedbackRecipeCpcvSpec::try_new(
+                    ResearchValidationConfig::default(),
+                    3_600,
+                    300,
+                )
+                .expect("valid CPCV recipe spec"),
+                downside_source: DownsideSource::MfeMae,
+                decision_policy_snapshot_id: self.decision_policy_snapshot_id,
+            })
             .expect("valid candidate recipe")
         }
 
@@ -2317,6 +2412,7 @@ mod tests {
         let fixture = FeedbackExecutionFixture::new();
         FeedbackDatasetBuildCommand {
             role,
+            resource_budget: FeedbackRecipeResourceBudget::test_fixture(),
             request: FeedbackDatasetBuildRequest {
                 training_dataset_id: TrainingDatasetId::from_v7(),
                 model_spec_id: ModelSpecId::from_v7(),
@@ -2385,6 +2481,7 @@ mod tests {
     fn training_command(seed: u8) -> FeedbackTrainingCommand {
         FeedbackTrainingCommand {
             candidate_recipe_hash: hash(seed),
+            resource_budget: FeedbackRecipeResourceBudget::test_fixture(),
             params: ModelTrainJobParams {
                 model_version_id: ModelVersionId::from_v7(),
                 model_run_id: ModelRunId::from_v7(),
@@ -2399,6 +2496,7 @@ mod tests {
     fn calibration_command(seed: u8) -> FeedbackCalibrationCommand {
         FeedbackCalibrationCommand {
             candidate_recipe_hash: hash(seed),
+            resource_budget: FeedbackRecipeResourceBudget::test_fixture(),
             params: ModelCalibrationFitJobParams {
                 model_run_id: ModelRunId::from_v7(),
                 request: FitModelCalibratorRequest {
@@ -2417,6 +2515,13 @@ mod tests {
     fn cpcv_command(seed: u8) -> FeedbackCpcvCommand {
         FeedbackCpcvCommand {
             candidate_recipe_hash: hash(seed),
+            resource_budget: FeedbackRecipeResourceBudget::test_fixture(),
+            cpcv_spec: FeedbackRecipeCpcvSpec::try_new(
+                ResearchValidationConfig::default(),
+                3_600,
+                300,
+            )
+            .expect("valid CPCV command spec"),
             params: CpcvBacktestJobParams {
                 model_version_id: ModelVersionId::from_v7(),
                 model_run_id: ModelRunId::from_v7(),
@@ -2522,6 +2627,13 @@ mod tests {
         let mut value = to_value(family).expect("serialize candidate family");
         value["candidates"][0]["calibration_method"] = json!("isotonic");
         assert!(from_value::<FeedbackCandidateFamily>(value).is_err());
+
+        let family = fixture
+            .family(vec![fixture.recipe(10)])
+            .expect("seal budget-bound candidate family");
+        let mut value = to_value(family).expect("serialize budget-bound family");
+        value["candidates"][0]["resource_budget"]["deadline_secs"] = json!(301);
+        assert!(from_value::<FeedbackCandidateFamily>(value).is_err());
     }
 
     #[test]
@@ -2597,6 +2709,19 @@ mod tests {
                 family_hash,
                 stage_ref(cycle_id, FeedbackStage::Calibration),
                 vec![missing_path],
+            )
+            .is_err()
+        );
+
+        let mut seven_paths = cpcv_command(10);
+        seven_paths.cpcv_spec.validation.cpcv.k_test = 2;
+        assert!(
+            FeedbackCpcvJobParams::try_new(
+                cycle_id,
+                cycle_hash,
+                family_hash,
+                stage_ref(cycle_id, FeedbackStage::Calibration),
+                vec![seven_paths],
             )
             .is_err()
         );

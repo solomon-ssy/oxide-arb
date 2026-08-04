@@ -1,5 +1,7 @@
 //! Content-addressed Gamma catalog objects and append-only change ledger.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
@@ -210,8 +212,8 @@ pub struct CatalogMarketChangeInfo {
 #[derive(Debug, Clone)]
 pub struct CatalogSnapshotInfo {
     pub market: CatalogMarketChangeInfo,
-    pub event: CatalogEventChangeInfo,
-    pub event_markets: Vec<CatalogMarketChangeInfo>,
+    pub event: Arc<CatalogEventChangeInfo>,
+    pub event_markets: Arc<[CatalogMarketChangeInfo]>,
 }
 
 /// Immutable catalog changes required to replay a bounded historical window.

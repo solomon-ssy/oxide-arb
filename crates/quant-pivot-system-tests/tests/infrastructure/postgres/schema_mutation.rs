@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use quant_pivot_migration::{
     acquire_schema_mutation_lease, apply, expected_migrations, inspect_preproduction_postgres,
-    plan, reset_preproduction_postgres, verify,
+    plan, verify,
 };
 use quant_pivot_models::config::PostgresConfig;
 use quant_pivot_storage::postgres::PostgresPool;
@@ -139,7 +139,8 @@ pub async fn reset_rejects_unknown_never() {
         .await
         .expect("acquire reset schema mutation lease");
 
-    let error = reset_preproduction_postgres(&config, &lease)
+    let error = lease
+        .reset_preproduction_postgres(&config)
         .await
         .expect_err("an unknown session must deny reset");
     assert!(error.to_string().contains("connections remain"));
@@ -149,7 +150,8 @@ pub async fn reset_rejects_unknown_never() {
         .expect("denied reset must not terminate the unknown session");
     unknown_session.close().await;
 
-    reset_preproduction_postgres(&config, &lease)
+    lease
+        .reset_preproduction_postgres(&config)
         .await
         .expect("reset exact disposable database after sessions stop");
     let inventory = inspect_preproduction_postgres(&config)

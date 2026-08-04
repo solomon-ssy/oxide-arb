@@ -489,11 +489,9 @@ fn runtime_model_is_active(
     config
         .model_routing
         .model
-        .active_model_version_id
-        .as_ref()
-        .into_iter()
-        .chain(config.model_routing.model.category_model_pointers.values())
-        .any(|reference| &reference.id == expected)
+        .buy_routes
+        .values()
+        .any(|binding| &binding.champion.model_version_id == expected)
 }
 
 #[derive(Default)]

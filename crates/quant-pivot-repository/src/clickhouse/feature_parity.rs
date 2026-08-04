@@ -23,9 +23,12 @@ use quant_pivot_models::{
 use quant_pivot_storage::clickhouse::ClickHousePool;
 
 use crate::{
-    clickhouse::query_limits::{
-        FEATURE_CELLS_FOR_VECTORS, FEATURE_PARITY_PAGE, FEATURE_PARITY_SUMMARY,
-        MODEL_INPUTS_FOR_RUNS, SERVING_COMPLETIONS_FOR_RUNS,
+    clickhouse::{
+        query_batch::{UUID_INLINE_BYTES, canonical_by, extend_rows, query_chunks},
+        query_limits::{
+            FEATURE_CELLS_FOR_VECTORS, FEATURE_PARITY_PAGE, FEATURE_PARITY_SUMMARY,
+            MODEL_INPUTS_FOR_RUNS, SERVING_COMPLETIONS_FOR_RUNS,
+        },
     },
     traits::{FeatureParityEventRepository, ServingEvidenceRepository},
 };
@@ -159,60 +162,102 @@ impl ServingEvidenceRepository for ChFeatureParityEventRepository {
         &self,
         model_run_ids: &[ModelRunId],
     ) -> Result<Vec<QuantServingEvidenceCompletionRow>, StorageError> {
+        let model_run_ids = canonical_by(model_run_ids.to_vec(), |id| id.as_uuid());
         if model_run_ids.is_empty() {
             return Ok(Vec::new());
         }
-        SERVING_COMPLETIONS_FOR_RUNS
-            .query(
-                self.pool.client(),
-                "SELECT ?fields FROM quant_serving_evidence_completion \
-                 WHERE model_run_id IN ? \
-                 ORDER BY model_run_id, ingestion_time",
-            )
-            .bind(model_run_ids)
-            .fetch_all::<QuantServingEvidenceCompletionRow>()
-            .await
-            .map_err(StorageError::from)
+        let mut rows = Vec::new();
+        for run_ids in query_chunks(
+            &model_run_ids,
+            |_| UUID_INLINE_BYTES,
+            "quant_serving_evidence_completion",
+        )? {
+            let page = SERVING_COMPLETIONS_FOR_RUNS
+                .query(
+                    self.pool.client(),
+                    "SELECT ?fields FROM quant_serving_evidence_completion \
+                     WHERE model_run_id IN ? \
+                     ORDER BY model_run_id, ingestion_time",
+                )
+                .bind(run_ids.to_vec())
+                .fetch_all::<QuantServingEvidenceCompletionRow>()
+                .await?;
+            extend_rows(
+                &mut rows,
+                page,
+                SERVING_COMPLETIONS_FOR_RUNS,
+                "quant_serving_evidence_completion",
+            )?;
+        }
+        Ok(rows)
     }
 
     async fn model_inputs_for_runs(
         &self,
         model_run_ids: &[ModelRunId],
     ) -> Result<Vec<QuantModelInputEventRow>, StorageError> {
+        let model_run_ids = canonical_by(model_run_ids.to_vec(), |id| id.as_uuid());
         if model_run_ids.is_empty() {
             return Ok(Vec::new());
         }
-        MODEL_INPUTS_FOR_RUNS
-            .query(
-                self.pool.client(),
-                "SELECT ?fields FROM quant_model_input_event \
-                 WHERE model_run_id IN ? \
-                 ORDER BY model_run_id, market_id, encoded_column, raw_input_name, ingestion_time",
-            )
-            .bind(model_run_ids)
-            .fetch_all::<QuantModelInputEventRow>()
-            .await
-            .map_err(StorageError::from)
+        let mut rows = Vec::new();
+        for run_ids in query_chunks(
+            &model_run_ids,
+            |_| UUID_INLINE_BYTES,
+            "quant_model_input_event",
+        )? {
+            let page = MODEL_INPUTS_FOR_RUNS
+                .query(
+                    self.pool.client(),
+                    "SELECT ?fields FROM quant_model_input_event \
+                     WHERE model_run_id IN ? \
+                     ORDER BY model_run_id, market_id, encoded_column, raw_input_name, ingestion_time",
+                )
+                .bind(run_ids.to_vec())
+                .fetch_all::<QuantModelInputEventRow>()
+                .await?;
+            extend_rows(
+                &mut rows,
+                page,
+                MODEL_INPUTS_FOR_RUNS,
+                "quant_model_input_event",
+            )?;
+        }
+        Ok(rows)
     }
 
     async fn feature_cells_for_vectors(
         &self,
         feature_vector_ids: &[FeatureVectorId],
     ) -> Result<Vec<QuantFeatureEventRow>, StorageError> {
+        let feature_vector_ids = canonical_by(feature_vector_ids.to_vec(), |id| id.as_uuid());
         if feature_vector_ids.is_empty() {
             return Ok(Vec::new());
         }
-        FEATURE_CELLS_FOR_VECTORS
-            .query(
-                self.pool.client(),
-                "SELECT ?fields FROM quant_feature_event \
-                 WHERE feature_vector_id IN ? \
-                 ORDER BY feature_vector_id, feature_name, ingestion_time",
-            )
-            .bind(feature_vector_ids)
-            .fetch_all::<QuantFeatureEventRow>()
-            .await
-            .map_err(StorageError::from)
+        let mut rows = Vec::new();
+        for vector_ids in query_chunks(
+            &feature_vector_ids,
+            |_| UUID_INLINE_BYTES,
+            "quant_feature_event",
+        )? {
+            let page = FEATURE_CELLS_FOR_VECTORS
+                .query(
+                    self.pool.client(),
+                    "SELECT ?fields FROM quant_feature_event \
+                     WHERE feature_vector_id IN ? \
+                     ORDER BY feature_vector_id, feature_name, ingestion_time",
+                )
+                .bind(vector_ids.to_vec())
+                .fetch_all::<QuantFeatureEventRow>()
+                .await?;
+            extend_rows(
+                &mut rows,
+                page,
+                FEATURE_CELLS_FOR_VECTORS,
+                "quant_feature_event",
+            )?;
+        }
+        Ok(rows)
     }
 }
 

@@ -579,6 +579,7 @@ impl FeedbackCohortCandidate {
     ) -> Result<Self, FeedbackCohortContractError> {
         let plane_is_valid = match cohort {
             FeedbackCohort::ModelLearning => execution_rollup.is_none(),
+            FeedbackCohort::ModelScoreLearning => false,
             FeedbackCohort::ExecutionLearning => resolution_outcome.is_none(),
             FeedbackCohort::PolicyEvaluation => true,
         };

@@ -16,15 +16,35 @@ use quant_pivot_core::{
     observability::metrics_hub::MetricsHub,
     runtime_config::{CommittedPolicyApplicator, DecisionPolicyStore},
     service::{
-        feedback_coordinator::{FeedbackStageDirective, FeedbackStageSuccess},
+        feedback_comparison_stage::{FeedbackComparisonStageAdapter, FeedbackComparisonStageDeps},
+        feedback_coordinator::{
+            FeedbackShadowCancellationPort, FeedbackStageDirective, FeedbackStagePreparation,
+            FeedbackStageSuccess,
+        },
         feedback_decision::{FeedbackDecisionExecutionDeps, FeedbackDecisionExecutionService},
         feedback_decision_stage::{FeedbackDecisionStageAdapter, FeedbackDecisionStageDeps},
+        feedback_evaluation::{
+            FeedbackEvaluationReservationDeps, FeedbackEvaluationReservationService,
+        },
+        feedback_governance_stage::{FeedbackGovernanceStageAdapter, FeedbackGovernanceStageDeps},
+        feedback_learning_stage::{FeedbackLearningStageAdapter, FeedbackLearningStageDeps},
+        feedback_recipe_stage::{FeedbackRecipeStageAdapter, FeedbackRecipeStageDeps},
         feedback_shadow::{FeedbackShadowExecutionDeps, FeedbackShadowExecutionService},
+        feedback_shadow_binding::{
+            ShadowBindingCancellationDeps, ShadowBindingCancellationService,
+            ShadowBindingExecutionDeps, ShadowBindingExecutionService,
+        },
+        feedback_shadow_binding_stage::{
+            FeedbackShadowBindingStageAdapter, FeedbackShadowBindingStageDeps,
+        },
         feedback_shadow_stage::{FeedbackShadowStageAdapter, FeedbackShadowStageDeps},
         model_route_bootstrap::{ModelRouteBootstrapService, ModelRouteBootstrapServiceDeps},
         model_route_evidence::{ModelRouteEvidenceDeps, ModelRouteEvidenceService},
         model_route_governance::{ModelRouteGovernanceService, ModelRouteGovernanceServiceDeps},
-        model_serving_generation::{ModelServingGenerationStore, PublishedShadowRouteIdentity},
+        model_serving_generation::{
+            ModelServingGenerationStore, PublishedChampionRouteIdentity,
+            PublishedShadowRouteIdentity,
+        },
         promotion_preflight::{
             PromotionPreflightDraft, PromotionPreflightPlan, PromotionPreflightService,
             PromotionPreflightServiceDeps,
@@ -39,22 +59,28 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        api::{FeedbackDriftJobParams, GatePreviewIntent, QualityGateReportView},
+        api::{
+            CpcvBacktestJobParams, FeedbackCoverageJobParams, FeedbackDriftJobParams,
+            FitModelCalibratorRequest, GatePreviewIntent, ModelTrainJobParams,
+            QualityGateReportView, RunCpcvBacktestRequest, TrainModelRequest,
+        },
         governance::{RuntimeControlSnapshot, RuntimeControlUpdate},
         ports::{
             BootstrapQualityGateEvidence, BootstrapQualityGateInput, CalibratedModelSealCommand,
-            CandidateQualityGateEvidence, CommittedPolicyApplyPort,
-            FeedbackAttributionPlanArtifact, FeedbackAttributionPlanJobParams,
-            FeedbackCandidateValidation, FeedbackDecisionExecutionPort,
-            FeedbackLearningStageArtifactRef, FeedbackShadowExecutionPort,
-            FeedbackTruthFreezeArtifact, FeedbackTruthFreezeJobParams, FeedbackValidationArtifact,
-            FeedbackValidationArtifactRef, FeedbackValidationJobParams,
-            FeedbackValidationTrialOutcome, GovernanceActor, ModelGovernancePort,
-            PolicySnapshotPort, PreparedPolicySnapshot,
+            CandidateQualityGateEvidence, CommittedPolicyApplyPort, FeedbackAttributionJobParams,
+            FeedbackAttributionManifest, FeedbackCalibrationCommand, FeedbackCalibrationJobParams,
+            FeedbackCandidateFamily, FeedbackCandidateValidation, FeedbackComparisonArtifactRef,
+            FeedbackCpcvCommand, FeedbackCpcvJobParams, FeedbackDecisionExecutionPort,
+            FeedbackLearningStageArtifactRef, FeedbackShadowExecutionPort, FeedbackTrainingCommand,
+            FeedbackTrainingJobParams, FeedbackTruthFreezeArtifact, FeedbackTruthFreezeJobParams,
+            FeedbackValidationArtifact, FeedbackValidationArtifactRef, FeedbackValidationJobParams,
+            FeedbackValidationTrialOutcome, GovernanceActor, ModelCalibrationFitJobParams,
+            ModelGovernancePort, PolicySnapshotPort, PreparedPolicySnapshot,
+            ShadowBindingExecutionPort, ShadowBindingLifecycle,
         },
         quant::{
             CommitModelRoutePromotion, ExecutionAttemptBarrier, ExecutionRollupBarrier,
-            FeedbackCohortWindow, FeedbackCycleInfo, FeedbackStageEventInfo,
+            FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackStageEventInfo,
             FeedbackStageEventInput, FeedbackStageJobIdentity, IssuePromotionPermit,
             ModelVersionInfo, NewFeedbackStageEvent, NewResearchJob, NoopProgressSink,
             PromoteModelRoute, PromotionPermitActor, PromotionPermitInfo, PromotionPermitScope,
@@ -92,9 +118,9 @@ use quant_pivot_models::{
     enums::{
         common::MarketCategory,
         quant::{
-            DatasetPurpose, FeedbackCycleStatus, FeedbackDecision, FeedbackStage,
-            FeedbackStageEventKind, QuantRuntimeMode, ResearchJobKind, ResearchJobResultKind,
-            ResearchJobStatus,
+            CalibrationMethod, DatasetPurpose, DownsideSource, FeedbackCycleStatus,
+            FeedbackDecision, FeedbackStage, FeedbackStageEventKind, QuantRuntimeMode,
+            ResearchJobKind, ResearchJobResultKind, ResearchJobStatus, ShadowBindingStatus,
         },
         runtime_config::PolicyActivationKind,
     },
@@ -104,11 +130,10 @@ use quant_pivot_models::{
         PolicyApplyReadiness, PolicyBundleIdentity,
     },
     types::{
-        ArtifactUri, BacktestPathSetId, BacktestReportId, ContentHash, FeatureValue,
-        FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackDecisionArtifactId,
-        FeedbackDriftArtifactId, FeedbackLearningStageArtifactId, ModelRunId, ModelVersionId,
-        PolicyIdempotencyKey, PromotionPermitId, ResearchJobId, ResearchJobParams, RoleCode,
-        TrainingDatasetId, WorkerId,
+        BacktestPathSetId, BacktestReportId, CalibrationArtifactId, ContentHash, FeatureValue,
+        FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackDriftArtifactId, ModelRunId,
+        ModelVersionId, PolicyIdempotencyKey, PromotionPermitId, ResearchJobParams, RoleCode,
+        ShadowBindingArtifactId, TrainingDatasetId, WorkerId,
         model_quality::{
             GateClass, GateId, GateIntent, GateOutcome, GateStatus, GateSubject, QualityGateReport,
             QualityGateReportInput,
@@ -121,33 +146,37 @@ use quant_pivot_repository::{
         PgBacktestPathSetRepository, PgBacktestReportRepository, PgFeatureParityRepository,
         PgFeedbackCycleRepository, PgModelCandidateManifestRepository,
         PgModelGovernanceAuditRepository, PgModelRegistryRepository,
-        PgModelRouteBootstrapRepository, PgModelRoutePromotionRepository, PgPolicyRepository,
-        PgPromotionPermitRepository, PgResearchJobRepository, PgRuntimeControlRepository,
-        PgShadowComparisonRepository,
+        PgModelRouteBootstrapRepository, PgModelRoutePromotionRepository,
+        PgModelRouteShadowBindingRepository, PgPolicyRepository, PgPromotionPermitRepository,
+        PgResearchJobRepository, PgRuntimeControlRepository, PgShadowComparisonRepository,
+        PgTrainingDatasetRepository,
     },
     traits::{
         BacktestPathSetRepository, BacktestReportRepository, FeatureParityLatchActor,
-        FeatureParityRepository, FeedbackCycleClaim, FeedbackCycleLeaseGuard,
-        FeedbackCycleRepository, ModelCandidateManifestRepository, ModelGovernanceAuditRepository,
-        ModelRegistryRepository, ModelRouteBootstrapRepository, ModelRoutePromotionCommit,
-        ModelRoutePromotionOutcome, ModelRoutePromotionRepository, PolicyRepository,
-        PromotionPermitIssueOutcome, PromotionPermitRepository, PromotionPermitRevokeOutcome,
-        ResearchJobEnqueueOutcome, ResearchJobRepository, RuntimeControlRepository,
+        FeatureParityRepository, FeedbackCycleClaim, FeedbackCycleGeneration,
+        FeedbackCycleLeaseGuard, FeedbackCycleRepository, ModelCandidateManifestRepository,
+        ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRouteBootstrapRepository,
+        ModelRoutePromotionCommit, ModelRoutePromotionOutcome, ModelRoutePromotionRepository,
+        ModelRouteShadowBindingRepository, PolicyRepository, PromotionPermitIssueOutcome,
+        PromotionPermitRepository, PromotionPermitRevokeOutcome, ResearchJobEnqueueOutcome,
+        ResearchJobRepository, RuntimeControlRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
     feedback::{
-        ChampionBaselineRef, ConceptDriftDetail, DriftGateOutcome,
-        FEEDBACK_DRIFT_ARTIFACT_FORMAT_VERSION, FeatureDriftDetail, FeedbackDriftArtifact,
+        ConceptDriftDetail, DriftGateOutcome, FEEDBACK_DRIFT_ARTIFACT_FORMAT_VERSION,
+        FeatureDriftDetail, FeedbackCoverageArtifact, FeedbackCoverageCodec, FeedbackDriftArtifact,
         FeedbackDriftCodec, LabelDriftDetail, drift_gate, drift_observations,
     },
+    feedback_comparison::FeedbackComparisonCodec,
     feedback_decision::FeedbackDecisionCodec,
     feedback_governance::FeedbackGovernanceCodec,
     feedback_learning::{
-        FeedbackCpcvStageResult, FeedbackLearningStageArtifact, FeedbackLearningStageCodec,
-        FeedbackLearningStageResults,
+        FeedbackCalibrationStageResult, FeedbackCpcvStageResult, FeedbackLearningStageArtifact,
+        FeedbackLearningStageCodec, FeedbackLearningStageResults, FeedbackTrainingStageResult,
     },
+    feedback_shadow_binding::ShadowBindingCodec,
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
@@ -166,22 +195,327 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    feedback_boot_schema::content_hash,
+    feedback_boot_schema::{content_hash, persist_recipe_plan_fixture},
     feedback_decision_evidence::{
         DecisionArtifactEvidence, DecisionPath, DecisionPathEvidence, DecisionPathEvidenceManifest,
         DeploymentAuthorityBoundary, ExactDecisionIdentifiers, InvariantDiff, InvariantSnapshot,
         PermitBindingEvidence, PermitEvidence, PermitLifecycleEvidence, ReplayEvidence,
         RestartReadBackEvidence, RowCountSnapshot, TimelineEventEvidence,
     },
+    feedback_learning_stage::{
+        FeedbackDatasetParamsExt, candidate_dataset, dataset_params, persist_artifact,
+    },
     feedback_shadow_stage::{
         ActivatedServing, ArtifactRoot, ShadowModels, activate_crypto_generation,
-        activate_generation, build_crypto_models, build_models, comparison_params,
-        comparison_params_with_validation, insert_observation, insert_stable_observations,
-        record_comparison, record_crypto_cycle, record_cycle,
+        build_crypto_models, build_serving, comparison_params_with_validation, insert_observation,
+        insert_stable_observations, record_comparison, record_crypto_cycle,
     },
+    feedback_signal_stage::{CoverageScenario, coverage_artifact, persist_coverage},
 };
 
 const JOB_LEASE_SECS: i64 = 90;
+const SHADOW_MODEL_BUDGET_BYTES: u64 = 1 << 30;
+
+fn recipe_stage(
+    cycles: &Arc<PgFeedbackCycleRepository>,
+    jobs: &Arc<PgResearchJobRepository>,
+    store: Arc<dyn ArtifactStore>,
+) -> Arc<FeedbackRecipeStageAdapter> {
+    Arc::new(
+        FeedbackRecipeStageAdapter::try_new(FeedbackRecipeStageDeps {
+            cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
+            jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
+            artifacts: store,
+            max_recovery_attempts: 3,
+        })
+        .expect("build F11 RecipePlan stage"),
+    )
+}
+
+fn comparison_stage(
+    db: &DatabaseConnection,
+    cycles: &Arc<PgFeedbackCycleRepository>,
+    jobs: &Arc<PgResearchJobRepository>,
+    store: Arc<dyn ArtifactStore>,
+) -> Arc<FeedbackComparisonStageAdapter> {
+    let recipes = recipe_stage(cycles, jobs, Arc::clone(&store));
+    let learning = Arc::new(
+        FeedbackLearningStageAdapter::try_new(FeedbackLearningStageDeps {
+            jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
+            artifacts: Arc::clone(&store),
+            recipes,
+            max_recovery_attempts: 3,
+        })
+        .expect("build terminal Comparison learning stage"),
+    );
+    let governance = Arc::new(
+        FeedbackGovernanceStageAdapter::try_new(FeedbackGovernanceStageDeps {
+            cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
+            jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
+            artifacts: Arc::clone(&store),
+            learning: Arc::clone(&learning),
+            max_recovery_attempts: 3,
+        })
+        .expect("build terminal Comparison governance stage"),
+    );
+    let reservations = Arc::new(FeedbackEvaluationReservationService::new(
+        FeedbackEvaluationReservationDeps {
+            cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
+            datasets: Arc::new(PgTrainingDatasetRepository::new(db.clone()))
+                as Arc<dyn TrainingDatasetRepository>,
+            learning_stages: Arc::clone(&learning),
+        },
+    ));
+    Arc::new(
+        FeedbackComparisonStageAdapter::try_new(FeedbackComparisonStageDeps {
+            cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
+            jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
+            models: Arc::new(PgModelRegistryRepository::new(db.clone()))
+                as Arc<dyn ModelRegistryRepository>,
+            path_sets: Arc::new(PgBacktestPathSetRepository::new(db.clone()))
+                as Arc<dyn BacktestPathSetRepository>,
+            artifacts: store,
+            learning_stages: learning,
+            governance_stages: governance,
+            evaluation_reservations: reservations,
+            max_recovery_attempts: 3,
+        })
+        .expect("build terminal Comparison stage"),
+    )
+}
+
+fn shadow_binding_stage(
+    db: &DatabaseConnection,
+    cycles: &Arc<PgFeedbackCycleRepository>,
+    jobs: &Arc<PgResearchJobRepository>,
+    store: Arc<dyn ArtifactStore>,
+    recipes: Arc<FeedbackRecipeStageAdapter>,
+) -> Arc<FeedbackShadowBindingStageAdapter> {
+    Arc::new(
+        FeedbackShadowBindingStageAdapter::try_new(FeedbackShadowBindingStageDeps {
+            cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
+            jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
+            models: Arc::new(PgModelRegistryRepository::new(db.clone())),
+            policies: Arc::new(PgPolicyRepository::new(db.clone())),
+            manifests: Arc::new(PgModelCandidateManifestRepository::new(db.clone())),
+            artifacts: store,
+            recipes,
+            total_shadow_model_budget_bytes: SHADOW_MODEL_BUDGET_BYTES,
+            max_recovery_attempts: 3,
+        })
+        .expect("build F11 ShadowBind stage"),
+    )
+}
+
+struct ShadowBindingApplyProbe {
+    readiness: Mutex<PolicyApplyReadiness>,
+}
+
+impl ShadowBindingApplyProbe {
+    const fn new(initial: PolicyBundleIdentity) -> Self {
+        Self {
+            readiness: Mutex::new(PolicyApplyReadiness::Ready { applied: initial }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CommittedPolicyApplyPort for ShadowBindingApplyProbe {
+    async fn apply_committed(
+        &self,
+        bundle: ActivePolicyBundle,
+    ) -> Result<PolicyApplyReadiness, ControlError> {
+        let readiness = PolicyApplyReadiness::Ready {
+            applied: PolicyBundleIdentity::from(&bundle),
+        };
+        *self
+            .readiness
+            .lock()
+            .map_err(|_| ControlError::Engine("ShadowBind apply probe is poisoned".to_owned()))? =
+            readiness;
+        Ok(readiness)
+    }
+
+    fn publish_prepared(
+        &self,
+        prepared: PreparedPolicySnapshot,
+        bundle: ActivePolicyBundle,
+    ) -> Result<PolicyApplyReadiness, ControlError> {
+        prepared.publish_bundle(bundle.clone())?;
+        let readiness = PolicyApplyReadiness::Ready {
+            applied: PolicyBundleIdentity::from(&bundle),
+        };
+        *self
+            .readiness
+            .lock()
+            .map_err(|_| ControlError::Engine("ShadowBind apply probe is poisoned".to_owned()))? =
+            readiness;
+        Ok(readiness)
+    }
+
+    fn readiness(&self) -> PolicyApplyReadiness {
+        *self
+            .readiness
+            .lock()
+            .expect("lock ShadowBind apply readiness")
+    }
+}
+
+async fn record_shadow_binding(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    serving: &ActivatedServing,
+    cycles: &Arc<PgFeedbackCycleRepository>,
+    jobs: &Arc<PgResearchJobRepository>,
+    claim: &FeedbackCycleClaim,
+    event_sequence: i64,
+) -> ActivatedServing {
+    let recipes = recipe_stage(cycles, jobs, Arc::clone(store));
+    let stage = shadow_binding_stage(db, cycles, jobs, Arc::clone(store), recipes);
+    let identity = FeedbackStageJobIdentity::try_root(
+        claim.cycle.feedback_cycle_id,
+        FeedbackStage::ShadowBind,
+    )
+    .expect("ShadowBind fixture identity");
+    let job = stage
+        .prepare(&claim.cycle, claim.lease, identity)
+        .await
+        .expect("prepare exact ShadowBind job");
+    let params = match &job.params_json {
+        ResearchJobParams::FeedbackShadowBind(params) => params.as_ref().clone(),
+        _ => panic!("ShadowBind stage emitted another job kind"),
+    };
+    match jobs.enqueue(job).await.expect("enqueue ShadowBind job") {
+        ResearchJobEnqueueOutcome::Inserted(_) | ResearchJobEnqueueOutcome::AlreadyPresent(_) => {}
+    }
+    let worker = WorkerId::from_v7();
+    let leased = jobs
+        .lease_next(
+            &[ResearchJobKind::FeedbackShadowBind],
+            &worker,
+            Utc::now() + Duration::seconds(JOB_LEASE_SECS),
+        )
+        .await
+        .expect("lease ShadowBind job")
+        .expect("queued ShadowBind job");
+    assert_eq!(leased.job_id, identity.job_id());
+
+    let policies = Arc::new(PgPolicyRepository::new(db.clone()));
+    let active = policies
+        .load_current_bundle()
+        .await
+        .expect("load pre-ShadowBind policy")
+        .expect("pre-ShadowBind policy exists");
+    let runtime_repository = Arc::new(PgRuntimeControlRepository::new(db.clone()));
+    let runtime = runtime_repository
+        .load()
+        .await
+        .expect("load ShadowBind runtime control");
+    let runtime_controls = RuntimeControlsHandle::new(RuntimeControlSnapshot::from(runtime));
+    let policy_store = Arc::new(DecisionPolicyStore::new_active(active.clone()));
+    let route_evidence = Arc::new(ModelRouteEvidenceService::new(ModelRouteEvidenceDeps {
+        policies: Arc::clone(&policies) as Arc<dyn PolicyRepository>,
+        durable_runtime: Arc::clone(&runtime_repository) as Arc<dyn RuntimeControlRepository>,
+        runtime_controls,
+        policy_store: Arc::clone(&policy_store),
+        models: Arc::new(PgModelRegistryRepository::new(db.clone()))
+            as Arc<dyn ModelRegistryRepository>,
+        feature_parity: Arc::new(PgFeatureParityRepository::new(db.clone()))
+            as Arc<dyn FeatureParityRepository>,
+        runtime_registry: Arc::clone(&serving.runtime_registry),
+        serving_generations: Arc::clone(&serving.generations),
+    }));
+    let policy_apply = Arc::new(ShadowBindingApplyProbe::new(PolicyBundleIdentity::from(
+        &active,
+    )));
+    let result = ShadowBindingExecutionService::new(ShadowBindingExecutionDeps {
+        bindings: Arc::new(PgModelRouteShadowBindingRepository::new(db.clone()))
+            as Arc<dyn ModelRouteShadowBindingRepository>,
+        policy_apply: Arc::clone(&policy_apply) as Arc<dyn CommittedPolicyApplyPort>,
+        route_evidence,
+        artifacts: Arc::clone(store),
+    })
+    .bind_shadow(
+        params.clone(),
+        Arc::new(NoopProgressSink),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("commit and converge exact ShadowBind");
+    let binding_bytes = store
+        .get(&result.artifact.uri)
+        .await
+        .expect("read committed ShadowBind artifact");
+    let binding =
+        ShadowBindingCodec::decode(&binding_bytes).expect("decode committed ShadowBind artifact");
+    let info = jobs
+        .finalize(
+            &identity.job_id(),
+            &worker,
+            ResearchJobFinalization::succeeded(
+                Some(ResearchJobResultRef {
+                    kind: ResearchJobResultKind::ShadowBindingArtifact,
+                    id: result.artifact_id.as_uuid(),
+                }),
+                Some(result.artifact.clone()),
+                None,
+            ),
+        )
+        .await
+        .expect("finalize ShadowBind job");
+    stage
+        .succeeded(&claim.cycle, &info)
+        .await
+        .expect("verify exact ShadowBind terminal artifact");
+    cycles
+        .append_stage(
+            claim.lease,
+            NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+                feedback_cycle_id: claim.cycle.feedback_cycle_id,
+                event_sequence,
+                stage: FeedbackStage::ShadowBind,
+                event_kind: FeedbackStageEventKind::Succeeded,
+                trigger_family: None,
+                research_job_id: Some(identity.job_id()),
+                actor: None,
+                reason_code: None,
+                evidence_uri: Some(result.artifact.uri),
+                evidence_hash: Some(result.artifact.content_hash),
+                occurred_at: info.finished_at.expect("ShadowBind terminal time"),
+            })
+            .expect("seal ShadowBind success event"),
+        )
+        .await
+        .expect("append ShadowBind success event");
+    let converged = build_serving(db, store).await;
+    let committed = PgPolicyRepository::new(db.clone())
+        .load_current_bundle()
+        .await
+        .expect("reload committed ShadowBind policy")
+        .expect("committed ShadowBind policy exists");
+    let published = converged
+        .generations
+        .current_route(claim.cycle.route)
+        .expect("committed ShadowBind route exists")
+        .published_shadow_identity()
+        .expect("committed ShadowBind route has a shadow");
+    assert_eq!(
+        policy_apply.readiness(),
+        PolicyApplyReadiness::Ready {
+            applied: PolicyBundleIdentity::from(&committed),
+        }
+    );
+    assert_eq!(
+        published.candidate_model_version_id,
+        params.candidate_model_version_id
+    );
+    assert_eq!(published.shadow_bound_at, binding.receipt.bound_at);
+    assert_eq!(
+        published.route_generation,
+        binding.receipt.binding_generation
+    );
+    converged
+}
 
 const PROMOTION_REPOSITORY_SOURCE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -224,6 +558,7 @@ fn expiring_preflight(
         expected_runtime_control_revision: original.expected_runtime_control_revision(),
         expected_decision_policy_snapshot_id: original.expected_snapshot_id(),
         expected_snapshot_hash: original.expected_snapshot_hash(),
+        expected_route_generation: original.expected_route_generation(),
         champion_model_version_id: original.champion_model_version_id(),
         champion_serving_contract_hash: original.champion_serving_contract_hash(),
         candidate_model_version_id: original.candidate_model_version_id(),
@@ -291,12 +626,29 @@ fn serving_route_value(identity: &PublishedShadowRouteIdentity) -> Value {
         "decision_policy_snapshot_id": identity.decision_policy_snapshot_id,
         "decision_policy_snapshot_hash": identity.decision_policy_snapshot_hash,
         "policy_bundle_generation": identity.policy_bundle_generation,
-        "active_model_version_id": identity.active_model_version_id,
-        "active_serving_contract_hash": identity.active_serving_contract_hash,
-        "shadow_model_version_id": identity.shadow_model_version_id,
-        "shadow_serving_contract_hash": identity.shadow_serving_contract_hash,
-        "minimum_topn_overlap": identity.minimum_topn_overlap,
+        "champion_model_version_id": identity.champion_model_version_id,
+        "champion_serving_contract_hash": identity.champion_serving_contract_hash,
+        "candidate_model_version_id": identity.candidate_model_version_id,
+        "candidate_serving_contract_hash": identity.candidate_serving_contract_hash,
+        "minimum_topn_decision_overlap": identity.minimum_topn_decision_overlap,
         "required_shadow_window_secs": identity.required_shadow_window_secs,
+    })
+}
+
+fn champion_route_value(identity: &PublishedChampionRouteIdentity) -> Value {
+    json!({
+        "route": route_name(identity.route),
+        "category_scope": identity.category_scope,
+        "research_profile_artifact_id": identity.research_profile_artifact_id,
+        "decision_policy_snapshot_id": identity.decision_policy_snapshot_id,
+        "decision_policy_snapshot_hash": identity.decision_policy_snapshot_hash,
+        "policy_bundle_generation": identity.policy_bundle_generation,
+        "champion_model_version_id": identity.champion_model_version_id,
+        "champion_serving_contract_hash": identity.champion_serving_contract_hash,
+        "candidate_model_version_id": Value::Null,
+        "candidate_serving_contract_hash": Value::Null,
+        "champion_bound_at": identity.champion_bound_at,
+        "route_generation": identity.route_generation,
     })
 }
 
@@ -390,9 +742,17 @@ impl InvariantProbe {
         let route = self
             .serving_generations
             .current_route(self.route)
-            .expect("load W4-E04 in-memory serving route")
-            .published_shadow_identity()
-            .expect("W4-E04 in-memory route is complete");
+            .expect("load W4-E04 in-memory serving route");
+        let in_memory_serving_route = route.published_shadow_identity().map_or_else(
+            |_| {
+                champion_route_value(
+                    &route
+                        .published_champion_identity()
+                        .expect("W4-E04 in-memory champion route is complete"),
+                )
+            },
+            |identity| serving_route_value(&identity),
+        );
         let policy_apply_readiness = self
             .policy_apply
             .as_ref()
@@ -406,7 +766,7 @@ impl InvariantProbe {
             champion_model: wire_value(&champion_model),
             candidate_model: wire_value(&candidate_model),
             parity_latch: wire_value(&parity_latch),
-            in_memory_serving_route: serving_route_value(&route),
+            in_memory_serving_route,
             policy_apply_readiness,
             deployment_authority: DeploymentAuthorityBoundary::default(),
         }
@@ -570,6 +930,8 @@ fn assert_protected_unchanged(
 
 struct AdvancingDriftSeed<'a> {
     cycle: &'a FeedbackCycleInfo,
+    coverage: &'a FeedbackCoverageArtifact,
+    coverage_ref: &'a ResearchJobArtifactRef,
 }
 
 impl AdvancingDriftSeed<'_> {
@@ -580,27 +942,8 @@ impl AdvancingDriftSeed<'_> {
             .resolve_builtin_research_profile()
             .expect("resolve F11 ResearchProfile");
         let policy = profile.spec.feedback_policy;
-        let evaluation_window = FeedbackCohortWindow::try_new(
-            self.cycle.profile_ref.clone(),
-            self.cycle.label_cutoff - Duration::days(i64::from(policy.evaluation_window_days)),
-            self.cycle.label_cutoff,
-        )
-        .expect("F11 evaluation window");
-        let champion_baseline = ChampionBaselineRef {
-            training_dataset_id: TrainingDatasetId::from_v7(),
-            purpose: DatasetPurpose::Training,
-            dataset_hash: content_hash('a'),
-            manifest_hash: content_hash('b'),
-            artifact_bytes_hash: content_hash('c'),
-            parquet_uri: ArtifactUri::parse("s3://f11-decision/champion-baseline.parquet")
-                .expect("F11 baseline URI"),
-            feature_schema_hash: content_hash('d'),
-            label_schema_hash: content_hash('e'),
-            window_start: evaluation_window.window_start() - Duration::days(2),
-            window_end: evaluation_window.window_start() - Duration::days(1),
-            pit_cutoff: evaluation_window.window_start(),
-            sample_count: 2,
-        };
+        let evaluation_window = self.coverage.evaluation_window.clone();
+        let champion_baseline = self.coverage.champion_baseline.clone();
         let data_detail = FeatureDriftDetail::compute(
             FeatureName::from_static("test.f11_regime"),
             &[
@@ -637,12 +980,9 @@ impl AdvancingDriftSeed<'_> {
             artifact_id: FeedbackDriftArtifactId::from_cycle_id(self.cycle.feedback_cycle_id),
             feedback_cycle_id: self.cycle.feedback_cycle_id,
             cycle_idempotency_hash: self.cycle.idempotency_hash,
-            coverage_artifact_id: FeedbackCoverageArtifactId::from_cycle_id(
-                self.cycle.feedback_cycle_id,
-            ),
-            coverage_artifact_uri: ArtifactUri::parse("s3://f11-decision/coverage.json")
-                .expect("F11 coverage URI"),
-            coverage_artifact_hash: content_hash('f'),
+            coverage_artifact_id: self.coverage.artifact_id,
+            coverage_artifact_uri: self.coverage_ref.uri.clone(),
+            coverage_artifact_hash: self.coverage_ref.content_hash,
             profile_ref: self.cycle.profile_ref.clone(),
             feedback_policy: policy,
             feedback_policy_hash: self.cycle.feedback_policy_hash,
@@ -799,6 +1139,7 @@ async fn record_truth_attribution(
     cycles: &PgFeedbackCycleRepository,
     jobs: &PgResearchJobRepository,
     claim: &FeedbackCycleClaim,
+    family: &FeedbackCandidateFamily,
 ) {
     let cycle = &claim.cycle;
     let cutoff = cycle.label_cutoff;
@@ -813,9 +1154,11 @@ async fn record_truth_attribution(
         ResolutionProjectionBarrier {
             cutoff,
             unresolved_count: 0,
+            mapping_blocked_count: 0,
             quarantined_count: 0,
+            excluded_count: 0,
             oldest_unresolved_at: None,
-            verified_through: cutoff,
+            terminal_through: cutoff,
         },
         ExecutionAttemptBarrier {
             cutoff,
@@ -846,23 +1189,51 @@ async fn record_truth_attribution(
     .record(cycles, jobs, claim)
     .await;
 
-    let attribution_params = FeedbackAttributionPlanJobParams::try_new(
+    let coverage = coverage_artifact(
+        cycle,
+        family
+            .shared_evaluation()
+            .source_lineage
+            .capability_registry_hashes
+            .clone(),
+        CoverageScenario::Advance,
+    );
+    let coverage_ref = persist_coverage(store, &coverage).await;
+    let coverage_params = FeedbackCoverageJobParams {
+        feedback_cycle_id: cycle.feedback_cycle_id,
+        cycle_idempotency_hash: cycle.idempotency_hash,
+        artifact_id: coverage.artifact_id,
+    };
+    StageFixtureInput {
+        stage: FeedbackStage::Coverage,
+        params: ResearchJobParams::FeedbackCoverage(coverage_params.clone()),
+        result: ResearchJobResultRef {
+            kind: ResearchJobResultKind::FeedbackCoverageArtifact,
+            id: coverage_params.artifact_id.as_uuid(),
+        },
+        artifact: coverage_ref,
+        event_sequence: 3,
+    }
+    .record(cycles, jobs, claim)
+    .await;
+
+    let attribution_params = FeedbackAttributionJobParams::try_new(
         cycle.feedback_cycle_id,
         cycle.idempotency_hash,
         cutoff,
         cycles
             .database_time()
             .await
-            .expect("load attribution-plan database time"),
-        cycle.candidate_family.shared_evaluation().window.clone(),
+            .expect("load attribution-manifest database time"),
+        coverage.evaluation_window,
         truth_ref,
     )
-    .expect("freeze AttributionPlan params");
+    .expect("freeze AttributionManifest params");
     let attribution =
-        FeedbackAttributionPlanArtifact::try_new(&attribution_params, Vec::new(), Vec::new())
-            .expect("seal PIT-safe AttributionPlan artifact");
+        FeedbackAttributionManifest::try_new(&attribution_params, Vec::new(), Vec::new())
+            .expect("seal PIT-safe AttributionManifest artifact");
     let attribution_bytes = FeedbackGovernanceCodec::encode_attribution(&attribution)
-        .expect("encode AttributionPlan artifact");
+        .expect("encode AttributionManifest artifact");
     let attribution_ref = persist_stage_artifact(
         store,
         ArtifactNamespace::FeedbackAttribution,
@@ -870,14 +1241,14 @@ async fn record_truth_attribution(
     )
     .await;
     StageFixtureInput {
-        stage: FeedbackStage::AttributionPlan,
-        params: ResearchJobParams::FeedbackAttributionPlan(attribution_params.clone()),
+        stage: FeedbackStage::Attribution,
+        params: ResearchJobParams::FeedbackAttribution(attribution_params.clone()),
         result: ResearchJobResultRef {
-            kind: ResearchJobResultKind::FeedbackAttributionPlanArtifact,
+            kind: ResearchJobResultKind::FeedbackAttributionManifest,
             id: attribution_params.artifact_id.as_uuid(),
         },
         artifact: attribution_ref,
-        event_sequence: 3,
+        event_sequence: 4,
     }
     .record(cycles, jobs, claim)
     .await;
@@ -912,19 +1283,20 @@ fn candidate_gate_report(
             pass(GateId::LabelCoverage, GateClass::Hard),
             pass(GateId::MaterializationCoverage, GateClass::Hard),
             pass(GateId::NoPitLeakage, GateClass::Hard),
-            pass(GateId::BacktestRequired, GateClass::Hard),
+            pass(GateId::ValidationEvidenceRequired, GateClass::Hard),
             pass(GateId::MaxDrawdown, GateClass::Hard),
             pass(GateId::TurnoverBudget, GateClass::Hard),
             pass(GateId::TailLossBudget, GateClass::Hard),
             pass(GateId::HitRate, GateClass::Soft),
             pass(GateId::CategoryConcentration, GateClass::Soft),
             pass(GateId::CpcvRequired, GateClass::Hard),
+            pass(GateId::CpcvPathCount, GateClass::Hard),
             pass(GateId::RankIc, GateClass::Hard),
             pass(GateId::DeflatedSharpe, GateClass::Hard),
             pass(GateId::Pbo, GateClass::Hard),
             pass(GateId::MinTrackRecordLength, GateClass::Soft),
             not_applicable(GateId::LiquidityExitFeasible, GateClass::Hard),
-            not_applicable(GateId::ShadowOverlapStability, GateClass::Hard),
+            not_applicable(GateId::ShadowDecisionOverlap, GateClass::Hard),
             not_applicable(GateId::CalibrationRequired, GateClass::Hard),
             pass(GateId::ExplainabilityRequired, GateClass::Hard),
         ],
@@ -938,128 +1310,381 @@ struct ValidationGateFixture {
     path_set_hash: ContentHash,
 }
 
-async fn record_validation_gate(
-    store: &Arc<dyn ArtifactStore>,
-    cycles: &PgFeedbackCycleRepository,
-    jobs: &PgResearchJobRepository,
-    claim: &FeedbackCycleClaim,
-    models: &ShadowModels,
-) -> ValidationGateFixture {
-    let cycle = &claim.cycle;
-    let recipe_hash = cycle.candidate_family.candidates()[0].candidate_recipe_hash();
-    let calibration_stage = FeedbackStage::Calibration;
-    let calibration_artifact_id = FeedbackLearningStageArtifactId::from_cycle_stage(
-        cycle.feedback_cycle_id,
-        calibration_stage,
-    )
-    .expect("Calibration artifact identity");
-    let calibration_ref = FeedbackLearningStageArtifactRef {
-        feedback_cycle_id: cycle.feedback_cycle_id,
-        stage: calibration_stage,
-        job_id: FeedbackStageJobIdentity::try_root(cycle.feedback_cycle_id, calibration_stage)
-            .expect("Calibration job identity")
-            .job_id(),
-        artifact_id: calibration_artifact_id,
-        input_hash: content_hash('8'),
-        artifact: ResearchJobArtifactRef {
-            uri: ArtifactUri::parse("s3://f11-decision/calibration.json")
-                .expect("Calibration artifact URI"),
-            content_hash: content_hash('9'),
-        },
-    };
-    let path_set_id = BacktestPathSetId::from_v7();
-    let path_set_hash = content_hash('a');
-    let cpcv_input_hash = content_hash('b');
-    let cpcv = FeedbackLearningStageArtifact::try_new(
-        cycle.feedback_cycle_id,
-        cycle.idempotency_hash,
-        cycle.candidate_family_hash,
-        cpcv_input_hash,
-        Some(calibration_ref),
-        FeedbackLearningStageResults::Cpcv(vec![FeedbackCpcvStageResult::Evaluated {
-            candidate_recipe_hash: recipe_hash,
-            model_version_id: models.candidate.model_version_id,
-            training_dataset_id: models
-                .candidate
-                .training_dataset_id
-                .expect("promotion candidate Training Dataset"),
-            path_set_id,
-            model_run_id: ModelRunId::from_feedback_stage(
-                cycle.feedback_cycle_id,
-                FeedbackStage::Cpcv,
-                recipe_hash,
-            ),
-            path_set_hash,
-        }]),
-    )
-    .expect("seal promotion CPCV artifact");
-    let cpcv_bytes =
-        FeedbackLearningStageCodec::encode(&cpcv).expect("encode promotion CPCV artifact");
-    let cpcv_artifact =
-        persist_stage_artifact(store, ArtifactNamespace::FeedbackLearning, &cpcv_bytes).await;
-    let cpcv_ref = cpcv
-        .reference(
-            FeedbackStageJobIdentity::try_root(cycle.feedback_cycle_id, FeedbackStage::Cpcv)
-                .expect("CPCV job identity")
-                .job_id(),
-            cpcv_artifact,
+struct ValidationGateRecorder<'a> {
+    store: &'a Arc<dyn ArtifactStore>,
+    cycles: &'a PgFeedbackCycleRepository,
+    jobs: &'a PgResearchJobRepository,
+    claim: &'a FeedbackCycleClaim,
+    models: &'a ShadowModels,
+    family: &'a FeedbackCandidateFamily,
+    cpcv_event_sequence: i64,
+    validation_event_sequence: i64,
+}
+
+struct DatasetGateFixture {
+    reference: FeedbackLearningStageArtifactRef,
+    training_dataset_id: TrainingDatasetId,
+    calibration_dataset_id: TrainingDatasetId,
+}
+
+struct TrainingGateFixture {
+    reference: FeedbackLearningStageArtifactRef,
+    source_model_version_id: ModelVersionId,
+    training_input_hash: ContentHash,
+}
+
+impl ValidationGateRecorder<'_> {
+    async fn record_dataset(&self, family_hash: ContentHash) -> DatasetGateFixture {
+        let params = dataset_params(&self.claim.cycle, self.family, family_hash);
+        let artifact = FeedbackLearningStageArtifact::try_new(
+            self.claim.cycle.feedback_cycle_id,
+            self.claim.cycle.idempotency_hash,
+            family_hash,
+            params
+                .input_hash()
+                .expect("promotion DatasetSeal input hash"),
+            None,
+            FeedbackLearningStageResults::DatasetSeal(params.dataset_results()),
         )
-        .expect("freeze promotion CPCV reference");
-    let evaluated_at = cycles
-        .database_time()
-        .await
-        .expect("load Validation database time");
-    let params = FeedbackValidationJobParams::try_new(
-        cycle.feedback_cycle_id,
-        cycle.idempotency_hash,
-        evaluated_at,
-        cpcv_ref.clone(),
-    )
-    .expect("freeze Validation params");
-    let validation = FeedbackValidationArtifact::try_new(
-        &params,
-        vec![FeedbackCandidateValidation {
-            candidate_recipe_hash: recipe_hash,
-            model_version_id: models.candidate.model_version_id,
-            trial_outcome: FeedbackValidationTrialOutcome::CpcvEvaluated,
-            quality_gate_report: candidate_gate_report(
-                models.candidate.model_version_id,
-                evaluated_at,
-            ),
-        }],
-    )
-    .expect("seal promotion Validation artifact");
-    let validation_bytes = FeedbackGovernanceCodec::encode_validation(&validation)
-        .expect("encode promotion Validation artifact");
-    let validation_ref = persist_stage_artifact(
-        store,
-        ArtifactNamespace::FeedbackValidation,
-        &validation_bytes,
-    )
-    .await;
-    let info = StageFixtureInput {
-        stage: FeedbackStage::Validation,
-        params: ResearchJobParams::FeedbackValidation(params.clone()),
-        result: ResearchJobResultRef {
-            kind: ResearchJobResultKind::FeedbackValidationArtifact,
-            id: params.artifact_id.as_uuid(),
-        },
-        artifact: validation_ref.clone(),
-        event_sequence: 5,
+        .expect("seal promotion DatasetSeal artifact");
+        let stored = persist_artifact(self.store, &artifact).await;
+        let info = StageFixtureInput {
+            stage: FeedbackStage::DatasetSeal,
+            params: ResearchJobParams::FeedbackDatasetSeal(params.clone()),
+            result: ResearchJobResultRef {
+                kind: ResearchJobResultKind::FeedbackLearningStageArtifact,
+                id: params.artifact_id.as_uuid(),
+            },
+            artifact: stored.clone(),
+            event_sequence: self
+                .cpcv_event_sequence
+                .checked_sub(3)
+                .expect("CPCV sequence leaves room for DatasetSeal"),
+        }
+        .record(self.cycles, self.jobs, self.claim)
+        .await;
+        DatasetGateFixture {
+            reference: artifact
+                .reference(info.job_id, stored)
+                .expect("freeze promotion DatasetSeal reference"),
+            training_dataset_id: candidate_dataset(&params, DatasetPurpose::Training),
+            calibration_dataset_id: candidate_dataset(&params, DatasetPurpose::Calibration),
+        }
     }
-    .record(cycles, jobs, claim)
-    .await;
-    ValidationGateFixture {
-        reference: FeedbackValidationArtifactRef {
-            feedback_cycle_id: cycle.feedback_cycle_id,
-            job_id: info.job_id,
-            artifact_id: params.artifact_id,
-            input_hash: params.input_hash().expect("Validation input hash"),
-            cpcv: cpcv_ref,
-            artifact: validation_ref,
-        },
-        path_set_id,
-        path_set_hash,
+
+    async fn record_training(
+        &self,
+        recipe_hash: ContentHash,
+        family_hash: ContentHash,
+        dataset: &DatasetGateFixture,
+    ) -> TrainingGateFixture {
+        let source_model_version_id = ModelVersionId::from_v7();
+        let model_run_id = ModelRunId::from_feedback_stage(
+            self.claim.cycle.feedback_cycle_id,
+            FeedbackStage::Training,
+            recipe_hash,
+        );
+        let params = FeedbackTrainingJobParams::try_new(
+            self.claim.cycle.feedback_cycle_id,
+            self.claim.cycle.idempotency_hash,
+            family_hash,
+            dataset.reference.clone(),
+            vec![FeedbackTrainingCommand {
+                candidate_recipe_hash: recipe_hash,
+                resource_budget: self
+                    .family
+                    .candidate(recipe_hash)
+                    .expect("promotion recipe exists")
+                    .resource_budget(),
+                params: ModelTrainJobParams {
+                    model_version_id: source_model_version_id,
+                    model_run_id,
+                    request: TrainModelRequest {
+                        training_dataset_id: dataset.training_dataset_id,
+                        reason: "promotion fixture exact Training predecessor".to_owned(),
+                    },
+                },
+            }],
+        )
+        .expect("freeze promotion Training params");
+        let training_input_hash = content_hash('8');
+        let artifact = FeedbackLearningStageArtifact::try_new(
+            self.claim.cycle.feedback_cycle_id,
+            self.claim.cycle.idempotency_hash,
+            family_hash,
+            params.input_hash().expect("promotion Training input hash"),
+            Some(params.previous.clone()),
+            FeedbackLearningStageResults::Training(vec![FeedbackTrainingStageResult {
+                candidate_recipe_hash: recipe_hash,
+                model_version_id: source_model_version_id,
+                model_run_id,
+                training_dataset_id: dataset.training_dataset_id,
+                model_artifact_hash: content_hash('6'),
+                serving_contract_hash: content_hash('7'),
+                training_input_hash,
+            }]),
+        )
+        .expect("seal promotion Training artifact");
+        let stored = persist_artifact(self.store, &artifact).await;
+        let info = StageFixtureInput {
+            stage: FeedbackStage::Training,
+            params: ResearchJobParams::FeedbackTraining(params.clone()),
+            result: ResearchJobResultRef {
+                kind: ResearchJobResultKind::FeedbackLearningStageArtifact,
+                id: params.artifact_id.as_uuid(),
+            },
+            artifact: stored.clone(),
+            event_sequence: self
+                .cpcv_event_sequence
+                .checked_sub(2)
+                .expect("CPCV sequence leaves room for Training"),
+        }
+        .record(self.cycles, self.jobs, self.claim)
+        .await;
+        TrainingGateFixture {
+            reference: artifact
+                .reference(info.job_id, stored)
+                .expect("freeze promotion Training reference"),
+            source_model_version_id,
+            training_input_hash,
+        }
+    }
+
+    async fn record_calibration(
+        &self,
+        recipe_hash: ContentHash,
+        family_hash: ContentHash,
+        dataset: &DatasetGateFixture,
+        training: &TrainingGateFixture,
+    ) -> FeedbackLearningStageArtifactRef {
+        let model_run_id = ModelRunId::from_feedback_stage(
+            self.claim.cycle.feedback_cycle_id,
+            FeedbackStage::Calibration,
+            recipe_hash,
+        );
+        let decision_policy_snapshot_id = self
+            .family
+            .candidate(recipe_hash)
+            .expect("promotion recipe exists")
+            .decision_policy_snapshot_id();
+        let params = FeedbackCalibrationJobParams::try_new(
+            self.claim.cycle.feedback_cycle_id,
+            self.claim.cycle.idempotency_hash,
+            family_hash,
+            training.reference.clone(),
+            vec![FeedbackCalibrationCommand {
+                candidate_recipe_hash: recipe_hash,
+                resource_budget: self
+                    .family
+                    .candidate(recipe_hash)
+                    .expect("promotion recipe exists")
+                    .resource_budget(),
+                params: ModelCalibrationFitJobParams {
+                    model_run_id,
+                    request: FitModelCalibratorRequest {
+                        model_version_id: training.source_model_version_id,
+                        calibration_dataset_id: dataset.calibration_dataset_id,
+                        method: CalibrationMethod::Platt,
+                        reason: "promotion fixture exact Calibration predecessor".to_owned(),
+                    },
+                    decision_policy_snapshot_id,
+                    downside_source: DownsideSource::MfeMae,
+                    actor: GovernanceActor::system(),
+                },
+            }],
+        )
+        .expect("freeze promotion Calibration params");
+        let artifact = FeedbackLearningStageArtifact::try_new(
+            self.claim.cycle.feedback_cycle_id,
+            self.claim.cycle.idempotency_hash,
+            family_hash,
+            params
+                .input_hash()
+                .expect("promotion Calibration input hash"),
+            Some(params.previous.clone()),
+            FeedbackLearningStageResults::Calibration(vec![
+                FeedbackCalibrationStageResult::Calibrated {
+                    candidate_recipe_hash: recipe_hash,
+                    source_model_version_id: training.source_model_version_id,
+                    model_run_id,
+                    calibration_dataset_id: dataset.calibration_dataset_id,
+                    method: CalibrationMethod::Platt,
+                    calibration_artifact_id: CalibrationArtifactId::from_v7(),
+                    calibration_artifact_hash: content_hash('9'),
+                    calibrated_model_version_id: self.models.candidate.model_version_id,
+                    calibrated_model_artifact_hash: self.models.candidate.artifact_hash,
+                    calibrated_serving_contract_hash: self.models.candidate.serving_contract_hash,
+                    training_input_hash: training.training_input_hash,
+                    sample_count: 100,
+                },
+            ]),
+        )
+        .expect("seal promotion Calibration artifact");
+        let stored = persist_artifact(self.store, &artifact).await;
+        let info = StageFixtureInput {
+            stage: FeedbackStage::Calibration,
+            params: ResearchJobParams::FeedbackCalibration(params.clone()),
+            result: ResearchJobResultRef {
+                kind: ResearchJobResultKind::FeedbackLearningStageArtifact,
+                id: params.artifact_id.as_uuid(),
+            },
+            artifact: stored.clone(),
+            event_sequence: self
+                .cpcv_event_sequence
+                .checked_sub(1)
+                .expect("CPCV sequence leaves room for Calibration"),
+        }
+        .record(self.cycles, self.jobs, self.claim)
+        .await;
+        artifact
+            .reference(info.job_id, stored)
+            .expect("freeze promotion Calibration reference")
+    }
+
+    async fn record(self) -> ValidationGateFixture {
+        let recipe_hash = self.family.candidates()[0].candidate_recipe_hash();
+        let resource_budget = self.family.candidates()[0].resource_budget();
+        let cpcv_spec = self.family.candidates()[0].cpcv_spec().clone();
+        let family_hash = self.family.candidate_family_hash();
+        let dataset = self.record_dataset(family_hash).await;
+        let training = self
+            .record_training(recipe_hash, family_hash, &dataset)
+            .await;
+        let calibration_ref = self
+            .record_calibration(recipe_hash, family_hash, &dataset, &training)
+            .await;
+        let Self {
+            store,
+            cycles,
+            jobs,
+            claim,
+            models,
+            family: _,
+            cpcv_event_sequence,
+            validation_event_sequence,
+        } = self;
+        let cycle = &claim.cycle;
+        let candidate_training_dataset_id = dataset.training_dataset_id;
+
+        let path_set_id = BacktestPathSetId::from_v7();
+        let path_set_hash = content_hash('a');
+        let cpcv_params = FeedbackCpcvJobParams::try_new(
+            cycle.feedback_cycle_id,
+            cycle.idempotency_hash,
+            family_hash,
+            calibration_ref,
+            vec![FeedbackCpcvCommand {
+                candidate_recipe_hash: recipe_hash,
+                resource_budget,
+                cpcv_spec,
+                params: CpcvBacktestJobParams {
+                    model_version_id: models.candidate.model_version_id,
+                    model_run_id: ModelRunId::from_feedback_stage(
+                        cycle.feedback_cycle_id,
+                        FeedbackStage::Cpcv,
+                        recipe_hash,
+                    ),
+                    request: RunCpcvBacktestRequest {
+                        training_dataset_id: candidate_training_dataset_id,
+                        decision_policy_snapshot_id: cycle.decision_policy_snapshot_id,
+                        reason: "promotion fixture exact CPCV predecessor".to_owned(),
+                        path_set_id: Some(path_set_id),
+                    },
+                },
+            }],
+        )
+        .expect("freeze promotion CPCV params");
+        let cpcv = FeedbackLearningStageArtifact::try_new(
+            cycle.feedback_cycle_id,
+            cycle.idempotency_hash,
+            family_hash,
+            cpcv_params.input_hash().expect("promotion CPCV input hash"),
+            Some(cpcv_params.previous.clone()),
+            FeedbackLearningStageResults::Cpcv(vec![FeedbackCpcvStageResult::Evaluated {
+                candidate_recipe_hash: recipe_hash,
+                model_version_id: models.candidate.model_version_id,
+                training_dataset_id: candidate_training_dataset_id,
+                path_set_id,
+                model_run_id: cpcv_params.commands[0].params.model_run_id,
+                path_set_hash,
+            }]),
+        )
+        .expect("seal promotion CPCV artifact");
+        let cpcv_bytes =
+            FeedbackLearningStageCodec::encode(&cpcv).expect("encode promotion CPCV artifact");
+        let cpcv_artifact =
+            persist_stage_artifact(store, ArtifactNamespace::FeedbackLearning, &cpcv_bytes).await;
+        let cpcv_info = StageFixtureInput {
+            stage: FeedbackStage::Cpcv,
+            params: ResearchJobParams::FeedbackCpcv(cpcv_params.clone()),
+            result: ResearchJobResultRef {
+                kind: ResearchJobResultKind::FeedbackLearningStageArtifact,
+                id: cpcv_params.artifact_id.as_uuid(),
+            },
+            artifact: cpcv_artifact.clone(),
+            event_sequence: cpcv_event_sequence,
+        }
+        .record(cycles, jobs, claim)
+        .await;
+        let cpcv_ref = cpcv
+            .reference(cpcv_info.job_id, cpcv_artifact)
+            .expect("freeze promotion CPCV reference");
+        let evaluated_at = cycles
+            .database_time()
+            .await
+            .expect("load Validation database time");
+        let params = FeedbackValidationJobParams::try_new(
+            cycle.feedback_cycle_id,
+            cycle.idempotency_hash,
+            evaluated_at,
+            cpcv_ref.clone(),
+        )
+        .expect("freeze Validation params");
+        let validation = FeedbackValidationArtifact::try_new(
+            &params,
+            vec![FeedbackCandidateValidation {
+                candidate_recipe_hash: recipe_hash,
+                model_version_id: models.candidate.model_version_id,
+                trial_outcome: FeedbackValidationTrialOutcome::CpcvEvaluated,
+                quality_gate_report: candidate_gate_report(
+                    models.candidate.model_version_id,
+                    evaluated_at,
+                ),
+            }],
+        )
+        .expect("seal promotion Validation artifact");
+        let validation_bytes = FeedbackGovernanceCodec::encode_validation(&validation)
+            .expect("encode promotion Validation artifact");
+        let validation_ref = persist_stage_artifact(
+            store,
+            ArtifactNamespace::FeedbackValidation,
+            &validation_bytes,
+        )
+        .await;
+        let info = StageFixtureInput {
+            stage: FeedbackStage::Validation,
+            params: ResearchJobParams::FeedbackValidation(params.clone()),
+            result: ResearchJobResultRef {
+                kind: ResearchJobResultKind::FeedbackValidationArtifact,
+                id: params.artifact_id.as_uuid(),
+            },
+            artifact: validation_ref.clone(),
+            event_sequence: validation_event_sequence,
+        }
+        .record(cycles, jobs, claim)
+        .await;
+        ValidationGateFixture {
+            reference: FeedbackValidationArtifactRef {
+                feedback_cycle_id: cycle.feedback_cycle_id,
+                job_id: info.job_id,
+                artifact_id: params.artifact_id,
+                input_hash: params.input_hash().expect("Validation input hash"),
+                cpcv: cpcv_ref,
+                artifact: validation_ref,
+            },
+            path_set_id,
+            path_set_hash,
+        }
     }
 }
 
@@ -1071,17 +1696,38 @@ async fn record_drift(
     lease: FeedbackCycleLeaseGuard,
     event_sequence: i64,
 ) {
-    let artifact = AdvancingDriftSeed { cycle }.seal();
+    let coverage_identity =
+        FeedbackStageJobIdentity::try_root(cycle.feedback_cycle_id, FeedbackStage::Coverage)
+            .expect("F11 Coverage identity");
+    let coverage_job = jobs
+        .find_by_id(&coverage_identity.job_id())
+        .await
+        .expect("read F11 Coverage job")
+        .expect("F11 Coverage job exists");
+    let coverage_ref = coverage_job
+        .result_artifact()
+        .expect("F11 Coverage job has a terminal artifact");
+    let coverage_bytes = store
+        .get(&coverage_ref.uri)
+        .await
+        .expect("read F11 Coverage artifact");
+    let coverage =
+        FeedbackCoverageCodec::decode(&coverage_bytes).expect("decode F11 Coverage artifact");
+    let artifact = AdvancingDriftSeed {
+        cycle,
+        coverage: &coverage,
+        coverage_ref: &coverage_ref,
+    }
+    .seal();
     let artifact_ref = persist_drift(store, &artifact).await;
     let identity =
         FeedbackStageJobIdentity::try_root(cycle.feedback_cycle_id, FeedbackStage::Drift)
             .expect("F11 drift identity");
-    let coverage_job_id = ResearchJobId::from_feedback_identity_hash(&content_hash('7'));
     let params = FeedbackDriftJobParams {
         feedback_cycle_id: cycle.feedback_cycle_id,
         cycle_idempotency_hash: cycle.idempotency_hash,
         artifact_id: artifact.artifact_id,
-        coverage_job_id,
+        coverage_job_id: coverage_job.job_id,
         coverage_artifact_id: artifact.coverage_artifact_id,
         coverage_artifact_uri: artifact.coverage_artifact_uri.clone(),
         coverage_artifact_hash: artifact.coverage_artifact_hash,
@@ -1093,14 +1739,8 @@ async fn record_drift(
         feedback_stage: None,
         kind: ResearchJobKind::FeedbackDrift,
         status: ResearchJobStatus::Queued,
-        model_spec_id: Some(cycle.candidate_family.shared_evaluation().model_spec_id),
-        decision_policy_snapshot_id: Some(
-            cycle
-                .candidate_family
-                .shared_evaluation()
-                .source_lineage
-                .decision_policy_snapshot_id,
-        ),
+        model_spec_id: Some(cycle.champion_model_spec_id),
+        decision_policy_snapshot_id: Some(cycle.decision_policy_snapshot_id),
         params_json: ResearchJobParams::FeedbackDrift(params),
         requested_by: None,
         acting_role: RoleCode::new("system"),
@@ -1168,26 +1808,57 @@ async fn record_shadow(
     claim: &FeedbackCycleClaim,
     event_sequence: i64,
 ) {
+    let recipes = recipe_stage(cycles, jobs, Arc::clone(store));
+    let shadow_bindings =
+        shadow_binding_stage(db, cycles, jobs, Arc::clone(store), Arc::clone(&recipes));
     let shadow_stage = FeedbackShadowStageAdapter::try_new(FeedbackShadowStageDeps {
         cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
         jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
         artifacts: Arc::clone(store),
         serving_generations: Arc::clone(generations),
+        recipes,
+        shadow_bindings,
         max_recovery_attempts: 3,
     })
     .expect("build F11 shadow stage");
     let shadow_identity =
         FeedbackStageJobIdentity::try_root(claim.cycle.feedback_cycle_id, FeedbackStage::Shadow)
             .expect("F11 shadow identity");
-    let shadow_job = shadow_stage
+    let shadow_preparation = shadow_stage
         .prepare_shadow(&claim.cycle, claim.lease, shadow_identity)
         .await
         .expect("prepare F11 shadow");
+    let shadow_job = match shadow_preparation {
+        FeedbackStagePreparation::Ready(job) => job,
+        FeedbackStagePreparation::Deferred {
+            resume_after,
+            reason_code,
+        } => {
+            assert_eq!(reason_code, "feedback_shadow_window_pending");
+            let database_time = cycles
+                .database_time()
+                .await
+                .expect("read F11 shadow-window database time");
+            let remaining = resume_after
+                .signed_duration_since(database_time)
+                .to_std()
+                .unwrap_or(StdDuration::ZERO);
+            tokio::time::sleep(remaining + StdDuration::from_millis(10)).await;
+            let preparation = shadow_stage
+                .prepare_shadow(&claim.cycle, claim.lease, shadow_identity)
+                .await
+                .expect("prepare F11 shadow at its exact mature boundary");
+            let FeedbackStagePreparation::Ready(job) = preparation else {
+                panic!("F11 shadow remained deferred after its governed resume boundary");
+            };
+            job
+        }
+    };
     let shadow_params = match &shadow_job.params_json {
         ResearchJobParams::FeedbackShadow(params) => params.as_ref().clone(),
         _ => panic!("F11 shadow stage emitted another kind"),
     };
-    match jobs.enqueue(shadow_job).await.expect("enqueue F11 shadow") {
+    match jobs.enqueue(*shadow_job).await.expect("enqueue F11 shadow") {
         ResearchJobEnqueueOutcome::Inserted(_) | ResearchJobEnqueueOutcome::AlreadyPresent(_) => {}
     }
     let shadow_worker = WorkerId::from_v7();
@@ -1273,6 +1944,7 @@ async fn execute_decision(
         cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
         jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
         artifacts: Arc::clone(store),
+        recipes: recipe_stage(cycles, jobs, Arc::clone(store)),
         max_recovery_attempts: 3,
     })
     .expect("build F11 decision stage");
@@ -1334,7 +2006,12 @@ async fn execute_decision(
         .expect("read F11 Decision artifact");
     let decision_artifact =
         FeedbackDecisionCodec::decode(&decision_bytes).expect("decode F11 Decision");
-    assert_eq!(decision_artifact.outcome().decision(), expected_decision);
+    assert_eq!(
+        decision_artifact.outcome().decision(),
+        expected_decision,
+        "unexpected decision evidence: {:?}",
+        decision_artifact.outcome()
+    );
     assert_eq!(decision_artifact.outcome().reason(), expected_reason);
     assert_ne!(expected_decision, FeedbackDecision::Promoted);
     let decision_info = jobs
@@ -1392,7 +2069,8 @@ async fn assert_tamper(
     FeedbackDecisionStageAdapter::try_new(FeedbackDecisionStageDeps {
         cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
         jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
-        artifacts: tampered_store,
+        artifacts: Arc::clone(&tampered_store),
+        recipes: recipe_stage(cycles, jobs, tampered_store),
         max_recovery_attempts: 3,
     })
     .expect("build tampered F11 stage")
@@ -1517,22 +2195,24 @@ fn exact_identifiers(input: ExactIdInput<'_>) -> ExactDecisionIdentifiers {
             .promotion_transaction_hash
             .map(|hash| hash.to_string()),
         target_category: input.route.category().map(|category| wire_name(&category)),
-        route_pointer_before: before_model
-            .active_pointer(input.route)
+        route_champion_before: before_model
+            .champion(input.route)
             .ok()
-            .map(|pointer| pointer.id().to_string()),
-        route_pointer_after: after_model
-            .active_pointer(input.route)
+            .map(|binding| binding.model_version_id.to_string()),
+        route_champion_after: after_model
+            .champion(input.route)
             .ok()
-            .map(|pointer| pointer.id().to_string()),
-        global_shadow_before: before_model
-            .shadow_model_version_id
-            .as_ref()
-            .map(|pointer| pointer.id().to_string()),
-        global_shadow_after: after_model
-            .shadow_model_version_id
-            .as_ref()
-            .map(|pointer| pointer.id().to_string()),
+            .map(|binding| binding.model_version_id.to_string()),
+        route_shadow_before: before_model
+            .route_binding(input.route)
+            .ok()
+            .and_then(|binding| binding.shadow.as_ref())
+            .map(|binding| binding.model_version_id.to_string()),
+        route_shadow_after: after_model
+            .route_binding(input.route)
+            .ok()
+            .and_then(|binding| binding.shadow.as_ref())
+            .map(|binding| binding.model_version_id.to_string()),
     }
 }
 
@@ -1564,6 +2244,7 @@ impl RestartProbe<'_> {
             cycles: Arc::clone(&cycles) as Arc<dyn FeedbackCycleRepository>,
             jobs: Arc::clone(&jobs) as Arc<dyn ResearchJobRepository>,
             artifacts: Arc::clone(&self.artifacts),
+            recipes: recipe_stage(&cycles, &jobs, Arc::clone(&self.artifacts)),
             max_recovery_attempts: 3,
         })
         .expect("build fresh W4-E04 Decision stage adapter");
@@ -1631,6 +2312,186 @@ impl RestartProbe<'_> {
             fresh_stage_adapter: true,
             exact_match,
             canonical_read_back_hash: canonical_read_back_hash.to_string(),
+        }
+    }
+}
+
+struct TerminalPipeline {
+    models: ShadowModels,
+    serving: ActivatedServing,
+    claim: FeedbackCycleClaim,
+    cycles: Arc<PgFeedbackCycleRepository>,
+    jobs: Arc<PgResearchJobRepository>,
+    comparison: FeedbackComparisonArtifactRef,
+}
+
+impl TerminalPipeline {
+    async fn prepare(
+        db: &DatabaseConnection,
+        store: &Arc<dyn ArtifactStore>,
+        comparison_uplift: Decimal,
+    ) -> Self {
+        let models = Box::pin(build_crypto_models(db, store)).await;
+        let serving = activate_crypto_generation(db, store, &models).await;
+        let (schema, claim) = record_crypto_cycle(db, &models).await;
+        let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
+        let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
+        record_truth_attribution(
+            store,
+            cycles.as_ref(),
+            jobs.as_ref(),
+            &claim,
+            &schema.candidate_family,
+        )
+        .await;
+        record_drift(
+            cycles.as_ref(),
+            jobs.as_ref(),
+            store,
+            &claim.cycle,
+            claim.lease,
+            5,
+        )
+        .await;
+        persist_recipe_plan_fixture(
+            cycles.as_ref(),
+            jobs.as_ref(),
+            store,
+            claim.lease,
+            &claim.cycle,
+            &schema.candidate_family,
+            6,
+        )
+        .await;
+        let validation = ValidationGateRecorder {
+            store,
+            cycles: cycles.as_ref(),
+            jobs: jobs.as_ref(),
+            claim: &claim,
+            models: &models,
+            family: &schema.candidate_family,
+            cpcv_event_sequence: 10,
+            validation_event_sequence: 11,
+        }
+        .record()
+        .await;
+        let params = comparison_params_with_validation(
+            db,
+            &schema,
+            &claim,
+            &models,
+            validation.reference,
+            validation.path_set_id,
+            validation.path_set_hash,
+        )
+        .await;
+        let comparison = record_comparison(db, store, &claim, params, comparison_uplift, 12).await;
+        Self {
+            models,
+            serving,
+            claim,
+            cycles,
+            jobs,
+            comparison,
+        }
+    }
+}
+
+struct RejectedReplayEvidence {
+    artifact: DecisionArtifactEvidence,
+    restart: RestartReadBackEvidence,
+    counts_after_exact_replay: RowCountSnapshot,
+}
+
+struct RejectedReplayProbe<'a> {
+    db: &'a DatabaseConnection,
+    store: &'a Arc<dyn ArtifactStore>,
+    cycles: &'a Arc<PgFeedbackCycleRepository>,
+    jobs: &'a Arc<PgResearchJobRepository>,
+    claim: &'a FeedbackCycleClaim,
+    comparison: &'a FeedbackComparisonArtifactRef,
+    job: &'a ResearchJobInfo,
+    success: &'a FeedbackStageSuccess,
+    invariant: &'a InvariantProbe,
+    expected_after: &'a InvariantSnapshot,
+    expected_timeline: &'a [TimelineEventEvidence],
+    models: &'a ShadowModels,
+}
+
+impl RejectedReplayProbe<'_> {
+    async fn verify(self) -> RejectedReplayEvidence {
+        let bytes = self
+            .store
+            .get(&self.comparison.artifact.uri)
+            .await
+            .expect("read terminal Comparison artifact");
+        let artifact =
+            FeedbackComparisonCodec::decode(&bytes).expect("decode terminal Comparison artifact");
+        let artifact_evidence = DecisionArtifactEvidence {
+            artifact_id: artifact.artifact_id().to_string(),
+            uri: self.comparison.artifact.uri.to_string(),
+            bytes_hash: self.comparison.artifact.content_hash.to_string(),
+            semantic_hash: artifact.artifact_hash().to_string(),
+            decision_job_input_hash: Some(artifact.job_input_hash().to_string()),
+            champion_serving_contract_hash: self.models.champion.serving_contract_hash.to_string(),
+            candidate_serving_contract_hash: self
+                .models
+                .candidate
+                .serving_contract_hash
+                .to_string(),
+        };
+        let tampered_store: Arc<dyn ArtifactStore> = Arc::new(ReadTamperArtifactStoreFixture::new(
+            Arc::clone(self.store),
+            self.comparison.artifact.uri.clone(),
+            b"{}".to_vec(),
+        ));
+        comparison_stage(self.db, self.cycles, self.jobs, tampered_store)
+            .succeeded_comparison(&self.claim.cycle, self.job)
+            .await
+            .expect_err("terminal Comparison replay must reject tampered bytes");
+        let fresh_cycles = Arc::new(PgFeedbackCycleRepository::new(self.db.clone()));
+        let fresh_jobs = Arc::new(PgResearchJobRepository::new(self.db.clone()));
+        let fresh_job = fresh_jobs
+            .find_by_id(&self.comparison.job_id)
+            .await
+            .expect("restart read terminal Comparison job")
+            .expect("restart terminal Comparison job exists");
+        let fresh_success =
+            comparison_stage(self.db, &fresh_cycles, &fresh_jobs, Arc::clone(self.store))
+                .succeeded_comparison(&self.claim.cycle, &fresh_job)
+                .await
+                .expect("restart verify terminal Comparison");
+        assert_eq!(&fresh_success, self.success);
+        let restart_after = self.invariant.load().await;
+        let restart_timeline = timeline_evidence(
+            fresh_cycles
+                .list_stage_events(&self.claim.cycle.feedback_cycle_id)
+                .await
+                .expect("restart read terminal Comparison timeline"),
+        );
+        let exact_match = wire_value(&restart_after) == wire_value(self.expected_after)
+            && restart_timeline == self.expected_timeline
+            && wire_value(&fresh_job) == wire_value(self.job);
+        assert!(exact_match, "fresh owners read a different terminal graph");
+        let restart_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot:w4-e04:comparison-restart-read-back",
+            1,
+            &json!({
+                "invariant": restart_after,
+                "timeline": restart_timeline,
+                "comparison_job": fresh_job,
+            }),
+        )
+        .expect("hash terminal Comparison restart read-back");
+        RejectedReplayEvidence {
+            artifact: artifact_evidence,
+            restart: RestartReadBackEvidence {
+                fresh_repository_owners: true,
+                fresh_stage_adapter: true,
+                exact_match,
+                canonical_read_back_hash: restart_hash.to_string(),
+            },
+            counts_after_exact_replay: load_evidence_counts(self.db).await,
         }
     }
 }
@@ -1704,7 +2565,7 @@ impl TerminalDecisionCase {
                 permit: None,
                 policy_activation_id: None,
                 promotion_transaction_hash: None,
-                route: BuyModelRoute::Pooled,
+                route: BuyModelRoute::Crypto,
             }),
             decision_artifact: decision_artifact_evidence(
                 input.completion,
@@ -1731,48 +2592,49 @@ impl TerminalDecisionCase {
     }
 
     async fn run(self) -> DecisionPathEvidence {
+        if matches!(self, Self::RejectedComparison) {
+            return Box::pin(self.run_rejected()).await;
+        }
         assert_authority_boundary();
         let (pool, _container) = setup_pg().await;
         let db = pool.connection().clone();
         let artifact_root = ArtifactRoot::create();
         let store: Arc<dyn ArtifactStore> =
             Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
-        let models = Box::pin(build_models(&db, &store)).await;
-        let generations = activate_generation(&db, &store, &models).await;
-        let route_before = generations
-            .current_route(BuyModelRoute::Pooled)
-            .expect("F11 route before")
+        let TerminalPipeline {
+            models,
+            serving,
+            claim,
+            cycles,
+            jobs,
+            comparison: _,
+        } = Box::pin(TerminalPipeline::prepare(&db, &store, dec!(100))).await;
+        let serving = Box::pin(record_shadow_binding(
+            &db, &store, &serving, &cycles, &jobs, &claim, 13,
+        ))
+        .await;
+        let route_before = serving
+            .generations
+            .current_route(BuyModelRoute::Crypto)
+            .expect("F11 Crypto route before Decision")
             .published_shadow_identity()
-            .expect("F11 published identity before");
-        let (schema, claim) = record_cycle(&db, &models).await;
-        let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
-        let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
-        record_drift(
+            .expect("F11 Crypto shadow is bound before Decision");
+        insert_observation(
+            &db,
             cycles.as_ref(),
-            jobs.as_ref(),
-            &store,
-            &claim.cycle,
-            claim.lease,
-            2,
+            &serving.generations,
+            BuyModelRoute::Crypto,
         )
         .await;
-        let comparison = comparison_params(&db, &schema, &claim, &models).await;
-        let candidate_return_bps = match self {
-            Self::InsufficientShadow => dec!(100),
-            Self::RejectedComparison => Decimal::ZERO,
-        };
-        record_comparison(&db, &store, &claim, comparison, candidate_return_bps, 3).await;
-        if matches!(self, Self::InsufficientShadow) {
-            insert_observation(&db, cycles.as_ref(), &generations).await;
-        }
+        tokio::time::sleep(StdDuration::from_millis(1_100)).await;
         Box::pin(record_shadow(
             &db,
             &store,
-            &generations,
+            &serving.generations,
             &cycles,
             &jobs,
             &claim,
-            4,
+            14,
         ))
         .await;
         let policy_repository = PgPolicyRepository::new(db.clone());
@@ -1786,8 +2648,8 @@ impl TerminalDecisionCase {
             cycle_id: claim.cycle.feedback_cycle_id,
             champion_model_version_id: models.champion.model_version_id,
             candidate_model_version_id: models.candidate.model_version_id,
-            route: BuyModelRoute::Pooled,
-            serving_generations: Arc::clone(&generations),
+            route: BuyModelRoute::Crypto,
+            serving_generations: Arc::clone(&serving.generations),
             policy_apply: None,
         };
         let before = probe.load().await;
@@ -1803,7 +2665,7 @@ impl TerminalDecisionCase {
         ))
         .await;
         assert_tamper(&store, &cycles, &jobs, &claim.cycle, &completion).await;
-        finalize_decision(cycles.as_ref(), &claim, &completion, 5).await;
+        finalize_decision(cycles.as_ref(), &claim, &completion, 15).await;
         let policy_after = policy_repository
             .load_current_bundle()
             .await
@@ -1818,8 +2680,9 @@ impl TerminalDecisionCase {
         );
         let counts_after_first = load_evidence_counts(&db).await;
         assert_eq!(
-            generations
-                .current_route(BuyModelRoute::Pooled)
+            serving
+                .generations
+                .current_route(BuyModelRoute::Crypto)
                 .expect("F11 route after")
                 .published_shadow_identity()
                 .expect("F11 published identity after"),
@@ -1867,6 +2730,153 @@ impl TerminalDecisionCase {
             restart_read_back,
         })
     }
+
+    async fn run_rejected(self) -> DecisionPathEvidence {
+        assert!(matches!(self, Self::RejectedComparison));
+        assert_authority_boundary();
+        let (pool, _container) = setup_pg().await;
+        let db = pool.connection().clone();
+        let artifact_root = ArtifactRoot::create();
+        let store: Arc<dyn ArtifactStore> =
+            Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+        let TerminalPipeline {
+            models,
+            serving,
+            claim,
+            cycles,
+            jobs,
+            comparison,
+        } = Box::pin(TerminalPipeline::prepare(&db, &store, Decimal::ZERO)).await;
+        let policy_repository = PgPolicyRepository::new(db.clone());
+        let policy_before = policy_repository
+            .load_current_bundle()
+            .await
+            .expect("load terminal Comparison policy before")
+            .expect("terminal Comparison policy exists");
+        let probe = InvariantProbe {
+            db: db.clone(),
+            cycle_id: claim.cycle.feedback_cycle_id,
+            champion_model_version_id: models.champion.model_version_id,
+            candidate_model_version_id: models.candidate.model_version_id,
+            route: BuyModelRoute::Crypto,
+            serving_generations: Arc::clone(&serving.generations),
+            policy_apply: None,
+        };
+        let before = probe.load().await;
+        let counts_before = load_evidence_counts(&db).await;
+        let stage = comparison_stage(&db, &cycles, &jobs, Arc::clone(&store));
+        let job = jobs
+            .find_by_id(&comparison.job_id)
+            .await
+            .expect("read terminal Comparison job")
+            .expect("terminal Comparison job exists");
+        let success = stage
+            .succeeded_comparison(&claim.cycle, &job)
+            .await
+            .expect("verify terminal Comparison rejection");
+        let replay = stage
+            .succeeded_comparison(&claim.cycle, &job)
+            .await
+            .expect("replay terminal Comparison rejection");
+        assert_eq!(success, replay);
+        let FeedbackStageDirective::Complete(terminal) = success.directive() else {
+            panic!("rejected Comparison must complete the cycle");
+        };
+        assert_eq!(
+            terminal.decision(),
+            Some(FeedbackDecision::ChallengerRejected)
+        );
+        assert_eq!(
+            terminal.reason_code(),
+            "comparison_all_challengers_rejected"
+        );
+        cycles
+            .finalize_cycle(claim.lease, terminal.clone())
+            .await
+            .expect("finalize terminal Comparison cycle");
+        let after = probe.load().await;
+        let policy_after = policy_repository
+            .load_current_bundle()
+            .await
+            .expect("load terminal Comparison policy after")
+            .expect("terminal Comparison policy remains");
+        let timeline = timeline_evidence(
+            cycles
+                .list_stage_events(&claim.cycle.feedback_cycle_id)
+                .await
+                .expect("load terminal Comparison timeline"),
+        );
+        let counts_after_first = load_evidence_counts(&db).await;
+
+        let replay_evidence = Box::pin(
+            RejectedReplayProbe {
+                db: &db,
+                store: &store,
+                cycles: &cycles,
+                jobs: &jobs,
+                claim: &claim,
+                comparison: &comparison,
+                job: &job,
+                success: &success,
+                invariant: &probe,
+                expected_after: &after,
+                expected_timeline: &timeline,
+                models: &models,
+            }
+            .verify(),
+        )
+        .await;
+        let invariant_diff = InvariantDiff::between(&before, &after);
+        assert_protected_unchanged(
+            &invariant_diff,
+            "terminal Comparison",
+            &[
+                "$.policy_bundle",
+                "$.runtime_control",
+                "$.model_routes",
+                "$.capital_allocations",
+                "$.champion_model",
+                "$.candidate_model",
+                "$.parity_latch",
+                "$.in_memory_serving_route",
+                "$.policy_apply_readiness",
+                "$.deployment_authority",
+            ],
+        );
+        assert!(invariant_diff.any_below("$.cycle"));
+        let evidence = DecisionPathEvidence {
+            path: DecisionPath::ChallengerRejected,
+            decision: wire_name(&FeedbackDecision::ChallengerRejected),
+            decision_reason: "comparison_all_challengers_rejected".to_owned(),
+            exact_ids: exact_identifiers(ExactIdInput {
+                cycle: &claim.cycle,
+                models: &models,
+                policy_before: &policy_before,
+                policy_after: &policy_after,
+                permit: None,
+                policy_activation_id: None,
+                promotion_transaction_hash: None,
+                route: BuyModelRoute::Crypto,
+            }),
+            decision_artifact: replay_evidence.artifact,
+            permit: None,
+            worm_timeline: timeline,
+            before,
+            after,
+            invariant_diff,
+            replay: ReplayEvidence::new(
+                "committed:challenger_rejected_at_comparison",
+                "exact_comparison_artifact_read_replay",
+                counts_before,
+                counts_after_first,
+                replay_evidence.counts_after_exact_replay,
+            ),
+            restart_read_back: replay_evidence.restart,
+            fault_injection_rollback_verified: false,
+        };
+        evidence.validate();
+        evidence
+    }
 }
 
 pub async fn terminal_decision_contracts() {
@@ -1874,6 +2884,114 @@ pub async fn terminal_decision_contracts() {
     let rejected = Box::pin(TerminalDecisionCase::RejectedComparison.run()).await;
     no_action.validate();
     rejected.validate();
+}
+
+struct ShadowBoundCase {
+    db: DatabaseConnection,
+    store: Arc<dyn ArtifactStore>,
+    models: ShadowModels,
+    model_repository: Arc<PgModelRegistryRepository>,
+    serving: ActivatedServing,
+    route_before: PublishedShadowRouteIdentity,
+    claim: FeedbackCycleClaim,
+    cycles: Arc<PgFeedbackCycleRepository>,
+    jobs: Arc<PgResearchJobRepository>,
+}
+
+impl ShadowBoundCase {
+    async fn prepare(db: DatabaseConnection, store: Arc<dyn ArtifactStore>) -> Self {
+        let models = Box::pin(build_crypto_models(&db, &store)).await;
+        let model_repository = Arc::new(PgModelRegistryRepository::new(db.clone()));
+        let parity_run_id = ModelVersionFixture::persist_parity_proof(&db, &models.candidate)
+            .await
+            .expect("persist P03 candidate full-parity proof");
+        PgFeatureParityRepository::new(db.clone())
+            .acknowledge_latch(
+                &parity_run_id,
+                FeatureParityLatchActor {
+                    actor: Some("promotion-preflight-fixture".to_owned()),
+                    acting_role: "risk_owner".to_owned(),
+                    reason: "acknowledge exact candidate-bound full parity proof".to_owned(),
+                },
+            )
+            .await
+            .expect("initialize P03 feature-parity latch from exact proof");
+        let serving = activate_crypto_generation(&db, &store, &models).await;
+        let (schema, claim) = record_crypto_cycle(&db, &models).await;
+        let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
+        let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
+        record_truth_attribution(
+            &store,
+            cycles.as_ref(),
+            jobs.as_ref(),
+            &claim,
+            &schema.candidate_family,
+        )
+        .await;
+        record_drift(
+            cycles.as_ref(),
+            jobs.as_ref(),
+            &store,
+            &claim.cycle,
+            claim.lease,
+            5,
+        )
+        .await;
+        persist_recipe_plan_fixture(
+            cycles.as_ref(),
+            jobs.as_ref(),
+            &store,
+            claim.lease,
+            &claim.cycle,
+            &schema.candidate_family,
+            6,
+        )
+        .await;
+        let validation = ValidationGateRecorder {
+            store: &store,
+            cycles: cycles.as_ref(),
+            jobs: jobs.as_ref(),
+            claim: &claim,
+            models: &models,
+            family: &schema.candidate_family,
+            cpcv_event_sequence: 10,
+            validation_event_sequence: 11,
+        }
+        .record()
+        .await;
+        let comparison = comparison_params_with_validation(
+            &db,
+            &schema,
+            &claim,
+            &models,
+            validation.reference,
+            validation.path_set_id,
+            validation.path_set_hash,
+        )
+        .await;
+        record_comparison(&db, &store, &claim, comparison, dec!(100), 12).await;
+        let serving = Box::pin(record_shadow_binding(
+            &db, &store, &serving, &cycles, &jobs, &claim, 13,
+        ))
+        .await;
+        let route_before = serving
+            .generations
+            .current_route(BuyModelRoute::Crypto)
+            .expect("P03 Crypto route after ShadowBind")
+            .published_shadow_identity()
+            .expect("P03 exact published shadow after ShadowBind");
+        Self {
+            db,
+            store,
+            models,
+            model_repository,
+            serving,
+            route_before,
+            claim,
+            cycles,
+            jobs,
+        }
+    }
 }
 
 struct PromotionPreflightCase {
@@ -1893,56 +3011,19 @@ struct PromotionPreflightCase {
 
 impl PromotionPreflightCase {
     async fn prepare(db: DatabaseConnection, store: Arc<dyn ArtifactStore>) -> Self {
-        let models = Box::pin(build_crypto_models(&db, &store)).await;
-        let model_repository = Arc::new(PgModelRegistryRepository::new(db.clone()));
-        let parity_run_id = ModelVersionFixture::persist_parity_proof(&db, &models.candidate)
-            .await
-            .expect("persist P03 candidate full-parity proof");
-        PgFeatureParityRepository::new(db.clone())
-            .acknowledge_latch(
-                &parity_run_id,
-                FeatureParityLatchActor {
-                    actor: Some("promotion-preflight-fixture".to_owned()),
-                    acting_role: "risk_owner".to_owned(),
-                    reason: "acknowledge exact candidate-bound full parity proof".to_owned(),
-                },
-            )
-            .await
-            .expect("initialize P03 feature-parity latch from exact proof");
-        let serving = activate_crypto_generation(&db, &store, &models).await;
-        let route_before = serving
-            .generations
-            .current_route(BuyModelRoute::Crypto)
-            .expect("P03 Crypto route before preflight")
-            .published_shadow_identity()
-            .expect("P03 exact published shadow before preflight");
-        let (schema, claim) = record_crypto_cycle(&db, &models).await;
-        let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
-        let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
-        record_truth_attribution(&store, cycles.as_ref(), jobs.as_ref(), &claim).await;
-        record_drift(
-            cycles.as_ref(),
-            jobs.as_ref(),
-            &store,
-            &claim.cycle,
-            claim.lease,
-            4,
-        )
-        .await;
-        let validation =
-            record_validation_gate(&store, cycles.as_ref(), jobs.as_ref(), &claim, &models).await;
-        let comparison = comparison_params_with_validation(
-            &db,
-            &schema,
-            &claim,
-            &models,
-            validation.reference,
-            validation.path_set_id,
-            validation.path_set_hash,
-        )
-        .await;
-        record_comparison(&db, &store, &claim, comparison, dec!(100), 6).await;
-        insert_stable_observations(&db, &serving.generations, claim.cycle.created_at).await;
+        let bound = Box::pin(ShadowBoundCase::prepare(db, store)).await;
+        let ShadowBoundCase {
+            db,
+            store,
+            models,
+            model_repository,
+            serving,
+            route_before,
+            claim,
+            cycles,
+            jobs,
+        } = bound;
+        insert_stable_observations(&db, &serving.generations).await;
         Box::pin(record_shadow(
             &db,
             &store,
@@ -1950,7 +3031,7 @@ impl PromotionPreflightCase {
             &cycles,
             &jobs,
             &claim,
-            7,
+            14,
         ))
         .await;
         let decision_probe = InvariantProbe {
@@ -1973,7 +3054,7 @@ impl PromotionPreflightCase {
             "feedback_candidate_ready_governance_required",
         ))
         .await;
-        finalize_decision(cycles.as_ref(), &claim, &completion, 8).await;
+        finalize_decision(cycles.as_ref(), &claim, &completion, 15).await;
         Self {
             db,
             store,
@@ -1996,6 +3077,7 @@ impl PromotionPreflightCase {
                 cycles: Arc::clone(&self.cycles) as Arc<dyn FeedbackCycleRepository>,
                 jobs: Arc::clone(&self.jobs) as Arc<dyn ResearchJobRepository>,
                 artifacts: Arc::clone(&self.store),
+                recipes: recipe_stage(&self.cycles, &self.jobs, Arc::clone(&self.store)),
                 max_recovery_attempts: 3,
             })
             .expect("build promotion decision evidence reader"),
@@ -2024,7 +3106,8 @@ impl PromotionPreflightCase {
         FeedbackDecisionStageAdapter::try_new(FeedbackDecisionStageDeps {
             cycles: Arc::clone(&self.cycles) as Arc<dyn FeedbackCycleRepository>,
             jobs: Arc::clone(&self.jobs) as Arc<dyn ResearchJobRepository>,
-            artifacts: tampered_store,
+            artifacts: Arc::clone(&tampered_store),
+            recipes: recipe_stage(&self.cycles, &self.jobs, tampered_store),
             max_recovery_attempts: 3,
         })
         .expect("build P03 tampered decision reader")
@@ -2182,9 +3265,15 @@ impl PromotionPermitFixture {
             plan.projection().candidate_model_version_id(),
             case.models.candidate.model_version_id
         );
+        let projected_at = case
+            .cycles
+            .database_time()
+            .await
+            .expect("load promotion projection clock");
+        let projected = plan.projection().candidate_snapshot(projected_at);
         plan.projection()
-            .validate_candidate(plan.projection().prospective_snapshot())
-            .expect("promotion projection changes only its exact route and global shadow");
+            .validate_candidate(&projected, projected_at)
+            .expect("promotion projection changes only its exact route-owned binding");
         let actor = UserEntity::find()
             .filter(UserColumn::Username.eq("admin"))
             .one(&case.db)
@@ -2268,14 +3357,7 @@ impl PromotionPermitFixture {
             verified.preflight().preflight_hash(),
             self.initial_preflight.preflight_hash()
         );
-        assert_eq!(
-            verified.projection().non_route_policy_hash(),
-            self.initial_projection.non_route_policy_hash()
-        );
-        assert_eq!(
-            verified.projection().prospective_snapshot(),
-            self.initial_projection.prospective_snapshot()
-        );
+        assert_eq!(verified.projection(), &self.initial_projection);
     }
 }
 
@@ -2607,6 +3689,8 @@ impl PromotionHarness {
                 )) as Arc<dyn ModelRouteBootstrapRepository>,
                 preflight: Arc::clone(&permit_fixture.preflight),
                 repository: Arc::clone(&promotions) as Arc<dyn ModelRoutePromotionRepository>,
+                shadow_bindings: Arc::new(PgModelRouteShadowBindingRepository::new(case.db.clone()))
+                    as Arc<dyn ModelRouteShadowBindingRepository>,
                 policies: Arc::clone(&permit_fixture.policies) as Arc<dyn PolicyRepository>,
                 policy_apply: Arc::clone(&policy_apply) as Arc<dyn CommittedPolicyApplyPort>,
             },
@@ -2969,43 +4053,46 @@ impl AtomicPromotionCase {
         let before_routes = &policy_before.snapshot.model_routing.model;
         let after_routes = &policy_after.snapshot.model_routing.model;
         assert_eq!(
-            after_routes.active_model_version_id,
-            before_routes.active_model_version_id
-        );
-        assert_eq!(
             after_routes.active_exit_model_version_id,
             before_routes.active_exit_model_version_id
         );
         assert_eq!(
-            after_routes
-                .category_model_pointers
-                .get(&MarketCategory::Weather),
-            before_routes
-                .category_model_pointers
-                .get(&MarketCategory::Weather)
+            after_routes.buy_routes.get(&BuyModelRoute::Pooled),
+            before_routes.buy_routes.get(&BuyModelRoute::Pooled)
+        );
+        assert_eq!(
+            after_routes.buy_routes.get(&BuyModelRoute::Weather),
+            before_routes.buy_routes.get(&BuyModelRoute::Weather)
         );
         assert_eq!(
             after_routes
-                .category_model_pointers
-                .get(&MarketCategory::Crypto)
-                .map(|pointer| *pointer.id()),
+                .champion(BuyModelRoute::Crypto)
+                .map(|binding| binding.model_version_id)
+                .ok(),
             Some(self.case.models.candidate.model_version_id)
         );
         assert_eq!(
             before_routes
-                .category_model_pointers
-                .get(&MarketCategory::Crypto)
-                .map(|pointer| *pointer.id()),
+                .champion(BuyModelRoute::Crypto)
+                .map(|binding| binding.model_version_id)
+                .ok(),
             Some(self.case.models.champion.model_version_id)
         );
         assert_eq!(
             before_routes
-                .shadow_model_version_id
-                .as_ref()
-                .map(|pointer| *pointer.id()),
+                .route_binding(BuyModelRoute::Crypto)
+                .ok()
+                .and_then(|binding| binding.shadow.as_ref())
+                .map(|binding| binding.model_version_id),
             Some(self.case.models.candidate.model_version_id)
         );
-        assert!(after_routes.shadow_model_version_id.is_none());
+        assert!(
+            after_routes
+                .route_binding(BuyModelRoute::Crypto)
+                .expect("promoted Crypto route")
+                .shadow
+                .is_none()
+        );
     }
 
     async fn promoted_state(&self) -> PromotedState {
@@ -3565,7 +4652,7 @@ impl AtomicPromotionCase {
             self.case.models.candidate.model_version_id,
         )
         .expect("rebuild P04 route projection")
-        .validate_candidate(&policy_after.snapshot)
+        .validate_candidate(&policy_after.snapshot, committed.activation.activated_at)
         .expect("P04 changed only the exact category route and consumed shadow");
 
         let champion_after =
@@ -3591,6 +4678,47 @@ impl AtomicPromotionCase {
         assert_eq!(cycle_after.status, FeedbackCycleStatus::Succeeded);
         assert_eq!(cycle_after.decision, Some(FeedbackDecision::Promoted));
         assert_eq!(cycle_after.generation, self.cycle_before.generation + 1);
+        let decision_stage = self.case.decision_stage();
+        let historical = decision_stage
+            .candidate_evidence(&self.case.claim.cycle.feedback_cycle_id)
+            .await
+            .expect("Promoted cycle retains immutable CandidateReady audit evidence");
+        assert_eq!(historical.cycle.decision, Some(FeedbackDecision::Promoted));
+        decision_stage
+            .promotion_evidence(&self.case.claim.cycle.feedback_cycle_id)
+            .await
+            .expect_err("Promoted cycle cannot be reused as actionable promotion preflight");
+        let cycle_activation = self
+            .harness
+            .promotions
+            .find_cycle_activation(&self.case.claim.cycle.feedback_cycle_id)
+            .await
+            .expect("resolve promotion by exact feedback cycle")
+            .expect("Promoted cycle retains its immutable activation graph");
+        assert_eq!(
+            cycle_activation.activation.policy_activation_id,
+            committed.activation.policy_activation_id
+        );
+        assert_eq!(
+            cycle_activation.transaction_hash,
+            committed.transaction_hash
+        );
+        let shadow_lifecycle = PgModelRouteShadowBindingRepository::new(self.db.clone())
+            .find_lifecycle(&ShadowBindingArtifactId::from_cycle_id(
+                self.case.claim.cycle.feedback_cycle_id,
+            ))
+            .await
+            .expect("read promoted route-owned shadow lifecycle")
+            .expect("promoted route-owned shadow lifecycle exists");
+        assert_eq!(shadow_lifecycle.status, ShadowBindingStatus::Promoted);
+        assert_eq!(
+            shadow_lifecycle.termination_policy_activation_id,
+            Some(committed.activation.policy_activation_id)
+        );
+        assert_eq!(
+            shadow_lifecycle.terminated_at,
+            Some(committed.activation.activated_at)
+        );
         assert_eq!(
             self.case
                 .serving
@@ -3883,6 +5011,201 @@ pub async fn promotion_runtime_apply_contracts() {
     ))
     .await;
     Box::pin(case.assert_apply_recovery()).await;
+}
+
+const SHADOW_CANCEL_REASON: &str = "operator_cancelled_after_shadow_bind";
+
+impl ShadowBoundCase {
+    async fn request_cancel(&self) -> FeedbackCycleInfo {
+        let cycle = self
+            .cycles
+            .find_cycle(&self.claim.cycle.feedback_cycle_id)
+            .await
+            .expect("load shadow-bound cycle")
+            .expect("shadow-bound cycle exists");
+        let events = self
+            .cycles
+            .list_stage_events(&cycle.feedback_cycle_id)
+            .await
+            .expect("load shadow-bound timeline");
+        let event_sequence = events
+            .iter()
+            .map(|event| event.event_sequence)
+            .max()
+            .expect("shadow-bound timeline is non-empty")
+            + 1;
+        let occurred_at = self
+            .cycles
+            .database_time()
+            .await
+            .expect("load cancellation database time");
+        let cancellation = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+            feedback_cycle_id: cycle.feedback_cycle_id,
+            event_sequence,
+            stage: FeedbackStage::Shadow,
+            event_kind: FeedbackStageEventKind::CancellationRequested,
+            trigger_family: None,
+            research_job_id: None,
+            actor: Some("operator@risk_owner".to_owned()),
+            reason_code: Some(SHADOW_CANCEL_REASON.to_owned()),
+            evidence_uri: None,
+            evidence_hash: None,
+            occurred_at,
+        })
+        .expect("seal post-ShadowBind cancellation request");
+        self.cycles
+            .request_cancel(FeedbackCycleGeneration::from(&cycle), cancellation)
+            .await
+            .expect("persist post-ShadowBind cancellation request");
+        let cancelled_cycle = self
+            .cycles
+            .find_cycle(&cycle.feedback_cycle_id)
+            .await
+            .expect("reload cancellation-pending cycle")
+            .expect("cancellation-pending cycle exists");
+        assert_eq!(cancelled_cycle.status, FeedbackCycleStatus::Running);
+        assert_eq!(cancelled_cycle.cancel_requested_at, Some(occurred_at));
+        cancelled_cycle
+    }
+}
+
+async fn assert_shadow_cancelled(
+    case: &ShadowBoundCase,
+    db: &DatabaseConnection,
+    bindings: &Arc<PgModelRouteShadowBindingRepository>,
+    before: &ShadowBindingLifecycle,
+    cancelled_cycle: &FeedbackCycleInfo,
+) {
+    let policies = Arc::new(PgPolicyRepository::new(db.clone()));
+    let policy_before = policies
+        .load_current_bundle()
+        .await
+        .expect("load pre-cancellation policy")
+        .expect("pre-cancellation policy exists");
+    let policy_apply = Arc::new(ShadowBindingApplyProbe::new(PolicyBundleIdentity::from(
+        &policy_before,
+    )));
+    let service = ShadowBindingCancellationService::new(ShadowBindingCancellationDeps {
+        bindings: Arc::clone(bindings) as Arc<dyn ModelRouteShadowBindingRepository>,
+        policies: Arc::clone(&policies) as Arc<dyn PolicyRepository>,
+        policy_apply: Arc::clone(&policy_apply) as Arc<dyn CommittedPolicyApplyPort>,
+    });
+    service
+        .release_cycle(cancelled_cycle, SHADOW_CANCEL_REASON)
+        .await
+        .expect("release exact cancelled-cycle route shadow");
+
+    let after = bindings
+        .find_lifecycle(&before.binding_id)
+        .await
+        .expect("load cancelled binding lifecycle")
+        .expect("cancelled binding exists");
+    assert_eq!(after.status, ShadowBindingStatus::Cancelled);
+    assert_eq!(after.lifecycle_generation, before.lifecycle_generation + 1);
+    assert_eq!(after.binding_generation, before.binding_generation);
+    assert_eq!(
+        after.termination_reason_code.as_deref(),
+        Some(SHADOW_CANCEL_REASON)
+    );
+    let activation_id = after
+        .termination_policy_activation_id
+        .expect("cancelled binding records its policy activation");
+    let activation = ActivationEntity::find_by_id(activation_id)
+        .one(db)
+        .await
+        .expect("load shadow cancellation activation")
+        .expect("shadow cancellation activation exists");
+    assert_eq!(
+        activation.activation_kind,
+        PolicyActivationKind::ModelShadowCancellation
+    );
+    assert!(activation.activated_by_user_id.is_none());
+    assert_eq!(activation.activated_by_label, "feedback-coordinator");
+    assert!(
+        ActivationAuditEntity::find_by_id(activation.audit_event_id)
+            .one(db)
+            .await
+            .expect("load cancellation audit")
+            .is_some()
+    );
+    assert!(
+        ActivationOutboxEntity::find_by_id(activation.audit_event_id)
+            .one(db)
+            .await
+            .expect("load cancellation outbox")
+            .is_some()
+    );
+    let policy_after = policies
+        .load_current_bundle()
+        .await
+        .expect("load post-cancellation policy")
+        .expect("post-cancellation policy exists");
+    let route = policy_after
+        .snapshot
+        .model_routing
+        .model
+        .route_binding(BuyModelRoute::Crypto)
+        .expect("load cancelled Crypto route");
+    assert_eq!(
+        route.champion.model_version_id,
+        before.champion_model_version_id
+    );
+    assert_eq!(route.champion.generation, before.binding_generation + 1);
+    assert_eq!(route.champion.config_revision, policy_after.generation);
+    assert!(route.shadow.is_none());
+    assert_eq!(
+        policy_apply.readiness(),
+        PolicyApplyReadiness::Ready {
+            applied: PolicyBundleIdentity::from(&policy_after),
+        }
+    );
+
+    let counts = load_evidence_counts(db).await;
+    service
+        .release_cycle(cancelled_cycle, SHADOW_CANCEL_REASON)
+        .await
+        .expect("replay cancelled shadow convergence without another write");
+    assert_eq!(load_evidence_counts(db).await, counts);
+
+    case.cycles
+        .finalize_cycle(
+            case.claim.lease.with_generation(cancelled_cycle.generation),
+            FeedbackCycleTerminal::try_cancelled(SHADOW_CANCEL_REASON.to_owned())
+                .expect("seal cancelled feedback terminal"),
+        )
+        .await
+        .expect("finalize cycle only after shadow release convergence");
+    let terminal = case
+        .cycles
+        .find_cycle(&cancelled_cycle.feedback_cycle_id)
+        .await
+        .expect("load terminal cancelled cycle")
+        .expect("terminal cancelled cycle exists");
+    assert_eq!(terminal.status, FeedbackCycleStatus::Cancelled);
+    assert_eq!(
+        terminal.terminal_reason_code.as_deref(),
+        Some(SHADOW_CANCEL_REASON)
+    );
+}
+
+pub async fn shadow_cancellation_contracts() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let artifact_root = ArtifactRoot::create();
+    let store: Arc<dyn ArtifactStore> =
+        Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+    let case = Box::pin(ShadowBoundCase::prepare(db.clone(), store)).await;
+    let bindings = Arc::new(PgModelRouteShadowBindingRepository::new(db.clone()));
+    let binding_id = ShadowBindingArtifactId::from_cycle_id(case.claim.cycle.feedback_cycle_id);
+    let before = bindings
+        .find_lifecycle(&binding_id)
+        .await
+        .expect("load active cancellation fixture binding")
+        .expect("cancellation fixture binding exists");
+    assert_eq!(before.status, ShadowBindingStatus::Active);
+
+    let cancelled_cycle = case.request_cancel().await;
+    assert_shadow_cancelled(&case, &db, &bindings, &before, &cancelled_cycle).await;
 }
 
 async fn rejection_fault_matrix() {

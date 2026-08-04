@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Display,
+    sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
@@ -595,8 +596,8 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
         txn.commit().await.map_err(StorageError::from)?;
         Ok(Some(CatalogSnapshotInfo {
             market,
-            event,
-            event_markets,
+            event: Arc::new(event),
+            event_markets: Arc::from(event_markets),
         }))
     }
 
@@ -614,15 +615,19 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
         let event_cache = Self::events_by_change_ids(&txn, &event_change_ids, boundary)
             .await?
             .into_iter()
-            .map(|event| (event.event_change_id, event))
+            .map(|event| (event.event_change_id, Arc::new(event)))
             .collect::<BTreeMap<_, _>>();
-        let mut member_cache = BTreeMap::<CatalogEventChangeId, Vec<_>>::new();
+        let mut member_groups = BTreeMap::<CatalogEventChangeId, Vec<_>>::new();
         for member in Self::event_members_by_changes(&txn, &event_change_ids, boundary).await? {
-            member_cache
+            member_groups
                 .entry(member.event_change_id)
                 .or_default()
                 .push(member);
         }
+        let member_cache = member_groups
+            .into_iter()
+            .map(|(event_change_id, members)| (event_change_id, Arc::from(members)))
+            .collect::<BTreeMap<CatalogEventChangeId, Arc<[CatalogMarketChangeInfo]>>>();
         let mut snapshots = Vec::with_capacity(markets.len());
         for market in markets {
             let event_change_id = market.event_change_id;
@@ -634,10 +639,10 @@ impl CatalogLedgerRepository for PgCatalogLedgerRepository {
             })?;
             snapshots.push(CatalogSnapshotInfo {
                 market,
-                event: event.clone(),
+                event: Arc::clone(event),
                 event_markets: member_cache
                     .get(&event_change_id)
-                    .cloned()
+                    .map(Arc::clone)
                     .unwrap_or_default(),
             });
         }

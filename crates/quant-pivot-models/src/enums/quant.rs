@@ -219,12 +219,34 @@ pg_enum! {
     @derive(Default)
     pub enum ResolutionProjectionStatus {
         #[default]
-        PendingMapping => "pending_mapping",
+        Pending => "pending",
         Delivering => "delivering",
-        Retrying => "retrying",
+        RetryScheduled => "retry_scheduled",
+        MappingBlocked => "mapping_blocked",
         Quarantined => "quarantined",
-        Failed => "failed",
+        Excluded => "excluded",
         Verified => "verified",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_resolution_projection_error_code",
+    /// Queryable fault taxonomy for resolution projection operations.
+    pub enum ResolutionProjectionErrorCode {
+        CatalogMappingUnavailable => "catalog_mapping_unavailable",
+        InvalidObservation => "invalid_observation",
+        PersistenceUnavailable => "persistence_unavailable",
+        ExternalDependencyUnavailable => "external_dependency_unavailable",
+        UnexpectedTransient => "unexpected_transient",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_resolution_remediation_action",
+    /// Governed operator disposition for a blocked projection.
+    pub enum ResolutionRemediationAction {
+        Requeue => "requeue",
+        Exclude => "exclude",
     }
 }
 
@@ -716,9 +738,12 @@ pg_enum! {
         /// Freeze cohort coverage and decide whether statistical drift may run.
         FeedbackCoverage => "feedback_coverage",
         /// Freeze the PIT-safe attribution inputs available to recipe planning.
-        FeedbackAttributionPlan => "feedback_attribution_plan",
+        FeedbackAttribution => "feedback_attribution",
         /// Compute data/concept/label drift from immutable coverage evidence.
         FeedbackDrift => "feedback_drift",
+        /// Select an approved challenger template and seal all downstream
+        /// Dataset/training inputs after trigger evaluation.
+        FeedbackRecipePlan => "feedback_recipe_plan",
         /// Seal the bounded Training/Calibration/Evaluation Dataset batch.
         FeedbackDatasetSeal => "feedback_dataset_seal",
         /// Train the predeclared candidate batch.
@@ -732,6 +757,9 @@ pg_enum! {
         /// Compare every CPCV-eligible challenger with the champion over the
         /// one-time reserved Evaluation holdout.
         FeedbackComparison => "feedback_comparison",
+        /// Atomically bind the selected challenger to its route-owned shadow
+        /// slot and converge the committed runtime generation.
+        FeedbackShadowBind => "feedback_shadow_bind",
         /// Evaluate one F09-eligible challenger against exact production
         /// shadow observations from a published serving generation.
         FeedbackShadow => "feedback_shadow",
@@ -750,14 +778,18 @@ pg_enum! {
     type_name = "qp_research_job_status",
     /// Durable research-job lifecycle state.
     ///
-    /// `Queued → Running → {Succeeded | Failed | Cancelled}`. A crashed/orphaned
-    /// `Running` job is reclaimed to `Queued` by the boot recovery sweep (bounded
-    /// by `recovery_attempt`); a graceful shutdown also returns an in-flight job to
-    /// `Queued`. `Cancelled` is an operator terminal state (never auto-resumed).
+    /// `Queued → Running → {Succeeded | Failed | Cancelled}` with two
+    /// non-terminal release edges: `AwaitingEvidence` preserves a normal
+    /// external-materialization wait without consuming retry budget, while
+    /// `RetryScheduled` represents a typed transient execution failure or
+    /// interrupted worker. `Cancelled` is an operator terminal state (never
+    /// auto-resumed).
     @derive(Default)
     pub enum ResearchJobStatus {
         #[default]
         Queued => "queued",
+        AwaitingEvidence => "awaiting_evidence",
+        RetryScheduled => "retry_scheduled",
         Running => "running",
         Succeeded => "succeeded",
         Failed => "failed",
@@ -777,11 +809,13 @@ pg_enum! {
         FeatureParityRun => "feature_parity_run",
         FeedbackTruthFreezeArtifact => "feedback_truth_freeze_artifact",
         FeedbackCoverageArtifact => "feedback_coverage_artifact",
-        FeedbackAttributionPlanArtifact => "feedback_attribution_plan_artifact",
+        FeedbackAttributionManifest => "feedback_attribution_manifest",
         FeedbackDriftArtifact => "feedback_drift_artifact",
+        CandidateRecipePlanArtifact => "candidate_recipe_plan_artifact",
         FeedbackLearningStageArtifact => "feedback_learning_stage_artifact",
         FeedbackValidationArtifact => "feedback_validation_artifact",
         FeedbackComparisonArtifact => "feedback_comparison_artifact",
+        ShadowBindingArtifact => "shadow_binding_artifact",
         FeedbackShadowArtifact => "feedback_shadow_artifact",
         FeedbackDecisionArtifact => "feedback_decision_artifact",
         TradePolicyArtifact => "trade_policy_artifact",
@@ -796,10 +830,13 @@ impl ResearchJobStatus {
         matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
     }
 
-    /// Whether the job is still pending or executing (occupies a concurrency slot).
+    /// Whether the job is still pending or executing.
     #[must_use]
     pub const fn is_active(self) -> bool {
-        matches!(self, Self::Queued | Self::Running)
+        matches!(
+            self,
+            Self::Queued | Self::AwaitingEvidence | Self::RetryScheduled | Self::Running
+        )
     }
 }
 
@@ -899,6 +936,10 @@ wire_enum! {
     pub enum ResearchJobErrorCode {
         /// The offline service returned a business error.
         ExecutionFailed => "execution_failed",
+        /// A typed transient execution failure scheduled a durable retry.
+        ExecutionRetryScheduled => "execution_retry_scheduled",
+        /// Typed transient execution failures exhausted the governed retry cap.
+        ExecutionRetryExhausted => "execution_retry_exhausted",
         /// A boot recovery sweep re-queued this orphaned run.
         InterruptedByRestart => "interrupted_by_restart",
         /// Automatic recovery exceeded `max_recovery_attempts` (poison-pill quarantine).
@@ -1060,6 +1101,8 @@ pg_enum! {
     pub enum FeedbackCohort {
         /// Resolution labels for model training and calibration.
         ModelLearning => "model_learning",
+        /// Complete serving population that reached model scoring, including abstentions.
+        ModelScoreLearning => "model_score_learning",
         /// Real venue attempts for fill and execution-cost learning.
         ExecutionLearning => "execution_learning",
         /// Recommendation coverage and strategy-effect evaluation.
@@ -1079,13 +1122,17 @@ pg_enum! {
         Succeeded => "succeeded",
         Failed => "failed",
         Cancelled => "cancelled",
+        Quarantined => "quarantined",
     }
 }
 
 impl FeedbackCycleStatus {
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Quarantined
+        )
     }
 
     #[must_use]
@@ -1095,7 +1142,11 @@ impl FeedbackCycleStatus {
             (Self::Queued, Self::Running | Self::Cancelled)
                 | (
                     Self::Running,
-                    Self::Running | Self::Succeeded | Self::Failed | Self::Cancelled
+                    Self::Running
+                        | Self::Succeeded
+                        | Self::Failed
+                        | Self::Cancelled
+                        | Self::Quarantined
                 )
         )
     }
@@ -1123,20 +1174,62 @@ pg_enum! {
 }
 
 pg_enum! {
+    type_name = "qp_feedback_evaluation_mode",
+    /// Whether one occurrence evaluates policy triggers or is an explicitly
+    /// governed child attempt that may bypass only the no-retraining decision.
+    pub enum FeedbackEvaluationMode {
+        Conditional => "conditional",
+        ForcedRetraining => "forced_retraining",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_feedback_scheduler_failure_kind",
+    /// The durable scheduler phase that failed for the current pending cutoff.
+    pub enum FeedbackSchedulerFailureKind {
+        Materialization => "materialization",
+        Settlement => "settlement",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_feedback_recipe_template_status",
+    /// Governance lifecycle for an immutable feedback recipe-template revision.
+    pub enum FeedbackRecipeTemplateStatus {
+        Draft => "draft",
+        Approved => "approved",
+        Retired => "retired",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_shadow_binding_status",
+    /// Lifecycle of one route-owned shadow-slot reservation.
+    pub enum ShadowBindingStatus {
+        Active => "active",
+        Rejected => "rejected",
+        Promoted => "promoted",
+        Cancelled => "cancelled",
+    }
+}
+
+pg_enum! {
     type_name = "qp_feedback_stage",
     /// Closed feedback DAG stage vocabulary.
     pub enum FeedbackStage {
         Trigger => "trigger",
         TruthFreeze => "truth_freeze",
         Coverage => "coverage",
-        AttributionPlan => "attribution_plan",
+        Attribution => "attribution",
         Drift => "drift",
+        RecipePlan => "recipe_plan",
         DatasetSeal => "dataset_seal",
         Training => "training",
         Calibration => "calibration",
         Cpcv => "cpcv",
         Validation => "validation",
         Comparison => "comparison",
+        ShadowBind => "shadow_bind",
         Shadow => "shadow",
         Decision => "decision",
     }
@@ -1149,15 +1242,17 @@ impl FeedbackStage {
         match self {
             Self::Trigger => Some(Self::TruthFreeze),
             Self::TruthFreeze => Some(Self::Coverage),
-            Self::Coverage => Some(Self::AttributionPlan),
-            Self::AttributionPlan => Some(Self::Drift),
-            Self::Drift => Some(Self::DatasetSeal),
+            Self::Coverage => Some(Self::Attribution),
+            Self::Attribution => Some(Self::Drift),
+            Self::Drift => Some(Self::RecipePlan),
+            Self::RecipePlan => Some(Self::DatasetSeal),
             Self::DatasetSeal => Some(Self::Training),
             Self::Training => Some(Self::Calibration),
             Self::Calibration => Some(Self::Cpcv),
             Self::Cpcv => Some(Self::Validation),
             Self::Validation => Some(Self::Comparison),
-            Self::Comparison => Some(Self::Shadow),
+            Self::Comparison => Some(Self::ShadowBind),
+            Self::ShadowBind => Some(Self::Shadow),
             Self::Shadow => Some(Self::Decision),
             Self::Decision => None,
         }
@@ -1184,8 +1279,9 @@ pg_enum! {
     /// Semantically distinct immutable explanation and association artifacts.
     pub enum AttributionArtifactKind {
         PredictionExplanation => "prediction_explanation",
-        DecisionCounterfactual => "decision_counterfactual",
-        OutcomeAssociation => "outcome_association",
+        DecisionInterventionReplay => "decision_intervention_replay",
+        ResolutionOutcomeAssociation => "resolution_outcome_association",
+        ExecutionOutcomeAssociation => "execution_outcome_association",
         ExecutionTrajectory => "execution_trajectory",
         PolicyCounterfactualOutcome => "policy_counterfactual_outcome",
     }
@@ -1679,11 +1775,13 @@ mod tests {
 
         for (cohort, wire) in [
             (FeedbackCohort::ModelLearning, "model_learning"),
+            (FeedbackCohort::ModelScoreLearning, "model_score_learning"),
             (FeedbackCohort::ExecutionLearning, "execution_learning"),
             (FeedbackCohort::PolicyEvaluation, "policy_evaluation"),
         ] {
             let exhaustive_wire = match cohort {
                 FeedbackCohort::ModelLearning => "model_learning",
+                FeedbackCohort::ModelScoreLearning => "model_score_learning",
                 FeedbackCohort::ExecutionLearning => "execution_learning",
                 FeedbackCohort::PolicyEvaluation => "policy_evaluation",
             };

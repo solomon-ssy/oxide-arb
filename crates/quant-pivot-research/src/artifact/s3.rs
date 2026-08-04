@@ -191,10 +191,20 @@ impl S3ArtifactStore {
         ArtifactUri::parse(uri.to_string()).map_err(Into::into)
     }
 
-    fn io_error(&self, path: &Path, error: &Error) -> ResearchError {
-        ResearchError::ArtifactIo {
-            uri: format!("s3://{}/{}", self.bucket, path),
-            detail: error.to_string(),
+    fn store_error(&self, path: &Path, error: &Error) -> ResearchError {
+        let uri = format!("s3://{}/{}", self.bucket, path);
+        match error {
+            // `object_store` maps exhausted HTTP transport/server retries to
+            // `Generic`; authentication, authorization, path, precondition,
+            // and capability failures have dedicated non-retryable variants.
+            Error::Generic { .. } => ResearchError::ArtifactTransport {
+                uri,
+                detail: error.to_string(),
+            },
+            _ => ResearchError::ArtifactIo {
+                uri,
+                detail: error.to_string(),
+            },
         }
     }
 
@@ -277,19 +287,19 @@ impl ArtifactStore for S3ArtifactStore {
             .store
             .put_multipart(&path)
             .await
-            .map_err(|error| self.io_error(&path, &error))?;
+            .map_err(|error| self.store_error(&path, &error))?;
         let mut writer = WriteMultipart::new(upload);
         while let Some(chunk) = stream.next().await {
             writer
                 .wait_for_capacity(4)
                 .await
-                .map_err(|error| self.io_error(&path, &error))?;
+                .map_err(|error| self.store_error(&path, &error))?;
             writer.put(chunk?);
         }
         let completed = writer
             .finish()
             .await
-            .map_err(|error| self.io_error(&path, &error))?;
+            .map_err(|error| self.store_error(&path, &error))?;
         if self.require_versioning && completed.version.is_none() {
             return Err(ResearchError::ArtifactIo {
                 uri: format!("s3://{}/{}", self.bucket, path),
@@ -329,7 +339,7 @@ impl ArtifactStore for S3ArtifactStore {
                     Error::NotFound { .. } => ResearchError::ArtifactNotFound {
                         uri: uri.to_string(),
                     },
-                    error => self.io_error(&object.path, &error),
+                    error => self.store_error(&object.path, &error),
                 })?;
         let display = uri.to_string();
         let stream = result.into_stream().map(move |result| {
@@ -353,7 +363,7 @@ impl ArtifactStore for S3ArtifactStore {
         let meta = self
             .head_object(&object)
             .await
-            .map_err(|error| self.io_error(&object.path, &error))?;
+            .map_err(|error| self.store_error(&object.path, &error))?;
         let object_locked = match meta.version.as_deref() {
             Some(version_id) => self.object_lock_is_active(&object.path, version_id).await?,
             None => false,
@@ -404,7 +414,7 @@ impl ArtifactStore for S3ArtifactStore {
         match self.head_object(&object).await {
             Ok(_) => Ok(true),
             Err(Error::NotFound { .. }) => Ok(false),
-            Err(error) => Err(self.io_error(&object.path, &error).into()),
+            Err(error) => Err(self.store_error(&object.path, &error).into()),
         }
     }
 

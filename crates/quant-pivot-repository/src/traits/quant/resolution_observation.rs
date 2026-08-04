@@ -1,14 +1,15 @@
 //! Durable resolution observation inbox and projection queue.
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
     domain::{
         data_plane::UpsertDomainSourceCursor,
         quant::{
-            NewResolutionObservationInbox, ResolutionObservationProjectionInfo,
+            NewResolutionObservationInbox, RemediateResolutionProjection,
+            ResolutionObservationProjectionInfo, ResolutionProjectionAttentionItem,
             ResolutionProjectionBarrier, ResolutionProjectionClaim, ResolutionProjectionSettlement,
-            ResolutionScanCommitOutcome,
+            ResolutionRemediationCommit, ResolutionScanCommitOutcome,
         },
     },
     types::{ContentHash, ResolutionObservationId, WorkerId},
@@ -40,6 +41,20 @@ pub trait ResolutionObservationRepository: Send + Sync {
         worker_id: WorkerId,
         settlement: ResolutionProjectionSettlement,
     ) -> Result<ResolutionObservationProjectionInfo, StorageError>;
+
+    /// Apply an exact-CAS governed `Requeue` or `Exclude` transition and append
+    /// its immutable evidence in the same transaction.
+    async fn remediate(
+        &self,
+        command: RemediateResolutionProjection,
+    ) -> QuantResult<ResolutionRemediationCommit>;
+
+    /// Return bounded blocked/quarantined projections with ordered WORM
+    /// remediation history for Truth Ops.
+    async fn list_attention(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<ResolutionProjectionAttentionItem>, StorageError>;
 
     /// Resolve an inbox identity for recovery and deterministic replay.
     async fn find_by_checkpoint(

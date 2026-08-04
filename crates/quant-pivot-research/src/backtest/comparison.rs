@@ -369,8 +369,11 @@ mod tests {
         report.report_hash = report.recomputed_hash().expect("report hash");
         BacktestRunResult {
             report,
+            calibration_outcomes: Vec::new(),
+            rank_outcomes: Vec::new(),
             sample_outcomes: samples,
             portfolio_returns: Vec::new(),
+            tick_weights: Vec::new(),
         }
     }
 

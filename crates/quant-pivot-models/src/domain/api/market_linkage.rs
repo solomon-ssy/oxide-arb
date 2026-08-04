@@ -7,6 +7,8 @@
 //! durable, queryable record of every feature-source-vs-settlement-oracle
 //! divergence that crossed the governed threshold.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
@@ -271,6 +273,10 @@ pub struct DomainSourceExpectationView {
     pub freshness_secs: i64,
     pub affected_market_ids: Vec<MarketId>,
     pub affected_profile_ids: Vec<ResearchProfileId>,
+    /// Server-derived, mutually exclusive status used by aggregate health
+    /// summaries. The more specific expectation and cursor statuses remain
+    /// available for diagnostics.
+    pub snapshot_status: DomainSourceSnapshotStatus,
     pub status: DomainSourceExpectationStatus,
     pub status_reason: Option<String>,
     pub cursor_status: Option<DomainCursorStatus>,
@@ -283,7 +289,6 @@ pub struct DomainSourceExpectationView {
     /// `None` means no cursor exists. It must never be rendered as zero lag.
     pub lag_secs: Option<i64>,
     pub cursor_updated_at: Option<DateTime<Utc>>,
-    pub observed_at: DateTime<Utc>,
 }
 
 impl DomainSourceExpectationView {
@@ -300,6 +305,8 @@ impl DomainSourceExpectationView {
             (cursor, last_event_time, freshness_observed_at, lag_secs)
         });
         let (status, status_reason) = effective_source_status(&expected, observation.as_ref());
+        let snapshot_status =
+            DomainSourceSnapshotStatus::from_observation(status, observation.is_some());
         let (
             cursor_status,
             checkpoint,
@@ -332,6 +339,7 @@ impl DomainSourceExpectationView {
             freshness_secs: expected.freshness_secs,
             affected_market_ids: expected.affected_market_ids.0,
             affected_profile_ids: expected.affected_profile_ids.0,
+            snapshot_status,
             status,
             status_reason,
             cursor_status,
@@ -341,7 +349,95 @@ impl DomainSourceExpectationView {
             freshness_observed_at,
             lag_secs,
             cursor_updated_at,
+        }
+    }
+}
+
+/// Mutually exclusive health class used by the domain-source snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainSourceSnapshotStatus {
+    /// A cursor exists but has not completed bootstrap/backfill.
+    Declared,
+    /// The source has a live cursor inside its freshness budget.
+    Live,
+    /// The source has a live cursor outside its freshness budget.
+    Stale,
+    /// Credentials, unsupported capability, or a typed source failure blocks use.
+    Blocked,
+    /// No cursor has ever been observed for the declared binding.
+    Unobserved,
+}
+
+impl DomainSourceSnapshotStatus {
+    const fn from_observation(status: DomainSourceExpectationStatus, has_cursor: bool) -> Self {
+        match status {
+            DomainSourceExpectationStatus::Live => Self::Live,
+            DomainSourceExpectationStatus::Stale => Self::Stale,
+            DomainSourceExpectationStatus::CredentialBlocked
+            | DomainSourceExpectationStatus::Failed
+            | DomainSourceExpectationStatus::Unsupported => Self::Blocked,
+            DomainSourceExpectationStatus::NotStarted if has_cursor => Self::Declared,
+            DomainSourceExpectationStatus::NotStarted => Self::Unobserved,
+        }
+    }
+}
+
+/// Server-owned aggregate for one domain family.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DomainSourceFamilySummary {
+    pub declared: u64,
+    pub live: u64,
+    pub stale: u64,
+    pub blocked: u64,
+    pub unobserved: u64,
+    /// Maximum lag among observed cursors. `None` means no cursor was observed.
+    pub worst_lag_secs: Option<i64>,
+}
+
+impl DomainSourceFamilySummary {
+    fn record(&mut self, item: &DomainSourceExpectationView) {
+        match item.snapshot_status {
+            DomainSourceSnapshotStatus::Declared => self.declared += 1,
+            DomainSourceSnapshotStatus::Live => self.live += 1,
+            DomainSourceSnapshotStatus::Stale => self.stale += 1,
+            DomainSourceSnapshotStatus::Blocked => self.blocked += 1,
+            DomainSourceSnapshotStatus::Unobserved => self.unobserved += 1,
+        }
+        if let Some(lag_secs) = item.lag_secs {
+            self.worst_lag_secs = Some(
+                self.worst_lag_secs
+                    .map_or(lag_secs, |current| current.max(lag_secs)),
+            );
+        }
+    }
+}
+
+/// Point-in-time, server-derived domain-source health projection.
+#[derive(Debug, Clone, Serialize)]
+pub struct DomainSourcesSnapshot {
+    pub observed_at: DateTime<Utc>,
+    pub summary_by_family: BTreeMap<DomainFamily, DomainSourceFamilySummary>,
+    pub items: Vec<DomainSourceExpectationView>,
+}
+
+impl DomainSourcesSnapshot {
+    #[must_use]
+    pub fn new(observed_at: DateTime<Utc>, items: Vec<DomainSourceExpectationView>) -> Self {
+        let mut summary_by_family = DomainFamily::ALL
+            .into_iter()
+            .map(|family| (family, DomainSourceFamilySummary::default()))
+            .collect::<BTreeMap<_, _>>();
+        for item in &items {
+            summary_by_family
+                .entry(item.family)
+                .or_default()
+                .record(item);
+        }
+        Self {
             observed_at,
+            summary_by_family,
+            items,
         }
     }
 }
@@ -454,7 +550,7 @@ impl From<BasisAlertInfo> for BasisAlertView {
 mod tests {
     use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 
-    use super::DomainSourceExpectationView;
+    use super::{DomainSourceExpectationView, DomainSourceSnapshotStatus, DomainSourcesSnapshot};
     use crate::{
         domain::data_plane::{
             AffectedMarketIds, AffectedProfileIds, DomainCursorStatus, DomainSourceCheckpoint,
@@ -525,6 +621,7 @@ mod tests {
             observed_at,
         );
         assert_eq!(view.status, DomainSourceExpectationStatus::NotStarted);
+        assert_eq!(view.snapshot_status, DomainSourceSnapshotStatus::Unobserved);
         assert_eq!(view.status_reason.as_deref(), Some("cursor_not_created"));
         assert_eq!(view.lag_secs, None);
         assert_eq!(view.last_event_time, None);
@@ -539,6 +636,7 @@ mod tests {
             observed_at,
         );
         assert_eq!(stale.status, DomainSourceExpectationStatus::Stale);
+        assert_eq!(stale.snapshot_status, DomainSourceSnapshotStatus::Stale);
 
         let blocked = DomainSourceExpectationView::from_expected_and_observed(
             expectation(
@@ -552,6 +650,7 @@ mod tests {
             blocked.status,
             DomainSourceExpectationStatus::CredentialBlocked
         );
+        assert_eq!(blocked.snapshot_status, DomainSourceSnapshotStatus::Blocked);
         assert_eq!(
             blocked.status_reason.as_deref(),
             Some("credential_required")
@@ -581,5 +680,55 @@ mod tests {
         );
         assert_eq!(view.lag_secs, Some(10));
         assert_eq!(view.status, DomainSourceExpectationStatus::Live);
+        assert_eq!(view.snapshot_status, DomainSourceSnapshotStatus::Live);
+    }
+
+    #[test]
+    fn snapshot_summarizes_server_states() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
+        let mut bootstrap_cursor = cursor(observed_at);
+        bootstrap_cursor.status = DomainCursorStatus::Bootstrap;
+        let items = vec![
+            DomainSourceExpectationView::from_expected_and_observed(
+                expectation(DomainSourceExpectationStatus::NotStarted, None),
+                None,
+                observed_at,
+            ),
+            DomainSourceExpectationView::from_expected_and_observed(
+                expectation(DomainSourceExpectationStatus::Live, None),
+                Some(bootstrap_cursor),
+                observed_at,
+            ),
+            DomainSourceExpectationView::from_expected_and_observed(
+                expectation(DomainSourceExpectationStatus::Live, None),
+                Some(cursor(observed_at)),
+                observed_at,
+            ),
+            DomainSourceExpectationView::from_expected_and_observed(
+                expectation(DomainSourceExpectationStatus::Live, None),
+                Some(cursor(observed_at - Duration::seconds(901))),
+                observed_at,
+            ),
+            DomainSourceExpectationView::from_expected_and_observed(
+                expectation(
+                    DomainSourceExpectationStatus::CredentialBlocked,
+                    Some("credential_required"),
+                ),
+                None,
+                observed_at,
+            ),
+        ];
+
+        let snapshot = DomainSourcesSnapshot::new(observed_at, items);
+        let summary = snapshot
+            .summary_by_family
+            .get(&DomainFamily::Weather)
+            .expect("weather summary");
+        assert_eq!(summary.declared, 1);
+        assert_eq!(summary.live, 1);
+        assert_eq!(summary.stale, 1);
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(summary.unobserved, 1);
+        assert_eq!(summary.worst_lag_secs, Some(901));
     }
 }

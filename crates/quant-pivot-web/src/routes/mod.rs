@@ -317,6 +317,7 @@ mod tests {
                         | "/research/model-route-activation-permits"
                         | "/research/model-route-activation-permits/{permit_id}/revoke"
                         | "/research/model-route-bootstraps"
+                        | "/research/model-route-shadow-bindings/{binding_id}/reject"
                         | "/research/model-route-activations"
                 ) && spec.method == Method::POST
             })
@@ -349,7 +350,7 @@ mod tests {
                 (
                     Method::POST,
                     "/research/model-route-activation-permits",
-                    Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
+                    Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Authorize),
                 ),
                 (
                     Method::POST,
@@ -364,7 +365,12 @@ mod tests {
                 (
                     Method::POST,
                     "/research/model-route-activations",
-                    Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
+                    Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Activate),
+                ),
+                (
+                    Method::POST,
+                    "/research/model-route-shadow-bindings/{binding_id}/reject",
+                    Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Reject),
                 ),
             ]
         );

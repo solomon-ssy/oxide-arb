@@ -363,6 +363,12 @@ fn liquidity_usd(i: usize) -> Decimal {
     Decimal::from(1_000 * (i as u64 + 1))
 }
 
+/// Cross-sectional spread (bps) for the `i`-th market. Keeping this input
+/// non-degenerate is required for the governed `WinsorizedZScore` factor replay.
+fn spread_bps(i: usize) -> Decimal {
+    Decimal::from(100 + 10 * i as u64)
+}
+
 fn feature_values(i: usize) -> BTreeMap<FeatureName2, FeatureCell> {
     let values = [
         (MID, FeatureValue::Probability(Probability::new(dec!(0.5)))),
@@ -374,7 +380,7 @@ fn feature_values(i: usize) -> BTreeMap<FeatureName2, FeatureCell> {
             VISIBLE_LIQUIDITY_USD,
             FeatureValue::Usd(Usd::new(liquidity_usd(i))),
         ),
-        (SPREAD_BPS, FeatureValue::Bps(dec!(400))),
+        (SPREAD_BPS, FeatureValue::Bps(spread_bps(i))),
         // Non-crypto category: this suite exercises frozen liquidity inputs,
         // not the crypto domain-weight publish invariant.
         (CATEGORY, FeatureValue::Category(MarketCategory::Politics)),

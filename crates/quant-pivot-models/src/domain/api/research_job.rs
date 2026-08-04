@@ -139,16 +139,18 @@ pub struct ResearchJobView {
     pub result: Option<ResearchJobResultRef>,
     /// Canonical object identity for artifact-producing result kinds.
     pub result_artifact: Option<ResearchJobArtifactRef>,
-    /// Structured failure payload on terminal `failed`.
+    /// Structured terminal failure or active retry diagnostic.
     pub error: Option<ResearchJobError>,
     /// Build/backtest coverage diagnostics.
     pub coverage_json: Option<DatasetCoverage>,
     pub requested_by: Option<String>,
     pub acting_role: RoleCode,
     pub parent_job_id: Option<ResearchJobId>,
-    /// Number of automatic crash-recovery re-queues so far.
+    /// Number of automatic interruption/transient-execution retries so far.
     pub recovery_attempt: i32,
     pub max_recovery_attempts: i32,
+    /// DB-clock deadline for a durable typed retry.
+    pub next_attempt_at: Option<DateTime<Utc>>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -182,6 +184,7 @@ impl From<ResearchJobInfo> for ResearchJobView {
             parent_job_id: info.parent_job_id,
             recovery_attempt: info.recovery_attempt,
             max_recovery_attempts: info.max_recovery_attempts,
+            next_attempt_at: info.next_attempt_at,
             lease_expires_at: info.lease_expires_at,
             started_at: info.started_at,
             finished_at: info.finished_at,

@@ -18,7 +18,7 @@ use reqwest::{
     Client, Url,
     header::{AUTHORIZATION, HeaderValue},
 };
-use teloxide::{prelude::*, types::ChatId};
+use teloxide_core::{Bot, requests::Requester, types::ChatId};
 use tokio::runtime::Handle;
 
 #[derive(Clone)]

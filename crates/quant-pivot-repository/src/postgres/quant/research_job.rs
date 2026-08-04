@@ -1,6 +1,8 @@
 //! Postgres-backed durable research-job ledger repository.
 
-use chrono::{DateTime, Utc};
+use std::time::Duration;
+
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::storage::{StorageError, entity::QUANT_RESEARCH_JOB};
 use quant_pivot_models::{
     domain::{
@@ -22,7 +24,10 @@ use sea_orm::{
 
 use crate::{
     postgres::{primitives, query::paginate_mapped},
-    traits::{KindRunningCount, ReclaimOutcome, ResearchJobEnqueueOutcome, ResearchJobRepository},
+    traits::{
+        KindRunningCount, ReclaimOutcome, ResearchJobEnqueueOutcome, ResearchJobRepository,
+        ResearchJobRetryOutcome,
+    },
 };
 
 /// Postgres-backed durable research-job ledger repository.
@@ -233,7 +238,26 @@ impl ResearchJobRepository for PgResearchJobRepository {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         // Skip-locked so concurrent workers never contend on the same queued row.
         let candidate = Entity::find()
-            .filter(Column::Status.eq(ResearchJobStatus::Queued))
+            .filter(
+                Condition::any()
+                    .add(Column::Status.eq(ResearchJobStatus::Queued))
+                    .add(
+                        Condition::all()
+                            .add(Column::Status.eq(ResearchJobStatus::AwaitingEvidence))
+                            .add(
+                                Expr::col(Column::NextAttemptAt)
+                                    .lte(Expr::cust("statement_timestamp()")),
+                            ),
+                    )
+                    .add(
+                        Condition::all()
+                            .add(Column::Status.eq(ResearchJobStatus::RetryScheduled))
+                            .add(
+                                Expr::col(Column::NextAttemptAt)
+                                    .lte(Expr::cust("statement_timestamp()")),
+                            ),
+                    ),
+            )
             .filter(Column::Kind.is_in(eligible.iter().copied()))
             .order_by_asc(Column::CreatedAt)
             .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
@@ -247,6 +271,9 @@ impl ResearchJobRepository for PgResearchJobRepository {
         let now = primitives::statement_timestamp(&txn).await?;
         let mut active = model.into_active_model();
         active.status = Set(ResearchJobStatus::Running);
+        active.next_attempt_at = Set(None);
+        active.progress_json = Set(None);
+        active.error_json = Set(None);
         active.lease_owner = Set(Some(*owner));
         active.lease_expires_at = Set(Some(lease_expires_at));
         active.started_at = Set(Some(now));
@@ -319,6 +346,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
             .col_expr(Column::FinishedAt, Expr::cust("statement_timestamp()"))
             .col_expr(Column::LeaseOwner, Expr::value(None::<WorkerId>))
             .col_expr(Column::LeaseExpiresAt, Expr::value(None::<DateTime<Utc>>))
+            .col_expr(Column::NextAttemptAt, Expr::value(None::<DateTime<Utc>>))
             .filter(Column::JobId.eq(*job_id))
             .filter(Column::Status.eq(ResearchJobStatus::Running))
             .filter(Column::LeaseOwner.eq(owner))
@@ -336,7 +364,72 @@ impl ResearchJobRepository for PgResearchJobRepository {
             .ok_or_else(|| StorageError::not_found(QUANT_RESEARCH_JOB, job_id))
     }
 
-    async fn cancel_if_queued(
+    async fn await_evidence(
+        &self,
+        job_id: &ResearchJobId,
+        owner: &WorkerId,
+        progress: ResearchJobProgress,
+        retry_after: Duration,
+    ) -> Result<ResearchJobInfo, StorageError> {
+        let delay = ChronoDuration::from_std(retry_after).map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_RESEARCH_JOB),
+                format!("evidence-wait delay is not representable: {error}"),
+            )
+        })?;
+        if delay <= ChronoDuration::zero() {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_RESEARCH_JOB),
+                "evidence-wait delay must be positive",
+            ));
+        }
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let model = Entity::find_by_id(*job_id)
+            .lock(LockType::Update)
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_RESEARCH_JOB, job_id))?;
+        if model.status != ResearchJobStatus::Running || model.lease_owner.as_ref() != Some(owner) {
+            return Err(StorageError::state_conflict(
+                QUANT_RESEARCH_JOB,
+                Some(job_id),
+                format!(
+                    "cannot await evidence from {} owned by {:?}",
+                    model.status, model.lease_owner
+                ),
+            ));
+        }
+        if model.kind != ResearchJobKind::FeatureParity {
+            return Err(StorageError::state_conflict(
+                QUANT_RESEARCH_JOB,
+                Some(job_id),
+                format!(
+                    "only feature_parity may await external evidence, got {}",
+                    model.kind
+                ),
+            ));
+        }
+        let now = primitives::statement_timestamp(&txn).await?;
+        let mut active = model.into_active_model();
+        active.status = Set(ResearchJobStatus::AwaitingEvidence);
+        active.next_attempt_at = Set(Some(now + delay));
+        active.progress_json = Set(Some(progress));
+        active.error_json = Set(None);
+        active.lease_owner = Set(None);
+        active.lease_expires_at = Set(None);
+        active.started_at = Set(None);
+        active.heartbeat_at = Set(None);
+        active.finished_at = Set(None);
+        let updated = Entity::update(active)
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(updated.into())
+    }
+
+    async fn cancel_if_pending(
         &self,
         job_id: &ResearchJobId,
         error: ResearchJobError,
@@ -351,12 +444,93 @@ impl ResearchJobRepository for PgResearchJobRepository {
             )
             .col_expr(Column::ErrorJson, Expr::value(error))
             .col_expr(Column::FinishedAt, Expr::cust("statement_timestamp()"))
+            .col_expr(Column::NextAttemptAt, Expr::value(None::<DateTime<Utc>>))
             .filter(Column::JobId.eq(*job_id))
-            .filter(Column::Status.eq(ResearchJobStatus::Queued))
+            .filter(Column::Status.is_in([
+                ResearchJobStatus::Queued,
+                ResearchJobStatus::AwaitingEvidence,
+                ResearchJobStatus::RetryScheduled,
+            ]))
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;
         Ok(result.rows_affected > 0)
+    }
+
+    async fn retry_transient(
+        &self,
+        job_id: &ResearchJobId,
+        owner: &WorkerId,
+        detail: String,
+        retry_after: Duration,
+    ) -> Result<ResearchJobRetryOutcome, StorageError> {
+        let delay = ChronoDuration::from_std(retry_after).map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_RESEARCH_JOB),
+                format!("transient retry delay is not representable: {error}"),
+            )
+        })?;
+        if delay <= ChronoDuration::zero() {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_RESEARCH_JOB),
+                "transient retry delay must be positive",
+            ));
+        }
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let model = Entity::find_by_id(*job_id)
+            .lock(LockType::Update)
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_RESEARCH_JOB, job_id))?;
+        if model.status != ResearchJobStatus::Running || model.lease_owner.as_ref() != Some(owner) {
+            return Err(StorageError::state_conflict(
+                QUANT_RESEARCH_JOB,
+                Some(job_id),
+                format!(
+                    "cannot schedule transient retry from {} owned by {:?}",
+                    model.status, model.lease_owner
+                ),
+            ));
+        }
+        let now = primitives::statement_timestamp(&txn).await?;
+        let exhausted = model.recovery_attempt >= model.max_recovery_attempts;
+        let next_recovery_attempt = model.recovery_attempt + 1;
+        let mut active = model.into_active_model();
+        active.lease_owner = Set(None);
+        active.lease_expires_at = Set(None);
+        if exhausted {
+            active.status = Set(ResearchJobStatus::Failed);
+            active.next_attempt_at = Set(None);
+            active.finished_at = Set(Some(now));
+            active.error_json = Set(Some(ResearchJobError::new(
+                ResearchJobErrorCode::ExecutionRetryExhausted,
+                detail,
+            )));
+        } else {
+            active.status = Set(ResearchJobStatus::RetryScheduled);
+            active.recovery_attempt = Set(next_recovery_attempt);
+            active.next_attempt_at = Set(Some(now + delay));
+            active.progress_json = Set(None);
+            active.started_at = Set(None);
+            active.finished_at = Set(None);
+            active.heartbeat_at = Set(None);
+            active.error_json = Set(Some(ResearchJobError::new(
+                ResearchJobErrorCode::ExecutionRetryScheduled,
+                detail,
+            )));
+        }
+        let updated = Entity::update(active)
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        let info = ResearchJobInfo::from(updated);
+        Ok(if exhausted {
+            ResearchJobRetryOutcome::Exhausted(info)
+        } else {
+            ResearchJobRetryOutcome::Scheduled(info)
+        })
     }
 
     async fn reclaim_orphaned(
@@ -411,7 +585,7 @@ impl PgResearchJobRepository {
         let requeued = Entity::update_many()
             .col_expr(
                 Column::Status,
-                primitives::enum_value(&ResearchJobStatus::Queued),
+                primitives::enum_value(&ResearchJobStatus::RetryScheduled),
             )
             .col_expr(
                 Column::RecoveryAttempt,
@@ -419,11 +593,13 @@ impl PgResearchJobRepository {
             )
             .col_expr(Column::LeaseOwner, Expr::value(None::<WorkerId>))
             .col_expr(Column::LeaseExpiresAt, Expr::value(None::<DateTime<Utc>>))
+            .col_expr(Column::NextAttemptAt, Expr::cust("statement_timestamp()"))
             .col_expr(
                 Column::ProgressJson,
                 Expr::value(None::<ResearchJobProgress>),
             )
             .col_expr(Column::StartedAt, Expr::value(None::<DateTime<Utc>>))
+            .col_expr(Column::HeartbeatAt, Expr::value(None::<DateTime<Utc>>))
             .col_expr(
                 Column::ErrorJson,
                 Expr::value(ResearchJobError::new(

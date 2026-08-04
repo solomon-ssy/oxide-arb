@@ -57,7 +57,7 @@ rayon       = { workspace = true }
 
 # ── Observability ──────────────────────────────────────────────────
 prometheus = { workspace = true }
-teloxide   = { workspace = true, features = ["macros"] }
+teloxide-core = { workspace = true }
 reqwest    = { workspace = true, features = ["json"] }
 
 # ── Cache ──────────────────────────────────────────────────────────

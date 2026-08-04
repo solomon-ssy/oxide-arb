@@ -2,7 +2,9 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{QpFeedbackCycleStatus, QpFeedbackDecision};
+use super::sea_orm_active_enums::{
+    QpFeedbackCycleStatus, QpFeedbackDecision, QpFeedbackEvaluationMode, QpModelFamily,
+};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -23,26 +25,43 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub feedback_policy_hash: String,
     pub label_cutoff: DateTimeWithTimeZone,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub capability_registry_hashes: Json,
     pub champion_model_version_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub champion_serving_contract_hash: String,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub candidate_family: Json,
+    pub champion_model_spec_id: Uuid,
     #[sea_orm(column_type = "Text")]
-    pub candidate_family_hash: String,
+    pub champion_model_spec_definition_hash: String,
+    pub champion_model_family: QpModelFamily,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub route: Json,
+    pub decision_policy_snapshot_id: Uuid,
+    #[sea_orm(column_type = "Text")]
+    pub decision_policy_snapshot_hash: String,
+    pub policy_bundle_generation: i64,
+    pub route_generation: i64,
+    pub evaluation_mode: QpFeedbackEvaluationMode,
+    pub parent_cycle_id: Option<Uuid>,
+    pub forced_idempotency_key: Option<String>,
     pub status: QpFeedbackCycleStatus,
     pub decision: Option<QpFeedbackDecision>,
     pub terminal_reason_code: Option<String>,
     pub generation: i64,
     pub lease_owner: Option<Uuid>,
     pub lease_expires_at: Option<DateTimeWithTimeZone>,
+    pub stage_resume_after: Option<DateTimeWithTimeZone>,
     pub cancel_requested_at: Option<DateTimeWithTimeZone>,
     pub started_at: Option<DateTimeWithTimeZone>,
     pub completed_at: Option<DateTimeWithTimeZone>,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
+    #[sea_orm(
+        belongs_to,
+        from = "research_profile_artifact_id",
+        to = "research_profile_artifact_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

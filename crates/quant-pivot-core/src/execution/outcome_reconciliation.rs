@@ -27,6 +27,7 @@ use quant_pivot_models::{
             ResolutionProjectionClaim, ResolutionProjectionSettlement, ResolutionScanCommitOutcome,
         },
     },
+    enums::quant::ResolutionProjectionErrorCode,
     hashing::CanonicalDigest,
     runtime_config::OutcomeReconciliationPolicy,
     types::{
@@ -474,13 +475,12 @@ impl OutcomeReconciliationService {
             .collect::<HashMap<_, _>>();
         for claim in claims {
             let Some(market) = markets_by_id.get(&claim.observation.market_id) else {
-                let retry_at = claim.projection.updated_at + Duration::minutes(5);
                 self.resolution_observations
                     .settle(
                         claim.observation.resolution_observation_id,
                         self.projection_worker_id,
-                        ResolutionProjectionSettlement::Quarantined {
-                            retry_at,
+                        ResolutionProjectionSettlement::MappingBlocked {
+                            error_code: ResolutionProjectionErrorCode::CatalogMappingUnavailable,
                             error: format!(
                                 "catalog mapping unavailable for market {}",
                                 claim.observation.market_id
@@ -510,7 +510,8 @@ impl OutcomeReconciliationService {
                         .settle(
                             claim.observation.resolution_observation_id,
                             self.projection_worker_id,
-                            ResolutionProjectionSettlement::Failed {
+                            ResolutionProjectionSettlement::Quarantined {
+                                error_code: ResolutionProjectionErrorCode::InvalidObservation,
                                 error: reason.clone(),
                             },
                         )
@@ -518,13 +519,23 @@ impl OutcomeReconciliationService {
                     return Err(ExecutionError::OutcomeReconciliationInvariant { reason }.into());
                 }
                 Err(error) => {
-                    let retry_at = claim.projection.updated_at + Duration::minutes(1);
                     self.resolution_observations
                         .settle(
                             claim.observation.resolution_observation_id,
                             self.projection_worker_id,
-                            ResolutionProjectionSettlement::Retry {
-                                retry_at,
+                            ResolutionProjectionSettlement::RetryScheduled {
+                                retry_delay_secs: 60,
+                                error_code: match &error {
+                                    QuantError::Storage(_) => {
+                                        ResolutionProjectionErrorCode::PersistenceUnavailable
+                                    }
+                                    QuantError::Api(_)
+                                    | QuantError::Rpc(_)
+                                    | QuantError::WebSocket(_) => {
+                                        ResolutionProjectionErrorCode::ExternalDependencyUnavailable
+                                    }
+                                    _ => ResolutionProjectionErrorCode::UnexpectedTransient,
+                                },
                                 error: error.to_string(),
                             },
                         )

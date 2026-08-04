@@ -4,35 +4,45 @@ use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
     mem,
+    str::FromStr,
     sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
+    clickhouse::{
+        MarketResolutionRow, QuantFeatureEventRow, QuantModelInputEventRow,
+        QuantServingEvidenceCompletionRow, ReportMarketFunnelRow,
+    },
     domain::{
         ports::FeedbackDatasetBuildRequest,
         quant::{
             FEEDBACK_COHORT_PAGE_LIMIT, FactorDefinitionInfo, FactorValueInfo, FeatureVectorInfo,
             FeedbackCohortDecision, FeedbackCohortEvidence, FeedbackCohortPageQuery,
             FeedbackCohortSnapshot, FeedbackCohortWindow, FeedbackRecommendationContext,
-            FeedbackResolutionEvidence, JobProgressSink,
+            FeedbackResolutionEvidence, JobProgressSink, RecommendationReportInfo,
         },
     },
-    enums::quant::{CohortCensorReason, CohortExclusionReason, FeedbackCohort, OutcomeSide},
+    enums::{
+        model::ModelFamily,
+        quant::{CohortCensorReason, CohortExclusionReason, FeedbackCohort, OutcomeSide},
+    },
     hashing::CanonicalDigest,
     types::{
-        CapabilityRegistryHashes, CohortCensorCount, CohortExclusionCount,
+        CapabilityRegistryHashes, CohortCensorCount, CohortExclusionCount, ContentHash,
         DATASET_COHORT_MANIFEST_FORMAT_VERSION, DatasetCohortArtifactRef, DatasetCohortCounts,
         DatasetCohortManifest, DatasetCoverage, FactorDefinitionId, FeatureSourceRefs,
-        FeatureVectorId, MODEL_LEARNING_COHORT_FORMAT_VERSION, ModelLearningCohortArtifact,
-        ModelLearningCohortRow, ModelVersionId, NewModelLearningCohortRow, ResearchJobProgress,
+        FeatureVectorId, MODEL_SCORE_COHORT_FORMAT_VERSION, ModelLearningCohortRow, ModelRunId,
+        ModelScoreCohortArtifact, ModelScoreCohortRow, ModelVersionId, NewModelLearningCohortRow,
+        NewModelScoreCohortRow, RecommendationReportId, ReportFunnelStage, ResearchJobProgress,
         SchemaVersion, TokenId, TrainingSampleSource, TrainingSampleSources,
         factor::{FactorDefinitionRef, FactorServingPlane},
     },
 };
 use quant_pivot_repository::traits::{
-    FactorRepository, FeatureRepository, FeedbackCohortRepository,
+    FactorRepository, FeatureRepository, FeedbackCohortRepository, QuantFactReadRepository,
+    RecommendationReportRepository, ServingEvidenceRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -41,19 +51,24 @@ use quant_pivot_research::{
     feedback::{FeedbackCoverageCohorts, FeedbackMatureLabel},
     selection::SelectedMarket,
     training::{
-        DatasetPlanRequest, ModelLearningCohortCodec, TOKEN_PAYOUT_RATIO, TrainingDatasetArtifact,
+        DatasetPlanRequest, ModelScoreCohortCodec, TOKEN_PAYOUT_RATIO, TrainingDatasetArtifact,
         TrainingExample, TrainingLabel,
     },
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::service::{
-    feedback_cohort::evaluate_feedback_cohort, training_dataset::TrainingDatasetService,
+use crate::{
+    observability::serving_evidence::verify_completion,
+    service::{
+        feedback_cohort::evaluate_feedback_cohort, training_dataset::TrainingDatasetService,
+    },
 };
 
 /// Dependencies for [`FeedbackDatasetService`].
 pub struct FeedbackDatasetServiceDeps {
-    pub cohort_repository: Arc<dyn FeedbackCohortRepository>,
+    pub report_repository: Arc<dyn RecommendationReportRepository>,
+    pub fact_repository: Arc<dyn QuantFactReadRepository>,
+    pub serving_evidence_repository: Arc<dyn ServingEvidenceRepository>,
     pub feature_repository: Arc<dyn FeatureRepository>,
     pub factor_repository: Arc<dyn FactorRepository>,
     pub artifact_store: Arc<dyn ArtifactStore>,
@@ -97,20 +112,86 @@ impl FeedbackCohortMaterializer {
 
 /// Seals `ModelLearning` truth and materializes only exact serving rows.
 pub struct FeedbackDatasetService {
-    materializer: FeedbackCohortMaterializer,
+    score_materializer: ModelScoreCohortMaterializer,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_service: Arc<TrainingDatasetService>,
+}
+
+/// Complete scored-serving population reader. Recommendation publication is
+/// intentionally absent from this boundary.
+struct ModelScoreCohortMaterializer {
+    reports: Arc<dyn RecommendationReportRepository>,
+    facts: Arc<dyn QuantFactReadRepository>,
+    evidence: Arc<dyn ServingEvidenceRepository>,
+    features: Arc<dyn FeatureRepository>,
+    factors: Arc<dyn FactorRepository>,
+}
+
+#[derive(Clone)]
+struct ScoreFunnelBinding {
+    report: RecommendationReportInfo,
+    funnel: ReportMarketFunnelRow,
+    feature_vector_id: FeatureVectorId,
+    model_run_id: ModelRunId,
+}
+
+struct ScoreInputBinding {
+    model_family: ModelFamily,
+    input_contract_hash: ContentHash,
+    transform_hash: ContentHash,
+    training_input_hash: ContentHash,
+}
+
+struct ScoreSeed {
+    binding: ScoreFunnelBinding,
+    serving_evidence_available_at: DateTime<Utc>,
+    serving_completion_hash: ContentHash,
+    model_input_rows_hash: ContentHash,
+    input: ScoreInputBinding,
+    resolution: FeedbackResolutionEvidence,
+}
+
+struct UnresolvedScoreSeed {
+    binding: ScoreFunnelBinding,
+    serving_evidence_available_at: DateTime<Utc>,
+    serving_completion_hash: ContentHash,
+    model_input_rows_hash: ContentHash,
+    input: ScoreInputBinding,
+}
+
+struct MaterializedModelScores {
+    rows: Vec<ModelScoreCohortRow>,
+    examples: Vec<TrainingExample>,
+    factor_serving_plane: FactorServingPlane,
+    coverage: DatasetCoverage,
+    counts: DatasetCohortCounts,
+    feature_schema_version: SchemaVersion,
+    knowledge_lag_secs: u64,
+    model_family: ModelFamily,
+}
+
+struct ModelScoreRowsAssembly {
+    rows: Vec<ModelScoreCohortRow>,
+    examples: Vec<TrainingExample>,
+    factor_serving_plane: FactorServingPlane,
+    counts: DatasetCohortCounts,
+    market_count: u64,
+    feature_schema_version: Option<SchemaVersion>,
+    knowledge_lag_secs: Option<u64>,
+    model_family: Option<ModelFamily>,
 }
 
 impl FeedbackDatasetService {
     #[must_use]
     pub fn new(deps: FeedbackDatasetServiceDeps) -> Self {
         Self {
-            materializer: FeedbackCohortMaterializer::new(FeedbackCohortMaterializerDeps {
-                cohorts: deps.cohort_repository,
+            score_materializer: ModelScoreCohortMaterializer {
+                reports: deps.report_repository,
+                facts: deps.fact_repository,
+                evidence: deps.serving_evidence_repository,
                 features: deps.feature_repository,
                 factors: deps.factor_repository,
-            }),
+            },
             artifact_store: deps.artifact_store,
             dataset_service: deps.dataset_service,
         }
@@ -125,33 +206,21 @@ impl FeedbackDatasetService {
     ) -> QuantResult<TrainingDatasetArtifact> {
         request.validate()?;
         let expected_model_spec_hash = request.model_spec_definition_hash;
-        let mut scan = self
-            .materializer
-            .scan_cohort(
-                FeedbackCohort::ModelLearning,
+        let mut materialized = self
+            .score_materializer
+            .materialize(
                 &request.window,
                 request.source_lineage.pit_cutoff,
                 &progress,
                 &cancel,
             )
             .await?;
-        if scan.eligible.is_empty() {
-            return Err(ResearchError::NotEligible {
-                code: "feedback_cohort_empty",
-                detail: "frozen ModelLearning cohort contains no mature resolution labels"
-                    .to_owned(),
-            }
-            .into());
-        }
-        let eligible = mem::take(&mut scan.eligible);
-        let materialized = self.materializer.materialize(eligible).await?;
-        let counts = scan.counts(materialized.rows.len())?;
         let cohort_manifest = self
-            .persist_cohort(
+            .persist_score_cohort(
                 request.window.clone(),
-                counts,
+                materialized.counts.clone(),
                 request.source_lineage.capability_registry_hashes.clone(),
-                materialized.rows,
+                mem::take(&mut materialized.rows),
             )
             .await?;
         if cancel.is_cancelled() {
@@ -174,7 +243,7 @@ impl FeedbackDatasetService {
                     knowledge_lag_secs: materialized.knowledge_lag_secs,
                     feature_schema_version: materialized.feature_schema_version,
                     sample_sources: TrainingSampleSources::from(
-                        TrainingSampleSource::RecommendationFeedback,
+                        TrainingSampleSource::ModelScoreFeedback,
                     ),
                     training_dataset_id: Some(request.training_dataset_id),
                     purpose: request.purpose,
@@ -189,9 +258,1088 @@ impl FeedbackDatasetService {
             }
             .into());
         }
+        if plan.model_family != materialized.model_family {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "feedback Dataset recipe family {} differs from completed serving family {}",
+                    plan.model_family, materialized.model_family
+                ),
+            }
+            .into());
+        }
         self.dataset_service
             .build_feedback(plan, materialized.examples, materialized.coverage)
             .await
+    }
+}
+
+impl ModelScoreCohortMaterializer {
+    async fn materialize(
+        &self,
+        window: &FeedbackCohortWindow,
+        truth_cutoff: DateTime<Utc>,
+        progress: &Arc<dyn JobProgressSink>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<MaterializedModelScores> {
+        let reports = self.load_reports(window, truth_cutoff).await?;
+        progress.report(ResearchJobProgress::indeterminate(
+            "feedback-model-score-reports",
+            u64::try_from(reports.len()).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("serving report count conversion failed: {error}"),
+            })?,
+        ));
+        if cancel.is_cancelled() {
+            return Err(ResearchError::Cancelled {
+                detail: "model-score cohort cancelled after report freeze".to_owned(),
+            }
+            .into());
+        }
+        let bindings = self.load_funnels(window, truth_cutoff, &reports).await?;
+        progress.report(ResearchJobProgress::indeterminate(
+            "feedback-model-score-funnel",
+            u64::try_from(bindings.len()).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("model-score funnel count conversion failed: {error}"),
+            })?,
+        ));
+        if bindings.is_empty() {
+            return Err(ResearchError::NotEligible {
+                code: "model_score_cohort_empty",
+                detail: "frozen window contains no completed model-scoring population".to_owned(),
+            }
+            .into());
+        }
+        let unresolved = self.load_evidence(bindings, truth_cutoff).await?;
+        if cancel.is_cancelled() {
+            return Err(ResearchError::Cancelled {
+                detail: "model-score cohort cancelled after serving-evidence verification"
+                    .to_owned(),
+            }
+            .into());
+        }
+        let (seeds, counts) = self.bind_truth(unresolved, window, truth_cutoff).await?;
+        progress.report(ResearchJobProgress::indeterminate(
+            "feedback-model-score-truth",
+            counts.included_count(),
+        ));
+        self.assemble(seeds, counts).await
+    }
+
+    async fn load_reports(
+        &self,
+        window: &FeedbackCohortWindow,
+        truth_cutoff: DateTime<Utc>,
+    ) -> QuantResult<HashMap<RecommendationReportId, RecommendationReportInfo>> {
+        let mut by_id = HashMap::new();
+        for report in self
+            .reports
+            .list_committed_between(window.window_start(), window.cutoff())
+            .await?
+        {
+            if report.profile_ref != *window.profile_ref()
+                || report.created_at > truth_cutoff
+                || report.model_run_id.is_none()
+            {
+                continue;
+            }
+            if by_id
+                .insert(report.recommendation_report_id, report)
+                .is_some()
+            {
+                return Err(ResearchError::DatasetBuild {
+                    detail: "committed report query returned a duplicate report identity"
+                        .to_owned(),
+                }
+                .into());
+            }
+        }
+        Ok(by_id)
+    }
+
+    async fn load_funnels(
+        &self,
+        window: &FeedbackCohortWindow,
+        truth_cutoff: DateTime<Utc>,
+        reports: &HashMap<RecommendationReportId, RecommendationReportInfo>,
+    ) -> QuantResult<Vec<ScoreFunnelBinding>> {
+        let mut bindings = Vec::new();
+        let mut identities = HashSet::new();
+        for funnel in self
+            .facts
+            .report_funnel_between(
+                window.profile_ref(),
+                window.window_start().timestamp_millis(),
+                window.cutoff().timestamp_millis(),
+            )
+            .await?
+        {
+            let Some(report) = reports.get(&funnel.recommendation_report_id) else {
+                continue;
+            };
+            if funnel.ingestion_time > truth_cutoff.timestamp_millis() {
+                continue;
+            }
+            let stage = ReportFunnelStage::from_str(&funnel.terminal_stage).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("decode conserved report-funnel stage: {error}"),
+                }
+            })?;
+            Self::validate_funnel(report, &funnel)?;
+            if stage < ReportFunnelStage::ModelScored {
+                continue;
+            }
+            let feature_vector_id =
+                funnel
+                    .feature_vector_id
+                    .ok_or_else(|| ResearchError::DatasetBuild {
+                        detail: format!(
+                            "scored funnel row {}/{} has no feature-vector identity",
+                            funnel.recommendation_report_id, funnel.market_id
+                        ),
+                    })?;
+            let model_run_id = funnel
+                .model_run_id
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "scored funnel row {}/{} has no model-run identity",
+                        funnel.recommendation_report_id, funnel.market_id
+                    ),
+                })?;
+            if !identities.insert((model_run_id, feature_vector_id)) {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "serving run {model_run_id} conserves feature vector {feature_vector_id} more than once"
+                    ),
+                }
+                .into());
+            }
+            bindings.push(ScoreFunnelBinding {
+                report: report.clone(),
+                funnel,
+                feature_vector_id,
+                model_run_id,
+            });
+        }
+        bindings.sort_by_key(|binding| {
+            (
+                binding.report.recommendation_report_id.as_uuid(),
+                binding.funnel.market_id.clone(),
+            )
+        });
+        Ok(bindings)
+    }
+
+    fn validate_funnel(
+        report: &RecommendationReportInfo,
+        funnel: &ReportMarketFunnelRow,
+    ) -> QuantResult<()> {
+        let valid = funnel.profile_id == report.profile_ref.id.as_str()
+            && funnel.profile_version == report.profile_ref.version
+            && funnel.profile_content_hash == report.profile_ref.content_hash.to_string()
+            && funnel.decision_policy_snapshot_id == report.decision_policy_snapshot_id
+            && funnel.model_version_id == report.model_version_id
+            && funnel.model_run_id == report.model_run_id
+            && funnel.market_selection_id == report.market_selection_id
+            && funnel.event_time == report.decision_at.timestamp_millis();
+        if !valid {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "report-funnel row {}/{} disagrees with its committed report header",
+                    funnel.recommendation_report_id, funnel.market_id
+                ),
+            }
+            .into());
+        }
+        funnel
+            .verify_hash()
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: format!(
+                    "report-funnel row {}/{} failed semantic hash verification: {error}",
+                    funnel.recommendation_report_id, funnel.market_id
+                ),
+            })?;
+        Ok(())
+    }
+
+    async fn load_evidence(
+        &self,
+        bindings: Vec<ScoreFunnelBinding>,
+        truth_cutoff: DateTime<Utc>,
+    ) -> QuantResult<Vec<UnresolvedScoreSeed>> {
+        let mut run_ids = bindings
+            .iter()
+            .map(|binding| binding.model_run_id)
+            .collect::<Vec<_>>();
+        run_ids.sort_by_key(|id| id.as_uuid());
+        run_ids.dedup();
+        let completions =
+            Self::canonical_completions(self.evidence.completions_for_runs(&run_ids).await?)?;
+        let inputs = Self::canonical_inputs(self.evidence.model_inputs_for_runs(&run_ids).await?)?;
+        let mut marker_vectors = Vec::new();
+        for run_id in &run_ids {
+            let marker = completions
+                .get(run_id)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!("serving run {run_id} has no durable completion marker"),
+                })?;
+            marker_vectors.extend(Self::completion_vectors(marker)?);
+        }
+        marker_vectors.sort_by_key(|id| id.as_uuid());
+        marker_vectors.dedup();
+        let feature_rows = Self::canonical_features(
+            self.evidence
+                .feature_cells_for_vectors(&marker_vectors)
+                .await?,
+        )?;
+        let mut inputs_by_run = HashMap::<ModelRunId, Vec<QuantModelInputEventRow>>::new();
+        for row in inputs {
+            inputs_by_run.entry(row.model_run_id).or_default().push(row);
+        }
+        let mut features_by_vector = HashMap::<FeatureVectorId, Vec<QuantFeatureEventRow>>::new();
+        for row in feature_rows {
+            features_by_vector
+                .entry(row.feature_vector_id)
+                .or_default()
+                .push(row);
+        }
+        let mut bindings_by_run = HashMap::<ModelRunId, Vec<ScoreFunnelBinding>>::new();
+        for binding in bindings {
+            bindings_by_run
+                .entry(binding.model_run_id)
+                .or_default()
+                .push(binding);
+        }
+
+        let mut seeds = Vec::new();
+        for run_id in run_ids {
+            let marker = completions
+                .get(&run_id)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!("serving completion {run_id} disappeared during assembly"),
+                })?;
+            let available_at = Self::utc_millis(marker.ingestion_time, "completion ingestion")?;
+            if available_at > truth_cutoff {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "serving completion {run_id} was not available at the frozen truth cutoff"
+                    ),
+                }
+                .into());
+            }
+            let vector_ids = Self::completion_vectors(marker)?;
+            let mut run_features = Vec::new();
+            for vector_id in &vector_ids {
+                let rows = features_by_vector.get(vector_id).ok_or_else(|| {
+                    ResearchError::DatasetBuild {
+                        detail: format!(
+                            "serving completion {run_id} references missing feature evidence {vector_id}"
+                        ),
+                    }
+                })?;
+                run_features.extend(rows.iter().cloned());
+            }
+            let run_inputs = inputs_by_run.remove(&run_id).unwrap_or_default();
+            verify_completion(marker, &run_features, &run_inputs)?;
+            let run_bindings =
+                bindings_by_run
+                    .remove(&run_id)
+                    .ok_or_else(|| ResearchError::DatasetBuild {
+                        detail: format!("serving run {run_id} lost its report-funnel bindings"),
+                    })?;
+            let scored_vectors = run_bindings
+                .iter()
+                .map(|binding| binding.feature_vector_id)
+                .collect::<HashSet<_>>();
+            let input_vectors = run_inputs
+                .iter()
+                .map(|row| row.feature_vector_id)
+                .collect::<HashSet<_>>();
+            if scored_vectors != input_vectors {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "serving run {run_id} model-input population disagrees with its conserved scored funnel"
+                    ),
+                }
+                .into());
+            }
+            let completion_hash =
+                marker
+                    .completion_hash
+                    .parse::<ContentHash>()
+                    .map_err(|error| ResearchError::DatasetBuild {
+                        detail: format!("invalid completion hash for run {run_id}: {error}"),
+                    })?;
+            let input_rows_hash = marker
+                .model_input_rows_hash
+                .parse::<ContentHash>()
+                .map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!("invalid model-input hash for run {run_id}: {error}"),
+                })?;
+            for binding in run_bindings {
+                let vector_inputs = run_inputs
+                    .iter()
+                    .filter(|row| row.feature_vector_id == binding.feature_vector_id)
+                    .collect::<Vec<_>>();
+                let input = Self::bind_input(&binding, &vector_inputs)?;
+                seeds.push(UnresolvedScoreSeed {
+                    binding,
+                    serving_evidence_available_at: available_at,
+                    serving_completion_hash: completion_hash,
+                    model_input_rows_hash: input_rows_hash,
+                    input,
+                });
+            }
+        }
+        seeds.sort_by_key(|seed| {
+            (
+                seed.serving_evidence_available_at,
+                seed.binding.report.recommendation_report_id.as_uuid(),
+                seed.binding.feature_vector_id.as_uuid(),
+            )
+        });
+        Ok(seeds)
+    }
+
+    fn bind_input(
+        binding: &ScoreFunnelBinding,
+        rows: &[&QuantModelInputEventRow],
+    ) -> QuantResult<ScoreInputBinding> {
+        let first = rows.first().ok_or_else(|| ResearchError::DatasetBuild {
+            detail: format!(
+                "scored feature vector {} has no model-input evidence",
+                binding.feature_vector_id
+            ),
+        })?;
+        let valid = rows.iter().all(|row| {
+            row.model_run_id == binding.model_run_id
+                && row.model_version_id == binding.report.model_version_id
+                && row.market_id == binding.funnel.market_id
+                && row.feature_vector_id == binding.feature_vector_id
+                && row.decision_at == binding.report.decision_at.timestamp_millis()
+                && row
+                    .recommendation_report_id
+                    .is_none_or(|report_id| report_id == binding.report.recommendation_report_id)
+                && row.model_family == first.model_family
+                && row.input_contract_hash == first.input_contract_hash
+                && row.transform_hash == first.transform_hash
+                && row.training_input_hash == first.training_input_hash
+        });
+        if !valid {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "model-input evidence for feature vector {} has contradictory serving lineage",
+                    binding.feature_vector_id
+                ),
+            }
+            .into());
+        }
+        Ok(ScoreInputBinding {
+            model_family: ModelFamily::from_str(&first.model_family).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!(
+                        "feature vector {} has unknown serving model family: {error}",
+                        binding.feature_vector_id
+                    ),
+                }
+            })?,
+            input_contract_hash: Self::parse_hash(
+                &first.input_contract_hash,
+                "model-input contract",
+            )?,
+            transform_hash: Self::parse_hash(&first.transform_hash, "model-input transform")?,
+            training_input_hash: Self::parse_hash(&first.training_input_hash, "training input")?,
+        })
+    }
+
+    async fn bind_truth(
+        &self,
+        unresolved: Vec<UnresolvedScoreSeed>,
+        window: &FeedbackCohortWindow,
+        truth_cutoff: DateTime<Utc>,
+    ) -> QuantResult<(Vec<ScoreSeed>, DatasetCohortCounts)> {
+        let candidate_count =
+            u64::try_from(unresolved.len()).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("model-score candidate count conversion failed: {error}"),
+            })?;
+        let mut market_ids = unresolved
+            .iter()
+            .map(|seed| seed.binding.funnel.market_id.clone())
+            .collect::<Vec<_>>();
+        market_ids.sort();
+        market_ids.dedup();
+        let resolutions = self
+            .facts
+            .resolutions_between(
+                market_ids,
+                window.window_start().timestamp_millis(),
+                truth_cutoff.timestamp_millis(),
+                truth_cutoff.timestamp_millis(),
+            )
+            .await?;
+        let resolutions = resolutions
+            .into_iter()
+            .map(|resolution| (resolution.market_id.clone(), resolution))
+            .collect::<HashMap<_, _>>();
+        let mut seeds = Vec::new();
+        let mut censored = 0_u64;
+        for seed in unresolved {
+            let Some(resolution) = resolutions.get(&seed.binding.funnel.market_id) else {
+                censored = censored
+                    .checked_add(1)
+                    .ok_or_else(|| ResearchError::DatasetBuild {
+                        detail: "model-score resolution censor count overflowed u64".to_owned(),
+                    })?;
+                continue;
+            };
+            seeds.push(ScoreSeed {
+                resolution: Self::resolution_evidence(
+                    resolution,
+                    &seed.binding.funnel.primary_token_id,
+                )?,
+                binding: seed.binding,
+                serving_evidence_available_at: seed.serving_evidence_available_at,
+                serving_completion_hash: seed.serving_completion_hash,
+                model_input_rows_hash: seed.model_input_rows_hash,
+                input: seed.input,
+            });
+        }
+        if seeds.is_empty() {
+            return Err(ResearchError::NotEligible {
+                code: "model_score_labels_unavailable",
+                detail: "complete scored-serving population has no mature resolution labels"
+                    .to_owned(),
+            }
+            .into());
+        }
+        let included = u64::try_from(seeds.len()).map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("model-score included count conversion failed: {error}"),
+        })?;
+        let censors = if censored == 0 {
+            Vec::new()
+        } else {
+            vec![CohortCensorCount {
+                reason: CohortCensorReason::ResolutionUnavailableAtCutoff,
+                count: censored,
+            }]
+        };
+        let counts =
+            DatasetCohortCounts::try_new(candidate_count, included, included, Vec::new(), censors)
+                .map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!("model-score cohort counts do not reconcile: {error}"),
+                })?;
+        Ok((seeds, counts))
+    }
+
+    fn resolution_evidence(
+        resolution: &MarketResolutionRow,
+        token_id: &TokenId,
+    ) -> QuantResult<FeedbackResolutionEvidence> {
+        let token_payout_ratio =
+            resolution
+                .payout_for(token_id)
+                .map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "resolution {} cannot label token {token_id}: {error}",
+                        resolution.market_id
+                    ),
+                })?;
+        let resolution_kind =
+            resolution
+                .resolution_kind()
+                .map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "resolution {} has invalid payout semantics: {error}",
+                        resolution.market_id
+                    ),
+                })?;
+        Ok(FeedbackResolutionEvidence {
+            resolution_kind,
+            token_payout_ratio,
+            resolved_at: Self::utc_millis(resolution.resolved_at, "resolution time")?,
+            available_at: Self::utc_millis(resolution.observed_at, "resolution availability")?,
+            outcome_hash: resolution.resolution_fact_hash,
+        })
+    }
+
+    async fn assemble(
+        &self,
+        seeds: Vec<ScoreSeed>,
+        counts: DatasetCohortCounts,
+    ) -> QuantResult<MaterializedModelScores> {
+        let feature_ids = seeds
+            .iter()
+            .map(|seed| seed.binding.feature_vector_id)
+            .collect::<Vec<_>>();
+        let features = self.features.find_by_ids(&feature_ids).await?;
+        let features = features
+            .into_iter()
+            .map(|feature| (feature.feature_vector_id, feature))
+            .collect::<HashMap<_, _>>();
+        if features.len() != feature_ids.len() {
+            return Err(StorageError::invariant_violation(
+                Some("quant_feature_vector"),
+                "model-score cohort references a missing feature vector",
+            )
+            .into());
+        }
+        let factor_rows = self.factors.find_values_by_vectors(&feature_ids).await?;
+        let mut factors_by_vector = HashMap::<FeatureVectorId, Vec<FactorValueInfo>>::new();
+        for row in factor_rows {
+            factors_by_vector
+                .entry(row.feature_vector_id)
+                .or_default()
+                .push(row);
+        }
+        let expected_factor_ids = Self::factor_contract(&seeds, &factors_by_vector)?;
+        let definitions = self
+            .factors
+            .find_definitions_by_ids(&expected_factor_ids)
+            .await?
+            .into_iter()
+            .map(|definition| (definition.factor_definition_id, definition))
+            .collect::<HashMap<_, _>>();
+        if definitions.len() != expected_factor_ids.len() {
+            return Err(StorageError::invariant_violation(
+                Some("quant_factor_definition"),
+                "model-score cohort references a missing factor definition",
+            )
+            .into());
+        }
+        let factor_serving_plane = if expected_factor_ids.is_empty() {
+            FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("seal model-score factor-free plane: {error}"),
+            })?
+        } else {
+            let revisions = expected_factor_ids
+                .iter()
+                .map(|id| {
+                    let definition = definitions.get(id).ok_or_else(|| {
+                        StorageError::invariant_violation(
+                            Some("quant_factor_definition"),
+                            format!("factor definition {id} disappeared during assembly"),
+                        )
+                    })?;
+                    FactorDefinitionRef::try_from(definition).map_err(|error| {
+                        ResearchError::DatasetBuild {
+                            detail: format!("reconstruct factor revision {id}: {error}"),
+                        }
+                        .into()
+                    })
+                })
+                .collect::<QuantResult<Vec<_>>>()?;
+            FactorServingPlane::try_seal(revisions).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("seal model-score factor serving plane: {error}"),
+                }
+            })?
+        };
+        Self::assemble_rows(
+            seeds,
+            counts,
+            &features,
+            factors_by_vector,
+            &definitions,
+            factor_serving_plane,
+        )
+    }
+
+    fn factor_contract(
+        seeds: &[ScoreSeed],
+        factors_by_vector: &HashMap<FeatureVectorId, Vec<FactorValueInfo>>,
+    ) -> QuantResult<Vec<FactorDefinitionId>> {
+        let mut expected = None;
+        for seed in seeds {
+            let mut ids = factors_by_vector
+                .get(&seed.binding.feature_vector_id)
+                .into_iter()
+                .flatten()
+                .filter(|row| row.model_run_id == seed.binding.model_run_id)
+                .map(|row| row.factor_definition_id)
+                .collect::<Vec<_>>();
+            ids.sort_by_key(|id| id.as_uuid());
+            if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "feature vector {} has duplicate factor rows for serving run {}",
+                        seed.binding.feature_vector_id, seed.binding.model_run_id
+                    ),
+                }
+                .into());
+            }
+            match &expected {
+                Some(expected) if expected != &ids => {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: "one model-score Dataset cannot mix factor contracts".to_owned(),
+                    }
+                    .into());
+                }
+                None => expected = Some(ids),
+                Some(_) => {}
+            }
+        }
+        Ok(expected.unwrap_or_default())
+    }
+
+    fn assemble_rows(
+        seeds: Vec<ScoreSeed>,
+        counts: DatasetCohortCounts,
+        features: &HashMap<FeatureVectorId, FeatureVectorInfo>,
+        mut factors_by_vector: HashMap<FeatureVectorId, Vec<FactorValueInfo>>,
+        definitions: &HashMap<FactorDefinitionId, FactorDefinitionInfo>,
+        factor_serving_plane: FactorServingPlane,
+    ) -> QuantResult<MaterializedModelScores> {
+        let mut rows = Vec::with_capacity(seeds.len());
+        let mut examples = Vec::with_capacity(seeds.len());
+        let mut feature_schema_version = None;
+        let mut knowledge_lag_secs = None;
+        let mut model_family = None;
+        let mut markets = HashSet::new();
+        for seed in seeds {
+            let feature = features
+                .get(&seed.binding.feature_vector_id)
+                .ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some("quant_feature_vector"),
+                        format!(
+                            "feature vector {} disappeared during assembly",
+                            seed.binding.feature_vector_id
+                        ),
+                    )
+                })?;
+            Self::validate_score_feature(&seed, feature)?;
+            let vector = FeatureVector::try_from(feature)?;
+            let factor_values = Self::score_factors(
+                &seed,
+                factors_by_vector
+                    .remove(&seed.binding.feature_vector_id)
+                    .unwrap_or_default(),
+                definitions,
+                &factor_serving_plane,
+            )?;
+            let snapshot = &feature.decision_capture.snapshot;
+            let model_token_id =
+                vector
+                    .token_id
+                    .clone()
+                    .ok_or_else(|| ResearchError::DatasetBuild {
+                        detail: format!(
+                            "scored feature vector {} has no primary token",
+                            seed.binding.feature_vector_id
+                        ),
+                    })?;
+            let payout = seed.resolution.token_payout_ratio;
+            let row = ModelScoreCohortRow::try_seal(NewModelScoreCohortRow {
+                recommendation_report_id: seed.binding.report.recommendation_report_id,
+                category: snapshot.selection.category,
+                market_id: seed.binding.funnel.market_id.clone(),
+                event_id: seed.binding.funnel.event_id.clone(),
+                model_token_id: model_token_id.clone(),
+                decision_at: seed.binding.report.decision_at,
+                serving_evidence_available_at: seed.serving_evidence_available_at,
+                decision_policy_snapshot_id: seed.binding.report.decision_policy_snapshot_id,
+                market_selection_id: seed.binding.report.market_selection_id,
+                feature_vector_id: seed.binding.feature_vector_id,
+                model_run_id: seed.binding.model_run_id,
+                model_version_id: seed.binding.report.model_version_id,
+                model_family: seed.input.model_family,
+                factor_definition_versions: {
+                    let mut ids = factor_serving_plane
+                        .definitions()
+                        .iter()
+                        .map(FactorDefinitionRef::factor_definition_id)
+                        .collect::<Vec<_>>();
+                    ids.sort_by_key(|id| id.as_uuid());
+                    ids
+                },
+                book_snapshot_ref: snapshot.book_snapshot_ref.clone(),
+                data_quality_snapshot_id: seed.binding.report.data_quality_snapshot_ref,
+                resolution: seed.resolution,
+                model_token_payout_ratio: payout,
+                serving_completion_hash: seed.serving_completion_hash,
+                model_input_rows_hash: seed.model_input_rows_hash,
+                input_contract_hash: seed.input.input_contract_hash,
+                transform_hash: seed.input.transform_hash,
+                training_input_hash: seed.input.training_input_hash,
+                funnel_row_hash: Self::parse_hash(
+                    &seed.binding.funnel.row_hash,
+                    "report-funnel row",
+                )?,
+            })
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("seal model-score cohort row: {error}"),
+            })?;
+            examples.push(TrainingExample {
+                example_id: row.example_id,
+                market_id: row.market_id.clone(),
+                token_id: model_token_id,
+                selected_market: SelectedMarket::from(&snapshot.selection),
+                decision_boundary: feature.decision_boundary.clone(),
+                sample_source: TrainingSampleSource::ModelScoreFeedback,
+                feature_vector: vector,
+                factor_values,
+                labels: vec![TrainingLabel {
+                    label_name: TOKEN_PAYOUT_RATIO,
+                    horizon_secs: 0,
+                    value: row.model_token_payout_ratio.inner(),
+                    is_resolved: true,
+                    matured_at: row.resolution.resolved_at,
+                }],
+                source_refs: feature.source_refs.0.clone(),
+                decision_capture: Some(feature.decision_capture.clone()),
+                lot_context: None,
+                position_state: None,
+                book_fidelity: None,
+            });
+            feature_schema_version = FeedbackCohortMaterializer::one_schema(
+                feature_schema_version,
+                feature.feature_schema_version,
+            )?;
+            knowledge_lag_secs = FeedbackCohortMaterializer::one_lag(
+                knowledge_lag_secs,
+                feature.decision_boundary.knowledge_lag_secs(),
+            )?;
+            if model_family.is_some_and(|family| family != row.model_family) {
+                return Err(ResearchError::DatasetBuild {
+                    detail: "one model-score Dataset cannot mix model families".to_owned(),
+                }
+                .into());
+            }
+            model_family = Some(row.model_family);
+            markets.insert(row.market_id.clone());
+            rows.push(row);
+        }
+        let market_count =
+            u64::try_from(markets.len()).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("model-score market count conversion failed: {error}"),
+            })?;
+        Self::finalize_rows(ModelScoreRowsAssembly {
+            rows,
+            examples,
+            factor_serving_plane,
+            counts,
+            market_count,
+            feature_schema_version,
+            knowledge_lag_secs,
+            model_family,
+        })
+    }
+
+    fn finalize_rows(mut assembly: ModelScoreRowsAssembly) -> QuantResult<MaterializedModelScores> {
+        assembly.rows.sort_by_key(|row| {
+            (
+                row.serving_evidence_available_at,
+                row.recommendation_report_id.as_uuid(),
+                row.feature_vector_id.as_uuid(),
+            )
+        });
+        assembly.examples.sort_by(|left, right| {
+            (
+                left.market_id.as_str(),
+                left.token_id.as_str(),
+                left.decision_at(),
+                left.example_id.as_uuid(),
+            )
+                .cmp(&(
+                    right.market_id.as_str(),
+                    right.token_id.as_str(),
+                    right.decision_at(),
+                    right.example_id.as_uuid(),
+                ))
+        });
+        let included = u64::try_from(assembly.examples.len()).map_err(|error| {
+            ResearchError::DatasetBuild {
+                detail: format!("model-score example count conversion failed: {error}"),
+            }
+        })?;
+        Ok(MaterializedModelScores {
+            rows: assembly.rows,
+            examples: assembly.examples,
+            factor_serving_plane: assembly.factor_serving_plane,
+            coverage: DatasetCoverage {
+                planned_samples: assembly.counts.candidate_count(),
+                built_examples: included,
+                markets: assembly.market_count,
+                labels_available: included,
+                labels_not_mature: assembly.counts.candidate_count() - included,
+                ..DatasetCoverage::default()
+            },
+            counts: assembly.counts,
+            feature_schema_version: assembly.feature_schema_version.ok_or_else(|| {
+                ResearchError::DatasetBuild {
+                    detail: "model-score materialization produced no feature schema".to_owned(),
+                }
+            })?,
+            knowledge_lag_secs: assembly.knowledge_lag_secs.ok_or_else(|| {
+                ResearchError::DatasetBuild {
+                    detail: "model-score materialization produced no knowledge-lag contract"
+                        .to_owned(),
+                }
+            })?,
+            model_family: assembly
+                .model_family
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "model-score materialization produced no model family".to_owned(),
+                })?,
+        })
+    }
+
+    fn validate_score_feature(seed: &ScoreSeed, feature: &FeatureVectorInfo) -> QuantResult<()> {
+        let capture_hash = CanonicalDigest::content_hash_json(&feature.decision_capture)?;
+        let snapshot = &feature.decision_capture.snapshot;
+        let selection = &snapshot.selection;
+        let mut mismatches = Vec::new();
+        if feature.feature_vector_id != seed.binding.feature_vector_id {
+            mismatches.push("feature_vector_id");
+        }
+        if feature.market_id != seed.binding.funnel.market_id {
+            mismatches.push("feature_market_id");
+        }
+        if feature.token_id.as_ref() != Some(&seed.binding.funnel.primary_token_id) {
+            mismatches.push("feature_token_id");
+        }
+        if feature.decision_at != seed.binding.report.decision_at {
+            mismatches.push("decision_at");
+        }
+        if feature.decision_boundary != snapshot.boundary {
+            mismatches.push("decision_boundary");
+        }
+        if feature.created_at > seed.serving_evidence_available_at {
+            mismatches.push("created_after_serving_completion");
+        }
+        if feature.decision_capture_hash != capture_hash {
+            mismatches.push("decision_capture_hash");
+        }
+        if snapshot.market_id != seed.binding.funnel.market_id {
+            mismatches.push("snapshot_market_id");
+        }
+        if snapshot.event_id != seed.binding.funnel.event_id {
+            mismatches.push("snapshot_event_id");
+        }
+        if snapshot.token_id != selection.primary_token_id {
+            mismatches.push("snapshot_primary_token_id");
+        }
+        if selection.primary_token_id != seed.binding.funnel.primary_token_id {
+            mismatches.push("selection_primary_token_id");
+        }
+        if selection.market_id != seed.binding.funnel.market_id {
+            mismatches.push("selection_market_id");
+        }
+        if selection.event_id != seed.binding.funnel.event_id {
+            mismatches.push("selection_event_id");
+        }
+        if feature.decision_capture.data_quality != feature.data_quality {
+            mismatches.push("data_quality");
+        }
+        if !mismatches.is_empty() {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "feature vector {} disagrees with its completed serving/funnel evidence: mismatches={mismatches:?}, feature_created_at={}, serving_available_at={}, feature_decision_at={}, report_decision_at={}, feature_token_id={:?}, funnel_primary_token_id={}",
+                    seed.binding.feature_vector_id,
+                    feature.created_at,
+                    seed.serving_evidence_available_at,
+                    feature.decision_at,
+                    seed.binding.report.decision_at,
+                    feature.token_id,
+                    seed.binding.funnel.primary_token_id,
+                ),
+            }
+            .into());
+        }
+        let vector = FeatureVector::try_from(feature)?;
+        if FeatureSourceRefs(vector.evidence_refs()) != feature.source_refs {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "feature vector {} source references do not reproduce",
+                    seed.binding.feature_vector_id
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn score_factors(
+        seed: &ScoreSeed,
+        rows: Vec<FactorValueInfo>,
+        definitions: &HashMap<FactorDefinitionId, FactorDefinitionInfo>,
+        serving_plane: &FactorServingPlane,
+    ) -> QuantResult<Vec<FactorValue>> {
+        let mut by_definition = HashMap::new();
+        for row in rows
+            .into_iter()
+            .filter(|row| row.model_run_id == seed.binding.model_run_id)
+        {
+            if row.market_id != seed.binding.funnel.market_id
+                || row.decision_at != seed.binding.report.decision_at
+                || by_definition
+                    .insert(row.factor_definition_id, row)
+                    .is_some()
+            {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "feature vector {} has contradictory factor serving rows",
+                        seed.binding.feature_vector_id
+                    ),
+                }
+                .into());
+            }
+        }
+        serving_plane
+            .definitions()
+            .iter()
+            .map(|revision| {
+                let id = revision.factor_definition_id();
+                let value = by_definition.get(&id).ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some("quant_factor_value"),
+                        format!("factor value {id} disappeared during assembly"),
+                    )
+                })?;
+                let definition = definitions.get(&id).ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some("quant_factor_definition"),
+                        format!("factor definition {id} disappeared during assembly"),
+                    )
+                })?;
+                let factor = FactorValue::try_from_persistence(value, definition)?;
+                factor.validate_against(revision)?;
+                Ok(factor)
+            })
+            .collect()
+    }
+
+    fn canonical_completions(
+        rows: Vec<QuantServingEvidenceCompletionRow>,
+    ) -> QuantResult<HashMap<ModelRunId, QuantServingEvidenceCompletionRow>> {
+        let mut canonical = HashMap::<ModelRunId, QuantServingEvidenceCompletionRow>::new();
+        for row in rows {
+            if let Some(existing) = canonical.get_mut(&row.model_run_id) {
+                let mut left = existing.clone();
+                let mut right = row.clone();
+                left.ingestion_time = 0;
+                right.ingestion_time = 0;
+                if left != right {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "serving run {} has conflicting completion rows",
+                            row.model_run_id
+                        ),
+                    }
+                    .into());
+                }
+                existing.ingestion_time = existing.ingestion_time.min(row.ingestion_time);
+            } else {
+                canonical.insert(row.model_run_id, row);
+            }
+        }
+        Ok(canonical)
+    }
+
+    fn canonical_inputs(
+        rows: Vec<QuantModelInputEventRow>,
+    ) -> QuantResult<Vec<QuantModelInputEventRow>> {
+        let mut canonical =
+            HashMap::<(ModelRunId, FeatureVectorId, String, String), QuantModelInputEventRow>::new(
+            );
+        for row in rows {
+            let key = (
+                row.model_run_id,
+                row.feature_vector_id,
+                row.raw_input_name.clone(),
+                row.encoded_column.clone(),
+            );
+            if let Some(existing) = canonical.get_mut(&key) {
+                let mut left = existing.clone();
+                let mut right = row.clone();
+                left.ingestion_time = 0;
+                right.ingestion_time = 0;
+                if left != right {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "serving run {} has conflicting model-input retries for feature vector {}",
+                            row.model_run_id, row.feature_vector_id
+                        ),
+                    }
+                    .into());
+                }
+                existing.ingestion_time = existing.ingestion_time.min(row.ingestion_time);
+            } else {
+                canonical.insert(key, row);
+            }
+        }
+        let mut rows = canonical.into_values().collect::<Vec<_>>();
+        rows.sort_by_key(|row| {
+            (
+                row.model_run_id.as_uuid(),
+                row.feature_vector_id.as_uuid(),
+                row.raw_input_name.clone(),
+                row.encoded_column.clone(),
+            )
+        });
+        Ok(rows)
+    }
+
+    fn canonical_features(
+        rows: Vec<QuantFeatureEventRow>,
+    ) -> QuantResult<Vec<QuantFeatureEventRow>> {
+        let mut canonical = HashMap::<(FeatureVectorId, String), QuantFeatureEventRow>::new();
+        for row in rows {
+            let key = (row.feature_vector_id, row.feature_name.clone());
+            if let Some(existing) = canonical.get_mut(&key) {
+                let mut left = existing.clone();
+                let mut right = row.clone();
+                left.ingestion_time = 0;
+                right.ingestion_time = 0;
+                if left != right {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "feature vector {} has conflicting durable feature retries for {}",
+                            row.feature_vector_id, row.feature_name
+                        ),
+                    }
+                    .into());
+                }
+                existing.ingestion_time = existing.ingestion_time.min(row.ingestion_time);
+            } else {
+                canonical.insert(key, row);
+            }
+        }
+        let mut rows = canonical.into_values().collect::<Vec<_>>();
+        rows.sort_by_key(|row| (row.feature_vector_id.as_uuid(), row.feature_name.clone()));
+        Ok(rows)
+    }
+
+    fn completion_vectors(
+        marker: &QuantServingEvidenceCompletionRow,
+    ) -> QuantResult<Vec<FeatureVectorId>> {
+        serde_json::from_str::<Vec<FeatureVectorId>>(&marker.feature_vector_ids_json).map_err(
+            |error| {
+                ResearchError::DatasetBuild {
+                    detail: format!(
+                        "decode serving completion vectors for {}: {error}",
+                        marker.model_run_id
+                    ),
+                }
+                .into()
+            },
+        )
+    }
+
+    fn parse_hash(value: &str, subject: &str) -> QuantResult<ContentHash> {
+        value.parse::<ContentHash>().map_err(|error| {
+            ResearchError::DatasetBuild {
+                detail: format!("invalid {subject} hash: {error}"),
+            }
+            .into()
+        })
+    }
+
+    fn utc_millis(value: i64, subject: &str) -> QuantResult<DateTime<Utc>> {
+        DateTime::from_timestamp_millis(value).ok_or_else(|| {
+            ResearchError::DatasetBuild {
+                detail: format!("{subject} is outside the supported UTC range"),
+            }
+            .into()
+        })
     }
 }
 
@@ -487,10 +1635,6 @@ impl FeedbackCohortMaterializer {
 struct MaterializedFeedback {
     rows: Vec<ModelLearningCohortRow>,
     examples: Vec<TrainingExample>,
-    factor_serving_plane: FactorServingPlane,
-    coverage: DatasetCoverage,
-    feature_schema_version: SchemaVersion,
-    knowledge_lag_secs: u64,
 }
 
 impl FeedbackCohortMaterializer {
@@ -537,17 +1681,10 @@ impl FeedbackCohortMaterializer {
             .into());
         }
         if expected_factor_ids.is_empty() {
-            let factor_serving_plane =
-                FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetBuild {
-                    detail: format!("seal feedback factor-free plane: {error}"),
-                })?;
-            return Self::materialize_rows(
-                eligible,
-                &features,
-                HashMap::new(),
-                &HashMap::new(),
-                factor_serving_plane,
-            );
+            FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("seal feedback factor-free plane: {error}"),
+            })?;
+            return Self::materialize_rows(eligible, &features, HashMap::new(), &HashMap::new());
         }
         let definitions = self
             .factors
@@ -593,18 +1730,10 @@ impl FeedbackCohortMaterializer {
                 })
             })
             .collect::<QuantResult<Vec<_>>>()?;
-        let factor_serving_plane = FactorServingPlane::try_seal(revisions).map_err(|error| {
-            ResearchError::DatasetBuild {
-                detail: format!("seal feedback factor serving plane: {error}"),
-            }
+        FactorServingPlane::try_seal(revisions).map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("seal feedback factor serving plane: {error}"),
         })?;
-        Self::materialize_rows(
-            eligible,
-            &features,
-            factors_by_vector,
-            &definitions,
-            factor_serving_plane,
-        )
+        Self::materialize_rows(eligible, &features, factors_by_vector, &definitions)
     }
 
     fn materialize_rows(
@@ -612,13 +1741,11 @@ impl FeedbackCohortMaterializer {
         features: &HashMap<FeatureVectorId, FeatureVectorInfo>,
         mut factors_by_vector: HashMap<FeatureVectorId, Vec<FactorValueInfo>>,
         definitions: &HashMap<FactorDefinitionId, FactorDefinitionInfo>,
-        factor_serving_plane: FactorServingPlane,
     ) -> QuantResult<MaterializedFeedback> {
         let mut rows = Vec::with_capacity(eligible.len());
         let mut examples = Vec::with_capacity(eligible.len());
         let mut feature_schema_version = None;
         let mut knowledge_lag_secs = None;
-        let mut markets = HashSet::new();
 
         for seed in eligible {
             let feature_id = seed.context.feature_vector_id();
@@ -679,7 +1806,7 @@ impl FeedbackCohortMaterializer {
                 token_id: row.model_token_id.clone(),
                 selected_market: SelectedMarket::from(&feature.decision_capture.snapshot.selection),
                 decision_boundary: feature.decision_boundary.clone(),
-                sample_source: TrainingSampleSource::RecommendationFeedback,
+                sample_source: TrainingSampleSource::PublishedDecisionDiagnostic,
                 feature_vector: vector,
                 factor_values: factors,
                 labels: vec![TrainingLabel {
@@ -701,7 +1828,6 @@ impl FeedbackCohortMaterializer {
                 knowledge_lag_secs,
                 feature.decision_boundary.knowledge_lag_secs(),
             )?;
-            markets.insert(row.market_id.clone());
             rows.push(row);
             examples.push(example);
         }
@@ -719,33 +1845,13 @@ impl FeedbackCohortMaterializer {
                     right.example_id.as_uuid(),
                 ))
         });
-        let count = u64::try_from(examples.len()).map_err(|error| ResearchError::DatasetBuild {
-            detail: format!("feedback example count conversion failed: {error}"),
+        feature_schema_version.ok_or_else(|| ResearchError::DatasetBuild {
+            detail: "feedback materialization produced no feature schema".to_owned(),
         })?;
-        Ok(MaterializedFeedback {
-            rows,
-            examples,
-            factor_serving_plane,
-            coverage: DatasetCoverage {
-                planned_samples: count,
-                built_examples: count,
-                markets: u64::try_from(markets.len()).map_err(|error| {
-                    ResearchError::DatasetBuild {
-                        detail: format!("feedback market count conversion failed: {error}"),
-                    }
-                })?,
-                labels_available: count,
-                ..DatasetCoverage::default()
-            },
-            feature_schema_version: feature_schema_version.ok_or_else(|| {
-                ResearchError::DatasetBuild {
-                    detail: "feedback materialization produced no feature schema".to_owned(),
-                }
-            })?,
-            knowledge_lag_secs: knowledge_lag_secs.ok_or_else(|| ResearchError::DatasetBuild {
-                detail: "feedback materialization produced no knowledge-lag contract".to_owned(),
-            })?,
-        })
+        knowledge_lag_secs.ok_or_else(|| ResearchError::DatasetBuild {
+            detail: "feedback materialization produced no knowledge-lag contract".to_owned(),
+        })?;
+        Ok(MaterializedFeedback { rows, examples })
     }
 }
 
@@ -961,15 +2067,15 @@ impl FeedbackCohortMaterializer {
 }
 
 impl FeedbackDatasetService {
-    async fn persist_cohort(
+    async fn persist_score_cohort(
         &self,
         window: FeedbackCohortWindow,
         counts: DatasetCohortCounts,
         capability_registry_hashes: CapabilityRegistryHashes,
-        rows: Vec<ModelLearningCohortRow>,
+        rows: Vec<ModelScoreCohortRow>,
     ) -> QuantResult<DatasetCohortManifest> {
-        let artifact = ModelLearningCohortArtifact {
-            format_version: MODEL_LEARNING_COHORT_FORMAT_VERSION,
+        let artifact = ModelScoreCohortArtifact {
+            format_version: MODEL_SCORE_COHORT_FORMAT_VERSION,
             window: window.clone(),
             counts: counts.clone(),
             rows,
@@ -977,26 +2083,26 @@ impl FeedbackDatasetService {
         let source_hash = artifact
             .source_hash()
             .map_err(|error| ResearchError::DatasetBuild {
-                detail: format!("hash ModelLearning cohort artifact: {error}"),
+                detail: format!("hash model-score cohort artifact: {error}"),
             })?;
-        let bytes = ModelLearningCohortCodec::encode(&artifact)?;
-        let bytes_hash = ModelLearningCohortCodec::bytes_hash(&bytes);
-        let schema_hash = ModelLearningCohortCodec::schema_hash()?;
+        let bytes = ModelScoreCohortCodec::encode(&artifact)?;
+        let bytes_hash = ModelScoreCohortCodec::bytes_hash(&bytes);
+        let schema_hash = ModelScoreCohortCodec::schema_hash()?;
         let key = ArtifactKey::new(ArtifactNamespace::FeedbackCohort, source_hash.hex(), "json")?;
         let uri = self.artifact_store.put(key, &bytes).await?;
         let persisted = self.artifact_store.get(&uri).await?;
-        if ModelLearningCohortCodec::bytes_hash(&persisted) != bytes_hash
-            || ModelLearningCohortCodec::decode(&persisted)? != artifact
+        if ModelScoreCohortCodec::bytes_hash(&persisted) != bytes_hash
+            || ModelScoreCohortCodec::decode(&persisted)? != artifact
         {
             return Err(ResearchError::ArtifactHashMismatch {
                 expected: bytes_hash.to_string(),
-                actual: ModelLearningCohortCodec::bytes_hash(&persisted).to_string(),
+                actual: ModelScoreCohortCodec::bytes_hash(&persisted).to_string(),
             }
             .into());
         }
         let manifest = DatasetCohortManifest {
             format_version: DATASET_COHORT_MANIFEST_FORMAT_VERSION,
-            cohort: FeedbackCohort::ModelLearning,
+            cohort: FeedbackCohort::ModelScoreLearning,
             window,
             artifact: DatasetCohortArtifactRef {
                 uri,
@@ -1011,7 +2117,7 @@ impl FeedbackDatasetService {
         manifest
             .validate()
             .map_err(|error| ResearchError::DatasetBuild {
-                detail: format!("validate ModelLearning cohort manifest: {error}"),
+                detail: format!("validate model-score cohort manifest: {error}"),
             })?;
         Ok(manifest)
     }

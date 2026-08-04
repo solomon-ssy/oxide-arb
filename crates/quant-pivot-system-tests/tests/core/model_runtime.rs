@@ -3,6 +3,7 @@
 //! model-run repository finalize transitions.
 
 use std::{
+    collections::BTreeMap,
     env, iter,
     sync::{
         Arc,
@@ -47,7 +48,10 @@ use quant_pivot_models::{
             EventRegistryInfo, MarketRegistryInfo, TokenInfo,
             book::{BookLevel, BookSnapshot},
         },
-        quant::{NewModelRun, NewModelVersion},
+        quant::{
+            NewModelRun, NewModelVersion, NewShadowComparison, ShadowObservationQuery,
+            ShadowObservationWindow, ShadowStabilitySummary,
+        },
     },
     entities::quant_model_run::Entity as ModelRunEntity,
     enums::{
@@ -60,14 +64,15 @@ use quant_pivot_models::{
         runtime_config::ConfigResourceKind,
     },
     runtime_config::{
-        DataQualityConfig, DecimalValue, DecisionPolicySnapshot, DomainConfig, FactorsConfig,
-        FeaturesConfig, ModelConfig, ModelVersionRef,
+        BuyModelRoute, BuyRouteBinding, DataQualityConfig, DecimalValue, DecisionPolicySnapshot,
+        DomainConfig, FactorsConfig, FeaturesConfig, ModelBinding, ModelBindingSource, ModelConfig,
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FeatureVectorId,
-        MarketId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, Price, SchemaVersion, Shares, TokenId, Usd,
-        model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
+        FeedbackCycleId, MarketId, ModelInputContract, ModelRunId, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, PolicyBundleGeneration, Price, SchemaVersion,
+        Shares, TokenId, Usd, model_metrics::ModelVersionMetrics,
+        model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -79,7 +84,7 @@ use quant_pivot_repository::{
     traits::{
         EventRepository, FactorRepository, FeatureRepository, MarketRepository,
         ModelRegistryRepository, ModelRunRepository, PolicyRepository, QuantFactReadRepository,
-        ShadowComparisonRepository,
+        ShadowComparisonRepository, ShadowComparisonWriteOutcome,
     },
 };
 use quant_pivot_research::{
@@ -254,6 +259,42 @@ impl QuantFactReadRepository for EmptyFactRead {
         _decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError> {
         Ok(Vec::new())
+    }
+}
+
+struct RejectingShadowComparisonRepository;
+
+#[async_trait]
+impl ShadowComparisonRepository for RejectingShadowComparisonRepository {
+    async fn create(
+        &self,
+        _comparison: NewShadowComparison,
+    ) -> Result<ShadowComparisonWriteOutcome, StorageError> {
+        Err(StorageError::invariant_violation(
+            Some("quant_shadow_comparison"),
+            "forced shadow comparison persistence failure",
+        ))
+    }
+
+    async fn summary(
+        &self,
+        _candidate_model_version_id: &ModelVersionId,
+        _since: DateTime<Utc>,
+    ) -> Result<ShadowStabilitySummary, StorageError> {
+        Err(StorageError::invariant_violation(
+            Some("quant_shadow_comparison"),
+            "summary is unavailable in the rejecting test repository",
+        ))
+    }
+
+    async fn observation_window(
+        &self,
+        _query: &ShadowObservationQuery,
+    ) -> Result<ShadowObservationWindow, StorageError> {
+        Err(StorageError::invariant_violation(
+            Some("quant_shadow_comparison"),
+            "observation window is unavailable in the rejecting test repository",
+        ))
     }
 }
 
@@ -937,8 +978,29 @@ fn factors_with_head_skew(
 
 fn model_config(active: &ModelVersionId, shadow: Option<&ModelVersionId>) -> ModelConfig {
     ModelConfig {
-        active_model_version_id: Some(ModelVersionRef::new(*active)),
-        shadow_model_version_id: shadow.copied().map(ModelVersionRef::new),
+        buy_routes: BTreeMap::from([(
+            BuyModelRoute::Pooled,
+            BuyRouteBinding {
+                champion: ModelBinding::new(
+                    *active,
+                    ModelBindingSource::Bootstrap,
+                    Utc::now(),
+                    PolicyBundleGeneration::FIRST,
+                    1,
+                ),
+                shadow: shadow.copied().map(|model_version_id| {
+                    ModelBinding::new(
+                        model_version_id,
+                        ModelBindingSource::Feedback {
+                            feedback_cycle_id: FeedbackCycleId::from_v7(),
+                        },
+                        Utc::now(),
+                        PolicyBundleGeneration::FIRST,
+                        2,
+                    )
+                }),
+            },
+        )]),
         min_model_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
         candidate_score_floor: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
         ..ModelConfig::default()
@@ -985,6 +1047,7 @@ async fn build_runner(
     db: &DatabaseConnection,
     store: Arc<dyn ArtifactStore>,
     critical: Arc<AtomicUsize>,
+    shadow_comparison_repo: Option<Arc<dyn ShadowComparisonRepository>>,
 ) -> QuantResult<ModelRunner> {
     let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
     let factor_pipeline = Arc::new(FactorPipelineService::new(
@@ -994,8 +1057,10 @@ async fn build_runner(
     ));
     let model_run_repo =
         Arc::new(PgModelRunRepository::new(db.clone())) as Arc<dyn ModelRunRepository>;
-    let shadow_comparison_repo = Arc::new(PgShadowComparisonRepository::new(db.clone()))
-        as Arc<dyn ShadowComparisonRepository>;
+    let shadow_comparison_repo = shadow_comparison_repo.unwrap_or_else(|| {
+        Arc::new(PgShadowComparisonRepository::new(db.clone()))
+            as Arc<dyn ShadowComparisonRepository>
+    });
     let evidence_scope = EvidenceScopeIdentity::from_config(
         &ClickHouseConfig::default(),
         &ArtifactStoreDeployConfig::default(),
@@ -1057,7 +1122,7 @@ pub async fn online_loop_selection_candidates() {
         build_cross_section_features(&db, policy.decision_policy_snapshot_id).await;
 
     let critical = Arc::new(AtomicUsize::new(0));
-    let runner = build_runner(&db, Arc::clone(&store), Arc::clone(&critical))
+    let runner = build_runner(&db, Arc::clone(&store), Arc::clone(&critical), None)
         .await
         .expect("bootstrap serving generation");
     let active_model = resolve_active_model(&runner, &policy, &boundary).await;
@@ -1128,7 +1193,7 @@ pub async fn generation_rejects_bad_shadow() {
     // model-run side effect can exist.
     let drifted_shadow = register_contract_drift(&db, &active, &factors).await;
     let _policy = activate_model_config(&db, &active, Some(&drifted_shadow)).await;
-    let result = build_runner(&db, Arc::clone(&store), Arc::new(AtomicUsize::new(0))).await;
+    let result = build_runner(&db, Arc::clone(&store), Arc::new(AtomicUsize::new(0)), None).await;
     let Err(error) = result else {
         panic!("invalid shadow must reject the complete serving generation");
     };
@@ -1205,7 +1270,7 @@ pub async fn cached_planes_stay_stable() {
     let (vectors, ids, selection, evidence, boundary) =
         build_cross_section_features(&db, policy.decision_policy_snapshot_id).await;
     let critical = Arc::new(AtomicUsize::new(0));
-    let runner = build_runner(&db, Arc::clone(&store), Arc::clone(&critical))
+    let runner = build_runner(&db, Arc::clone(&store), Arc::clone(&critical), None)
         .await
         .expect("bootstrap active and shadow generation");
     let active = resolve_active_model(&runner, &policy, &boundary).await;
@@ -1269,6 +1334,79 @@ pub async fn cached_planes_stay_stable() {
     assert_eq!(shadow_run.run_kind, ModelRunKind::Shadow);
 }
 
+pub async fn shadow_persistence_degrades_only() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    seed_catalog(&db).await;
+    seed_peer_markets(&db).await;
+
+    let factors = factors_config();
+    let features = FeaturesConfig::default();
+    let training_policy_id = seed_runtime_policy(&db, &factors, &features).await;
+    let store = artifact_store();
+    let champion =
+        publish_weighted_model(&db, &store, &factors, &features, training_policy_id).await;
+    register_enabled_factors(&db, &factors, &features).await;
+    let candidate_factors = factors_with_head_skew(&factors, &features, 0);
+    let candidate = register_candidate_sibling(&db, &store, &champion, &candidate_factors).await;
+    register_enabled_factors(&db, &candidate_factors, &features).await;
+    let policy = activate_model_config(&db, &champion, Some(&candidate)).await;
+    let (vectors, ids, selection, evidence, boundary) =
+        build_cross_section_features(&db, policy.decision_policy_snapshot_id).await;
+    let critical = Arc::new(AtomicUsize::new(0));
+    let comparison_repo =
+        Arc::new(RejectingShadowComparisonRepository) as Arc<dyn ShadowComparisonRepository>;
+    let runner = build_runner(
+        &db,
+        Arc::clone(&store),
+        Arc::clone(&critical),
+        Some(comparison_repo),
+    )
+    .await
+    .expect("bootstrap active and shadow generation");
+    let active = resolve_active_model(&runner, &policy, &boundary).await;
+    let outcome = run_model_round(ModelRoundInput {
+        runner: &runner,
+        active: &active,
+        selection: &selection,
+        vectors: &vectors,
+        ids: &ids,
+        evidence: &evidence,
+        boundary,
+        decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
+    })
+    .await;
+
+    let active_run = PgModelRunRepository::new(db.clone())
+        .find_by_id(&outcome.model_run_id)
+        .await
+        .expect("find active run")
+        .expect("active run row");
+    assert_eq!(active_run.status, ModelRunStatus::Succeeded);
+    assert!(!outcome.accepted.is_empty(), "active result remains usable");
+    let shadow = outcome.shadow.expect("configured shadow outcome");
+    assert_eq!(shadow.emitted, 0);
+    assert!(shadow.diff.is_none());
+    assert!(
+        shadow
+            .failure
+            .as_deref()
+            .is_some_and(|detail| detail.contains("forced shadow comparison persistence failure"))
+    );
+    let shadow_run = PgModelRunRepository::new(db)
+        .find_by_id(&shadow.model_run_id.expect("shadow run id"))
+        .await
+        .expect("find shadow run")
+        .expect("shadow run row");
+    assert_eq!(shadow_run.status, ModelRunStatus::Failed);
+    assert_eq!(
+        shadow_run.error_code,
+        Some(ModelRunErrorCode::ShadowInferenceFailed)
+    );
+    assert!(shadow_run.output_hash.is_none());
+    assert_eq!(critical.load(Ordering::Relaxed), 0);
+}
+
 pub async fn generation_uses_route_authority() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -1281,7 +1419,7 @@ pub async fn generation_uses_route_authority() {
     let active = publish_weighted_model(&db, &store, &factors, &features, training_policy_id).await;
     register_enabled_factors(&db, &factors, &features).await;
     let _policy = activate_model_config(&db, &active, None).await;
-    let _runner = build_runner(&db, Arc::clone(&store), Arc::new(AtomicUsize::new(0)))
+    let _runner = build_runner(&db, Arc::clone(&store), Arc::new(AtomicUsize::new(0)), None)
         .await
         .expect("the active route, not a global model status, owns serving authority");
     assert!(

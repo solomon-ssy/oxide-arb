@@ -9,39 +9,41 @@ use quant_pivot_models::{
     domain::{
         api::{
             ActivateModelRouteRequest, BootstrapModelRouteRequest, CancelFeedbackCycleRequest,
-            FeedbackCycleMutationView, FeedbackCycleTriggerView, FeedbackSchedulerControlRequest,
-            FeedbackSchedulerMutationView, FeedbackSchedulerStateView, IssuePromotionPermitRequest,
-            ModelRouteActivationReceiptView, ModelRouteBootstrapReceiptView,
-            PromotionPermitListQuery, PromotionPermitMutationView, PromotionPermitView,
-            RevokePromotionPermitRequest, TriggerFeedbackCycleRequest,
+            FeedbackCycleMutationView, FeedbackCycleTriggerRequest, FeedbackCycleTriggerView,
+            FeedbackSchedulerControlRequest, FeedbackSchedulerMutationView,
+            FeedbackSchedulerStateView, IssuePromotionPermitRequest,
+            ModelRouteActivationMutationView, ModelRouteActivationReceiptView,
+            ModelRouteBootstrapReceiptView, ModelRouteRollbackTargetView, PromotionPermitListQuery,
+            PromotionPermitMutationView, PromotionPermitView, RejectShadowBindingRequest,
+            RemediateResolutionProjectionRequest, ResolutionProjectionRemediationView,
+            RevokePromotionPermitRequest, ShadowBindingRejectionReceiptView,
         },
         pagination::Paginated,
-        ports::{
-            FeedbackCandidateFamily, FeedbackCandidateFamilyInput, FeedbackCandidateRecipe,
-            FeedbackComparisonContract, FeedbackDatasetBuildRequest, FeedbackMutationPort,
-        },
+        ports::{FeedbackActivationReadPort, FeedbackMutationPort, RejectShadowBinding},
         quant::{
             BootstrapModelRoute, FeedbackCohortWindow, FeedbackCycleActor, FeedbackCycleKey,
             FeedbackCycleKeyInput, FeedbackSchedulerClaim, FeedbackSchedulerControl,
             FeedbackSchedulerSuccess, FeedbackStageEventInput, GovernedFeedbackCancellation,
             GovernedFeedbackTrigger, IssuePromotionPermit, ModelGovernanceAuditDetail,
             NewFeedbackCycle, NewFeedbackSchedulerState, NewFeedbackStageEvent, PromoteModelRoute,
-            PromotionPermitActor, PromotionPermitInfo, RevokePromotionPermit,
+            PromotionPermitActor, PromotionPermitInfo, RemediateResolutionProjection,
+            RevokePromotionPermit,
         },
     },
     enums::{
         common::MarketCategory,
         quant::{
-            CalibrationMethod, DatasetPurpose, DownsideSource, FeedbackStage,
+            FeedbackCycleStatus, FeedbackDecision, FeedbackEvaluationMode, FeedbackStage,
             FeedbackStageEventKind, FeedbackTriggerFamily,
         },
     },
     hashing::CanonicalDigest,
     runtime_config::BuyModelRoute,
     types::{
-        ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetSourceLineage,
-        DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId, PromotionPermitId,
-        ResearchProfileArtifact, ResearchProfileId, TrainingDatasetId, builtin_research_profiles,
+        ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId, FeedbackCycleId,
+        ModelSpecId, PolicyActivationId, PolicyIdempotencyKey, PromotionPermitId,
+        ResearchProfileArtifact, ResearchProfileId, ResolutionObservationId,
+        ShadowBindingArtifactId, builtin_research_profiles,
     },
 };
 use quant_pivot_repository::traits::{
@@ -49,11 +51,12 @@ use quant_pivot_repository::traits::{
     FeedbackSchedulerRepository, FeedbackStageWriteOutcome, FeedbackTriggerCommit,
     FeedbackTriggerWriteOutcome, ModelRouteBootstrapCommit, ModelRouteBootstrapOutcome,
     ModelRoutePromotionCommit, ModelRoutePromotionOutcome, PromotionPermitIssueOutcome,
-    PromotionPermitRepository, PromotionPermitRevokeOutcome,
+    PromotionPermitRepository, PromotionPermitRevokeOutcome, ResolutionObservationRepository,
+    ShadowBindingRejectOutcome,
 };
 use tokio_util::sync::CancellationToken;
 
-use super::training_dataset::{CoreTrainingDatasetPort, FeedbackSourceFreeze};
+use super::training_dataset::CoreTrainingDatasetPort;
 use crate::{
     governance::PromotionPermitService,
     observability::metrics_hub::MetricsHub,
@@ -68,8 +71,23 @@ use crate::{
 
 const FEEDBACK_SOURCE_PROGRAM_DOMAIN: &str = "quant-pivot/feedback-source-program";
 const FEEDBACK_SOURCE_PROGRAM_VERSION: u32 = 1;
-const FEEDBACK_DATASET_PLAN_DOMAIN: &str = "quant-pivot/feedback-dataset-plan";
-const FEEDBACK_DATASET_PLAN_VERSION: u32 = 1;
+
+#[derive(Debug, Clone)]
+struct FeedbackCycleAttempt {
+    evaluation_mode: FeedbackEvaluationMode,
+    parent_cycle_id: Option<FeedbackCycleId>,
+    forced_idempotency_key: Option<PolicyIdempotencyKey>,
+}
+
+impl FeedbackCycleAttempt {
+    const fn conditional() -> Self {
+        Self {
+            evaluation_mode: FeedbackEvaluationMode::Conditional,
+            parent_cycle_id: None,
+            forced_idempotency_key: None,
+        }
+    }
+}
 
 /// Complete dependencies for the governed feedback mutation port.
 pub struct CoreFeedbackMutationDeps {
@@ -81,6 +99,7 @@ pub struct CoreFeedbackMutationDeps {
     pub serving_preimages: Arc<ModelServingPreimageService>,
     pub serving_generations: Arc<ModelServingGenerationStore>,
     pub route_governance: Arc<ModelRouteGovernanceService>,
+    pub resolutions: Arc<dyn ResolutionObservationRepository>,
     pub training_datasets: Arc<CoreTrainingDatasetPort>,
     pub feedback_wake: FeedbackCoordinatorWake,
     pub shutdown: CancellationToken,
@@ -319,6 +338,26 @@ impl CoreFeedbackMutationPort {
         commit: ModelRoutePromotionCommit,
         permit: PromotionPermitInfo,
     ) -> QuantResult<ModelRouteActivationReceiptView> {
+        let ModelGovernanceAuditDetail::PromoteRoute { record } = &commit.audit.detail else {
+            return Err(FeedbackError::PromotionTransactionConflict {
+                detail: "model-route activation lost its typed transaction record".to_owned(),
+            }
+            .into());
+        };
+        let preflight = record.preflight();
+        let policy = record.policy();
+        let route = BuyModelRoute::try_from(Some(record.route().category)).map_err(|error| {
+            FeedbackError::PromotionTransactionConflict {
+                detail: error.to_string(),
+            }
+        })?;
+        let previous_route_generation = preflight.scope().expected_route_generation();
+        let activated_route_generation =
+            previous_route_generation.checked_add(1).ok_or_else(|| {
+                FeedbackError::PromotionTransactionConflict {
+                    detail: "activated route generation overflowed".to_owned(),
+                }
+            })?;
         let activated_by_user_id = commit.activation.activated_by_user_id.ok_or_else(|| {
             FeedbackError::PromotionTransactionConflict {
                 detail: "model-route activation has no authenticated user identity".to_owned(),
@@ -342,20 +381,10 @@ impl CoreFeedbackMutationPort {
         })?;
         Ok(ModelRouteActivationReceiptView {
             promotion_permit_id,
-            feedback_cycle_id: match &commit.audit.detail {
-                ModelGovernanceAuditDetail::PromoteRoute { record } => {
-                    record.preflight().feedback_cycle_id()
-                }
-                _ => {
-                    return Err(FeedbackError::PromotionTransactionConflict {
-                        detail: "model-route activation lost its typed transaction record"
-                            .to_owned(),
-                    }
-                    .into());
-                }
-            },
-            previous_route_generation: commit.activation.expected_bundle_generation,
-            activated_route_generation: commit.activation.bundle_generation,
+            feedback_cycle_id: preflight.feedback_cycle_id(),
+            route,
+            previous_route_generation,
+            activated_route_generation,
             previous_model_version_id: permit.champion_model_version_id,
             activated_model_version_id: commit.audit.model_version_id.ok_or_else(|| {
                 FeedbackError::PromotionTransactionConflict {
@@ -367,6 +396,15 @@ impl CoreFeedbackMutationPort {
             audit_event_id: commit.activation.audit_event_id,
             outbox_event_id: commit.activation.audit_event_id,
             transaction_hash: commit.transaction_hash,
+            activated_model_routing_revision_id: policy.committed_model_routing_revision_id,
+            rollback_target: ModelRouteRollbackTargetView {
+                route,
+                rollback_target_revision_id: policy.rollback_target_revision_id,
+                rollback_target_revision_hash: policy.rollback_target_revision_hash,
+                activated_model_version_id: record.route().candidate_model_version_id,
+                restored_model_version_id: record.route().champion_model_version_id,
+                shadow_cleared: true,
+            },
             permit_issued_by_user_id: permit.issued_by_user_id,
             permit_issued_by_username: permit.issued_by_username,
             permit_issued_by_role: permit.issued_by_role,
@@ -375,7 +413,6 @@ impl CoreFeedbackMutationPort {
             activated_by_role,
             server_timestamp: commit.activation.activated_at,
             execution_authority_unchanged: true,
-            replayed: commit.outcome == ModelRoutePromotionOutcome::ExactReplay,
         })
     }
 
@@ -438,45 +475,12 @@ impl CoreFeedbackMutationPort {
         Ok((profile, route))
     }
 
-    fn dataset_request(
-        purpose: DatasetPurpose,
-        window: FeedbackCohortWindow,
-        model_spec_id: ModelSpecId,
-        model_spec_definition_hash: ContentHash,
-        source_lineage: &DatasetSourceLineage,
-    ) -> QuantResult<FeedbackDatasetBuildRequest> {
-        let plan_hash = CanonicalDigest::content_hash_typed(
-            FEEDBACK_DATASET_PLAN_DOMAIN,
-            FEEDBACK_DATASET_PLAN_VERSION,
-            &(
-                FEEDBACK_DATASET_PLAN_VERSION,
-                purpose,
-                window.profile_ref(),
-                window.window_start(),
-                window.cutoff(),
-                model_spec_id,
-                model_spec_definition_hash,
-                source_lineage,
-                DATASET_ARTIFACT_FORMAT_VERSION,
-            ),
-        )?;
-        let request = FeedbackDatasetBuildRequest {
-            training_dataset_id: TrainingDatasetId::from_feedback_plan_hash(&plan_hash),
-            model_spec_id,
-            model_spec_definition_hash,
-            source_lineage: source_lineage.clone(),
-            window,
-            purpose,
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
     async fn freeze_feedback_cycle(
         &self,
         profile: &ResearchProfileArtifact,
         route: BuyModelRoute,
         label_cutoff: DateTime<Utc>,
+        attempt: FeedbackCycleAttempt,
     ) -> QuantResult<NewFeedbackCycle> {
         let serving = self
             .deps
@@ -488,6 +492,7 @@ impl CoreFeedbackMutationPort {
                     profile.profile_ref.id
                 ),
             })?;
+        let champion_identity = serving.published_champion_identity()?;
         let champion = serving.active_version();
         let preimage = self.deps.serving_preimages.load(champion).await?;
         if preimage.profile() != profile
@@ -495,6 +500,9 @@ impl CoreFeedbackMutationPort {
             || champion.category_scope != route.category()
             || serving.decision_policy_snapshot_id()
                 != preimage.policy_snapshot().decision_policy_snapshot_id
+            || champion_identity.route != route
+            || champion_identity.champion_model_version_id != champion.model_version_id
+            || champion_identity.champion_serving_contract_hash != champion.serving_contract_hash
         {
             return Err(Self::invalid(
                 "current route, champion, profile, or committed policy preimage differs",
@@ -510,58 +518,6 @@ impl CoreFeedbackMutationPort {
             policy.snapshot_hash,
             label_cutoff,
         )?;
-        let source_lineage = self
-            .deps
-            .training_datasets
-            .freeze_feedback_source(
-                FeedbackSourceFreeze {
-                    profile,
-                    runtime: &policy.snapshot,
-                    decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
-                    runtime_config_hash: policy.snapshot_hash,
-                    research_program_hash: plan.research_program_hash(),
-                    window_start: plan.source_start(),
-                    window_end: plan.label_cutoff(),
-                    pit_cutoff: plan.label_cutoff(),
-                },
-                &self.deps.shutdown,
-            )
-            .await?;
-        let training = Self::dataset_request(
-            DatasetPurpose::Training,
-            plan.training().clone(),
-            model_spec.model_spec_id,
-            model_spec.definition_hash,
-            &source_lineage,
-        )?;
-        let calibration = Self::dataset_request(
-            DatasetPurpose::Calibration,
-            plan.calibration().clone(),
-            model_spec.model_spec_id,
-            model_spec.definition_hash,
-            &source_lineage,
-        )?;
-        let evaluation = Self::dataset_request(
-            DatasetPurpose::Evaluation,
-            plan.evaluation().clone(),
-            model_spec.model_spec_id,
-            model_spec.definition_hash,
-            &source_lineage,
-        )?;
-        let recipe = FeedbackCandidateRecipe::try_seal(
-            training,
-            calibration,
-            CalibrationMethod::Platt,
-            DownsideSource::MfeMae,
-            policy.decision_policy_snapshot_id,
-        )?;
-        let candidate_family = FeedbackCandidateFamily::try_seal(FeedbackCandidateFamilyInput {
-            shared_evaluation: evaluation,
-            comparison_contract: FeedbackComparisonContract::try_from_policy(
-                &profile.spec.feedback_policy,
-            )?,
-            candidates: vec![recipe],
-        })?;
         let feedback_policy_hash =
             profile
                 .spec
@@ -574,10 +530,19 @@ impl CoreFeedbackMutationPort {
             profile_ref: profile.profile_ref.clone(),
             feedback_policy_hash,
             label_cutoff: plan.label_cutoff(),
-            capability_registry_hashes: source_lineage.capability_registry_hashes,
             champion_model_version_id: champion.model_version_id,
             champion_serving_contract_hash: champion.serving_contract_hash,
-            candidate_family,
+            champion_model_spec_id: model_spec.model_spec_id,
+            champion_model_spec_definition_hash: model_spec.definition_hash,
+            champion_model_family: champion.model_family,
+            route,
+            decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: policy.snapshot_hash,
+            policy_bundle_generation: champion_identity.policy_bundle_generation,
+            route_generation: champion_identity.route_generation,
+            evaluation_mode: attempt.evaluation_mode,
+            parent_cycle_id: attempt.parent_cycle_id,
+            forced_idempotency_key: attempt.forced_idempotency_key,
         })?)
         .map_err(Into::into)
     }
@@ -611,7 +576,18 @@ impl CoreFeedbackMutationPort {
             .into());
         }
         let cycle =
-            Box::pin(self.freeze_feedback_cycle(&profile, route, claim.state.next_due_at)).await?;
+            Box::pin(self.freeze_feedback_cycle(
+                &profile,
+                route,
+                claim.state.pending_cutoff.ok_or_else(|| {
+                    FeedbackError::InvalidCoordinatorState {
+                        detail: "claimed scheduler occurrence has no durable pending cutoff"
+                            .to_owned(),
+                    }
+                })?,
+                FeedbackCycleAttempt::conditional(),
+            ))
+            .await?;
         let occurred_at = self.deps.cycles.database_time().await?;
         let trigger = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
             feedback_cycle_id: cycle.feedback_cycle_id(),
@@ -693,10 +669,55 @@ impl CoreFeedbackMutationPort {
 }
 
 #[async_trait]
+impl FeedbackActivationReadPort for CoreFeedbackMutationPort {
+    async fn get_activation(
+        &self,
+        policy_activation_id: PolicyActivationId,
+    ) -> QuantResult<Option<ModelRouteActivationReceiptView>> {
+        let Some(commit) = self
+            .deps
+            .route_governance
+            .find_activation(&policy_activation_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let permit_id = commit.activation.promotion_permit_id.ok_or_else(|| {
+            FeedbackError::PromotionTransactionConflict {
+                detail: "persisted model-route activation has no permit identity".to_owned(),
+            }
+        })?;
+        let permit = self.deps.permits.load(&permit_id).await?;
+        Self::activation_receipt(commit, permit).map(Some)
+    }
+
+    async fn get_cycle_activation(
+        &self,
+        feedback_cycle_id: FeedbackCycleId,
+    ) -> QuantResult<Option<ModelRouteActivationReceiptView>> {
+        let Some(commit) = self
+            .deps
+            .route_governance
+            .find_cycle_activation(&feedback_cycle_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let permit_id = commit.activation.promotion_permit_id.ok_or_else(|| {
+            FeedbackError::PromotionTransactionConflict {
+                detail: "persisted model-route activation has no permit identity".to_owned(),
+            }
+        })?;
+        let permit = self.deps.permits.load(&permit_id).await?;
+        Self::activation_receipt(commit, permit).map(Some)
+    }
+}
+
+#[async_trait]
 impl FeedbackMutationPort for CoreFeedbackMutationPort {
     async fn trigger_cycle(
         &self,
-        request: TriggerFeedbackCycleRequest,
+        request: FeedbackCycleTriggerRequest,
         actor: FeedbackCycleActor,
     ) -> QuantResult<FeedbackCycleTriggerView> {
         let (profile, route) = Self::resolve_profile_route(&request.profile_id)?;
@@ -705,14 +726,56 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
             .scheduler
             .sync_state(NewFeedbackSchedulerState::try_new(&profile, database_now)?)
             .await?;
-        let label_cutoff = FeedbackCycleFreezePlan::cadence_cutoff(database_now, &profile)?;
-        let cycle = Box::pin(self.freeze_feedback_cycle(&profile, route, label_cutoff)).await?;
+        let (label_cutoff, attempt) = match request.evaluation_mode {
+            FeedbackEvaluationMode::Conditional if request.parent_cycle_id.is_none() => (
+                FeedbackCycleFreezePlan::cadence_cutoff(database_now, &profile)?,
+                FeedbackCycleAttempt::conditional(),
+            ),
+            FeedbackEvaluationMode::ForcedRetraining => {
+                let parent_cycle_id = request.parent_cycle_id.ok_or_else(|| {
+                    Self::invalid("ForcedRetraining requires a terminal parent cycle")
+                })?;
+                let parent = self
+                    .deps
+                    .cycles
+                    .find_cycle(&parent_cycle_id)
+                    .await?
+                    .ok_or_else(|| {
+                        StorageError::not_found("quant_feedback_cycle", parent_cycle_id)
+                    })?;
+                if parent.profile_ref.id != request.profile_id
+                    || parent.evaluation_mode != FeedbackEvaluationMode::Conditional
+                    || parent.status != FeedbackCycleStatus::Succeeded
+                    || parent.decision != Some(FeedbackDecision::NoAction)
+                {
+                    return Err(Self::invalid(
+                        "ForcedRetraining parent must be the same profile's terminal Conditional NoAction cycle",
+                    ));
+                }
+                (
+                    parent.label_cutoff,
+                    FeedbackCycleAttempt {
+                        evaluation_mode: FeedbackEvaluationMode::ForcedRetraining,
+                        parent_cycle_id: Some(parent_cycle_id),
+                        forced_idempotency_key: Some(request.idempotency_key.clone()),
+                    },
+                )
+            }
+            FeedbackEvaluationMode::Conditional => {
+                return Err(Self::invalid(
+                    "Conditional evaluation cannot bind a parent cycle",
+                ));
+            }
+        };
+        let cycle =
+            Box::pin(self.freeze_feedback_cycle(&profile, route, label_cutoff, attempt)).await?;
         let result = self
             .deps
             .cycles
             .record_governed_trigger(GovernedFeedbackTrigger {
                 actor,
                 cycle,
+                idempotency_key: request.idempotency_key,
                 reason_code: request.reason,
             })
             .await?;
@@ -864,7 +927,7 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
         &self,
         request: ActivateModelRouteRequest,
         actor: FeedbackCycleActor,
-    ) -> QuantResult<ModelRouteActivationReceiptView> {
+    ) -> QuantResult<ModelRouteActivationMutationView> {
         let permit_id = request.promotion_permit_id;
         let permit = self.deps.permits.load(&permit_id).await?;
         let commit = match Box::pin(self.deps.route_governance.activate(PromoteModelRoute {
@@ -900,7 +963,65 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
                 return Err(error);
             }
         };
-        Self::activation_receipt(commit, permit)
+        let replayed = commit.outcome == ModelRoutePromotionOutcome::ExactReplay;
+        Ok(ModelRouteActivationMutationView {
+            receipt: Self::activation_receipt(commit, permit)?,
+            replayed,
+        })
+    }
+
+    async fn reject_shadow(
+        &self,
+        binding_id: ShadowBindingArtifactId,
+        request: RejectShadowBindingRequest,
+        actor: FeedbackCycleActor,
+    ) -> QuantResult<ShadowBindingRejectionReceiptView> {
+        let commit = self
+            .deps
+            .route_governance
+            .reject_shadow(RejectShadowBinding {
+                binding_id,
+                expected_binding_generation: request.expected_binding_generation,
+                expected_policy_generation: request.expected_policy_generation,
+                idempotency_key: request.idempotency_key,
+                reason_code: request.reason_code,
+                note: request.note,
+                actor_user_id: actor.user_id,
+                actor_role: actor.acting_role,
+            })
+            .await?;
+        Ok(ShadowBindingRejectionReceiptView {
+            outbox_event_id: commit.receipt.audit_event_id,
+            receipt: commit.receipt,
+            replayed: commit.outcome == ShadowBindingRejectOutcome::ExactReplay,
+        })
+    }
+
+    async fn remediate_resolution(
+        &self,
+        observation_id: ResolutionObservationId,
+        request: RemediateResolutionProjectionRequest,
+        actor: FeedbackCycleActor,
+    ) -> QuantResult<ResolutionProjectionRemediationView> {
+        let commit = self
+            .deps
+            .resolutions
+            .remediate(RemediateResolutionProjection {
+                resolution_observation_id: observation_id,
+                expected_revision: request.expected_revision,
+                action: request.action,
+                idempotency_key: request.idempotency_key,
+                reason_code: request.reason_code,
+                operator_note: request.operator_note,
+                actor_user_id: actor.user_id,
+                actor_role: actor.acting_role,
+            })
+            .await?;
+        Ok(ResolutionProjectionRemediationView {
+            projection: commit.projection,
+            remediation: commit.remediation,
+            replayed: commit.replayed,
+        })
     }
 
     async fn bootstrap_route(

@@ -1,6 +1,6 @@
 //! Typed execution boundary for deterministic feature-parity research jobs.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
@@ -10,6 +10,17 @@ use crate::domain::{
     api::{FeatureParityJobParams, FeatureParityRunView},
     quant::JobProgressSink,
 };
+
+/// One bounded parity execution attempt.
+///
+/// Waiting for an append-only serving marker is a normal durable state, not a
+/// transient execution failure. The worker must persist the retry deadline and
+/// release its lease so another parity run can make progress.
+#[derive(Debug, Clone)]
+pub enum FeatureParityExecutionOutcome {
+    Completed(Box<FeatureParityRunView>),
+    AwaitingMaterialization { retry_after: Duration },
+}
 
 /// Executes the full comparison ladder (selection through business prediction).
 ///
@@ -22,5 +33,5 @@ pub trait FeatureParityExecutionPort: Send + Sync {
         params: FeatureParityJobParams,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
-    ) -> QuantResult<FeatureParityRunView>;
+    ) -> QuantResult<FeatureParityExecutionOutcome>;
 }

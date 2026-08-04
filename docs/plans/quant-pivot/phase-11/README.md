@@ -37,9 +37,9 @@
 > **11.8 已完成（含 2026-07-16 P0 收尾复核）**：ReportRun / Prepared→Published、
 > PG durable scheduler、scope current、supersession execution cascade、censored attribution 与
 > operator workflow 的唯一验收真相见 11.8；**11.9 的 current-byte Implementation Closure
-> 已于 2026-07-31 完成**。旧关闭结论曾因合同缺口撤回；canonical truth、attempt/rollup、单实例 durable
-> scheduler、完整 feedback DAG、quality gate、attribution、Weather 8-family、route governance
-> 与 UI/ops 现已按新生产合同实现并通过完整门禁。独立 11.10 已 `MERGED INTO 11.9`，不再形成后继依赖节点。
+> 与 Business Loop Closure 均为 BLOCKED**。2026-07-31 独立复核推翻了旧关闭结论；W6 正在重建
+> route-owned shadow、RecipePlan、execution feedback、durable recovery 和真实 production-stack
+> E2E。独立 11.10 已 `MERGED INTO 11.9`，不再形成后继依赖节点。
 > `Operational Activation` 仍独立 blocked：没有 authenticated current-data、mature labels、
 > 完整 retraining cooldown 的真实 ReportOnly shadow 或已授权 route activation，就不存在真实资金、
 > current Champion route 或 execution-authority 扩大声明。唯一逐项进度与证据真相见 11.9
@@ -138,7 +138,7 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.7.1 | Composable Entry Conditions + Crypto/Weather Events | typed AST + PIT facts/events + Recommendation shadow + vertical gates — **实施中** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
 | 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility baseline + cash-budget + PIT fee + purged CPCV/uniqueness/DSR/PBO/ESS，交付至 ReportOnly shadow — **仓库契约已闭环：Weather/structural producers、56/21 CPCV、2× latency、Evidence v3、独立 Validate、分页 drilldown 与 fact outbox 已接通；物理迁移/真实数据验收与 24h shadow 待目标环境完成；真实 canary 已移交 11.11** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
 | 11.8 | Report Lifecycle, Durable Scheduling & Operator Workflow | **已完成（含 P0 收尾复核）**：CH decision-fact、delivery claim-loss 与 censor accounting 闭环；历史版本已被 boot 基线取代 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
-| 11.9 | Crypto / Weather Verticals, Attribution Feedback & Auto-Retraining | canonical truth、attempt/rollup、自动再训练、质量治理、三类 attribution、Weather 8-family、唯一 route authority 与 UI/ops — **Implementation Closure=DONE；Operational Activation 仍独立 blocked** | 19, 20, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 11.9 | Crypto / Weather Verticals, Attribution Feedback & Auto-Retraining | canonical truth、attempt/rollup、自动再训练、质量治理、三类 attribution、Weather 8-family、唯一 route authority 与 UI/ops — **Implementation Closure=BLOCKED；Business Loop Closure=BLOCKED；Operational Activation=BLOCKED** | 19, 20, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 11.10 | Counterfactual Factor Attribution | **MERGED INTO 11.9**；仅保留合并说明，不是独立实施或依赖节点 | — | [11.10](11.10-counterfactual-factor-attribution.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
 

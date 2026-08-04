@@ -17,6 +17,11 @@ pub const REPORT_FUNNEL_PAGE: ClickHouseQueryLimits = ClickHouseQueryLimits::new
     API_PAGE_ROWS,
     8 * MIB,
 );
+pub const REPORT_FUNNEL_BETWEEN: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.report_funnel_between.v1",
+    RESEARCH_ROWS,
+    512 * MIB,
+);
 pub const ENTRY_EVALUATION_LATEST: ClickHouseQueryLimits =
     ClickHouseQueryLimits::new("ch.repository.entry_evaluation_latest.v1", 1, 64 * KIB);
 pub const CRYPTO_REPORT_AT: ClickHouseQueryLimits =
@@ -64,6 +69,11 @@ pub const BOOK_LEDGER_SNAPSHOT_AT: ClickHouseQueryLimits =
     ClickHouseQueryLimits::new("ch.repository.book_ledger_snapshot_at.v1", 1, 4 * MIB);
 pub const BOOK_LEDGER_FROM: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
     "ch.repository.book_l2_ledger_from.v1",
+    ONLINE_ROWS,
+    256 * MIB,
+);
+pub const BOOK_LEDGER_REPLAY_FROM: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.book_l2_replay_from.v1",
     ONLINE_ROWS,
     256 * MIB,
 );

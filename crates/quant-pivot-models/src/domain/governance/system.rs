@@ -548,6 +548,7 @@ pub struct NewModelPromotionActivation {
     pub policy_revision_id: PolicyRevisionId,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub policy_approval_id: PolicyApprovalId,
+    pub activated_at: DateTime<Utc>,
     pub activated_by_kind: PolicyActorKind,
     pub activated_by_user_id: UserId,
     pub activated_by_label: String,

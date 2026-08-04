@@ -26,8 +26,9 @@ use crate::{
     validation::{
         BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
         DefaultCombinatorialPurgedBacktester, DsrInput, FoldModelSource, FoldRuntime,
-        GroupEvaluation, GroupRowFilter, PboInput, PolicyFoldRuntime, PurgeConfig, RankObservation,
-        ReplayEngine, TimelineGroup, TrialPerformanceMatrix, probability_of_backtest_overfitting,
+        FoldTrainingIdentity, FoldTrainingRequest, GroupEvaluation, GroupRowFilter, PboInput,
+        PolicyFoldRuntime, PurgeConfig, RankObservation, ReplayEngine, TimelineGroup,
+        TrialPerformanceMatrix, probability_of_backtest_overfitting,
     },
 };
 
@@ -141,10 +142,20 @@ struct PolicyFoldSource<'a> {
 }
 
 impl FoldModelSource for PolicyFoldSource<'_> {
-    fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<FoldRuntime> {
+    fn train_fold(&self, request: FoldTrainingRequest<'_>) -> QuantResult<FoldRuntime> {
+        let FoldTrainingIdentity::Validation {
+            combination_index, ..
+        } = request.identity
+        else {
+            return Err(methodology(
+                "policy CPCV fold source cannot train a trial-grid estimator".to_owned(),
+            ));
+        };
+        let filter = request.filter;
         let candidate_index = best_candidate(self.groups, &filter.group_indices)?;
         let utility = weighted_candidate_mean(self.groups, &filter.group_indices, candidate_index)?;
         Ok(FoldRuntime::Policy(PolicyFoldRuntime {
+            validation_fold_index: combination_index,
             candidate_index,
             candidate_id: self.candidate_ids[candidate_index].clone(),
             training_group_count: u64::try_from(filter.group_indices.len()).map_err(|error| {
@@ -175,7 +186,7 @@ impl ReplayEngine for PolicyReplay<'_> {
             .lock()
             .map_err(|_| methodology("policy CPCV audit mutex is poisoned".to_owned()))?
             .push(PolicyCpcvFoldAttempt {
-                fold_index: 0,
+                fold_index: selected.validation_fold_index,
                 test_group_indices: filter.group_indices.clone(),
                 selected_candidate_id: selected.candidate_id.clone(),
                 training_group_count: selected.training_group_count,
@@ -202,6 +213,7 @@ impl ReplayEngine for PolicyReplay<'_> {
                         score: selected.training_utility_bps,
                         realized,
                     }],
+                    allocation_weights: None,
                 })
             })
             .collect()
@@ -351,11 +363,17 @@ fn run_policy_cpcv(
         .map_err(|_| methodology("policy CPCV audit still has live owners".to_owned()))?
         .into_inner()
         .map_err(|_| methodology("policy CPCV audit mutex is poisoned".to_owned()))?;
-    folds.sort_by(|left, right| left.test_group_indices.cmp(&right.test_group_indices));
-    for (index, fold) in folds.iter_mut().enumerate() {
-        fold.fold_index = u32::try_from(index).map_err(|error| {
+    folds.sort_unstable_by_key(|fold| fold.fold_index);
+    for (index, fold) in folds.iter().enumerate() {
+        let expected = u32::try_from(index).map_err(|error| {
             methodology(format!("policy CPCV fold index does not fit u32: {error}"))
         })?;
+        if fold.fold_index != expected {
+            return Err(methodology(format!(
+                "policy CPCV fold identities must be contiguous: expected {expected}, got {}",
+                fold.fold_index
+            )));
+        }
     }
     if folds.len()
         != usize::try_from(POLICY_CPCV_COMBINATIONS).map_err(|error| {
@@ -809,6 +827,13 @@ mod tests {
 
         assert_eq!(summary.cpcv_combination_count, POLICY_CPCV_COMBINATIONS);
         assert_eq!(summary.cpcv_folds.len(), 56);
+        assert!(
+            summary
+                .cpcv_folds
+                .iter()
+                .enumerate()
+                .all(|(index, fold)| u32::try_from(index).ok() == Some(fold.fold_index))
+        );
         assert_eq!(
             summary.cpcv_paths.len(),
             usize::try_from(POLICY_CPCV_PATHS).expect("usize")

@@ -257,7 +257,7 @@ struct CanonicalCryptoContract {
     minimum_deflated_sharpe_ratio: String,
     maximum_probability_backtest_overfitting: String,
     required_shadow_window_secs: u64,
-    minimum_shadow_overlap: String,
+    minimum_shadow_decision_overlap: String,
     chainlink_semi_auto_minimum_days: u32,
     chainlink_semi_auto_minimum_samples: u64,
     binance_semi_auto_minimum_days: u32,
@@ -392,8 +392,8 @@ impl CanonicalCryptoContract {
                 .normalize()
                 .to_string(),
             required_shadow_window_secs: runtime_gate.required_shadow_window_secs,
-            minimum_shadow_overlap: runtime_gate
-                .min_shadow_overlap_stability
+            minimum_shadow_decision_overlap: runtime_gate
+                .min_shadow_decision_overlap
                 .value()
                 .normalize()
                 .to_string(),

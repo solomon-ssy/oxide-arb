@@ -945,10 +945,7 @@ mod tests {
             },
         },
         enums::{
-            quant::{
-                EmptyReportReason, FeatureParityStateTransition, RecommendationReportStatus,
-                ReportKind, ReportRunStatus,
-            },
+            quant::{EmptyReportReason, RecommendationReportStatus, ReportKind, ReportRunStatus},
             runtime_config::{ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActorKind},
         },
         runtime_config::{ActivePolicyBundle, PolicyValidationEvidence},
@@ -1031,6 +1028,7 @@ mod tests {
             parent_job_id: job.parent_job_id,
             recovery_attempt: job.recovery_attempt,
             max_recovery_attempts: job.max_recovery_attempts,
+            next_attempt_at: None,
             lease_owner: None,
             lease_expires_at: None,
             started_at: None,
@@ -1050,6 +1048,10 @@ mod tests {
 
     #[async_trait]
     impl FeatureParityRepository for CoordinatorParityRepository {
+        async fn database_time(&self) -> Result<DateTime<Utc>, StorageError> {
+            Ok(Utc::now())
+        }
+
         async fn create_run(
             &self,
             _run: NewFeatureParityRun,
@@ -1173,15 +1175,6 @@ mod tests {
 
         async fn current_state(&self) -> Result<Option<FeatureParityStateInfo>, StorageError> {
             Ok(None)
-        }
-
-        async fn open_latch(
-            &self,
-            _cause_run_id: &FeatureParityRunId,
-            _transition: FeatureParityStateTransition,
-            _reason: String,
-        ) -> Result<FeatureParityStateInfo, StorageError> {
-            Err(unexpected("open_latch"))
         }
 
         async fn acknowledge_latch(

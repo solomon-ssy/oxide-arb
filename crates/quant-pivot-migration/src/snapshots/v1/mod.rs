@@ -52,10 +52,12 @@ pub mod quant_feature_parity_run;
 pub mod quant_feature_parity_state;
 pub mod quant_feature_parity_subject;
 pub mod quant_feature_vector;
+pub mod quant_feedback_coordinator_fault;
 pub mod quant_feedback_cycle;
 pub mod quant_feedback_evaluation_use;
 pub mod quant_feedback_event_outbox;
 pub mod quant_feedback_promotion_permit;
+pub mod quant_feedback_recipe_template;
 pub mod quant_feedback_scheduler_state;
 pub mod quant_feedback_stage_event;
 pub mod quant_feedback_trigger_event;
@@ -66,6 +68,7 @@ pub mod quant_market_selection_member;
 pub mod quant_model_candidate_manifest;
 pub mod quant_model_comparison_report;
 pub mod quant_model_governance_audit;
+pub mod quant_model_route_shadow_binding;
 pub mod quant_model_run;
 pub mod quant_model_spec;
 pub mod quant_model_version;
@@ -88,6 +91,7 @@ pub mod quant_research_readiness_evidence;
 pub mod quant_resolution_observation_inbox;
 pub mod quant_resolution_observation_projection;
 pub mod quant_resolution_outcome_reconciliation_task;
+pub mod quant_resolution_projection_remediation;
 pub mod quant_settlement_authorization;
 pub mod quant_settlement_chain_submission;
 pub mod quant_settlement_external_cursor;
@@ -165,9 +169,11 @@ pub const TABLES: &[&str] = &[
     "quant_factor_definition",
     "quant_factor_value",
     "quant_feedback_cycle",
+    "quant_feedback_coordinator_fault",
     "quant_feedback_evaluation_use",
     "quant_feedback_event_outbox",
     "quant_feedback_promotion_permit",
+    "quant_feedback_recipe_template",
     "quant_feedback_scheduler_state",
     "quant_feedback_stage_event",
     "quant_feedback_trigger_event",
@@ -183,6 +189,7 @@ pub const TABLES: &[&str] = &[
     "quant_model_candidate_manifest",
     "quant_model_comparison_report",
     "quant_model_governance_audit",
+    "quant_model_route_shadow_binding",
     "quant_model_run",
     "quant_model_spec",
     "quant_model_version",
@@ -199,6 +206,7 @@ pub const TABLES: &[&str] = &[
     "quant_reconciliation",
     "quant_resolution_observation_inbox",
     "quant_resolution_observation_projection",
+    "quant_resolution_projection_remediation",
     "quant_resolution_outcome_reconciliation_task",
     "quant_report_data_quality_snapshot",
     "quant_report_fact_delivery",
@@ -278,6 +286,9 @@ pub const ENUMS: &[&str] = &[
     "qp_feedback_drift_kind",
     "qp_feedback_drift_metric",
     "qp_feedback_evaluation_purpose",
+    "qp_feedback_evaluation_mode",
+    "qp_feedback_recipe_template_status",
+    "qp_feedback_scheduler_failure_kind",
     "qp_feedback_stage",
     "qp_feedback_stage_event_kind",
     "qp_feedback_trigger_family",
@@ -324,6 +335,8 @@ pub const ENUMS: &[&str] = &[
     "qp_reconciliation_result",
     "qp_report_fact_delivery_status",
     "qp_resolution_projection_status",
+    "qp_resolution_projection_error_code",
+    "qp_resolution_remediation_action",
     "qp_outcome_reconciliation_task_status",
     "qp_report_kind",
     "qp_report_run_status",
@@ -352,6 +365,7 @@ pub const ENUMS: &[&str] = &[
     "qp_settlement_submission_purpose",
     "qp_settlement_submission_state",
     "qp_side",
+    "qp_shadow_binding_status",
     "qp_source_slice_status",
     "qp_tick_size",
     "qp_trade_tape_block_cursor_status",
@@ -416,9 +430,11 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_factor_definition.rs"),
     include_bytes!("quant_factor_value.rs"),
     include_bytes!("quant_feedback_cycle.rs"),
+    include_bytes!("quant_feedback_coordinator_fault.rs"),
     include_bytes!("quant_feedback_evaluation_use.rs"),
     include_bytes!("quant_feedback_event_outbox.rs"),
     include_bytes!("quant_feedback_promotion_permit.rs"),
+    include_bytes!("quant_feedback_recipe_template.rs"),
     include_bytes!("quant_feedback_scheduler_state.rs"),
     include_bytes!("quant_feedback_stage_event.rs"),
     include_bytes!("quant_feedback_trigger_event.rs"),
@@ -434,6 +450,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_model_candidate_manifest.rs"),
     include_bytes!("quant_model_comparison_report.rs"),
     include_bytes!("quant_model_governance_audit.rs"),
+    include_bytes!("quant_model_route_shadow_binding.rs"),
     include_bytes!("quant_model_run.rs"),
     include_bytes!("quant_model_spec.rs"),
     include_bytes!("quant_model_version.rs"),
@@ -450,6 +467,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_reconciliation.rs"),
     include_bytes!("quant_resolution_observation_inbox.rs"),
     include_bytes!("quant_resolution_observation_projection.rs"),
+    include_bytes!("quant_resolution_projection_remediation.rs"),
     include_bytes!("quant_resolution_outcome_reconciliation_task.rs"),
     include_bytes!("quant_report_data_quality_snapshot.rs"),
     include_bytes!("quant_report_fact_delivery.rs"),

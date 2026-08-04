@@ -22,7 +22,7 @@
 //! implementations; supplies lot-grouped implementations with
 //! zero changes here.
 
-use std::ops::Range;
+use std::{collections::BTreeMap, ops::Range};
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::types::{
@@ -33,7 +33,7 @@ use rayon::prelude::*;
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::{
-    backtest::metrics::sharpe_ratio,
+    backtest::metrics::{sharpe_ratio, turnover},
     model::{runtime::QuantModelRuntime, sell_scorer::SellScorerRuntime},
     precision::RESEARCH_DECIMAL_SCALE,
     stats,
@@ -127,6 +127,31 @@ pub struct GroupRowFilter {
     pub group_indices: Vec<usize>,
 }
 
+/// Immutable semantic identity supplied to one fold-scoped training call.
+///
+/// Validation identities bind the deterministic combination index together
+/// with its exact held-out partitions and groups. This distinction matters:
+/// purge/embargo can legitimately leave two different combinations with the
+/// same training rows and therefore the same trained model bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldTrainingIdentity<'a> {
+    /// One `C(N,k)` validation combination.
+    Validation {
+        combination_index: u32,
+        test_partitions: &'a [usize],
+        test_groups: &'a [usize],
+    },
+    /// One governed full-window hyperparameter trial.
+    Trial { trial_id: u32 },
+}
+
+/// Borrowed input to one fold-scoped training call.
+#[derive(Debug, Clone, Copy)]
+pub struct FoldTrainingRequest<'a> {
+    pub identity: FoldTrainingIdentity<'a>,
+    pub filter: &'a GroupRowFilter,
+}
+
 /// A fold-trained model, family-polymorphic over the two runtime traits the
 /// CPCV pipeline can train and replay.
 ///
@@ -147,6 +172,7 @@ pub enum FoldRuntime {
 /// Candidate selected using only one fold's purged training groups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyFoldRuntime {
+    pub validation_fold_index: u32,
     pub candidate_index: usize,
     pub candidate_id: String,
     pub training_group_count: u64,
@@ -207,7 +233,7 @@ pub trait FoldModelSource: Send + Sync {
     /// Train a fold-scoped model. Errors propagate (a fold that cannot train
     /// — e.g. too few resolved labels after purge — fails the whole CPCV run
     /// rather than silently skipping a path).
-    fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<FoldRuntime>;
+    fn train_fold(&self, request: FoldTrainingRequest<'_>) -> QuantResult<FoldRuntime>;
 }
 
 /// One (predicted score, realized outcome) pair contributed by one evaluated
@@ -242,6 +268,11 @@ pub struct GroupEvaluation {
     /// cross-section (e.g. one Buy `as_of` tick's ranked tokens). Pooled
     /// across the whole path by `build_path` to compute rank IC.
     pub rank_observations: Vec<RankObservation>,
+    /// Exact normalized per-market allocation weights for this decision tick.
+    /// Buy-side replay always supplies this value so complete CPCV paths can
+    /// reconstruct turnover across fold boundaries. Non-portfolio evaluators
+    /// use `None`, making turnover explicitly not evaluable rather than zero.
+    pub allocation_weights: Option<BTreeMap<String, Decimal>>,
 }
 
 /// Evaluates a trained model against the groups `filter` selects, returning
@@ -363,37 +394,51 @@ impl CombinatorialPurgedBacktester for DefaultCombinatorialPurgedBacktester {
 
         let fold_results: Vec<QuantResult<FoldResult>> = combos
             .par_iter()
-            .map(|test_partitions| -> QuantResult<FoldResult> {
-                let test_group_indices: Vec<usize> = test_partitions
-                    .iter()
-                    .flat_map(|&partition| partitions[partition].clone())
-                    .collect();
-                let split = splitter.split(groups, &test_group_indices, &purge)?;
-                let model = fold_source.train_fold(&GroupRowFilter {
-                    group_indices: split.train_indices,
-                })?;
-                let test_filter = GroupRowFilter {
-                    group_indices: split.test_indices,
-                };
-                let mut evaluations = replay.evaluate(&model, &test_filter)?;
-                evaluations.sort_unstable_by_key(|evaluation| evaluation.group_index);
-                if evaluations.len() != test_filter.group_indices.len()
-                    || evaluations
+            .enumerate()
+            .map(
+                |(combination_index, test_partitions)| -> QuantResult<FoldResult> {
+                    let combination_index = u32::try_from(combination_index).map_err(|error| {
+                        methodology(format!("CPCV combination index does not fit u32: {error}"))
+                    })?;
+                    let test_group_indices: Vec<usize> = test_partitions
                         .iter()
-                        .zip(&test_filter.group_indices)
-                        .any(|(evaluation, &expected)| evaluation.group_index != expected)
-                {
-                    return Err(methodology(format!(
-                        "CPCV replay returned {} evaluations for {} exact test groups",
-                        evaluations.len(),
-                        test_filter.group_indices.len()
-                    )));
-                }
-                Ok(FoldResult {
-                    test_partitions: test_partitions.clone(),
-                    evaluations,
-                })
-            })
+                        .flat_map(|&partition| partitions[partition].clone())
+                        .collect();
+                    let split = splitter.split(groups, &test_group_indices, &purge)?;
+                    let training_filter = GroupRowFilter {
+                        group_indices: split.train_indices,
+                    };
+                    let test_filter = GroupRowFilter {
+                        group_indices: split.test_indices,
+                    };
+                    let model = fold_source.train_fold(FoldTrainingRequest {
+                        identity: FoldTrainingIdentity::Validation {
+                            combination_index,
+                            test_partitions,
+                            test_groups: &test_filter.group_indices,
+                        },
+                        filter: &training_filter,
+                    })?;
+                    let mut evaluations = replay.evaluate(&model, &test_filter)?;
+                    evaluations.sort_unstable_by_key(|evaluation| evaluation.group_index);
+                    if evaluations.len() != test_filter.group_indices.len()
+                        || evaluations
+                            .iter()
+                            .zip(&test_filter.group_indices)
+                            .any(|(evaluation, &expected)| evaluation.group_index != expected)
+                    {
+                        return Err(methodology(format!(
+                            "CPCV replay returned {} evaluations for {} exact test groups",
+                            evaluations.len(),
+                            test_filter.group_indices.len()
+                        )));
+                    }
+                    Ok(FoldResult {
+                        test_partitions: test_partitions.clone(),
+                        evaluations,
+                    })
+                },
+            )
             .collect();
         let mut folds = Vec::with_capacity(fold_results.len());
         for result in fold_results {
@@ -532,6 +577,8 @@ fn build_path(
     let mut group_returns = Vec::with_capacity(per_group.len());
     let mut pooled_scores = Vec::new();
     let mut pooled_realized = Vec::new();
+    let mut allocation_weights = Vec::with_capacity(per_group.len());
+    let mut turnover_evaluable = true;
     for (group_index, evaluation) in per_group.iter().enumerate() {
         let Some(evaluation) = evaluation else {
             return Err(ResearchError::ValidationMethodology {
@@ -543,6 +590,10 @@ fn build_path(
         for observation in &evaluation.rank_observations {
             pooled_scores.push(observation.score);
             pooled_realized.push(observation.realized);
+        }
+        match &evaluation.allocation_weights {
+            Some(weights) => allocation_weights.push(weights.clone()),
+            None => turnover_evaluable = false,
         }
     }
 
@@ -558,6 +609,7 @@ fn build_path(
         stats::spearman(&pooled_scores, &pooled_realized).round_dp(RESEARCH_DECIMAL_SCALE);
     let max_drawdown = max_drawdown_from_returns(&group_returns);
     let tail_loss = tail_loss_from_returns(&group_returns, Decimal::new(10, 2))?;
+    let path_turnover = turnover_evaluable.then(|| turnover(&allocation_weights));
 
     Ok(BacktestPath {
         path_index,
@@ -566,13 +618,15 @@ fn build_path(
         rank_ic,
         max_drawdown,
         tail_loss,
+        turnover: path_turnover,
     })
 }
 
 /// Maximum peak-to-trough drawdown of the cumulative-return curve built from
-/// `returns` (non-compounding cumulative sum, consistent with
-/// [`crate::backtest::metrics::max_drawdown`]'s convention). `0` for an empty
-/// or monotonically non-decreasing series.
+/// total-budget-normalized `returns` (non-compounding cumulative sum,
+/// consistent with [`crate::backtest::metrics::max_drawdown`]'s convention).
+/// The result is bounded to `[0, 1]`; `0` for an empty or monotonically
+/// non-decreasing series.
 fn max_drawdown_from_returns(returns: &[Decimal]) -> Decimal {
     let mut cumulative = Decimal::ZERO;
     let mut peak = Decimal::ZERO;
@@ -582,10 +636,12 @@ fn max_drawdown_from_returns(returns: &[Decimal]) -> Decimal {
         peak = peak.max(cumulative);
         max_dd = max_dd.max(peak - cumulative);
     }
-    max_dd.round_dp(RESEARCH_DECIMAL_SCALE)
+    max_dd
+        .clamp(Decimal::ZERO, Decimal::ONE)
+        .round_dp(RESEARCH_DECIMAL_SCALE)
 }
 
-/// Mean of the worst `quantile` fraction of `returns` (tail loss). Mirrors
+/// Mean return of the worst `quantile` fraction of `returns`. Mirrors
 /// [`crate::backtest::metrics::tail_loss`]'s convention over an abstract
 /// return series rather than [`crate::backtest::SampleOutcome`].
 fn tail_loss_from_returns(returns: &[Decimal], quantile: Decimal) -> QuantResult<Decimal> {
@@ -621,15 +677,30 @@ fn tail_loss_from_returns(returns: &[Decimal], quantile: Decimal) -> QuantResult
 
 fn sharpe_distribution(paths: &[BacktestPath]) -> QuantResult<SharpeDistribution> {
     let mut sharpes: Vec<Decimal> = paths.iter().map(|p| p.sharpe).collect();
+    let mut max_drawdowns: Vec<Decimal> = paths.iter().map(|path| path.max_drawdown).collect();
+    let mut tail_losses: Vec<Decimal> = paths.iter().map(|path| path.tail_loss).collect();
+    let mut turnovers = paths
+        .iter()
+        .map(|path| path.turnover)
+        .collect::<Option<Vec<_>>>();
     sharpes.sort();
+    max_drawdowns.sort();
+    tail_losses.sort();
+    if let Some(values) = &mut turnovers {
+        values.sort();
+    }
     Ok(SharpeDistribution {
         min: percentile(&sharpes, Decimal::ZERO)?,
         p25: percentile(&sharpes, Decimal::new(25, 2))?,
         median: percentile(&sharpes, Decimal::new(5, 1))?,
         p75: percentile(&sharpes, Decimal::new(75, 2))?,
         max: percentile(&sharpes, Decimal::ONE)?,
-        median_max_drawdown: None,
-        median_tail_loss: None,
+        median_max_drawdown: Some(percentile(&max_drawdowns, Decimal::new(5, 1))?),
+        median_tail_loss: Some(percentile(&tail_losses, Decimal::new(5, 1))?),
+        median_turnover: turnovers
+            .as_deref()
+            .map(|values| percentile(values, Decimal::new(5, 1)))
+            .transpose()?,
         baseline_uplift: None,
     })
 }
@@ -679,6 +750,8 @@ fn methodology(detail: String) -> QuantError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use quant_pivot_error::QuantResult;
@@ -688,8 +761,8 @@ mod tests {
 
     use super::{
         CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
-        DefaultCombinatorialPurgedBacktester, FoldModelSource, FoldRuntime, GroupEvaluation,
-        GroupRowFilter, RankObservation, ReplayEngine,
+        DefaultCombinatorialPurgedBacktester, FoldModelSource, FoldRuntime, FoldTrainingRequest,
+        GroupEvaluation, GroupRowFilter, RankObservation, ReplayEngine, max_drawdown_from_returns,
     };
     use crate::{
         features::FeatureName,
@@ -728,7 +801,7 @@ mod tests {
 
     struct StubFoldSource;
     impl FoldModelSource for StubFoldSource {
-        fn train_fold(&self, _filter: &GroupRowFilter) -> QuantResult<FoldRuntime> {
+        fn train_fold(&self, _request: FoldTrainingRequest<'_>) -> QuantResult<FoldRuntime> {
             Ok(FoldRuntime::Buy(Box::new(StubRuntime)))
         }
     }
@@ -753,6 +826,7 @@ mod tests {
                         score: dec!(1),
                         realized: dec!(1),
                     }],
+                    allocation_weights: None,
                 })
                 .collect())
         }
@@ -768,6 +842,18 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn drawdown_clamps_budget() {
+        assert_eq!(
+            max_drawdown_from_returns(&[dec!(-0.6), dec!(-0.6)]),
+            Decimal::ONE
+        );
+        assert_eq!(
+            max_drawdown_from_returns(&[dec!(0.2), dec!(-0.1), dec!(0.3)]),
+            dec!(0.1)
+        );
     }
 
     #[test]
@@ -863,6 +949,66 @@ mod tests {
     }
 
     #[test]
+    fn cpcv_turnover_crosses_folds() {
+        struct AlternatingWeightsReplay;
+
+        impl ReplayEngine for AlternatingWeightsReplay {
+            fn evaluate(
+                &self,
+                _model: &FoldRuntime,
+                filter: &GroupRowFilter,
+            ) -> QuantResult<Vec<GroupEvaluation>> {
+                Ok(filter
+                    .group_indices
+                    .iter()
+                    .map(|&group_index| {
+                        let market = if group_index % 2 == 0 {
+                            "market-a"
+                        } else {
+                            "market-b"
+                        };
+                        GroupEvaluation {
+                            group_index,
+                            return_value: Decimal::ZERO,
+                            rank_observations: Vec::new(),
+                            allocation_weights: Some(BTreeMap::from([(
+                                market.to_owned(),
+                                Decimal::ONE,
+                            )])),
+                        }
+                    })
+                    .collect())
+            }
+        }
+
+        let groups = groups(80);
+        let result = DefaultCombinatorialPurgedBacktester::new()
+            .run(CpcvRequest {
+                path_set_id: BacktestPathSetId::from_v7(),
+                groups: &groups,
+                cpcv: CpcvConfig {
+                    n_groups: 8,
+                    k_test: 2,
+                },
+                purge: PurgeConfig::pct_only(Decimal::ZERO),
+                fold_source: &StubFoldSource,
+                replay: &AlternatingWeightsReplay,
+            })
+            .expect("cpcv run");
+
+        assert_eq!(
+            result.sharpe_distribution.median_turnover,
+            Some(Decimal::ONE)
+        );
+        assert!(
+            result
+                .paths
+                .iter()
+                .all(|path| path.turnover == Some(Decimal::ONE))
+        );
+    }
+
+    #[test]
     fn cpcv_rejects_k_groups() {
         let groups = groups(40);
         let result = DefaultCombinatorialPurgedBacktester::new().run(CpcvRequest {
@@ -927,6 +1073,7 @@ mod tests {
                             score: Decimal::from(group_index as u64),
                             realized: Decimal::from(group_index as u64),
                         }],
+                        allocation_weights: None,
                     })
                     .collect())
             }

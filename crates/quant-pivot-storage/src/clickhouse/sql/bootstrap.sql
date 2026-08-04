@@ -520,7 +520,7 @@ CREATE TABLE IF NOT EXISTS quant_report_market_funnel (
     `model_run_id` Nullable(String),
     `market_id` String,
     `event_id` String,
-    `token_id` String,
+    `primary_token_id` String,
     `terminal_stage` LowCardinality(String),
     `primary_reason` LowCardinality(String),
     `secondary_diagnostics_json` String,

@@ -6,8 +6,8 @@ use quant_pivot_error::{QuantError, QuantResult, feedback::FeedbackError, storag
 use quant_pivot_models::{
     domain::{
         ports::{
-            FeedbackCandidateRecipe, FeedbackComparisonCandidateRef, FeedbackComparisonJobInput,
-            FeedbackComparisonJobParams, FeedbackEvaluationUseRef,
+            FeedbackCandidateFamily, FeedbackCandidateRecipe, FeedbackComparisonCandidateRef,
+            FeedbackComparisonJobInput, FeedbackComparisonJobParams, FeedbackEvaluationUseRef,
             FeedbackLearningStageArtifactRef, FeedbackValidationArtifact,
         },
         quant::{
@@ -16,8 +16,8 @@ use quant_pivot_models::{
         },
     },
     enums::quant::{
-        FeedbackStage, FeedbackStageEventKind, ResearchJobKind, ResearchJobResultKind,
-        ResearchJobStatus,
+        FeedbackDecision, FeedbackStage, FeedbackStageEventKind, ResearchJobKind,
+        ResearchJobResultKind, ResearchJobStatus,
     },
     types::{
         BacktestReportId, FeedbackComparisonArtifactId, ModelRunId, ModelVersionId,
@@ -30,7 +30,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    feedback_comparison::FeedbackComparisonCodec,
+    feedback_comparison::{FeedbackComparisonCodec, RomanoWolfOutcome},
     feedback_learning::{
         FeedbackCpcvStageResult, FeedbackLearningStageArtifact, FeedbackLearningStageResults,
     },
@@ -42,6 +42,9 @@ use crate::service::{
     feedback_governance_stage::FeedbackGovernanceStageAdapter,
     feedback_learning_stage::FeedbackLearningStageAdapter,
 };
+
+const COMPARISON_INSUFFICIENT_REASON: &str = "comparison_insufficient_observations";
+const COMPARISON_REJECTED_REASON: &str = "comparison_all_challengers_rejected";
 
 struct VerifiedCpcv {
     reference: FeedbackLearningStageArtifactRef,
@@ -106,15 +109,22 @@ impl FeedbackComparisonStageAdapter {
         cycle.validate()?;
         let validation = self.governance_stages.load_validation(cycle).await?;
         let cpcv = self.load_cpcv(cycle).await?;
+        let family = self.learning_stages.family(cycle).await?;
         if validation.reference.cpcv != cpcv.reference {
             return Err(Self::invalid(
                 "Validation and Comparison resolved different CPCV predecessors",
             ));
         }
         let champion = self.load_model(cycle.champion_model_version_id).await?;
-        Self::verify_champion(cycle, &champion)?;
+        Self::verify_champion(cycle, &family, &champion)?;
         let candidates = self
-            .build_candidates(cycle, &champion, &cpcv.artifact, &validation.artifact)
+            .build_candidates(
+                cycle,
+                &family,
+                &champion,
+                &cpcv.artifact,
+                &validation.artifact,
+            )
             .await?;
 
         // No Evaluation object bytes may be opened before this durable,
@@ -128,11 +138,10 @@ impl FeedbackComparisonStageAdapter {
             | FeedbackEvaluationWriteOutcome::AlreadyPresent(info) => info,
         };
         evaluation.validate()?;
-        let family = &cycle.candidate_family;
         let params = FeedbackComparisonJobParams::try_new(FeedbackComparisonJobInput {
             feedback_cycle_id: cycle.feedback_cycle_id,
             cycle_idempotency_hash: cycle.idempotency_hash,
-            candidate_family_hash: cycle.candidate_family_hash,
+            candidate_family_hash: family.candidate_family_hash(),
             validation: validation.reference,
             evaluation_use: FeedbackEvaluationUseRef::from(&evaluation),
             comparison_contract: family.comparison_contract().clone(),
@@ -185,10 +194,28 @@ impl FeedbackComparisonStageAdapter {
         }
         let artifact = FeedbackComparisonCodec::decode(&bytes)?;
         artifact.validate_for(params)?;
-        Ok(FeedbackStageSuccess::advance(
-            artifact_ref.uri,
-            artifact_ref.content_hash,
-        ))
+        let reason = match artifact.outcome() {
+            RomanoWolfOutcome::InsufficientObservations { .. } => {
+                Some(COMPARISON_INSUFFICIENT_REASON)
+            }
+            RomanoWolfOutcome::Compared { .. } if artifact.selected_candidate().is_none() => {
+                Some(COMPARISON_REJECTED_REASON)
+            }
+            RomanoWolfOutcome::Compared { .. } => None,
+        };
+        match reason {
+            Some(reason) => FeedbackStageSuccess::try_complete(
+                artifact_ref.uri,
+                artifact_ref.content_hash,
+                FeedbackDecision::ChallengerRejected,
+                reason.to_owned(),
+            )
+            .map_err(Into::into),
+            None => Ok(FeedbackStageSuccess::advance(
+                artifact_ref.uri,
+                artifact_ref.content_hash,
+            )),
+        }
     }
 
     async fn load_cpcv(&self, cycle: &FeedbackCycleInfo) -> QuantResult<VerifiedCpcv> {
@@ -259,6 +286,7 @@ impl FeedbackComparisonStageAdapter {
     async fn build_candidates(
         &self,
         cycle: &FeedbackCycleInfo,
+        family: &FeedbackCandidateFamily,
         champion: &ModelVersionInfo,
         artifact: &FeedbackLearningStageArtifact,
         validation: &FeedbackValidationArtifact,
@@ -315,12 +343,9 @@ impl FeedbackComparisonStageAdapter {
                     ));
                 }
             };
-            let recipe = cycle
-                .candidate_family
-                .candidate(candidate_recipe_hash)
-                .ok_or_else(|| {
-                    Self::invalid("CPCV result is outside the frozen candidate family")
-                })?;
+            let recipe = family.candidate(candidate_recipe_hash).ok_or_else(|| {
+                Self::invalid("CPCV result is outside the frozen candidate family")
+            })?;
             let model = self.load_model(model_version_id).await?;
             Self::verify_candidate(cycle, champion, recipe, result, &model)?;
             let path_set = self
@@ -331,8 +356,7 @@ impl FeedbackComparisonStageAdapter {
             path_set.verify_hash().map_err(|error| {
                 Self::invalid(format!("candidate CPCV path-set hash is invalid: {error}"))
             })?;
-            let policy_id = cycle
-                .candidate_family
+            let policy_id = family
                 .shared_evaluation()
                 .source_lineage
                 .decision_policy_snapshot_id;
@@ -377,8 +401,12 @@ impl FeedbackComparisonStageAdapter {
         Ok(model)
     }
 
-    fn verify_champion(cycle: &FeedbackCycleInfo, champion: &ModelVersionInfo) -> QuantResult<()> {
-        let evaluation = cycle.candidate_family.shared_evaluation();
+    fn verify_champion(
+        cycle: &FeedbackCycleInfo,
+        family: &FeedbackCandidateFamily,
+        champion: &ModelVersionInfo,
+    ) -> QuantResult<()> {
+        let evaluation = family.shared_evaluation();
         let bindings = champion.serving_contract.bindings();
         if champion.model_version_id != cycle.champion_model_version_id
             || champion.serving_contract_hash != cycle.champion_serving_contract_hash
@@ -443,7 +471,7 @@ impl FeedbackComparisonStageAdapter {
             feedback_stage: None,
             kind: ResearchJobKind::FeedbackComparison,
             status: ResearchJobStatus::Queued,
-            model_spec_id: Some(cycle.candidate_family.shared_evaluation().model_spec_id),
+            model_spec_id: Some(cycle.champion_model_spec_id),
             decision_policy_snapshot_id: Some(params.decision_policy_snapshot_id),
             params_json: ResearchJobParams::FeedbackComparison(Box::new(params)),
             requested_by: None,

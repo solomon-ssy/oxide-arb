@@ -8,22 +8,23 @@ use serde::{Deserialize, Serialize};
 
 use super::feedback_trigger::FeedbackTriggerEventInfo;
 use crate::{
-    domain::ports::FeedbackCandidateFamily,
     entities::{
         quant_drift_report, quant_feedback_cycle, quant_feedback_evaluation_use,
         quant_feedback_stage_event,
     },
+    enums::model::ModelFamily,
     enums::quant::{
         DatasetPurpose, FeedbackCycleStatus, FeedbackDecision, FeedbackDriftAssessment,
-        FeedbackDriftKind, FeedbackDriftMetric, FeedbackEvaluationPurpose, FeedbackStage,
-        FeedbackStageEventKind, FeedbackTriggerFamily,
+        FeedbackDriftKind, FeedbackDriftMetric, FeedbackEvaluationMode, FeedbackEvaluationPurpose,
+        FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily,
     },
     hashing::CanonicalDigest,
+    runtime_config::BuyModelRoute,
     types::{
-        ArtifactUri, CapabilityRegistryHashes, ContentHash, DriftReportId, FeedbackCycleId,
-        FeedbackEvaluationUseId, FeedbackStageEventId, ModelVersionId, ResearchJobId,
-        ResearchProfileArtifactId, ResearchProfileId, ResearchProfileRef, RoleCode,
-        TrainingDatasetId, UserId, WorkerId,
+        ArtifactUri, ContentHash, DecisionPolicySnapshotId, DriftReportId, FeedbackCycleId,
+        FeedbackEvaluationUseId, FeedbackStageEventId, ModelSpecId, ModelVersionId,
+        PolicyBundleGeneration, PolicyIdempotencyKey, ResearchJobId, ResearchProfileArtifactId,
+        ResearchProfileId, ResearchProfileRef, RoleCode, TrainingDatasetId, UserId, WorkerId,
     },
 };
 
@@ -49,10 +50,19 @@ pub struct FeedbackCycleKey {
     profile_ref: ResearchProfileRef,
     feedback_policy_hash: ContentHash,
     label_cutoff: DateTime<Utc>,
-    capability_registry_hashes: CapabilityRegistryHashes,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
-    candidate_family: FeedbackCandidateFamily,
+    champion_model_spec_id: ModelSpecId,
+    champion_model_spec_definition_hash: ContentHash,
+    champion_model_family: ModelFamily,
+    route: BuyModelRoute,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    decision_policy_snapshot_hash: ContentHash,
+    policy_bundle_generation: PolicyBundleGeneration,
+    route_generation: u64,
+    evaluation_mode: FeedbackEvaluationMode,
+    parent_cycle_id: Option<FeedbackCycleId>,
+    forced_idempotency_key: Option<PolicyIdempotencyKey>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,10 +72,19 @@ struct FeedbackCycleKeyDocument {
     profile_ref: ResearchProfileRef,
     feedback_policy_hash: ContentHash,
     label_cutoff: DateTime<Utc>,
-    capability_registry_hashes: CapabilityRegistryHashes,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
-    candidate_family: FeedbackCandidateFamily,
+    champion_model_spec_id: ModelSpecId,
+    champion_model_spec_definition_hash: ContentHash,
+    champion_model_family: ModelFamily,
+    route: BuyModelRoute,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    decision_policy_snapshot_hash: ContentHash,
+    policy_bundle_generation: PolicyBundleGeneration,
+    route_generation: u64,
+    evaluation_mode: FeedbackEvaluationMode,
+    parent_cycle_id: Option<FeedbackCycleId>,
+    forced_idempotency_key: Option<PolicyIdempotencyKey>,
 }
 
 /// Inputs frozen by the server before a cycle row is claimed.
@@ -74,10 +93,19 @@ pub struct FeedbackCycleKeyInput {
     pub profile_ref: ResearchProfileRef,
     pub feedback_policy_hash: ContentHash,
     pub label_cutoff: DateTime<Utc>,
-    pub capability_registry_hashes: CapabilityRegistryHashes,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
-    pub candidate_family: FeedbackCandidateFamily,
+    pub champion_model_spec_id: ModelSpecId,
+    pub champion_model_spec_definition_hash: ContentHash,
+    pub champion_model_family: ModelFamily,
+    pub route: BuyModelRoute,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub decision_policy_snapshot_hash: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub route_generation: u64,
+    pub evaluation_mode: FeedbackEvaluationMode,
+    pub parent_cycle_id: Option<FeedbackCycleId>,
+    pub forced_idempotency_key: Option<PolicyIdempotencyKey>,
 }
 
 impl FeedbackCycleKey {
@@ -88,10 +116,19 @@ impl FeedbackCycleKey {
             profile_ref: input.profile_ref,
             feedback_policy_hash: input.feedback_policy_hash,
             label_cutoff: input.label_cutoff,
-            capability_registry_hashes: input.capability_registry_hashes,
             champion_model_version_id: input.champion_model_version_id,
             champion_serving_contract_hash: input.champion_serving_contract_hash,
-            candidate_family: input.candidate_family,
+            champion_model_spec_id: input.champion_model_spec_id,
+            champion_model_spec_definition_hash: input.champion_model_spec_definition_hash,
+            champion_model_family: input.champion_model_family,
+            route: input.route,
+            decision_policy_snapshot_id: input.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: input.decision_policy_snapshot_hash,
+            policy_bundle_generation: input.policy_bundle_generation,
+            route_generation: input.route_generation,
+            evaluation_mode: input.evaluation_mode,
+            parent_cycle_id: input.parent_cycle_id,
+            forced_idempotency_key: input.forced_idempotency_key,
         };
         key.validate()?;
         Ok(key)
@@ -111,24 +148,19 @@ impl FeedbackCycleKey {
             .map_err(|error| FeedbackError::InvalidCycleIdentity {
                 detail: format!("research profile reference is invalid: {error}"),
             })?;
-        CapabilityRegistryHashes::try_new(self.capability_registry_hashes.as_slice().to_vec())
-            .map_err(|error| FeedbackError::InvalidCycleIdentity {
-                detail: format!("capability registry hashes are not canonical: {error}"),
-            })?;
-        self.candidate_family
-            .validate()
-            .map_err(|error| FeedbackError::InvalidCycleIdentity {
-                detail: format!("candidate family is invalid: {error}"),
-            })?;
-        let evaluation = self.candidate_family.shared_evaluation();
-        if evaluation.window.profile_ref() != &self.profile_ref
-            || evaluation.source_lineage.pit_cutoff != self.label_cutoff
-            || evaluation.source_lineage.capability_registry_hashes
-                != self.capability_registry_hashes
-        {
+        let forced_shape = match self.evaluation_mode {
+            FeedbackEvaluationMode::Conditional => {
+                self.parent_cycle_id.is_none() && self.forced_idempotency_key.is_none()
+            }
+            FeedbackEvaluationMode::ForcedRetraining => {
+                self.parent_cycle_id.is_some() && self.forced_idempotency_key.is_some()
+            }
+        };
+        if self.route_generation == 0 || !forced_shape {
             return Err(FeedbackError::InvalidCycleIdentity {
-                detail: "candidate family profile, label cutoff, or capability set differs from the cycle"
-                    .to_owned(),
+                detail:
+                    "route generation or Conditional/ForcedRetraining parent identity is invalid"
+                        .to_owned(),
             });
         }
         Ok(())
@@ -160,11 +192,6 @@ impl FeedbackCycleKey {
     }
 
     #[must_use]
-    pub const fn capability_registry_hashes(&self) -> &CapabilityRegistryHashes {
-        &self.capability_registry_hashes
-    }
-
-    #[must_use]
     pub const fn champion_model_version_id(&self) -> ModelVersionId {
         self.champion_model_version_id
     }
@@ -175,13 +202,58 @@ impl FeedbackCycleKey {
     }
 
     #[must_use]
-    pub const fn candidate_family_hash(&self) -> ContentHash {
-        self.candidate_family.candidate_family_hash()
+    pub const fn champion_model_spec_id(&self) -> ModelSpecId {
+        self.champion_model_spec_id
     }
 
     #[must_use]
-    pub const fn candidate_family(&self) -> &FeedbackCandidateFamily {
-        &self.candidate_family
+    pub const fn champion_spec_definition_hash(&self) -> ContentHash {
+        self.champion_model_spec_definition_hash
+    }
+
+    #[must_use]
+    pub const fn champion_model_family(&self) -> ModelFamily {
+        self.champion_model_family
+    }
+
+    #[must_use]
+    pub const fn route(&self) -> BuyModelRoute {
+        self.route
+    }
+
+    #[must_use]
+    pub const fn decision_policy_snapshot_id(&self) -> DecisionPolicySnapshotId {
+        self.decision_policy_snapshot_id
+    }
+
+    #[must_use]
+    pub const fn decision_policy_snapshot_hash(&self) -> ContentHash {
+        self.decision_policy_snapshot_hash
+    }
+
+    #[must_use]
+    pub const fn policy_bundle_generation(&self) -> PolicyBundleGeneration {
+        self.policy_bundle_generation
+    }
+
+    #[must_use]
+    pub const fn route_generation(&self) -> u64 {
+        self.route_generation
+    }
+
+    #[must_use]
+    pub const fn evaluation_mode(&self) -> FeedbackEvaluationMode {
+        self.evaluation_mode
+    }
+
+    #[must_use]
+    pub const fn parent_cycle_id(&self) -> Option<FeedbackCycleId> {
+        self.parent_cycle_id
+    }
+
+    #[must_use]
+    pub const fn forced_idempotency_key(&self) -> Option<&PolicyIdempotencyKey> {
+        self.forced_idempotency_key.as_ref()
     }
 }
 
@@ -194,10 +266,19 @@ impl TryFrom<FeedbackCycleKeyDocument> for FeedbackCycleKey {
             profile_ref: document.profile_ref,
             feedback_policy_hash: document.feedback_policy_hash,
             label_cutoff: document.label_cutoff,
-            capability_registry_hashes: document.capability_registry_hashes,
             champion_model_version_id: document.champion_model_version_id,
             champion_serving_contract_hash: document.champion_serving_contract_hash,
-            candidate_family: document.candidate_family,
+            champion_model_spec_id: document.champion_model_spec_id,
+            champion_model_spec_definition_hash: document.champion_model_spec_definition_hash,
+            champion_model_family: document.champion_model_family,
+            route: document.route,
+            decision_policy_snapshot_id: document.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: document.decision_policy_snapshot_hash,
+            policy_bundle_generation: document.policy_bundle_generation,
+            route_generation: document.route_generation,
+            evaluation_mode: document.evaluation_mode,
+            parent_cycle_id: document.parent_cycle_id,
+            forced_idempotency_key: document.forced_idempotency_key,
         };
         key.validate()?;
         Ok(key)
@@ -218,13 +299,20 @@ pub struct NewFeedbackCycle {
     profile_hash: ContentHash,
     feedback_policy_hash: ContentHash,
     label_cutoff: DateTime<Utc>,
-    #[sea_orm(column_type = "JsonBinary")]
-    capability_registry_hashes: CapabilityRegistryHashes,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
+    champion_model_spec_id: ModelSpecId,
+    champion_model_spec_definition_hash: ContentHash,
+    champion_model_family: ModelFamily,
     #[sea_orm(column_type = "JsonBinary")]
-    candidate_family: FeedbackCandidateFamily,
-    candidate_family_hash: ContentHash,
+    route: BuyModelRoute,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    decision_policy_snapshot_hash: ContentHash,
+    policy_bundle_generation: PolicyBundleGeneration,
+    route_generation: i64,
+    evaluation_mode: FeedbackEvaluationMode,
+    parent_cycle_id: Option<FeedbackCycleId>,
+    forced_idempotency_key: Option<PolicyIdempotencyKey>,
 }
 
 impl NewFeedbackCycle {
@@ -233,11 +321,24 @@ impl NewFeedbackCycle {
         let profile_ref = idempotency_key.profile_ref().clone();
         let feedback_policy_hash = idempotency_key.feedback_policy_hash();
         let label_cutoff = idempotency_key.label_cutoff();
-        let capability_registry_hashes = idempotency_key.capability_registry_hashes().clone();
         let champion_model_version_id = idempotency_key.champion_model_version_id();
         let champion_serving_contract_hash = idempotency_key.champion_serving_contract_hash();
-        let candidate_family = idempotency_key.candidate_family().clone();
-        let candidate_family_hash = idempotency_key.candidate_family_hash();
+        let route_generation =
+            i64::try_from(idempotency_key.route_generation()).map_err(|error| {
+                FeedbackError::InvalidCycleIdentity {
+                    detail: format!("route generation exceeds PostgreSQL bigint: {error}"),
+                }
+            })?;
+        let champion_model_spec_id = idempotency_key.champion_model_spec_id();
+        let champion_model_spec_definition_hash = idempotency_key.champion_spec_definition_hash();
+        let champion_model_family = idempotency_key.champion_model_family();
+        let route = idempotency_key.route();
+        let decision_policy_snapshot_id = idempotency_key.decision_policy_snapshot_id();
+        let decision_policy_snapshot_hash = idempotency_key.decision_policy_snapshot_hash();
+        let policy_bundle_generation = idempotency_key.policy_bundle_generation();
+        let evaluation_mode = idempotency_key.evaluation_mode();
+        let parent_cycle_id = idempotency_key.parent_cycle_id();
+        let forced_idempotency_key = idempotency_key.forced_idempotency_key().cloned();
         Ok(Self {
             feedback_cycle_id: FeedbackCycleId::from_idempotency_hash(&idempotency_hash),
             idempotency_hash,
@@ -247,11 +348,19 @@ impl NewFeedbackCycle {
             profile_ref,
             feedback_policy_hash,
             label_cutoff,
-            capability_registry_hashes,
             champion_model_version_id,
             champion_serving_contract_hash,
-            candidate_family,
-            candidate_family_hash,
+            champion_model_spec_id,
+            champion_model_spec_definition_hash,
+            champion_model_family,
+            route,
+            decision_policy_snapshot_id,
+            decision_policy_snapshot_hash,
+            policy_bundle_generation,
+            route_generation,
+            evaluation_mode,
+            parent_cycle_id,
+            forced_idempotency_key,
         })
     }
 
@@ -283,6 +392,16 @@ impl NewFeedbackCycle {
     #[must_use]
     pub const fn feedback_policy_hash(&self) -> ContentHash {
         self.feedback_policy_hash
+    }
+
+    #[must_use]
+    pub const fn evaluation_mode(&self) -> FeedbackEvaluationMode {
+        self.evaluation_mode
+    }
+
+    #[must_use]
+    pub const fn parent_cycle_id(&self) -> Option<FeedbackCycleId> {
+        self.parent_cycle_id
     }
 }
 
@@ -318,13 +437,17 @@ impl FeedbackCycleActor {
 pub struct GovernedFeedbackTrigger {
     pub actor: FeedbackCycleActor,
     pub cycle: NewFeedbackCycle,
+    pub idempotency_key: PolicyIdempotencyKey,
     pub reason_code: String,
 }
 
 impl GovernedFeedbackTrigger {
     pub fn validate(&self) -> Result<(), FeedbackError> {
         self.actor.validate()?;
-        if !valid_reason(&self.reason_code) {
+        if !valid_reason(&self.reason_code)
+            || (self.cycle.evaluation_mode() == FeedbackEvaluationMode::ForcedRetraining
+                && self.cycle.forced_idempotency_key.as_ref() != Some(&self.idempotency_key))
+        {
             return Err(FeedbackError::InvalidStageEvent {
                 detail: "trigger reason code violates the governed feedback contract".to_owned(),
             });
@@ -448,17 +571,26 @@ pub struct FeedbackCycleInfo {
     pub profile_hash: ContentHash,
     pub feedback_policy_hash: ContentHash,
     pub label_cutoff: DateTime<Utc>,
-    pub capability_registry_hashes: CapabilityRegistryHashes,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
-    pub candidate_family: FeedbackCandidateFamily,
-    pub candidate_family_hash: ContentHash,
+    pub champion_model_spec_id: ModelSpecId,
+    pub champion_model_spec_definition_hash: ContentHash,
+    pub champion_model_family: ModelFamily,
+    pub route: BuyModelRoute,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub decision_policy_snapshot_hash: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub route_generation: i64,
+    pub evaluation_mode: FeedbackEvaluationMode,
+    pub parent_cycle_id: Option<FeedbackCycleId>,
+    pub forced_idempotency_key: Option<PolicyIdempotencyKey>,
     pub status: FeedbackCycleStatus,
     pub decision: Option<FeedbackDecision>,
     pub terminal_reason_code: Option<String>,
     pub generation: i64,
     pub lease_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
+    pub stage_resume_after: Option<DateTime<Utc>>,
     pub cancel_requested_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -478,17 +610,26 @@ info_from_model!(
         profile_hash,
         feedback_policy_hash,
         label_cutoff,
-        capability_registry_hashes,
         champion_model_version_id,
         champion_serving_contract_hash,
-        candidate_family,
-        candidate_family_hash,
+        champion_model_spec_id,
+        champion_model_spec_definition_hash,
+        champion_model_family,
+        route,
+        decision_policy_snapshot_id,
+        decision_policy_snapshot_hash,
+        policy_bundle_generation,
+        route_generation,
+        evaluation_mode,
+        parent_cycle_id,
+        forced_idempotency_key,
         status,
         decision,
         terminal_reason_code,
         generation,
         lease_owner,
         lease_expires_at,
+        stage_resume_after,
         cancel_requested_at,
         started_at,
         completed_at,
@@ -509,11 +650,20 @@ impl FeedbackCycleInfo {
             && self.profile_hash == candidate.profile_hash
             && self.feedback_policy_hash == candidate.feedback_policy_hash
             && self.label_cutoff == candidate.label_cutoff
-            && self.capability_registry_hashes == candidate.capability_registry_hashes
             && self.champion_model_version_id == candidate.champion_model_version_id
             && self.champion_serving_contract_hash == candidate.champion_serving_contract_hash
-            && self.candidate_family == candidate.candidate_family
-            && self.candidate_family_hash == candidate.candidate_family_hash
+            && self.champion_model_spec_id == candidate.champion_model_spec_id
+            && self.champion_model_spec_definition_hash
+                == candidate.champion_model_spec_definition_hash
+            && self.champion_model_family == candidate.champion_model_family
+            && self.route == candidate.route
+            && self.decision_policy_snapshot_id == candidate.decision_policy_snapshot_id
+            && self.decision_policy_snapshot_hash == candidate.decision_policy_snapshot_hash
+            && self.policy_bundle_generation == candidate.policy_bundle_generation
+            && self.route_generation == candidate.route_generation
+            && self.evaluation_mode == candidate.evaluation_mode
+            && self.parent_cycle_id == candidate.parent_cycle_id
+            && self.forced_idempotency_key == candidate.forced_idempotency_key
     }
 
     #[must_use]
@@ -530,7 +680,6 @@ impl FeedbackCycleInfo {
             && self.label_cutoff == candidate.label_cutoff
             && self.champion_model_version_id == candidate.champion_model_version_id
             && self.champion_serving_contract_hash == candidate.champion_serving_contract_hash
-            && self.candidate_family_hash == candidate.candidate_family_hash
     }
 
     /// Revalidate every immutable projection plus the lifecycle/decision shape.
@@ -539,6 +688,8 @@ impl FeedbackCycleInfo {
         let expected_hash = self.idempotency_key.idempotency_hash()?;
         let expected_profile_id =
             ResearchProfileArtifactId::from_profile_ref(self.idempotency_key.profile_ref());
+        let route_generation_matches = u64::try_from(self.route_generation)
+            .is_ok_and(|generation| generation == self.idempotency_key.route_generation());
         if self.idempotency_hash != expected_hash
             || self.feedback_cycle_id != FeedbackCycleId::from_idempotency_hash(&expected_hash)
             || self.profile_ref != *self.idempotency_key.profile_ref()
@@ -546,12 +697,23 @@ impl FeedbackCycleInfo {
             || self.profile_hash != self.profile_ref.content_hash
             || self.feedback_policy_hash != self.idempotency_key.feedback_policy_hash()
             || self.label_cutoff != self.idempotency_key.label_cutoff()
-            || self.capability_registry_hashes != *self.idempotency_key.capability_registry_hashes()
             || self.champion_model_version_id != self.idempotency_key.champion_model_version_id()
             || self.champion_serving_contract_hash
                 != self.idempotency_key.champion_serving_contract_hash()
-            || self.candidate_family != *self.idempotency_key.candidate_family()
-            || self.candidate_family_hash != self.idempotency_key.candidate_family_hash()
+            || self.champion_model_spec_id != self.idempotency_key.champion_model_spec_id()
+            || self.champion_model_spec_definition_hash
+                != self.idempotency_key.champion_spec_definition_hash()
+            || self.champion_model_family != self.idempotency_key.champion_model_family()
+            || self.route != self.idempotency_key.route()
+            || self.decision_policy_snapshot_id
+                != self.idempotency_key.decision_policy_snapshot_id()
+            || self.decision_policy_snapshot_hash
+                != self.idempotency_key.decision_policy_snapshot_hash()
+            || self.policy_bundle_generation != self.idempotency_key.policy_bundle_generation()
+            || !route_generation_matches
+            || self.evaluation_mode != self.idempotency_key.evaluation_mode()
+            || self.parent_cycle_id != self.idempotency_key.parent_cycle_id()
+            || self.forced_idempotency_key.as_ref() != self.idempotency_key.forced_idempotency_key()
         {
             return Err(FeedbackError::InvalidCycleIdentity {
                 detail: "persisted frozen projections do not match the typed key".to_owned(),
@@ -579,6 +741,9 @@ impl FeedbackCycleInfo {
                 .is_some()
                 .ne(&self.lease_expires_at.is_some())
             || self
+                .stage_resume_after
+                .is_some_and(|resume_after| resume_after < self.created_at)
+            || self
                 .terminal_reason_code
                 .as_deref()
                 .is_some_and(|reason| !valid_reason(reason))
@@ -594,13 +759,14 @@ impl FeedbackCycleInfo {
                     && self.started_at.is_none()
                     && self.completed_at.is_none()
                     && self.lease_owner.is_none()
+                    && self.stage_resume_after.is_none()
             }
             FeedbackCycleStatus::Running => {
                 self.decision.is_none()
                     && self.terminal_reason_code.is_none()
                     && self.started_at.is_some()
                     && self.completed_at.is_none()
-                    && self.lease_owner.is_some()
+                    && (self.lease_owner.is_some() ^ self.stage_resume_after.is_some())
             }
             FeedbackCycleStatus::Succeeded => {
                 self.decision.is_some()
@@ -608,6 +774,7 @@ impl FeedbackCycleInfo {
                     && self.started_at.is_some()
                     && self.completed_at.is_some()
                     && self.lease_owner.is_none()
+                    && self.stage_resume_after.is_none()
             }
             FeedbackCycleStatus::Failed => {
                 self.decision.is_none()
@@ -615,12 +782,22 @@ impl FeedbackCycleInfo {
                     && self.started_at.is_some()
                     && self.completed_at.is_some()
                     && self.lease_owner.is_none()
+                    && self.stage_resume_after.is_none()
+            }
+            FeedbackCycleStatus::Quarantined => {
+                self.decision.is_none()
+                    && self.terminal_reason_code.as_deref() == Some("invalid_coordinator_state")
+                    && self.started_at.is_some()
+                    && self.completed_at.is_some()
+                    && self.lease_owner.is_none()
+                    && self.stage_resume_after.is_none()
             }
             FeedbackCycleStatus::Cancelled => {
                 self.decision.is_none()
                     && self.terminal_reason_code.is_some()
                     && self.completed_at.is_some()
                     && self.lease_owner.is_none()
+                    && self.stage_resume_after.is_none()
             }
         };
         if valid {
@@ -1722,28 +1899,17 @@ mod tests {
     use serde_json::{Value, from_value, to_value};
 
     use super::{
-        ArtifactUri, CapabilityRegistryHashes, ContentHash, DriftReportInput, FeedbackCycleId,
-        FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackDriftAssessment, FeedbackDriftKind,
-        FeedbackDriftMetric, FeedbackEvaluationUseInput, FeedbackStage, FeedbackStageEventInput,
-        FeedbackStageEventKind, FeedbackTriggerFamily, ModelVersionId, NewDriftReport,
-        NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent, ResearchJobId,
-        ResearchProfileRef, TrainingDatasetId, Utc,
+        ArtifactUri, ContentHash, DriftReportInput, FeedbackCycleId, FeedbackCycleKey,
+        FeedbackCycleKeyInput, FeedbackDriftAssessment, FeedbackDriftKind, FeedbackDriftMetric,
+        FeedbackEvaluationUseInput, FeedbackStage, FeedbackStageEventInput, FeedbackStageEventKind,
+        FeedbackTriggerFamily, ModelVersionId, NewDriftReport, NewFeedbackCycle,
+        NewFeedbackEvaluationUse, NewFeedbackStageEvent, ResearchJobId, ResearchProfileRef,
+        TrainingDatasetId, Utc,
     };
     use crate::{
-        domain::{
-            ports::{
-                FeedbackCandidateFamily, FeedbackCandidateFamilyInput, FeedbackCandidateRecipe,
-                FeedbackComparisonContract, FeedbackDatasetBuildRequest,
-            },
-            quant::FeedbackCohortWindow,
-        },
-        enums::quant::{CalibrationMethod, DatasetPurpose, DownsideSource},
-        types::{
-            DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetSourceLineage, DecisionPolicySnapshotId,
-            ModelSpecId, ReaderContractVersion, ResearchProfileArtifactId, ResearchProfileId,
-            SchemaContractVersion, SourceSliceId, SourceSliceManifestRef,
-            builtin_research_profiles,
-        },
+        enums::{model::ModelFamily, quant::FeedbackEvaluationMode},
+        runtime_config::BuyModelRoute,
+        types::{DecisionPolicySnapshotId, ModelSpecId, PolicyBundleGeneration, ResearchProfileId},
     };
 
     fn hash(seed: u8) -> ContentHash {
@@ -1766,133 +1932,25 @@ mod tests {
             .expect("valid cutoff")
     }
 
-    fn source_lineage(
-        profile: &ResearchProfileRef,
-        capabilities: &CapabilityRegistryHashes,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId,
-        window_start: DateTime<Utc>,
-        window_end: DateTime<Utc>,
-    ) -> DatasetSourceLineage {
-        DatasetSourceLineage {
-            format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
-            source_slice_id: SourceSliceId::from_v7(),
-            source_slice_identity_hash: hash(20),
-            research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(profile),
-            research_program_hash: hash(21),
-            source_slice: SourceSliceManifestRef {
-                manifest_uri: ArtifactUri::parse("s3://worm/cycle/source.json")
-                    .expect("valid source URI"),
-                manifest_hash: hash(22),
-            },
-            source_window_start: window_start,
-            source_window_end: window_end,
-            pit_cutoff: window_end,
-            decision_policy_snapshot_id,
-            runtime_config_hash: hash(23),
-            reader_contract_version: ReaderContractVersion::v1(),
-            schema_contract_version: SchemaContractVersion::v1(),
-            source_schema_hash: hash(24),
-            capability_registry_hashes: capabilities.clone(),
-        }
-    }
-
-    fn dataset_request(
-        profile: &ResearchProfileRef,
-        capabilities: &CapabilityRegistryHashes,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId,
-        model_spec_id: ModelSpecId,
-        purpose: DatasetPurpose,
-        window_start: DateTime<Utc>,
-        window_end: DateTime<Utc>,
-    ) -> FeedbackDatasetBuildRequest {
-        FeedbackDatasetBuildRequest {
-            training_dataset_id: TrainingDatasetId::from_v7(),
-            model_spec_id,
-            model_spec_definition_hash: hash(25),
-            source_lineage: source_lineage(
-                profile,
-                capabilities,
-                decision_policy_snapshot_id,
-                window_start,
-                window_end,
-            ),
-            window: FeedbackCohortWindow::try_new(profile.clone(), window_start, window_end)
-                .expect("valid cycle Dataset window"),
-            purpose,
-        }
-    }
-
-    fn candidate_family(
-        profile: &ResearchProfileRef,
-        capabilities: &CapabilityRegistryHashes,
-    ) -> FeedbackCandidateFamily {
-        let decision_policy_snapshot_id = DecisionPolicySnapshotId::from_v7();
-        let model_spec_id = ModelSpecId::from_v7();
-        let comparison_contract = FeedbackComparisonContract::try_from_policy(
-            &builtin_research_profiles()
-                .expect("built-in research profiles")
-                .into_iter()
-                .next()
-                .expect("built-in pooled profile")
-                .spec
-                .feedback_policy,
-        )
-        .expect("valid comparison contract");
-        let recipe = FeedbackCandidateRecipe::try_seal(
-            dataset_request(
-                profile,
-                capabilities,
-                decision_policy_snapshot_id,
-                model_spec_id,
-                DatasetPurpose::Training,
-                cutoff() - Duration::days(9),
-                cutoff() - Duration::days(7),
-            ),
-            dataset_request(
-                profile,
-                capabilities,
-                decision_policy_snapshot_id,
-                model_spec_id,
-                DatasetPurpose::Calibration,
-                cutoff() - Duration::days(6),
-                cutoff() - Duration::days(4),
-            ),
-            CalibrationMethod::Platt,
-            DownsideSource::MfeMae,
-            decision_policy_snapshot_id,
-        )
-        .expect("valid cycle candidate recipe");
-        FeedbackCandidateFamily::try_seal(FeedbackCandidateFamilyInput {
-            shared_evaluation: dataset_request(
-                profile,
-                capabilities,
-                decision_policy_snapshot_id,
-                model_spec_id,
-                DatasetPurpose::Evaluation,
-                cutoff() - Duration::days(3),
-                cutoff(),
-            ),
-            comparison_contract,
-            candidates: vec![recipe],
-        })
-        .expect("valid cycle candidate family")
-    }
-
     impl FeedbackCycleKey {
         fn fixture() -> Self {
-            let profile_ref = ResearchProfileRef::fixture();
-            let capability_registry_hashes =
-                CapabilityRegistryHashes::try_new(vec![hash(3), hash(4)])
-                    .expect("canonical capabilities");
-            let candidate_family = candidate_family(&profile_ref, &capability_registry_hashes);
             Self::try_new(FeedbackCycleKeyInput {
-                profile_ref,
+                profile_ref: ResearchProfileRef::fixture(),
                 feedback_policy_hash: hash(2),
                 label_cutoff: cutoff(),
-                capability_registry_hashes,
                 champion_model_version_id: ModelVersionId::from_v7(),
                 champion_serving_contract_hash: hash(5),
-                candidate_family,
+                champion_model_spec_id: ModelSpecId::from_v7(),
+                champion_model_spec_definition_hash: hash(6),
+                champion_model_family: ModelFamily::ClassicalGradientBoostedTrees,
+                route: BuyModelRoute::Crypto,
+                decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+                decision_policy_snapshot_hash: hash(7),
+                policy_bundle_generation: PolicyBundleGeneration::FIRST,
+                route_generation: 1,
+                evaluation_mode: FeedbackEvaluationMode::Conditional,
+                parent_cycle_id: None,
+                forced_idempotency_key: None,
             })
             .expect("valid cycle key")
         }

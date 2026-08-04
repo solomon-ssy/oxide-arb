@@ -109,6 +109,8 @@ pub enum ArtifactNamespace {
     FeedbackDrift,
     /// PIT-safe attribution inputs admitted to the next recipe planner.
     FeedbackAttribution,
+    /// Governed immutable challenger recipe plans.
+    FeedbackRecipePlan,
     /// Immutable explanation, counterfactual, association, and trajectory artifacts.
     Attribution,
     /// Dataset/training/calibration/CPCV feedback-stage batch evidence.
@@ -117,6 +119,8 @@ pub enum ArtifactNamespace {
     FeedbackValidation,
     /// Reserved same-window Romano-Wolf candidate-family evidence.
     FeedbackComparison,
+    /// Atomic route-owned shadow-binding receipts.
+    FeedbackShadowBinding,
     /// Exact published-generation production-shadow gate evidence.
     FeedbackShadow,
     /// Evidence-only terminal feedback decision.
@@ -148,10 +152,12 @@ impl ArtifactNamespace {
             Self::FeedbackCoverage => "feedback-coverage",
             Self::FeedbackDrift => "feedback-drift",
             Self::FeedbackAttribution => "feedback-attribution",
+            Self::FeedbackRecipePlan => "feedback-recipe-plans",
             Self::Attribution => "attribution",
             Self::FeedbackLearning => "feedback-learning",
             Self::FeedbackValidation => "feedback-validation",
             Self::FeedbackComparison => "feedback-comparison",
+            Self::FeedbackShadowBinding => "feedback-shadow-bindings",
             Self::FeedbackShadow => "feedback-shadow",
             Self::FeedbackDecision => "feedback-decision",
             Self::Model => "models",

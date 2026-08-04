@@ -151,24 +151,92 @@ pub struct SignalCandidate {
 /// composition, execution evidence, or operator diagnostics and therefore
 /// participates in deterministic parity.
 #[derive(Serialize)]
+struct CanonicalFactorContribution<'a> {
+    definition_id: &'a FactorDefinitionId,
+    name: &'a FactorName,
+    family: &'a FactorFamily,
+    value_state: &'a FactorValueState,
+    raw_value: Option<String>,
+    normalized_score: Option<String>,
+    normalization_source: &'a Option<NormalizationSource>,
+    indeterminate_reason: &'a Option<FactorIndeterminateReason>,
+    weight: String,
+    contribution: String,
+    confidence: String,
+    direction: &'a FactorDirection,
+    explanation: &'a str,
+    source_refs: &'a [String],
+}
+
+impl<'a> From<&'a FactorContribution> for CanonicalFactorContribution<'a> {
+    fn from(contribution: &'a FactorContribution) -> Self {
+        Self {
+            definition_id: &contribution.definition_id,
+            name: &contribution.name,
+            family: &contribution.family,
+            value_state: &contribution.value_state,
+            raw_value: contribution
+                .raw_value
+                .map(|value| value.normalize().to_string()),
+            normalized_score: contribution
+                .normalized_score
+                .map(|value| value.normalized().to_string()),
+            normalization_source: &contribution.normalization_source,
+            indeterminate_reason: &contribution.indeterminate_reason,
+            weight: contribution.weight.normalize().to_string(),
+            contribution: contribution.contribution.normalize().to_string(),
+            confidence: contribution.confidence.normalized().to_string(),
+            direction: &contribution.direction,
+            explanation: &contribution.explanation,
+            source_refs: &contribution.source_refs,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CanonicalModelExplanation<'a> {
+    headline: &'a str,
+    top_positive: Vec<CanonicalFactorContribution<'a>>,
+    top_negative: Vec<CanonicalFactorContribution<'a>>,
+}
+
+impl<'a> From<&'a ModelExplanation> for CanonicalModelExplanation<'a> {
+    fn from(explanation: &'a ModelExplanation) -> Self {
+        Self {
+            headline: &explanation.headline,
+            top_positive: explanation
+                .top_positive
+                .iter()
+                .map(CanonicalFactorContribution::from)
+                .collect(),
+            top_negative: explanation
+                .top_negative
+                .iter()
+                .map(CanonicalFactorContribution::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct CanonicalBusinessPrediction<'a> {
     market_id: &'a MarketId,
     token_id: &'a TokenId,
     outcome_side: &'a OutcomeSide,
-    composite_score: &'a Probability,
-    confidence: &'a Probability,
-    expected_return_bps: &'a Decimal,
-    downside_bps: &'a Decimal,
-    win_probability: &'a Option<Probability>,
-    entry_price_ref: &'a Price,
+    composite_score: String,
+    confidence: String,
+    expected_return_bps: String,
+    downside_bps: String,
+    win_probability: Option<String>,
+    entry_price_ref: String,
     suggested_horizon_secs: u64,
-    factor_breakdown: &'a [FactorContribution],
-    model_explanation: &'a ModelExplanation,
+    factor_breakdown: Vec<CanonicalFactorContribution<'a>>,
+    model_explanation: CanonicalModelExplanation<'a>,
     rejection_warnings: &'a [SignalWarning],
     rank_before_portfolio: u32,
-    liquidity_score: &'a Probability,
-    data_quality_score: &'a Probability,
-    model_score_percentile: &'a Probability,
+    liquidity_score: String,
+    data_quality_score: String,
+    model_score_percentile: String,
     decision_at: &'a DateTime<Utc>,
 }
 
@@ -178,20 +246,26 @@ impl<'a> From<&'a SignalCandidate> for CanonicalBusinessPrediction<'a> {
             market_id: &candidate.market_id,
             token_id: &candidate.token_id,
             outcome_side: &candidate.outcome_side,
-            composite_score: &candidate.composite_score,
-            confidence: &candidate.confidence,
-            expected_return_bps: &candidate.expected_return_bps,
-            downside_bps: &candidate.downside_bps,
-            win_probability: &candidate.win_probability,
-            entry_price_ref: &candidate.entry_price_ref,
+            composite_score: candidate.composite_score.normalized().to_string(),
+            confidence: candidate.confidence.normalized().to_string(),
+            expected_return_bps: candidate.expected_return_bps.normalize().to_string(),
+            downside_bps: candidate.downside_bps.normalize().to_string(),
+            win_probability: candidate
+                .win_probability
+                .map(|value| value.normalized().to_string()),
+            entry_price_ref: candidate.entry_price_ref.normalized().to_string(),
             suggested_horizon_secs: candidate.suggested_horizon_secs,
-            factor_breakdown: &candidate.factor_breakdown,
-            model_explanation: &candidate.model_explanation,
+            factor_breakdown: candidate
+                .factor_breakdown
+                .iter()
+                .map(CanonicalFactorContribution::from)
+                .collect(),
+            model_explanation: CanonicalModelExplanation::from(&candidate.model_explanation),
             rejection_warnings: &candidate.rejection_warnings,
             rank_before_portfolio: candidate.rank_before_portfolio,
-            liquidity_score: &candidate.liquidity_score,
-            data_quality_score: &candidate.data_quality_score,
-            model_score_percentile: &candidate.model_score_percentile,
+            liquidity_score: candidate.liquidity_score.normalized().to_string(),
+            data_quality_score: candidate.data_quality_score.normalized().to_string(),
+            model_score_percentile: candidate.model_score_percentile.normalized().to_string(),
             decision_at: &candidate.decision_at,
         }
     }
@@ -308,14 +382,22 @@ mod tests {
     use std::slice;
 
     use chrono::Utc;
-    use quant_pivot_models::types::{
-        MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId,
+    use quant_pivot_models::{
+        enums::{
+            factor::{FactorFamily, FactorValueState, NormalizationSource},
+            quant::FactorDirection,
+        },
+        types::{
+            FactorDefinitionId, MarketId, ModelRunId, Price, Probability, SignalCandidateId,
+            TokenId,
+        },
     };
     use rust_decimal::Decimal;
 
     use super::{
-        ModelExplanation, OutcomeSide, SignalCandidate, SignalWarning,
-        canonical_business_prediction_hash, signal_candidate_event, signal_candidate_events,
+        FactorContribution, FactorName, ModelExplanation, OutcomeSide, SignalCandidate,
+        SignalWarning, canonical_business_prediction_hash, signal_candidate_event,
+        signal_candidate_events,
     };
 
     /// Construct a strongly-typed candidate.
@@ -398,6 +480,53 @@ mod tests {
         assert_eq!(
             canonical_business_prediction_hash(slice::from_ref(&candidate)).expect("online"),
             canonical_business_prediction_hash(slice::from_ref(&replayed)).expect("replay")
+        );
+    }
+
+    #[test]
+    fn business_prediction_ignores_scale() {
+        let mut candidate = SignalCandidate::test_fixture();
+        let contribution = FactorContribution {
+            definition_id: FactorDefinitionId::from_v7(),
+            name: FactorName::from_static("test.factor"),
+            family: FactorFamily::Liquidity,
+            value_state: FactorValueState::Scored,
+            raw_value: Some(Decimal::new(125, 2)),
+            normalized_score: Some(Probability::new(Decimal::new(70, 2))),
+            normalization_source: Some(NormalizationSource::CrossSection),
+            indeterminate_reason: None,
+            weight: Decimal::new(50, 2),
+            contribution: Decimal::new(35, 2),
+            confidence: Probability::new(Decimal::new(60, 2)),
+            direction: FactorDirection::Positive,
+            explanation: "test contribution".to_owned(),
+            source_refs: vec!["fixture://factor".to_owned()],
+        };
+        candidate.factor_breakdown.push(contribution.clone());
+        candidate.model_explanation.top_positive.push(contribution);
+
+        let mut scaled = candidate.clone();
+        scaled.composite_score = Probability::new(Decimal::new(7200, 4));
+        scaled.confidence = Probability::new(Decimal::new(6000, 4));
+        scaled.expected_return_bps = Decimal::new(20_000, 2);
+        scaled.downside_bps = Decimal::new(50_000, 2);
+        scaled.win_probability = Some(Probability::new(Decimal::new(5200, 4)));
+        scaled.entry_price_ref = Price::new(Decimal::new(4000, 4));
+        for factor in scaled
+            .factor_breakdown
+            .iter_mut()
+            .chain(scaled.model_explanation.top_positive.iter_mut())
+        {
+            factor.raw_value = Some(Decimal::new(12_500, 4));
+            factor.normalized_score = Some(Probability::new(Decimal::new(7000, 4)));
+            factor.weight = Decimal::new(5000, 4);
+            factor.contribution = Decimal::new(3500, 4);
+            factor.confidence = Probability::new(Decimal::new(6000, 4));
+        }
+
+        assert_eq!(
+            canonical_business_prediction_hash(slice::from_ref(&candidate)).expect("canonical"),
+            canonical_business_prediction_hash(slice::from_ref(&scaled)).expect("scaled")
         );
     }
 

@@ -45,6 +45,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    app::ports::feedback_mutation::FeedbackCycleFreezePlan,
     projection::inference_batch::build_frozen_runtime_input,
     service::{
         feedback_dataset::{
@@ -131,7 +132,6 @@ impl FeedbackSignalService {
         let preimage = self.preimages.load(&version).await?;
         let serving_contract = preimage.artifact().header().serving_contract();
         let profile = preimage.profile();
-        let dataset = preimage.training_dataset();
         let valid = preimage.artifact().header().model_version_id()
             == cycle.champion_model_version_id
             && serving_contract.contract_hash() == cycle.champion_serving_contract_hash
@@ -144,8 +144,12 @@ impl FeedbackSignalService {
                     contract(format!("champion feedback policy hash failed: {error}"))
                 })?
                 == cycle.feedback_policy_hash
-            && dataset.source_lineage.capability_registry_hashes
-                == cycle.capability_registry_hashes;
+            && preimage.model_spec().model_spec_id == cycle.champion_model_spec_id
+            && preimage.model_spec().definition_hash == cycle.champion_model_spec_definition_hash
+            && preimage.model_spec().model_family == cycle.champion_model_family
+            && preimage.policy_snapshot().decision_policy_snapshot_id
+                == cycle.decision_policy_snapshot_id
+            && preimage.policy_snapshot().snapshot_hash == cycle.decision_policy_snapshot_hash;
         if !valid {
             return Err(contract(
                 "champion preimage differs from the frozen feedback cycle",
@@ -154,18 +158,19 @@ impl FeedbackSignalService {
         Ok(preimage)
     }
 
-    fn evaluation_window(cycle: &FeedbackCycleInfo) -> QuantResult<FeedbackCohortWindow> {
-        let evaluation = cycle.candidate_family.shared_evaluation();
-        let window = evaluation.window.clone();
-        if window.profile_ref() != &cycle.profile_ref
-            || evaluation.source_lineage.pit_cutoff != cycle.label_cutoff
-            || window.cutoff() > cycle.label_cutoff
-        {
-            return Err(contract(
-                "feedback candidate-family decision window differs from the cycle truth cutoff",
-            ));
-        }
-        Ok(window)
+    fn evaluation_window(
+        cycle: &FeedbackCycleInfo,
+        preimage: &VerifiedModelServingPreimage,
+    ) -> QuantResult<FeedbackCohortWindow> {
+        let plan = FeedbackCycleFreezePlan::derive_at_cutoff(
+            preimage.profile(),
+            cycle.champion_model_spec_id,
+            cycle.champion_model_spec_definition_hash,
+            cycle.decision_policy_snapshot_id,
+            cycle.decision_policy_snapshot_hash,
+            cycle.label_cutoff,
+        )?;
+        Ok(plan.evaluation().clone())
     }
 
     fn baseline_ref(preimage: &VerifiedModelServingPreimage) -> QuantResult<ChampionBaselineRef> {
@@ -216,7 +221,11 @@ impl FeedbackSignalService {
             profile_ref: cycle.profile_ref,
             feedback_policy: policy,
             feedback_policy_hash: cycle.feedback_policy_hash,
-            capability_registry_hashes: cycle.capability_registry_hashes,
+            capability_registry_hashes: preimage
+                .training_dataset()
+                .source_lineage
+                .capability_registry_hashes
+                .clone(),
             champion_model_version_id: cycle.champion_model_version_id,
             champion_serving_contract_hash: cycle.champion_serving_contract_hash,
             evaluation_window,
@@ -332,7 +341,7 @@ impl FeedbackCoverageExecutionPort for FeedbackSignalService {
             ));
         }
         let preimage = self.load_champion(&cycle).await?;
-        let evaluation_window = Self::evaluation_window(&cycle)?;
+        let evaluation_window = Self::evaluation_window(&cycle, &preimage)?;
         let champion_baseline = Self::baseline_ref(&preimage)?;
         progress.report(ResearchJobProgress::indeterminate(
             "feedback-coverage-freeze",
@@ -443,7 +452,11 @@ fn validate_coverage(
         && cycle_hash_matches
         && coverage.profile_ref == cycle.profile_ref
         && coverage.feedback_policy_hash == cycle.feedback_policy_hash
-        && coverage.capability_registry_hashes == cycle.capability_registry_hashes
+        && coverage.capability_registry_hashes
+            == preimage
+                .training_dataset()
+                .source_lineage
+                .capability_registry_hashes
         && coverage.champion_model_version_id == cycle.champion_model_version_id
         && coverage.champion_serving_contract_hash == cycle.champion_serving_contract_hash
         && baseline_dataset_matches;

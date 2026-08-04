@@ -12,7 +12,7 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::{
-    clickhouse::ChFactWriter,
+    clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
     traits::{
         BacktestPathSetRepository, BacktestReportRepository, BasisAlertRepository,
         CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
@@ -20,11 +20,13 @@ use quant_pivot_repository::{
         FeedbackCycleRepository, MarketLinkageRepository, MarketRepository,
         MarketSelectionRepository, ModelCandidateManifestRepository,
         ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
-        ModelRouteBootstrapRepository, ModelRoutePromotionRepository, ModelRunRepository,
-        PolicyRepository, PositionRepository, PromotionPermitRepository, QuantFactReadRepository,
-        ResearchJobRepository, ResearchReadinessEvidenceRepository, RuntimeControlRepository,
-        ShadowComparisonRepository, SourceSliceRepository, TradePolicyRepository,
-        TradeTapeBlockCursorRepository, TrainingDatasetRepository,
+        ModelRouteBootstrapRepository, ModelRoutePromotionRepository,
+        ModelRouteShadowBindingRepository, ModelRunRepository, PolicyRepository,
+        PositionRepository, PromotionPermitRepository, QuantFactReadRepository,
+        RecommendationReportRepository, ResearchJobRepository, ResearchReadinessEvidenceRepository,
+        RuntimeControlRepository, ServingEvidenceRepository, ShadowComparisonRepository,
+        SourceSliceRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
+        TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -42,10 +44,11 @@ use crate::{
     },
     prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
     service::{
-        bias_table_fit::BiasTableFitService,
+        bias_table_fit::{BiasTableFitService, BiasTableFitServiceDeps},
         factor_pipeline::FactorPipelineService,
         feature_pipeline::{FeaturePipelineDeps, FeaturePipelineService},
         feedback_decision_stage::{FeedbackDecisionStageAdapter, FeedbackDecisionStageDeps},
+        feedback_recipe_stage::{FeedbackRecipeStageAdapter, FeedbackRecipeStageDeps},
         frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
         model_route_bootstrap::{ModelRouteBootstrapService, ModelRouteBootstrapServiceDeps},
         model_route_evidence::{ModelRouteEvidenceDeps, ModelRouteEvidenceService},
@@ -165,6 +168,10 @@ pub struct ResearchBundle {
     pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     /// Historical fact read port (PIT book / microstructure / settlement).
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
+    /// Every committed serving report used to enumerate complete score cohorts.
+    pub recommendation_report_repo: Arc<dyn RecommendationReportRepository>,
+    /// Run-scoped completion, model-input, and feature-cell commitments.
+    pub serving_evidence_repo: Arc<dyn ServingEvidenceRepository>,
     /// Append-only catalog ledger for every offline PIT metadata read.
     pub catalog_ledger_repo: Arc<dyn CatalogLedgerRepository>,
     /// Append-only point-in-time CLOB parameters and fee schedules.
@@ -201,6 +208,13 @@ struct ResearchPipelines {
 struct ResearchEvidence {
     readiness: Arc<ResearchReadinessEvidenceService>,
     trade_policy: Arc<TradePolicyEvidenceVerifier>,
+}
+
+struct ModelResearchRepos {
+    model_run: Arc<dyn ModelRunRepository>,
+    model_registry: Arc<dyn ModelRegistryRepository>,
+    calibration_loader: Arc<dyn CalibrationArtifactLoader>,
+    shadow_comparison: Arc<dyn ShadowComparisonRepository>,
 }
 
 #[derive(Clone, Copy)]
@@ -311,6 +325,20 @@ fn assemble_research_evidence(
     })
 }
 
+fn assemble_model_repositories(deps: &ResearchBundleDeps<'_>) -> ModelResearchRepos {
+    let repos = &deps.infra.repos;
+    ModelResearchRepos {
+        model_run: Arc::clone(&repos.model_run) as Arc<dyn ModelRunRepository>,
+        model_registry: Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>,
+        calibration_loader: Arc::new(CoreCalibrationArtifactLoader::new(Arc::clone(
+            &repos.calibration_artifact,
+        )
+            as Arc<dyn CalibrationArtifactRepository>)),
+        shadow_comparison: Arc::clone(&repos.shadow_comparison)
+            as Arc<dyn ShadowComparisonRepository>,
+    }
+}
+
 impl ResearchBundle {
     /// Build the research bundle from deploy config plus wired infra/data handles.
     ///
@@ -329,16 +357,12 @@ impl ResearchBundle {
             Arc::clone(&repos.market_linkage) as Arc<dyn MarketLinkageRepository>;
         let pipelines = assemble_research_pipelines(deps, &market_linkage_repo);
 
-        let model_run_repo: Arc<dyn ModelRunRepository> =
-            Arc::clone(&repos.model_run) as Arc<dyn ModelRunRepository>;
-        let model_registry_repo: Arc<dyn ModelRegistryRepository> =
-            Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>;
-        let calibration_loader: Arc<dyn CalibrationArtifactLoader> =
-            Arc::new(CoreCalibrationArtifactLoader::new(
-                Arc::clone(&repos.calibration_artifact) as Arc<dyn CalibrationArtifactRepository>,
-            ));
-        let shadow_comparison_repo: Arc<dyn ShadowComparisonRepository> =
-            Arc::clone(&repos.shadow_comparison) as Arc<dyn ShadowComparisonRepository>;
+        let ModelResearchRepos {
+            model_run: model_run_repo,
+            model_registry: model_registry_repo,
+            calibration_loader,
+            shadow_comparison: shadow_comparison_repo,
+        } = assemble_model_repositories(deps);
         let offline = Self::assemble_offline_repositories(deps);
         let trade_policy_preimages = Arc::new(TradePolicyPreimageVerifier::new(
             TradePolicyPreimageVerifierDeps {
@@ -456,6 +480,11 @@ impl ResearchBundle {
             model_spec,
             calibration_loader,
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
+            recommendation_report_repo: Arc::clone(&repos.recommendation_report)
+                as Arc<dyn RecommendationReportRepository>,
+            serving_evidence_repo: Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
+                &deps.infra.ch,
+            ))) as Arc<dyn ServingEvidenceRepository>,
             catalog_ledger_repo: Arc::clone(&deps.data.catalog_ledger_repo),
             clob_market_info_repo: Arc::clone(&repos.clob_market_info)
                 as Arc<dyn ClobMarketInfoRepository>,
@@ -579,11 +608,20 @@ impl ResearchBundle {
             runtime_registry: Arc::clone(runtime_registry),
             serving_generations: Arc::clone(serving_generations),
         }));
+        let recipes = Arc::new(FeedbackRecipeStageAdapter::try_new(
+            FeedbackRecipeStageDeps {
+                cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
+                jobs: Arc::clone(&repos.research_job) as Arc<dyn ResearchJobRepository>,
+                artifacts: Arc::clone(artifact_store),
+                max_recovery_attempts: deps.deploy.quant.research_jobs.max_recovery_attempts,
+            },
+        )?);
         let feedback_decisions = Arc::new(FeedbackDecisionStageAdapter::try_new(
             FeedbackDecisionStageDeps {
                 cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
                 jobs: Arc::clone(&repos.research_job) as Arc<dyn ResearchJobRepository>,
                 artifacts: Arc::clone(artifact_store),
+                recipes,
                 max_recovery_attempts: deps.deploy.quant.research_jobs.max_recovery_attempts,
             },
         )?);
@@ -609,6 +647,8 @@ impl ResearchBundle {
                 preflight: Arc::clone(&promotion_preflight),
                 repository: Arc::clone(&repos.model_route_promotion)
                     as Arc<dyn ModelRoutePromotionRepository>,
+                shadow_bindings: Arc::clone(&repos.model_route_shadow_binding)
+                    as Arc<dyn ModelRouteShadowBindingRepository>,
                 policies: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
                 policy_apply: Arc::clone(&deps.governance.committed_policy)
                     as Arc<dyn CommittedPolicyApplyPort>,
@@ -686,14 +726,18 @@ fn assemble_calibration_artifact_fit(
     market_linkage_repo: &Arc<dyn MarketLinkageRepository>,
     offline: &OfflineResearchRepos,
 ) -> Arc<dyn CalibrationArtifactFitPort> {
-    Arc::new(BiasTableFitService::new(
-        Arc::clone(&deps.infra.quant_fact_read),
-        Arc::clone(&deps.data.catalog_ledger_repo),
-        Arc::clone(&deps.data.market_repo),
-        Arc::clone(market_linkage_repo),
-        Arc::clone(&deps.infra.repos.calibration_artifact)
+    Arc::new(BiasTableFitService::new(BiasTableFitServiceDeps {
+        fact_read: Arc::clone(&deps.infra.quant_fact_read),
+        catalog_repo: Arc::clone(&deps.data.catalog_ledger_repo),
+        clob_market_info_repo: Arc::clone(&deps.infra.repos.clob_market_info)
+            as Arc<dyn ClobMarketInfoRepository>,
+        market_repo: Arc::clone(&deps.data.market_repo),
+        linkage_repo: Arc::clone(market_linkage_repo),
+        calibration_repo: Arc::clone(&deps.infra.repos.calibration_artifact)
             as Arc<dyn CalibrationArtifactRepository>,
-        Arc::clone(&deps.infra.repos.runtime_config) as Arc<dyn PolicyRepository>,
-        Arc::clone(&offline.training_dataset) as Arc<dyn TrainingDatasetRepository>,
-    ))
+        runtime_config_repo: Arc::clone(&deps.infra.repos.runtime_config)
+            as Arc<dyn PolicyRepository>,
+        training_dataset_repo: Arc::clone(&offline.training_dataset)
+            as Arc<dyn TrainingDatasetRepository>,
+    }))
 }

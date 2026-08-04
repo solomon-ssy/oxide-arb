@@ -344,11 +344,13 @@ impl AdmissionInputBuilder {
         let route_bound = model_version.as_ref().is_some_and(|version| {
             let routing = &active_version.snapshot.model_routing.model;
             routing
-                .active_model_version_id
-                .iter()
-                .chain(routing.active_exit_model_version_id.iter())
-                .chain(routing.category_model_pointers.values())
-                .any(|reference| reference.id == version.model_version_id)
+                .buy_routes
+                .values()
+                .any(|binding| binding.champion.model_version_id == version.model_version_id)
+                || routing
+                    .active_exit_model_version_id
+                    .as_ref()
+                    .is_some_and(|reference| reference.id == version.model_version_id)
         });
         let return_model_calibrated = match model_version.as_ref() {
             Some(version) => {

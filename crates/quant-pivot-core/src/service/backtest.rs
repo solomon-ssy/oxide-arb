@@ -35,8 +35,8 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, MarketId,
-        ModelComparisonReportId, ModelRunId, ModelVersionId, PayoutRatio, ResearchJobProgress,
-        ResearchProfileArtifact, TokenId, TrainingDatasetId,
+        ModelComparisonReportId, ModelRunId, ModelVersionId, PayoutRatio, Price,
+        ResearchJobProgress, ResearchProfileArtifact, TokenId, TrainingDatasetId,
         calibration::ModelScoreCalibrationFitContract,
         model_serving::ModelServingPolicySnapshotBinding,
     },
@@ -48,13 +48,14 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::{
-        BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta, BacktestReport,
-        BacktestRequest, BacktestRunResult, BacktestTick, Backtester, MarketOutcome,
+        BacktestDownsidePoint, BacktestDownsideTrajectory, BacktestExecutionSnapshot,
+        BacktestInputs, BacktestMarketMeta, BacktestRankTarget, BacktestReport, BacktestRequest,
+        BacktestRunResult, BacktestTick, Backtester, MarketOutcome, ModelCalibrationOutcome,
         ModelComparisonReport, PortfolioCaps, PortfolioReplayBacktester,
-        PortfolioReturnObservation, SampleOutcome,
+        PortfolioReturnObservation,
     },
     execution_semantics::{PitFeeSchedule, aggressive_buy_limit},
-    model::QuantModelRuntime,
+    model::{LabelSelector, ModelRankTarget, QuantModelRuntime},
     training::{LabelName, TrainingExample},
 };
 use rust_decimal::Decimal;
@@ -145,7 +146,7 @@ pub(crate) struct CalibrationReplayEvidence {
     /// producer after fit and artifact persistence finish.
     pub model_run_id: ModelRunId,
     /// Per-sample score/outcome evidence.
-    pub samples: Vec<SampleOutcome>,
+    pub samples: Vec<ModelCalibrationOutcome>,
     /// Exact catalog window of the deeply verified Calibration Dataset.
     pub fit_window: TimeWindow,
     /// Canonical model, Dataset/Source Slice, and policy preimages.
@@ -434,7 +435,7 @@ impl BacktestService {
         match replay {
             Ok(result) => Ok(CalibrationReplayEvidence {
                 model_run_id,
-                samples: result.sample_outcomes,
+                samples: result.calibration_outcomes,
                 fit_window,
                 fit_contract,
             }),
@@ -525,10 +526,24 @@ impl BacktestService {
         // Runtime construction is intentionally last and consumes only the
         // already verified source retained above.
         let model = source.buy_runtime()?;
+        let rank_target = LabelSelector {
+            name: LabelName::new(
+                source
+                    .model_spec()
+                    .training_contract
+                    .target_label_name
+                    .clone(),
+            ),
+            horizon_secs: source
+                .model_spec()
+                .training_contract
+                .target_label_horizon_secs,
+        };
         Ok(PreparedReplay {
             version,
             dataset,
             model,
+            rank_target,
             examples,
             frozen_source,
             calibration_contract,
@@ -721,6 +736,7 @@ impl BacktestService {
             version,
             dataset,
             model,
+            rank_target,
             examples,
             frozen_source,
             calibration_contract: _,
@@ -740,6 +756,7 @@ impl BacktestService {
         // polling `cancel` at each cross-section boundary.
         let inputs = BacktestReplayInputs {
             model,
+            rank_target,
             examples,
             caps: self.caps.clone(),
             request,
@@ -918,6 +935,7 @@ struct PreparedReplay {
     version: ModelVersionInfo,
     dataset: TrainingDatasetInfo,
     model: Arc<dyn QuantModelRuntime>,
+    rank_target: LabelSelector,
     examples: Vec<TrainingExample>,
     frozen_source: FrozenSourceSlice,
     calibration_contract: Option<ModelScoreCalibrationFitContract>,
@@ -929,6 +947,7 @@ struct FeedbackPreparedModel {
     model_run_id: ModelRunId,
     backtest_report_id: BacktestReportId,
     model: Arc<dyn QuantModelRuntime>,
+    rank_target: LabelSelector,
 }
 
 impl FeedbackPreparedModel {
@@ -942,6 +961,19 @@ impl FeedbackPreparedModel {
             model_run_id: params.champion_model_run_id,
             backtest_report_id: params.champion_backtest_report_id,
             model: source.buy_runtime()?,
+            rank_target: LabelSelector {
+                name: LabelName::new(
+                    source
+                        .model_spec()
+                        .training_contract
+                        .target_label_name
+                        .clone(),
+                ),
+                horizon_secs: source
+                    .model_spec()
+                    .training_contract
+                    .target_label_horizon_secs,
+            },
         })
     }
 
@@ -955,6 +987,19 @@ impl FeedbackPreparedModel {
             model_run_id: candidate.model_run_id,
             backtest_report_id: candidate.backtest_report_id,
             model: source.buy_runtime()?,
+            rank_target: LabelSelector {
+                name: LabelName::new(
+                    source
+                        .model_spec()
+                        .training_contract
+                        .target_label_name
+                        .clone(),
+                ),
+                horizon_secs: source
+                    .model_spec()
+                    .training_contract
+                    .target_label_horizon_secs,
+            },
         })
     }
 }
@@ -999,15 +1044,16 @@ impl FeedbackReplayBatch {
                 completed,
                 total,
             ));
-            let Some(ticks) = frozen_ticks(
-                &self.examples,
-                &self.frozen_source,
-                self.entry_max_slippage_bps,
-                prepared.model.as_ref(),
-                &prepared.model_run_id,
-                &self.cancel,
-                self.progress.as_ref(),
-            )?
+            let Some(ticks) = frozen_ticks(FrozenTickBuild {
+                examples: &self.examples,
+                frozen_source: &self.frozen_source,
+                entry_max_slippage_bps: self.entry_max_slippage_bps,
+                rank_target: &prepared.rank_target,
+                model: prepared.model.as_ref(),
+                model_run_id: &prepared.model_run_id,
+                cancel: &self.cancel,
+                sink: self.progress.as_ref(),
+            })?
             else {
                 return Ok(None);
             };
@@ -1071,6 +1117,7 @@ struct RecordedRun {
 /// Owned inputs moved into the governed offline backtest replay.
 struct BacktestReplayInputs {
     model: Arc<dyn QuantModelRuntime>,
+    rank_target: LabelSelector,
     examples: Vec<TrainingExample>,
     caps: PortfolioCaps,
     request: BacktestRequest,
@@ -1095,15 +1142,16 @@ impl BacktestReplayInputs {
 impl BacktestReplayInputs {
     /// Assemble exact frozen runtime inputs and run the portfolio replay.
     async fn run_backtest_replay(self) -> QuantResult<Option<BacktestRunResult>> {
-        let Some(ticks) = frozen_ticks(
-            &self.examples,
-            &self.frozen_source,
-            self.entry_max_slippage_bps,
-            self.model.as_ref(),
-            &self.model_run_id,
-            &self.cancel,
-            self.sink.as_ref(),
-        )?
+        let Some(ticks) = frozen_ticks(FrozenTickBuild {
+            examples: &self.examples,
+            frozen_source: &self.frozen_source,
+            entry_max_slippage_bps: self.entry_max_slippage_bps,
+            rank_target: &self.rank_target,
+            model: self.model.as_ref(),
+            model_run_id: &self.model_run_id,
+            cancel: &self.cancel,
+            sink: self.sink.as_ref(),
+        })?
         else {
             return Ok(None);
         };
@@ -1133,16 +1181,31 @@ impl BacktestReplayInputs {
 ///
 /// Rejects malformed cross-sections, duplicate market rows, and invalid frozen
 /// model-input bindings.
-pub(crate) fn frozen_ticks(
-    examples: &[TrainingExample],
-    frozen_source: &FrozenSourceSlice,
-    entry_max_slippage_bps: Bps,
-    model: &dyn QuantModelRuntime,
-    model_run_id: &ModelRunId,
-    cancel: &CancellationToken,
-    sink: &dyn JobProgressSink,
-) -> QuantResult<Option<Vec<BacktestTick>>> {
+#[derive(Clone, Copy)]
+pub(crate) struct FrozenTickBuild<'a> {
+    pub examples: &'a [TrainingExample],
+    pub frozen_source: &'a FrozenSourceSlice,
+    pub entry_max_slippage_bps: Bps,
+    pub rank_target: &'a LabelSelector,
+    pub model: &'a dyn QuantModelRuntime,
+    pub model_run_id: &'a ModelRunId,
+    pub cancel: &'a CancellationToken,
+    pub sink: &'a dyn JobProgressSink,
+}
+
+pub(crate) fn frozen_ticks(input: FrozenTickBuild<'_>) -> QuantResult<Option<Vec<BacktestTick>>> {
+    let FrozenTickBuild {
+        examples,
+        frozen_source,
+        entry_max_slippage_bps,
+        rank_target,
+        model,
+        model_run_id,
+        cancel,
+        sink,
+    } = input;
     let execution = frozen_execution_snapshots(examples, frozen_source, entry_max_slippage_bps)?;
+    let downside_trajectories = frozen_downside_trajectories(examples, frozen_source, &execution)?;
     let mut by_decision: BTreeMap<DateTime<Utc>, Vec<&TrainingExample>> = BTreeMap::new();
     for example in examples {
         by_decision
@@ -1157,7 +1220,6 @@ pub(crate) fn frozen_ticks(
     let mut processed_sections: u64 = 0;
     let mut ticks = Vec::with_capacity(by_decision.len());
     let settlement_label = LabelName::new("token_payout_ratio");
-    let mae_label = LabelName::new("max_adverse_excursion_bps");
     for (decision_at, group) in by_decision {
         if cancel.is_cancelled() {
             return Ok(None);
@@ -1184,6 +1246,7 @@ pub(crate) fn frozen_ticks(
         }
         let mut market_meta = Vec::with_capacity(contexts.len());
         let mut outcomes = Vec::with_capacity(contexts.len());
+        let mut rank_targets = Vec::with_capacity(contexts.len());
         let mut execution_snapshots = Vec::new();
         for example in group {
             let Some(context) = contexts.get(&example.market_id) else {
@@ -1199,8 +1262,22 @@ pub(crate) fn frozen_ticks(
             outcomes.push(MarketOutcome {
                 market_id: example.market_id.clone(),
                 yes_payout_ratio,
-                max_adverse_excursion_bps: max_adverse_excursion(example, &mae_label),
             });
+            if let Some(label) = example.labels.iter().find(|label| {
+                label.is_resolved
+                    && label.label_name == rank_target.name
+                    && label.horizon_secs == rank_target.horizon_secs
+            }) {
+                rank_targets.push(BacktestRankTarget {
+                    market_id: example.market_id.clone(),
+                    token_id: example.token_id.clone(),
+                    target: ModelRankTarget {
+                        label_name: rank_target.name.clone(),
+                        label_horizon_secs: rank_target.horizon_secs,
+                    },
+                    realized: label.value,
+                });
+            }
             for token_id in iter::once(&example.selected_market.primary_token_id)
                 .chain(example.selected_market.secondary_token_id.as_ref())
             {
@@ -1224,14 +1301,97 @@ pub(crate) fn frozen_ticks(
             decision_at,
             model_input,
             outcomes,
+            rank_targets,
             market_meta,
             execution: execution_snapshots,
+            downside_trajectories: downside_trajectories
+                .iter()
+                .filter(|trajectory| trajectory.anchor == decision_at)
+                .cloned()
+                .collect(),
         });
     }
     if cancel.is_cancelled() {
         return Ok(None);
     }
     Ok(Some(ticks))
+}
+
+fn frozen_downside_trajectories(
+    examples: &[TrainingExample],
+    source: &FrozenSourceSlice,
+    execution: &HashMap<(DateTime<Utc>, &str), BacktestExecutionSnapshot>,
+) -> QuantResult<Vec<BacktestDownsideTrajectory>> {
+    let mut trajectories = Vec::new();
+    for example in examples {
+        let decision_at = example.decision_at();
+        for token_id in iter::once(&example.selected_market.primary_token_id)
+            .chain(example.selected_market.secondary_token_id.as_ref())
+        {
+            let snapshot = execution
+                .get(&(decision_at, token_id.as_str()))
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "backtest downside entry snapshot is missing for token {token_id} at {decision_at}"
+                    ),
+                })?;
+            let entry_ask = snapshot
+                .asks
+                .first()
+                .map(|level| level.price_decimal())
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "backtest downside entry book has no ask for token {token_id} at {decision_at}"
+                    ),
+                })?;
+            let mut rows = source
+                .prefetched
+                .micro
+                .get(token_id)
+                .map_or(&[][..], Vec::as_slice)
+                .iter()
+                .map(|row| {
+                    DateTime::from_timestamp_millis(row.bucket_time)
+                        .map(|at| (at, row))
+                        .ok_or_else(|| ResearchError::DatasetBuild {
+                            detail: format!(
+                                "backtest downside bucket timestamp {} is invalid",
+                                row.bucket_time
+                            ),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(at, _)| *at > decision_at && *at <= source.window_end)
+                .collect::<Vec<_>>();
+            rows.sort_by_key(|(at, _)| *at);
+            if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "backtest downside source has duplicate buckets for token {token_id}"
+                    ),
+                }
+                .into());
+            }
+            let data_available_until = rows.last().map_or(decision_at, |(at, _)| *at);
+            let points = rows
+                .into_iter()
+                .map(|(at, row)| BacktestDownsidePoint {
+                    at,
+                    best_bid_low: row.best_bid_low.map(Price::from),
+                })
+                .collect();
+            trajectories.push(BacktestDownsideTrajectory {
+                market_id: example.market_id.clone(),
+                token_id: token_id.clone(),
+                anchor: decision_at,
+                entry_ask,
+                data_available_until,
+                points,
+            });
+        }
+    }
+    Ok(trajectories)
 }
 
 fn frozen_execution_snapshots<'a>(
@@ -1381,12 +1541,4 @@ fn settlement_payout(
         }
         .into()
     })
-}
-
-fn max_adverse_excursion(example: &TrainingExample, label: &LabelName) -> Option<Decimal> {
-    example
-        .labels
-        .iter()
-        .find(|row| row.label_name == *label && row.is_resolved)
-        .map(|row| row.value)
 }

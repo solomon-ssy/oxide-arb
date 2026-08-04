@@ -13,14 +13,14 @@
 use quant_pivot_error::storage::{StorageError, entity::MARKET_RESOLUTION_EVENT};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, CryptoPriceReportRow,
-        DomainObservationRow, EntryConditionEvaluationEventRow, MarketResolutionRow,
-        MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow, TradeTapeRow,
-        WeatherForecastFactRow, WeatherObservationFactRow,
+        BookL2LedgerRow, BookLedgerReplayAnchor, BookMicrostructureRow, BookStreamSessionRow,
+        CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
+        MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
+        TradeTapeRow, WeatherForecastFactRow, WeatherObservationFactRow,
     },
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
-        RecommendationReportId, TokenId,
+        RecommendationReportId, ResearchProfileRef, TokenId,
     },
 };
 use uuid::Uuid;
@@ -52,6 +52,18 @@ pub trait QuantFactReadRepository: Send + Sync {
         _primary_reason: Option<&str>,
         _offset: u64,
         _limit: u64,
+    ) -> Result<Vec<ReportMarketFunnelRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Complete conserved funnel rows for one immutable profile and decision
+    /// window. Dataset materialization joins these rows to committed Postgres
+    /// report headers before admitting any serving sample.
+    async fn report_funnel_between(
+        &self,
+        _profile_ref: &ResearchProfileRef,
+        _from_ms: i64,
+        _to_ms: i64,
     ) -> Result<Vec<ReportMarketFunnelRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -216,6 +228,31 @@ pub trait QuantFactReadRepository: Send + Sync {
         _decision_at_ms: i64,
     ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
         Ok(Vec::new())
+    }
+
+    /// Canonical L2 replay rows for a bounded page of token-specific anchors.
+    /// Production implementations must execute a bounded batch query rather
+    /// than one round-trip per token. The default preserves adapter correctness.
+    async fn book_l2_replay_from(
+        &self,
+        anchors: Vec<BookLedgerReplayAnchor>,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<BookL2LedgerRow>, StorageError> {
+        let mut rows = Vec::new();
+        for anchor in anchors {
+            rows.extend(
+                self.book_l2_ledger_from(
+                    &anchor.token_id,
+                    anchor.stream_session_id,
+                    anchor.from_sequence,
+                    source_cutoff_ms,
+                    decision_at_ms,
+                )
+                .await?,
+            );
+        }
+        Ok(rows)
     }
 
     /// Canonical L2 events for one token page. Query shape is page-bounded and

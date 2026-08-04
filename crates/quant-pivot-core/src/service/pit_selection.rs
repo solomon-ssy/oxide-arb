@@ -618,6 +618,7 @@ mod tests {
                     market_changes: Vec::new(),
                     event_changes: Vec::new(),
                 },
+                clob_market_info: Vec::new(),
                 domain_observations: HashMap::new(),
                 crypto_reports: HashMap::new(),
                 weather_observations: HashMap::new(),

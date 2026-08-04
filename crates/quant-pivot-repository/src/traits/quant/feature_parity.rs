@@ -18,7 +18,7 @@ use quant_pivot_models::{
             NewResearchJob, ResearchJobInfo,
         },
     },
-    enums::quant::{FeatureParityRunKind, FeatureParityStateTransition},
+    enums::quant::FeatureParityRunKind,
     types::{
         FeatureParityRunId, FeatureVectorId, ModelRunId, ModelVersionId, RecommendationReportId,
         TrainingDatasetId,
@@ -46,6 +46,9 @@ pub enum EnqueueFrozenFeatureParityOutcome {
 /// Postgres parity-run and latch ledger.
 #[async_trait::async_trait]
 pub trait FeatureParityRepository: Send + Sync {
+    /// Return the `PostgreSQL` clock used by parity state transitions.
+    async fn database_time(&self) -> Result<DateTime<Utc>, StorageError>;
+
     async fn create_run(
         &self,
         run: NewFeatureParityRun,
@@ -148,14 +151,6 @@ pub trait FeatureParityRepository: Send + Sync {
     ) -> Result<FeatureParityRunInfo, StorageError>;
 
     async fn current_state(&self) -> Result<Option<FeatureParityStateInfo>, StorageError>;
-
-    /// Idempotently open the latch for a deterministic mismatch/integrity failure.
-    async fn open_latch(
-        &self,
-        cause_run_id: &FeatureParityRunId,
-        transition: FeatureParityStateTransition,
-        reason: String,
-    ) -> Result<FeatureParityStateInfo, StorageError>;
 
     /// Atomically append a failed integrity incident derived from an existing
     /// parity proof and open the global latch. Used when governance cannot

@@ -1,19 +1,235 @@
 //! Report lifecycle seeding owned by system tests.
 
+use std::sync::Arc;
+
+use anyhow::{Context, Result, ensure};
 use chrono::Duration;
 use quant_pivot_models::{
-    domain::quant::{NewReportTransaction, RecommendationReportInfo, ReportRunClaim},
+    clickhouse::{ChUsd, QuantReportRecommendationFactRow, ReportMarketFunnelRow},
+    config::ClickHouseConfig,
+    domain::quant::{
+        NewReportFactDelivery, NewReportTransaction, RecommendationReportInfo, ReportRunClaim,
+    },
     entities::quant_report_run::ActiveModel,
     enums::quant::{
-        RecommendationReportStatus, RecommendationStatus, ReportRunStatus, ReportTriggerKind,
+        RecommendationReportStatus, RecommendationStatus, ReportFactDeliveryStatus,
+        ReportRunStatus, ReportTriggerKind,
     },
-    types::{ReportRunId, ReportTriggerKey, WorkerId},
+    hashing::CanonicalDigest,
+    runtime_config::ReportDeliveryPolicy,
+    types::{
+        REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV1,
+        ReportFactNotificationRecommendationV1, ReportFactNotificationV1,
+        ReportFactTableCommitment, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
+        ReportRunId, ReportTriggerKey, WorkerId,
+    },
 };
 use quant_pivot_repository::{
+    clickhouse::ChFactWriter,
     postgres::{PgRecommendationReportRepository, PgReportRunRepository},
-    traits::{RecommendationReportRepository, ReportRunRepository},
+    traits::{FactWriter, RecommendationReportRepository, ReportRunRepository},
 };
 use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection};
+
+use quant_pivot_research::artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore};
+use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
+
+const RECOMMENDATION_TABLE: &str = "quant_report_recommendation_fact";
+const FUNNEL_TABLE: &str = "quant_report_market_funnel";
+
+/// Seal and write the production report facts for a small system fixture.
+pub async fn materialize_report_facts(
+    artifacts: &Arc<dyn ArtifactStore>,
+    clickhouse: &ClickHouseConfig,
+    transaction: &mut NewReportTransaction,
+) -> Result<()> {
+    let report = &transaction.report;
+    let recommendation_rows = transaction
+        .recommendations
+        .iter()
+        .map(|recommendation| {
+            Ok(QuantReportRecommendationFactRow {
+                event_time: report.decision_at.timestamp_millis(),
+                recommendation_report_id: report.recommendation_report_id,
+                recommendation_id: recommendation.recommendation_id,
+                rank: u32::try_from(recommendation.rank)?,
+                market_id: recommendation.market_id.clone(),
+                token_id: recommendation.token_id.clone(),
+                side: recommendation.outcome_side.into(),
+                score: recommendation.composite_score.into(),
+                risk_adjusted_score: recommendation.risk_adjusted_score.into(),
+                trade_plan_available: recommendation.trade_plan.is_available(),
+                suggested_usd: recommendation
+                    .trade_plan
+                    .sizing()
+                    .map(|sizing| ChUsd::from(sizing.suggested_usd)),
+                valid_until: recommendation.valid_until.timestamp_millis(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let funnel_rows = transaction
+        .recommendations
+        .iter()
+        .map(|recommendation| {
+            let profile_ref = recommendation.research_profile_artifact_id.profile_ref();
+            let terminal_stage = ReportFunnelStage::Published;
+            let primary_reason = ReportFunnelReason::Published;
+            let secondary_diagnostics = ReportFunnelDiagnostics::None {};
+            let mut row = ReportMarketFunnelRow {
+                event_time: report.decision_at.timestamp_millis(),
+                recommendation_report_id: report.recommendation_report_id,
+                market_selection_id: report.market_selection_id,
+                profile_id: profile_ref.id.to_string(),
+                profile_version: profile_ref.version,
+                profile_content_hash: profile_ref.content_hash.to_string(),
+                decision_policy_snapshot_id: report.decision_policy_snapshot_id,
+                model_version_id: report.model_version_id,
+                model_run_id: report.model_run_id,
+                market_id: recommendation.market_id.clone(),
+                event_id: recommendation.event_id.clone(),
+                primary_token_id: recommendation
+                    .evidence_refs
+                    .book_snapshot_ref
+                    .token_id
+                    .clone(),
+                terminal_stage: terminal_stage.as_str().to_owned(),
+                primary_reason: primary_reason.as_str().to_owned(),
+                secondary_diagnostics_json: serde_json::to_string(&secondary_diagnostics)?,
+                feature_vector_id: Some(recommendation.evidence_refs.feature_vector_id),
+                signal_candidate_id: Some(recommendation.evidence_refs.signal_candidate_id),
+                recommendation_id: Some(recommendation.recommendation_id),
+                row_hash: String::new(),
+                ingestion_time: report.decision_at.timestamp_millis(),
+            };
+            row.seal_hash()?;
+            Ok(row)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    seal_report_facts(
+        artifacts,
+        transaction,
+        recommendation_rows.clone(),
+        funnel_rows.clone(),
+    )
+    .await?;
+
+    let pool = Arc::new(ClickHousePool::connect(clickhouse).await?);
+    let manager = Arc::new(ChWriteManager::new(clickhouse.max_concurrent_inserts));
+    if !recommendation_rows.is_empty() {
+        ChFactWriter::new(
+            Arc::clone(&pool),
+            Arc::clone(&manager),
+            RECOMMENDATION_TABLE,
+        )
+        .write_batch(recommendation_rows)
+        .await?;
+    }
+    if !funnel_rows.is_empty() {
+        ChFactWriter::new(pool, manager, FUNNEL_TABLE)
+            .write_batch(funnel_rows)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Seal a production-format report-fact bundle for a deterministic system fixture.
+pub async fn seal_report_facts(
+    artifacts: &Arc<dyn ArtifactStore>,
+    transaction: &mut NewReportTransaction,
+    mut recommendation_rows: Vec<QuantReportRecommendationFactRow>,
+    mut funnel_rows: Vec<ReportMarketFunnelRow>,
+) -> Result<()> {
+    let report = &transaction.report;
+    recommendation_rows.sort_by(|left, right| {
+        left.rank.cmp(&right.rank).then_with(|| {
+            left.recommendation_id
+                .as_uuid()
+                .cmp(&right.recommendation_id.as_uuid())
+        })
+    });
+    funnel_rows.sort_by(|left, right| left.market_id.cmp(&right.market_id));
+    ensure!(
+        recommendation_rows
+            .iter()
+            .all(|row| row.recommendation_report_id == report.recommendation_report_id)
+            && funnel_rows
+                .iter()
+                .all(|row| row.recommendation_report_id == report.recommendation_report_id),
+        "report-fact fixture contains a row for another report"
+    );
+    let recommendation_hash = CanonicalDigest::content_hash_json(&recommendation_rows)?;
+    let funnel_hash = CanonicalDigest::content_hash_json(&funnel_rows)?;
+    let recommendation_row_count = u64::try_from(recommendation_rows.len())?;
+    let funnel_row_count = u64::try_from(funnel_rows.len())?;
+    let notification_top3 = transaction
+        .recommendations
+        .iter()
+        .take(3)
+        .map(|recommendation| ReportFactNotificationRecommendationV1 {
+            market_id: recommendation.market_id.to_string(),
+            outcome_side: recommendation.outcome_side,
+            score: recommendation.composite_score,
+            suggested_usd: recommendation
+                .trade_plan
+                .sizing()
+                .map(|sizing| sizing.suggested_usd),
+        })
+        .collect();
+    let bundle = ReportFactBundleV1 {
+        format_version: REPORT_FACT_BUNDLE_FORMAT_VERSION,
+        recommendation_report_id: report.recommendation_report_id,
+        created_at: report.decision_at,
+        delivery_policy: ReportDeliveryPolicy::StoreOnly,
+        notify_operators: false,
+        notification: ReportFactNotificationV1 {
+            kind: report.report_kind,
+            status: report.status.as_str().to_owned(),
+            runtime_mode: report.runtime_mode,
+            published_count: report.summary_json.published_recommendation_count,
+            total_suggested_usd: report.summary_json.total_suggested_usd,
+            top3: notification_top3,
+            warnings: report.summary_json.warnings.clone(),
+            empty_reason: report.summary_json.empty_reason,
+        },
+        recommendation_commitment: ReportFactTableCommitment {
+            table: RECOMMENDATION_TABLE.to_owned(),
+            row_count: recommendation_row_count,
+            row_chain_hash: recommendation_hash,
+        },
+        funnel_commitment: ReportFactTableCommitment {
+            table: FUNNEL_TABLE.to_owned(),
+            row_count: funnel_row_count,
+            row_chain_hash: funnel_hash,
+        },
+        recommendation_rows,
+        funnel_rows,
+    };
+    let bytes = serde_json::to_vec(&bundle).context("serialize system-test report-fact bundle")?;
+    let bundle_hash = CanonicalDigest::content_hash_bytes(&bytes);
+    let bundle_uri = artifacts
+        .put(
+            ArtifactKey::new(ArtifactNamespace::ReportFacts, bundle_hash.hex(), "json")?,
+            &bytes,
+        )
+        .await?;
+    let persisted = artifacts.get(&bundle_uri).await?;
+    ensure!(
+        persisted == bytes,
+        "system-test report-fact artifact failed read-after-write verification"
+    );
+    transaction.fact_delivery = Some(NewReportFactDelivery {
+        recommendation_report_id: report.recommendation_report_id,
+        status: ReportFactDeliveryStatus::Pending,
+        bundle_uri,
+        bundle_hash,
+        bundle_bytes: i64::try_from(bytes.len())?,
+        recommendation_row_count: i64::try_from(recommendation_row_count)?,
+        recommendation_row_chain_hash: recommendation_hash,
+        funnel_row_count: i64::try_from(funnel_row_count)?,
+        funnel_row_chain_hash: funnel_hash,
+    });
+    Ok(())
+}
 
 /// Persist a complete Prepared artifact, verify its delivery, and atomically
 /// publish it. Fixtures must not bypass the durable run/publication FSM.

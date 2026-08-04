@@ -46,10 +46,10 @@ pub struct BacktestPathSetInfo {
     /// Median of the paths' own rank IC — the hard `RankIc` gate's
     /// data source.
     pub median_rank_ic: Decimal,
-    /// `SharpeDistribution { min, p25, median, p75, max }`.
+    /// Sharpe and risk-evidence distribution across complete CPCV paths.
     pub sharpe_distribution: SharpeDistribution,
     /// `Vec<BacktestPath>` (`path_index`, `group_returns`, `sharpe`, `rank_ic`,
-    /// `max_drawdown`, `tail_loss`) — the full reconstructed path detail.
+    /// `max_drawdown`, `tail_loss`, `turnover`) — the full reconstructed path detail.
     pub paths: BacktestPaths,
     /// The Deflated Sharpe Ratio (`PSR` evaluated at the trial-grid-corrected
     /// benchmark) — in `[0, 1]`, the hard `DeflatedSharpe` gate's
@@ -276,8 +276,8 @@ struct BacktestPathSetHashInput<'a> {
     model_run_id: &'a ModelRunId,
     training_dataset_id: &'a TrainingDatasetId,
     decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
-    window_start: DateTime<Utc>,
-    window_end: DateTime<Utc>,
+    window_start_micros: i64,
+    window_end_micros: i64,
     subject: &'a CpcvPathSetSubject,
     methodology: &'a CpcvMethodologyBinding,
     fold_artifacts: &'a CpcvFoldArtifacts,
@@ -296,7 +296,7 @@ struct BacktestPathSetHashInput<'a> {
 }
 
 impl<'a> BacktestPathSetHashInput<'a> {
-    const fn from_new(input: &'a NewBacktestPathSetInput) -> Self {
+    fn from_new(input: &'a NewBacktestPathSetInput) -> Self {
         Self {
             contract: "quant_backtest_path_set_v2",
             path_set_id: &input.path_set_id,
@@ -304,19 +304,19 @@ impl<'a> BacktestPathSetHashInput<'a> {
             model_run_id: &input.model_run_id,
             training_dataset_id: &input.training_dataset_id,
             decision_policy_snapshot_id: &input.decision_policy_snapshot_id,
-            window_start: input.window_start,
-            window_end: input.window_end,
+            window_start_micros: input.window_start.timestamp_micros(),
+            window_end_micros: input.window_end.timestamp_micros(),
             subject: &input.subject,
             methodology: &input.methodology,
             fold_artifacts: &input.fold_artifacts,
             path_count: input.path_count,
             combination_count: input.combination_count,
-            median_rank_ic: input.median_rank_ic,
+            median_rank_ic: input.median_rank_ic.normalize(),
             sharpe_distribution: &input.sharpe_distribution,
             paths: &input.paths,
-            deflated_sharpe: input.deflated_sharpe,
-            dsr_benchmark_sharpe: input.dsr_benchmark_sharpe,
-            pbo: input.pbo,
+            deflated_sharpe: input.deflated_sharpe.normalize(),
+            dsr_benchmark_sharpe: input.dsr_benchmark_sharpe.normalize(),
+            pbo: input.pbo.normalize(),
             min_track_record_length_secs: input.min_track_record_length_secs,
             trial_count: input.trial_count,
             trial_grid_count: input.trial_grid_count,
@@ -324,7 +324,7 @@ impl<'a> BacktestPathSetHashInput<'a> {
         }
     }
 
-    const fn from_info(info: &'a BacktestPathSetInfo) -> Self {
+    fn from_info(info: &'a BacktestPathSetInfo) -> Self {
         Self {
             contract: "quant_backtest_path_set_v2",
             path_set_id: &info.path_set_id,
@@ -332,19 +332,19 @@ impl<'a> BacktestPathSetHashInput<'a> {
             model_run_id: &info.model_run_id,
             training_dataset_id: &info.training_dataset_id,
             decision_policy_snapshot_id: &info.decision_policy_snapshot_id,
-            window_start: info.window_start,
-            window_end: info.window_end,
+            window_start_micros: info.window_start.timestamp_micros(),
+            window_end_micros: info.window_end.timestamp_micros(),
             subject: &info.subject,
             methodology: &info.methodology,
             fold_artifacts: &info.fold_artifacts,
             path_count: info.path_count,
             combination_count: info.combination_count,
-            median_rank_ic: info.median_rank_ic,
+            median_rank_ic: info.median_rank_ic.normalize(),
             sharpe_distribution: &info.sharpe_distribution,
             paths: &info.paths,
-            deflated_sharpe: info.deflated_sharpe,
-            dsr_benchmark_sharpe: info.dsr_benchmark_sharpe,
-            pbo: info.pbo,
+            deflated_sharpe: info.deflated_sharpe.normalize(),
+            dsr_benchmark_sharpe: info.dsr_benchmark_sharpe.normalize(),
+            pbo: info.pbo.normalize(),
             min_track_record_length_secs: info.min_track_record_length_secs,
             trial_count: info.trial_count,
             trial_grid_count: info.trial_grid_count,
@@ -362,19 +362,19 @@ impl<'a> From<&'a NewBacktestPathSet> for BacktestPathSetHashInput<'a> {
             model_run_id: &input.model_run_id,
             training_dataset_id: &input.training_dataset_id,
             decision_policy_snapshot_id: &input.decision_policy_snapshot_id,
-            window_start: input.window_start,
-            window_end: input.window_end,
+            window_start_micros: input.window_start.timestamp_micros(),
+            window_end_micros: input.window_end.timestamp_micros(),
             subject: &input.subject,
             methodology: &input.methodology,
             fold_artifacts: &input.fold_artifacts,
             path_count: input.path_count,
             combination_count: input.combination_count,
-            median_rank_ic: input.median_rank_ic,
+            median_rank_ic: input.median_rank_ic.normalize(),
             sharpe_distribution: &input.sharpe_distribution,
             paths: &input.paths,
-            deflated_sharpe: input.deflated_sharpe,
-            dsr_benchmark_sharpe: input.dsr_benchmark_sharpe,
-            pbo: input.pbo,
+            deflated_sharpe: input.deflated_sharpe.normalize(),
+            dsr_benchmark_sharpe: input.dsr_benchmark_sharpe.normalize(),
+            pbo: input.pbo.normalize(),
             min_track_record_length_secs: input.min_track_record_length_secs,
             trial_count: input.trial_count,
             trial_grid_count: input.trial_grid_count,
@@ -487,7 +487,7 @@ pub enum BacktestPathSetError {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use rust_decimal_macros::dec;
 
     use super::{NewBacktestPathSet, NewBacktestPathSetInput};
@@ -495,8 +495,9 @@ mod tests {
         BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
         TrainingDatasetId,
         backtest::{
-            BacktestPath, CpcvFoldArtifact, CpcvFoldArtifacts, CpcvFoldCalibrationPolicy,
-            CpcvFoldRole, CpcvMethodologyBinding, CpcvPathSetSubject, SharpeDistribution,
+            BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
+            CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
+            SharpeDistribution,
         },
     };
 
@@ -533,7 +534,13 @@ mod tests {
                 ),
                 fold_artifacts: CpcvFoldArtifacts::try_new(vec![
                     CpcvFoldArtifact {
-                        role: CpcvFoldRole::Validation,
+                        identity: CpcvEstimatorIdentity::Validation {
+                            combination_index: 0,
+                            test_partitions_hash: hash('b'),
+                            test_partition_count: 1,
+                            test_groups_hash: hash('c'),
+                            test_group_count: 1,
+                        },
                         training_groups_hash: hash('b'),
                         training_group_count: 2,
                         model_artifact_hash: hash('c'),
@@ -541,7 +548,7 @@ mod tests {
                         model_payload_hash: hash('e'),
                     },
                     CpcvFoldArtifact {
-                        role: CpcvFoldRole::Trial { trial_id: 0 },
+                        identity: CpcvEstimatorIdentity::Trial { trial_id: 0 },
                         training_groups_hash: hash('f'),
                         training_group_count: 3,
                         model_artifact_hash: hash('1'),
@@ -561,6 +568,7 @@ mod tests {
                     max: dec!(0.6),
                     median_max_drawdown: Some(dec!(0.1)),
                     median_tail_loss: Some(dec!(-0.01)),
+                    median_turnover: Some(dec!(0.2)),
                     baseline_uplift: Some(dec!(0.02)),
                 },
                 paths: vec![BacktestPath {
@@ -570,6 +578,7 @@ mod tests {
                     rank_ic: dec!(0.1),
                     max_drawdown: dec!(0.005),
                     tail_loss: dec!(-0.005),
+                    turnover: Some(dec!(0.2)),
                 }]
                 .into(),
                 deflated_sharpe: dec!(0.95),
@@ -592,5 +601,22 @@ mod tests {
         value["pbo"] = serde_json::json!("0.9");
         let tampered: NewBacktestPathSet = serde_json::from_value(value).expect("deserialize");
         assert!(tampered.verify_hash().is_err());
+    }
+
+    #[test]
+    fn hash_uses_persistence_scalars() {
+        let mut sealed = NewBacktestPathSet::test_fixture();
+        sealed.median_rank_ic = dec!(0.1000);
+        sealed.deflated_sharpe = dec!(0.95000);
+        sealed.dsr_benchmark_sharpe = dec!(0.10000);
+        sealed.pbo = dec!(0.20000);
+        sealed.window_start =
+            DateTime::from_timestamp_micros(sealed.window_start.timestamp_micros())
+                .expect("microsecond timestamp")
+                + Duration::nanoseconds(999);
+
+        sealed
+            .verify_hash()
+            .expect("hash must ignore non-semantic decimal scale and sub-microsecond time");
     }
 }

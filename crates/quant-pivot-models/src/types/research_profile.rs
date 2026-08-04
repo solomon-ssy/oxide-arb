@@ -40,7 +40,7 @@ const MAX_FEEDBACK_OBSERVATION_COUNT: u64 = 9_223_372_036_854_775_807;
 const MIN_FEEDBACK_BOOTSTRAP_REPETITIONS: u32 = 1_000;
 const MAX_FEEDBACK_BOOTSTRAP_REPETITIONS: u32 = 100_000;
 /// Breaking hash-schema version for [`ResearchFeedbackPolicy`].
-pub const RESEARCH_FEEDBACK_POLICY_HASH_VERSION: u32 = 1;
+pub const RESEARCH_FEEDBACK_POLICY_HASH_VERSION: u32 = 2;
 const RESEARCH_FEEDBACK_POLICY_HASH_DOMAIN: &str = "quant-pivot/research-feedback-policy";
 
 /// Stable immutable profile identity carried by every downstream artifact.
@@ -336,6 +336,9 @@ pub enum ResearchProfileDataSource {
 #[serde(deny_unknown_fields)]
 pub struct ResearchFeedbackPolicy {
     pub evaluation_window_days: u32,
+    /// Maximum challenger templates selected by one immutable recipe plan.
+    /// Capacity increases require an explicit profile revision.
+    pub max_challengers: u32,
     /// How often the coordinator may evaluate whether a new feedback cycle is
     /// warranted. This schedules evaluation only; it grants no promotion
     /// authority.
@@ -486,6 +489,7 @@ impl ResearchFeedbackPolicy {
             });
         }
         for (field, value) in [
+            ("max_challengers", u64::from(self.max_challengers)),
             ("minimum_mature_labels", self.minimum_mature_labels),
             ("minimum_new_mature_labels", self.minimum_new_mature_labels),
             (
@@ -735,7 +739,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
     let cash_budget = vec![Usd::new(Decimal::new(25, 0))];
     let pooled = ResearchProfileArtifact::try_new(
         POOLED_1H_CONTROL_PROFILE_ID,
-        3,
+        4,
         ResearchProfileSpec {
             information_regime: ResearchInformationRegime::PooledBinaryMarket,
             policy_fitter: None,
@@ -764,7 +768,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
     )?;
     let crypto = ResearchProfileArtifact::try_new(
         CRYPTO_PRICE_15M_PROFILE_ID,
-        2,
+        3,
         ResearchProfileSpec {
             information_regime: ResearchInformationRegime::CryptoPrice,
             policy_fitter: None,
@@ -796,7 +800,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
     )?;
     let weather = ResearchProfileArtifact::try_new(
         WEATHER_FORECAST_24H_PROFILE_ID,
-        3,
+        4,
         ResearchProfileSpec {
             information_regime: ResearchInformationRegime::WeatherForecast,
             policy_fitter: Some(ResearchPolicyFitter::WeatherForecast),
@@ -868,6 +872,7 @@ fn production_feedback_policy(
 ) -> ResearchFeedbackPolicy {
     ResearchFeedbackPolicy {
         evaluation_window_days: 30,
+        max_challengers: 1,
         feedback_cadence_secs,
         minimum_mature_labels: 500,
         minimum_new_mature_labels,
@@ -931,20 +936,20 @@ mod tests {
             .iter()
             .find(|profile| profile.profile_ref.id.as_str() == WEATHER_FORECAST_24H_PROFILE_ID)
             .expect("weather profile");
-        assert_eq!(pooled.profile_ref.version, 3);
-        assert_eq!(crypto.profile_ref.version, 2);
-        assert_eq!(weather.profile_ref.version, 3);
+        assert_eq!(pooled.profile_ref.version, 4);
+        assert_eq!(crypto.profile_ref.version, 3);
+        assert_eq!(weather.profile_ref.version, 4);
         assert_eq!(
             pooled.profile_ref.content_hash.to_string(),
-            "blake3:c14628f49a8aae856f11d644d6c9f550eec749f055e7711dc4e0b7067a1bce84"
+            "blake3:045ed413fb4ee177cbfa78eff3e934a0f580ffa942d260be6e4ed10b8083e9fb"
         );
         assert_eq!(
             crypto.profile_ref.content_hash.to_string(),
-            "blake3:2639401dcb138626f130ad2589fb2829d1186d1c5f72e28ed8ea6b68594d7682"
+            "blake3:a1cd751681a00e479378d458f6d7e91911c6b748ee71f02d4a4b5394596654ef"
         );
         assert_eq!(
             weather.profile_ref.content_hash.to_string(),
-            "blake3:0dca50a71b5630ce844dfcfb55bec134c6d65e954d2a7b948807c97d53bafdc3"
+            "blake3:c906d7676bb12b6a75a261c518224efd7391ffbc1bcbad471ec5ccf8baf90c10"
         );
         assert_eq!(pooled.spec.feedback_policy.feedback_cadence_secs, 86_400);
         assert_eq!(
@@ -1268,7 +1273,7 @@ mod tests {
 
     #[test]
     fn policy_hash_is_deterministic() {
-        assert_eq!(RESEARCH_FEEDBACK_POLICY_HASH_VERSION, 1);
+        assert_eq!(RESEARCH_FEEDBACK_POLICY_HASH_VERSION, 2);
         let profiles = builtin_research_profiles().expect("profiles");
         for profile in &profiles {
             let policy = &profile.spec.feedback_policy;
@@ -1279,13 +1284,13 @@ mod tests {
             );
             let expected = match profile.profile_ref.id.as_str() {
                 POOLED_1H_CONTROL_PROFILE_ID => {
-                    "blake3:5d6518877b0f3998f18c31c2920fe7b4916bd2db0412d90ce0fcac9f41220ba1"
+                    "blake3:9e05d22176e953c73af29ab778f344eae7a9646037aea2933416ecf614d4a6d5"
                 }
                 CRYPTO_PRICE_15M_PROFILE_ID => {
-                    "blake3:fbed5098069fb80f50835a399ef2eec960be54813ca01d5bf495a31d5718e8b2"
+                    "blake3:b42bf8118ff05fee22f7b5c8e7a719c39d459b335bd0a4e305b66b084f1bc023"
                 }
                 WEATHER_FORECAST_24H_PROFILE_ID => {
-                    "blake3:6dc19095fc1b0062938c0cfa839c817c238f0d486d39b0b974d94ceed294d6c2"
+                    "blake3:2cdedc124bd6db3f3e6ca17a76549e2a447a93a9609deeb5f70955fce6d8a256"
                 }
                 other => panic!("unexpected built-in profile {other}"),
             };

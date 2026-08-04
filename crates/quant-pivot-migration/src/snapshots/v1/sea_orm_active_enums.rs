@@ -815,6 +815,8 @@ pub enum QpModelRunKind {
 pub enum QpFeedbackCohort {
     #[sea_orm(string_value = "model_learning")]
     ModelLearning,
+    #[sea_orm(string_value = "model_score_learning")]
+    ModelScoreLearning,
     #[sea_orm(string_value = "execution_learning")]
     ExecutionLearning,
     #[sea_orm(string_value = "policy_evaluation")]
@@ -993,6 +995,12 @@ pub enum QpPolicyActivationKind {
     Promote,
     #[sea_orm(string_value = "model_bootstrap")]
     ModelBootstrap,
+    #[sea_orm(string_value = "model_shadow_binding")]
+    ModelShadowBinding,
+    #[sea_orm(string_value = "model_shadow_cancellation")]
+    ModelShadowCancellation,
+    #[sea_orm(string_value = "model_shadow_rejection")]
+    ModelShadowRejection,
     #[sea_orm(string_value = "model_promotion")]
     ModelPromotion,
     #[sea_orm(string_value = "rollback")]
@@ -1193,18 +1201,50 @@ pub enum QpReportFactDeliveryStatus {
     enum_name = "qp_resolution_projection_status"
 )]
 pub enum QpResolutionProjectionStatus {
-    #[sea_orm(string_value = "pending_mapping")]
-    PendingMapping,
+    #[sea_orm(string_value = "pending")]
+    Pending,
     #[sea_orm(string_value = "delivering")]
     Delivering,
-    #[sea_orm(string_value = "retrying")]
-    Retrying,
+    #[sea_orm(string_value = "retry_scheduled")]
+    RetryScheduled,
+    #[sea_orm(string_value = "mapping_blocked")]
+    MappingBlocked,
     #[sea_orm(string_value = "quarantined")]
     Quarantined,
-    #[sea_orm(string_value = "failed")]
-    Failed,
+    #[sea_orm(string_value = "excluded")]
+    Excluded,
     #[sea_orm(string_value = "verified")]
     Verified,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_resolution_projection_error_code"
+)]
+pub enum QpResolutionProjectionErrorCode {
+    #[sea_orm(string_value = "catalog_mapping_unavailable")]
+    CatalogMappingUnavailable,
+    #[sea_orm(string_value = "invalid_observation")]
+    InvalidObservation,
+    #[sea_orm(string_value = "persistence_unavailable")]
+    PersistenceUnavailable,
+    #[sea_orm(string_value = "external_dependency_unavailable")]
+    ExternalDependencyUnavailable,
+    #[sea_orm(string_value = "unexpected_transient")]
+    UnexpectedTransient,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_resolution_remediation_action"
+)]
+pub enum QpResolutionRemediationAction {
+    #[sea_orm(string_value = "requeue")]
+    Requeue,
+    #[sea_orm(string_value = "exclude")]
+    Exclude,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
@@ -1325,10 +1365,12 @@ pub enum QpResearchJobKind {
     FeedbackTruthFreeze,
     #[sea_orm(string_value = "feedback_coverage")]
     FeedbackCoverage,
-    #[sea_orm(string_value = "feedback_attribution_plan")]
-    FeedbackAttributionPlan,
+    #[sea_orm(string_value = "feedback_attribution")]
+    FeedbackAttribution,
     #[sea_orm(string_value = "feedback_drift")]
     FeedbackDrift,
+    #[sea_orm(string_value = "feedback_recipe_plan")]
+    FeedbackRecipePlan,
     #[sea_orm(string_value = "feedback_dataset_seal")]
     FeedbackDatasetSeal,
     #[sea_orm(string_value = "feedback_training")]
@@ -1341,6 +1383,8 @@ pub enum QpResearchJobKind {
     FeedbackValidation,
     #[sea_orm(string_value = "feedback_comparison")]
     FeedbackComparison,
+    #[sea_orm(string_value = "feedback_shadow_bind")]
+    FeedbackShadowBind,
     #[sea_orm(string_value = "feedback_shadow")]
     FeedbackShadow,
     #[sea_orm(string_value = "feedback_decision")]
@@ -1373,16 +1417,20 @@ pub enum QpResearchJobResultKind {
     FeedbackTruthFreezeArtifact,
     #[sea_orm(string_value = "feedback_coverage_artifact")]
     FeedbackCoverageArtifact,
-    #[sea_orm(string_value = "feedback_attribution_plan_artifact")]
-    FeedbackAttributionPlanArtifact,
+    #[sea_orm(string_value = "feedback_attribution_manifest")]
+    FeedbackAttributionManifest,
     #[sea_orm(string_value = "feedback_drift_artifact")]
     FeedbackDriftArtifact,
+    #[sea_orm(string_value = "candidate_recipe_plan_artifact")]
+    CandidateRecipePlanArtifact,
     #[sea_orm(string_value = "feedback_learning_stage_artifact")]
     FeedbackLearningStageArtifact,
     #[sea_orm(string_value = "feedback_validation_artifact")]
     FeedbackValidationArtifact,
     #[sea_orm(string_value = "feedback_comparison_artifact")]
     FeedbackComparisonArtifact,
+    #[sea_orm(string_value = "shadow_binding_artifact")]
+    ShadowBindingArtifact,
     #[sea_orm(string_value = "feedback_shadow_artifact")]
     FeedbackShadowArtifact,
     #[sea_orm(string_value = "feedback_decision_artifact")]
@@ -1429,6 +1477,10 @@ pub enum QpTradeTapeSourceKind {
 pub enum QpResearchJobStatus {
     #[sea_orm(string_value = "queued")]
     Queued,
+    #[sea_orm(string_value = "awaiting_evidence")]
+    AwaitingEvidence,
+    #[sea_orm(string_value = "retry_scheduled")]
+    RetryScheduled,
     #[sea_orm(string_value = "running")]
     Running,
     #[sea_orm(string_value = "succeeded")]
@@ -1968,6 +2020,66 @@ pub enum QpFeedbackCycleStatus {
     Failed,
     #[sea_orm(string_value = "cancelled")]
     Cancelled,
+    #[sea_orm(string_value = "quarantined")]
+    Quarantined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_feedback_evaluation_mode"
+)]
+pub enum QpFeedbackEvaluationMode {
+    #[sea_orm(string_value = "conditional")]
+    Conditional,
+    #[sea_orm(string_value = "forced_retraining")]
+    ForcedRetraining,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_feedback_scheduler_failure_kind"
+)]
+pub enum QpFeedbackSchedulerFailureKind {
+    #[sea_orm(string_value = "materialization")]
+    Materialization,
+    #[sea_orm(string_value = "settlement")]
+    Settlement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_feedback_recipe_template_status"
+)]
+pub enum QpFeedbackRecipeTemplateStatus {
+    #[sea_orm(string_value = "draft")]
+    Draft,
+    #[sea_orm(string_value = "approved")]
+    Approved,
+    #[sea_orm(string_value = "retired")]
+    Retired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_shadow_binding_status"
+)]
+pub enum QpShadowBindingStatus {
+    #[sea_orm(string_value = "active")]
+    Active,
+    #[sea_orm(string_value = "rejected")]
+    Rejected,
+    #[sea_orm(string_value = "promoted")]
+    Promoted,
+    #[sea_orm(string_value = "cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
@@ -2005,10 +2117,12 @@ pub enum QpFeedbackStage {
     TruthFreeze,
     #[sea_orm(string_value = "coverage")]
     Coverage,
-    #[sea_orm(string_value = "attribution_plan")]
-    AttributionPlan,
+    #[sea_orm(string_value = "attribution")]
+    Attribution,
     #[sea_orm(string_value = "drift")]
     Drift,
+    #[sea_orm(string_value = "recipe_plan")]
+    RecipePlan,
     #[sea_orm(string_value = "dataset_seal")]
     DatasetSeal,
     #[sea_orm(string_value = "training")]
@@ -2021,6 +2135,8 @@ pub enum QpFeedbackStage {
     Validation,
     #[sea_orm(string_value = "comparison")]
     Comparison,
+    #[sea_orm(string_value = "shadow_bind")]
+    ShadowBind,
     #[sea_orm(string_value = "shadow")]
     Shadow,
     #[sea_orm(string_value = "decision")]
@@ -2061,10 +2177,12 @@ pub enum QpFeedbackStageEventKind {
 pub enum QpAttributionArtifactKind {
     #[sea_orm(string_value = "prediction_explanation")]
     PredictionExplanation,
-    #[sea_orm(string_value = "decision_counterfactual")]
-    DecisionCounterfactual,
-    #[sea_orm(string_value = "outcome_association")]
-    OutcomeAssociation,
+    #[sea_orm(string_value = "decision_intervention_replay")]
+    DecisionInterventionReplay,
+    #[sea_orm(string_value = "resolution_outcome_association")]
+    ResolutionOutcomeAssociation,
+    #[sea_orm(string_value = "execution_outcome_association")]
+    ExecutionOutcomeAssociation,
     #[sea_orm(string_value = "execution_trajectory")]
     ExecutionTrajectory,
     #[sea_orm(string_value = "policy_counterfactual_outcome")]

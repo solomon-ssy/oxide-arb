@@ -46,6 +46,18 @@ pub enum ResearchError {
         detail: String,
     },
 
+    /// A remote artifact-store request exhausted the store client's bounded
+    /// transport retries. Durable research jobs may retry this variant with a
+    /// separately governed backoff; configuration, authorization, and
+    /// artifact-contract failures remain non-retryable typed variants.
+    #[error("artifact store transport unavailable for `{uri}`: {detail}")]
+    ArtifactTransport {
+        /// The artifact location involved.
+        uri: String,
+        /// Underlying transport or retry-exhaustion detail.
+        detail: String,
+    },
+
     /// The requested artifact does not exist in the store.
     #[error("artifact not found: `{uri}`")]
     ArtifactNotFound {
@@ -238,6 +250,17 @@ pub enum ResearchError {
     ParquetCodec {
         /// Context describing the failure.
         detail: String,
+    },
+
+    /// A governed offline computation exceeded its explicit wall-clock budget.
+    /// Its CPU/memory leases remain owned until the isolated worker actually
+    /// stops; no partial terminal artifact may be published.
+    #[error("research compute `{operation}` exceeded its {deadline_secs}-second deadline")]
+    ComputeDeadlineExceeded {
+        /// Stable operation name used by metrics and operator diagnostics.
+        operation: &'static str,
+        /// Frozen deploy-time deadline.
+        deadline_secs: u64,
     },
 
     /// A long-running research job was cooperatively cancelled at a stage

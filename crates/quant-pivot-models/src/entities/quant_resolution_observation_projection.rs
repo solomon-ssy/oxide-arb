@@ -3,9 +3,9 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::quant_resolution_observation_inbox;
+use super::{quant_resolution_observation_inbox, quant_resolution_projection_remediation};
 use crate::{
-    enums::quant::ResolutionProjectionStatus,
+    enums::quant::{ResolutionProjectionErrorCode, ResolutionProjectionStatus},
     types::{ContentHash, ResolutionObservationId, WorkerId},
 };
 
@@ -17,10 +17,12 @@ pub struct Model {
     pub resolution_observation_id: ResolutionObservationId,
     pub source_checkpoint_hash: ContentHash,
     pub status: ResolutionProjectionStatus,
+    pub revision: i64,
     pub attempt_count: i32,
     pub claim_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
     pub next_attempt_at: Option<DateTime<Utc>>,
+    pub last_error_code: Option<ResolutionProjectionErrorCode>,
     #[sea_orm(column_type = "Text", nullable)]
     pub last_error: Option<String>,
     pub canonical_fact_hash: Option<ContentHash>,
@@ -35,6 +37,8 @@ pub struct Model {
         to = "resolution_observation_id"
     )]
     pub observation: BelongsTo<quant_resolution_observation_inbox::Entity>,
+    #[sea_orm(has_many)]
+    pub remediations: HasMany<quant_resolution_projection_remediation::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

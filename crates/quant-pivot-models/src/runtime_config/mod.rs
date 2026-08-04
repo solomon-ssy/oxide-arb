@@ -23,19 +23,19 @@ pub use schedule_preview::{
 use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use sea_orm::FromJsonQueryResult;
 pub use sections::{
-    AutoExecutionConfig, CryptoCrossCheckConfig, CryptoDomainConfig, DataQualityConfig,
-    DomainConfig, EntryConditionWorkerConfig, ExecutionConfig, FactorCrossSectionConfig,
-    FactorHeadConfig, FactorNormalizationConfig, FactorOrthogonalizeConfig, FactorsConfig,
-    FavoriteLongshotConfig, FeaturesConfig, KellySafetyConfig, MAX_REPORT_TOP_N,
-    ModelCalibrationConfig, ModelConfig, MomentumFeaturesConfig, NegRiskStructuralConfig,
-    ParticipantConcentrationConfig, PerFactorNormalization, PolicyValidationConfig,
-    PortfolioBudget, PortfolioConfig, PortfolioConstraints, QualityGateConfig,
-    ReportScheduleConfig, ReportsConfig, ResearchConfig, ResearchTrainingConfig,
-    ResearchValidationConfig, ResearchValidationCpcvConfig, ResearchValidationGatesConfig,
-    ResearchValidationPboConfig, ResearchValidationPurgeConfig, ResearchValidationTrialsConfig,
-    ReversalAfterShockConfig, SelectionConfig, SellQualityGateConfig, SellScorerConfig,
-    SemiAutoConfig, StructuralFactorsConfig, StructuralFeaturesConfig, TrainingConfig,
-    WeatherDomainConfig,
+    AutoExecutionConfig, BuyRouteBinding, CryptoCrossCheckConfig, CryptoDomainConfig,
+    DataQualityConfig, DomainConfig, EntryConditionWorkerConfig, ExecutionConfig,
+    FactorCrossSectionConfig, FactorHeadConfig, FactorNormalizationConfig,
+    FactorOrthogonalizeConfig, FactorsConfig, FavoriteLongshotConfig, FeaturesConfig,
+    KellySafetyConfig, MAX_REPORT_TOP_N, ModelBinding, ModelBindingSource, ModelCalibrationConfig,
+    ModelConfig, MomentumFeaturesConfig, NegRiskStructuralConfig, ParticipantConcentrationConfig,
+    PerFactorNormalization, PolicyValidationConfig, PortfolioBudget, PortfolioConfig,
+    PortfolioConstraints, QualityGateConfig, ReportScheduleConfig, ReportsConfig, ResearchConfig,
+    ResearchTrainingConfig, ResearchValidationConfig, ResearchValidationCpcvConfig,
+    ResearchValidationGatesConfig, ResearchValidationPboConfig, ResearchValidationPurgeConfig,
+    ResearchValidationTrialsConfig, ReversalAfterShockConfig, SelectionConfig,
+    SellQualityGateConfig, SellScorerConfig, SemiAutoConfig, StructuralFactorsConfig,
+    StructuralFeaturesConfig, TrainingConfig, WeatherDomainConfig,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Error as SerdeJsonError, Value};
@@ -142,7 +142,20 @@ impl Default for ModelRouting {
 /// `Pooled` may contain only non-vertical market categories. `Crypto` and
 /// `Weather` are isolated category routes because their `ResearchProfile`,
 /// domain-source, factor-plane, and serving-contract preimages are distinct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    FromJsonQueryResult,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BuyModelRoute {
     Pooled,
@@ -215,37 +228,24 @@ impl TryFrom<Option<MarketCategory>> for BuyModelRoute {
 }
 
 impl ModelConfig {
-    /// Resolve the exact active pointer for one report route.
+    /// Resolve the exact binding for one report route.
     ///
     /// # Errors
     ///
-    /// Returns a typed configuration error when the route has no pointer.
-    /// Category routes never fall back to the pooled pointer.
-    pub fn active_pointer(&self, route: BuyModelRoute) -> Result<&ModelVersionRef, ConfigError> {
-        match route {
-            BuyModelRoute::Pooled => {
-                self.active_model_version_id
-                    .as_ref()
-                    .ok_or_else(|| ConfigError::MissingField {
-                        section: "model".to_owned(),
-                        field: "active_model_version_id".to_owned(),
-                    })
-            }
-            BuyModelRoute::Crypto => self
-                .category_model_pointers
-                .get(&MarketCategory::Crypto)
-                .ok_or_else(|| ConfigError::MissingField {
-                    section: "model.category_model_pointers".to_owned(),
-                    field: MarketCategory::Crypto.to_string(),
-                }),
-            BuyModelRoute::Weather => self
-                .category_model_pointers
-                .get(&MarketCategory::Weather)
-                .ok_or_else(|| ConfigError::MissingField {
-                    section: "model.category_model_pointers".to_owned(),
-                    field: MarketCategory::Weather.to_string(),
-                }),
-        }
+    /// Returns a typed configuration error when the route has no binding.
+    /// Routes never fall back to another route.
+    pub fn route_binding(&self, route: BuyModelRoute) -> Result<&BuyRouteBinding, ConfigError> {
+        self.buy_routes
+            .get(&route)
+            .ok_or_else(|| ConfigError::MissingField {
+                section: "model.buy_routes".to_owned(),
+                field: format!("{route:?}").to_lowercase(),
+            })
+    }
+
+    /// Resolve one exact route champion.
+    pub fn champion(&self, route: BuyModelRoute) -> Result<&ModelBinding, ConfigError> {
+        self.route_binding(route).map(|binding| &binding.champion)
     }
 }
 

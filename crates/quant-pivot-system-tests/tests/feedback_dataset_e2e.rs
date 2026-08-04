@@ -22,9 +22,12 @@ use quant_pivot_core::{
         OutcomeReconciliationPassConfig, OutcomeReconciliationService,
         OutcomeReconciliationServiceDeps,
     },
+    observability::serving_evidence::{
+        ModelInputEvidenceBatch, completion_marker, feature_commitment, verify_completion,
+    },
+    projection::inference_context::build_market_inference_context,
     service::{
         feedback_dataset::{FeedbackDatasetService, FeedbackDatasetServiceDeps},
-        feedback_signals::{FeedbackSignalService, FeedbackSignalServiceDeps},
         training_dataset::{
             TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
             default_labelers,
@@ -33,33 +36,27 @@ use quant_pivot_core::{
 };
 use quant_pivot_error::storage::entity::MARKET_RESOLUTION_EVENT;
 use quant_pivot_models::{
-    clickhouse::MarketResolutionRow,
+    clickhouse::{
+        MarketResolutionRow, QuantFeatureEventRow, QuantModelInputEventRow,
+        QuantServingEvidenceCompletionRow,
+    },
+    config::ClickHouseConfig,
     domain::{
-        api::FeedbackCoverageJobParams,
         data_plane::{
             DecisionClock, DecisionSource, DomainCursorStatus, DomainSourceCheckpoint,
             DomainSourceCursorCasOutcome, UpsertDomainSourceCursor,
         },
-        ports::{
-            FeedbackCandidateFamily, FeedbackCandidateFamilyInput, FeedbackCandidateRecipe,
-            FeedbackComparisonContract, FeedbackCoverageExecutionPort, FeedbackDatasetBuildRequest,
-        },
+        ports::FeedbackDatasetBuildRequest,
         quant::{
-            FeatureParityStateInfo, FeedbackCohortWindow, FeedbackCycleInfo, FeedbackCycleKey,
-            FeedbackCycleKeyInput, FeedbackRecommendationContext, FeedbackStageEventInput,
-            NewFeedbackCycle, NewFeedbackStageEvent, NewRecommendation, NoopProgressSink,
-            TrainingDatasetInfo,
+            FeedbackCohortWindow, FeedbackRecommendationContext, ModelVersionInfo,
+            NewRecommendation, NoopProgressSink,
         },
     },
     enums::{
         catalog::CatalogTimestampQuality,
         feature::EvidenceSourceKind,
         market::MarketStatus,
-        quant::{
-            CalibrationMethod, CohortCensorReason, CohortExclusionReason, DataQualityStatus,
-            DatasetPurpose, DownsideSource, FeedbackStage, FeedbackStageEventKind,
-            FeedbackTriggerFamily, QuantRuntimeMode,
-        },
+        quant::{DataQualityStatus, DatasetPurpose, FeedbackCohort, QuantRuntimeMode},
     },
     hashing::CanonicalDigest,
     types::{
@@ -67,35 +64,36 @@ use quant_pivot_models::{
         ContentHash, DatasetSourceLineage, DecisionCaptureEvidence, DecisionPolicySnapshotId,
         DecisionSnapshotEvidence, DomainInstrumentKey, DomainSourceId, EvidenceSourceRef,
         EvmAddress, EvmBlockHash, EvmTransactionHash, FeatureCell, FeatureStaleness, FeatureValue,
-        FeedbackCoverageArtifactId, MarketId, ModelVersionId, PayoutRatio, Probability,
-        ResearchEvaluationTrack, ResearchProfileRef, SchemaVersion, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource, WorkerId,
+        MarketId, PayoutRatio, Probability, ResearchEvaluationTrack, SchemaVersion,
+        TrainingDatasetId, TrainingExampleId, TrainingSampleSource,
     },
 };
 use quant_pivot_repository::{
-    clickhouse::{ChFactWriter, ChQuantFactReadRepository},
+    clickhouse::{ChFactWriter, ChFeatureParityEventRepository, ChQuantFactReadRepository},
     postgres::{
         PgCalibrationArtifactRepository, PgCatalogLedgerRepository, PgClobMarketInfoRepository,
         PgDomainSourceCursorRepository, PgExecutionAttemptOutcomeRepository, PgFactorRepository,
-        PgFeatureParityRepository, PgFeatureRepository, PgFeedbackCohortRepository,
-        PgFeedbackCycleRepository, PgMarketLinkageRepository, PgMarketRepository,
+        PgFeatureRepository, PgMarketLinkageRepository, PgMarketRepository,
         PgModelRegistryRepository, PgPolicyRepository, PgPositionRepository,
         PgRecommendationExecutionRollupRepository, PgRecommendationReportRepository,
         PgRecommendationRepository, PgRecommendationResolutionOutcomeRepository,
         PgResolutionObservationRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        DomainSourceCursorRepository, FactWriter, FactorRepository, FeatureParityRepository,
-        FeatureRepository, FeedbackCycleRepository, MarketRepository, ModelRegistryRepository,
-        PolicyRepository, RecommendationReportRepository, RecommendationRepository,
-        RecommendationResolutionOutcomeRepository, TrainingDatasetRepository,
+        DomainSourceCursorRepository, FactWriter, FactorRepository, FeatureRepository,
+        MarketRepository, ModelRegistryRepository, PolicyRepository, QuantFactReadRepository,
+        RecommendationReportRepository, RecommendationRepository,
+        RecommendationResolutionOutcomeRepository, ServingEvidenceRepository,
     },
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
     factors::{FactorValue, FactorValueInsertContext},
-    features::{FeatureVector, names::book::MID},
-    feedback::{CoverageGateOutcome, CoverageNoActionReason, FeedbackCoverageCodec},
+    features::{
+        FeatureSchema, FeatureVector, feature_events,
+        names::book::{BEST_ASK, MID, SECONDARY_BEST_ASK},
+    },
+    model::{FactorInferenceRow, FactorInferenceTable, WeightedInputAuditContract},
     selection::SelectedMarket,
     training::{
         TOKEN_PAYOUT_RATIO, TrainingDatasetArtifact, TrainingExample, TrainingLabel,
@@ -109,22 +107,53 @@ use quant_pivot_system_tests::{
     support::{
         artifact_store::VersionedArtifactStoreFixture,
         execution_pg_seed::{
-            ExecutionTxnIds, FEEDBACK_SCALE_PER_REPORT, FEEDBACK_SCALE_REPORT_COUNT,
-            FEEDBACK_SCALE_TOTAL, ReportBuildOptions, ReportSeedConfig, SharedDemoInfra,
-            build_custom_report_transaction, fixture_no_token_id, fixture_profile_ref,
-            prepare_report_on_infra, seed_demo_with_store, seed_feedback_scale,
+            ExecutionTxnIds, FEEDBACK_SCALE_REPORT_COUNT, ReportBuildOptions, ReportSeedConfig,
+            SharedDemoInfra, build_custom_report_transaction, fixture_no_token_id,
+            fixture_profile_ref, prepare_report_on_infra, seed_demo_with_store,
+            seed_feedback_scale,
         },
-        model_serving_runtime::ModelServingRegistryFixture,
-        report_lifecycle_seed::persist_and_publish_report,
+        report_lifecycle_seed::{materialize_report_facts, persist_and_publish_report},
         research_fixtures::{
             ReplayableSourceSliceFixture, persist_replayable_source_slice, seed_source_manifest,
         },
-        trade_policy_fixtures::PublishedTradePolicyFixture,
     },
 };
 use rust_decimal_macros::dec;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use tokio_util::sync::CancellationToken;
+
+const FEATURE_EVENT_TABLE: &str = "quant_feature_event";
+const MODEL_INPUT_EVENT_TABLE: &str = "quant_model_input_event";
+const SERVING_COMPLETION_TABLE: &str = "quant_serving_evidence_completion";
+
+struct ServingEvidenceSinks {
+    features: Arc<dyn FactWriter<QuantFeatureEventRow>>,
+    inputs: Arc<dyn FactWriter<QuantModelInputEventRow>>,
+    completions: Arc<dyn FactWriter<QuantServingEvidenceCompletionRow>>,
+}
+
+impl ServingEvidenceSinks {
+    fn new(ch: &Arc<ClickHousePool>, max_concurrent_inserts: usize) -> Self {
+        let write_manager = Arc::new(ChWriteManager::new(max_concurrent_inserts));
+        Self {
+            features: Arc::new(ChFactWriter::new(
+                Arc::clone(ch),
+                Arc::clone(&write_manager),
+                FEATURE_EVENT_TABLE,
+            )),
+            inputs: Arc::new(ChFactWriter::new(
+                Arc::clone(ch),
+                Arc::clone(&write_manager),
+                MODEL_INPUT_EVENT_TABLE,
+            )),
+            completions: Arc::new(ChFactWriter::new(
+                Arc::clone(ch),
+                write_manager,
+                SERVING_COMPLETION_TABLE,
+            )),
+        }
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn outcome_dataset_production_stack() {
@@ -159,22 +188,48 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
         .find_model_version(&infra.model_version_id)
         .await?
         .context("seeded model version")?;
-
-    let mut reports = Vec::with_capacity(FEEDBACK_SCALE_REPORT_COUNT);
-    let mut serving = Vec::with_capacity(FEEDBACK_SCALE_REPORT_COUNT);
-    for ordinal in 0..FEEDBACK_SCALE_REPORT_COUNT {
-        let (ids, evidence) = seed_feedback_report(&db, &infra, ordinal).await?;
-        reports.push(ids);
-        serving.push(evidence);
-    }
-    assert_publication_history(&db, &reports).await?;
-    let reconciliation =
-        reconcile_outcomes(&db, Arc::clone(&ch), Arc::clone(&facts), &reports).await?;
+    let runtime = PgPolicyRepository::new(db.clone())
+        .load_snapshot(&infra.decision_policy_snapshot_id)
+        .await?
+        .context("seeded runtime policy")?
+        .snapshot;
+    let schema = FeatureSchema::build(&runtime.profile_artifacts.features.definition)?;
+    let sinks = ServingEvidenceSinks::new(&ch, stack.clickhouse_config.max_concurrent_inserts);
+    let population = seed_feedback_population(
+        &FeedbackReportSeedContext {
+            db: &db,
+            infra: &infra,
+            artifacts: &store,
+            clickhouse: &stack.clickhouse_config,
+            schema: &schema,
+            model: &model,
+            sinks: &sinks,
+        },
+        FEEDBACK_SCALE_REPORT_COUNT,
+    )
+    .await?;
+    assert_publication_history(&db, &population.reports).await?;
+    let reconciliation = reconcile_outcomes(
+        &db,
+        Arc::clone(&ch),
+        Arc::clone(&facts),
+        &population.reports,
+    )
+    .await?;
+    assert_scored_population(
+        &db,
+        ch.as_ref(),
+        facts.as_ref(),
+        reconciliation.window_start,
+        reconciliation.frozen_cutoff,
+    )
+    .await?;
 
     let dataset_service = feedback_service(
         &db,
         Arc::clone(&store),
-        facts,
+        Arc::clone(&facts),
+        Arc::clone(&ch),
         infra.decision_policy_snapshot_id,
     )
     .await?;
@@ -182,7 +237,7 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
         &db,
         &store,
         &[source_example(
-            &serving[0],
+            &population.serving[0],
             reconciliation.first_resolved_at,
         )],
         &infra,
@@ -199,41 +254,20 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
         window: feedback_window(reconciliation.window_start, reconciliation.frozen_cutoff)?,
         purpose: DatasetPurpose::Training,
     };
-    let first_artifact = Box::pin(dataset_service.build(
-        old_request.clone(),
-        Arc::new(NoopProgressSink),
-        CancellationToken::new(),
-    ))
-    .await?;
-    assert_cohort(&first_artifact, FEEDBACK_SCALE_TOTAL as u64, 1)?;
-
-    let rerun_artifact = Box::pin(dataset_service.build(
+    let first_artifact = assert_dataset_replay(
+        &dataset_service,
+        &store,
         old_request,
-        Arc::new(NoopProgressSink),
-        CancellationToken::new(),
-    ))
+        u64::try_from(FEEDBACK_SCALE_REPORT_COUNT)?,
+    )
     .await?;
-    ensure!(
-        rerun_artifact == first_artifact,
-        "same frozen request did not reload the exact immutable Dataset"
-    );
-    let first_bytes = store.get(&first_artifact.parquet_uri).await?;
-    ensure!(
-        CanonicalDigest::content_hash_bytes(&first_bytes) == first_artifact.artifact_bytes_hash,
-        "persisted Dataset byte hash does not reproduce"
-    );
-    ensure!(
-        dataset_manifest_hash(&first_artifact.manifest)?
-            == dataset_manifest_hash(&rerun_artifact.manifest)?,
-        "same frozen request changed its manifest hash"
-    );
 
     let next_source = source_lineage(
         &db,
         &store,
         &[
-            source_example(&serving[0], reconciliation.first_resolved_at),
-            source_example(&serving[1], reconciliation.second_resolved_at),
+            source_example(&population.serving[0], reconciliation.first_resolved_at),
+            source_example(&population.serving[1], reconciliation.second_resolved_at),
         ],
         &infra,
         reconciliation.window_start,
@@ -254,22 +288,53 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
         CancellationToken::new(),
     ))
     .await?;
-    assert_cohort(&next_artifact, FEEDBACK_SCALE_TOTAL as u64, 2)?;
+    assert_cohort(
+        &next_artifact,
+        u64::try_from(FEEDBACK_SCALE_REPORT_COUNT)?,
+        2,
+    )?;
     ensure!(
         first_artifact.dataset_hash != next_artifact.dataset_hash,
         "next cutoff did not incorporate the late outcome"
     );
-    assert_signal_coverage(
-        &db,
-        Arc::clone(&store),
-        infra.model_version_id,
-        reconciliation.next_cutoff,
-    )
-    .await?;
-
-    let storage_counts = assert_storage_idempotency(&db, ch.as_ref(), &reports).await?;
+    let storage_counts = assert_storage_idempotency(&db, ch.as_ref(), &population.reports).await?;
     print_evidence(&first_artifact, &next_artifact, storage_counts)?;
     Ok(())
+}
+
+async fn assert_dataset_replay(
+    service: &FeedbackDatasetService,
+    store: &Arc<dyn ArtifactStore>,
+    request: FeedbackDatasetBuildRequest,
+    expected_population: u64,
+) -> Result<TrainingDatasetArtifact> {
+    let first = Box::pin(service.build(
+        request.clone(),
+        Arc::new(NoopProgressSink),
+        CancellationToken::new(),
+    ))
+    .await?;
+    assert_cohort(&first, expected_population, 1)?;
+    let replayed = Box::pin(service.build(
+        request,
+        Arc::new(NoopProgressSink),
+        CancellationToken::new(),
+    ))
+    .await?;
+    ensure!(
+        replayed == first,
+        "same frozen request did not reload the exact immutable Dataset"
+    );
+    let bytes = store.get(&first.parquet_uri).await?;
+    ensure!(
+        CanonicalDigest::content_hash_bytes(&bytes) == first.artifact_bytes_hash,
+        "persisted Dataset byte hash does not reproduce"
+    );
+    ensure!(
+        dataset_manifest_hash(&first.manifest)? == dataset_manifest_hash(&replayed.manifest)?,
+        "same frozen request changed its manifest hash"
+    );
+    Ok(first)
 }
 
 struct ReconciledOutcomes {
@@ -280,242 +345,46 @@ struct ReconciledOutcomes {
     second_resolved_at: DateTime<Utc>,
 }
 
-async fn assert_signal_coverage(
+async fn assert_scored_population(
     db: &DatabaseConnection,
-    store: Arc<dyn ArtifactStore>,
-    model_version_id: ModelVersionId,
-    label_cutoff: DateTime<Utc>,
+    ch: &ClickHousePool,
+    facts: &ChQuantFactReadRepository,
+    window_start: DateTime<Utc>,
+    cutoff: DateTime<Utc>,
 ) -> Result<()> {
-    let cycle = record_signal_cycle(db, model_version_id, label_cutoff).await?;
-    let parity = PgFeatureParityRepository::new(db.clone());
-    let before = parity
-        .current_state()
-        .await?
-        .context("seeded parity state before feedback coverage")?;
-    let service = signal_service(db, Arc::clone(&store))?;
-    let artifact_id = FeedbackCoverageArtifactId::from_cycle_id(cycle.feedback_cycle_id);
-    let result = Box::pin(service.execute(
-        FeedbackCoverageJobParams {
-            feedback_cycle_id: cycle.feedback_cycle_id,
-            cycle_idempotency_hash: cycle.idempotency_hash,
-            artifact_id,
-        },
-        Arc::new(NoopProgressSink),
-        CancellationToken::new(),
-    ))
-    .await?;
-    ensure!(
-        result.artifact_id == artifact_id,
-        "coverage executor returned another artifact identity"
-    );
-    let bytes = store.get(&result.artifact.uri).await?;
-    ensure!(
-        FeedbackCoverageCodec::bytes_hash(&bytes) == result.artifact.content_hash,
-        "coverage result hash does not bind its object bytes"
-    );
-    let artifact = FeedbackCoverageCodec::decode(&bytes)?;
-    let cycle_hash_matches = artifact.cycle_idempotency_hash == cycle.idempotency_hash;
-    ensure!(
-        artifact.feedback_cycle_id == cycle.feedback_cycle_id && cycle_hash_matches,
-        "coverage object differs from its live frozen cycle"
-    );
-    ensure!(
-        matches!(
-            artifact.gate_outcome,
-            CoverageGateOutcome::NoAction {
-                reason: CoverageNoActionReason::InsufficientMatureLabels,
-                ..
-            }
-        ),
-        "two real mature outcomes must not pass the production 500-label floor"
-    );
-    ensure!(
-        artifact.cohorts.policy_evaluation.eligible_count() == FEEDBACK_SCALE_TOTAL as u64,
-        "coverage denominator did not retain the complete PolicyEvaluation universe"
-    );
-    ensure!(
-        artifact.cohorts.model_learning.eligible_count() == 2
-            && artifact.new_mature_label_count == 2
-            && artifact.champion_rows.len() == 2
-            && artifact.champion_examples.len() == 2,
-        "coverage did not freeze the two real mature champion labels"
-    );
-    let execution_exclusions = artifact.cohorts.execution_learning.exclusion_counts();
-    let report_only_count = execution_exclusions
-        .iter()
-        .find(|entry| entry.reason == CohortExclusionReason::ReportOnlyNoExecutionAuthority)
-        .map_or(0, |entry| entry.count);
-    let not_attempted_count = execution_exclusions
-        .iter()
-        .find(|entry| entry.reason == CohortExclusionReason::ExecutionNotAttempted)
-        .map_or(0, |entry| entry.count);
-    let execution_censors = artifact.cohorts.execution_learning.censor_counts();
-    let unsealed_count = execution_censors
-        .iter()
-        .find(|entry| entry.reason == CohortCensorReason::ExecutionOutcomeUnavailableAtCutoff)
-        .map_or(0, |entry| entry.count);
-    ensure!(
-        artifact.cohorts.execution_learning.eligible_count() == 0
-            && report_only_count == FEEDBACK_SCALE_PER_REPORT as u64
-            && not_attempted_count == 0
-            && unsealed_count == (FEEDBACK_SCALE_TOTAL - FEEDBACK_SCALE_PER_REPORT) as u64,
-        "ExecutionLearning did not preserve ReportOnly exclusion and open-authority censoring"
-    );
-    let after = parity
-        .current_state()
-        .await?
-        .context("seeded parity state after feedback coverage")?;
-    assert_parity_unchanged(&before, &after)?;
-    Ok(())
-}
-
-async fn record_signal_cycle(
-    db: &DatabaseConnection,
-    model_version_id: ModelVersionId,
-    label_cutoff: DateTime<Utc>,
-) -> Result<FeedbackCycleInfo> {
-    let models = PgModelRegistryRepository::new(db.clone());
-    let model = models
-        .find_model_version(&model_version_id)
-        .await?
-        .context("feedback coverage champion")?;
-    let dataset_id = model
-        .training_dataset_id
-        .context("feedback coverage champion Training Dataset")?;
-    let dataset = PgTrainingDatasetRepository::new(db.clone())
-        .find_by_id(&dataset_id)
-        .await?
-        .context("feedback coverage champion Dataset row")?;
-    let profile = model
-        .profile_ref
-        .resolve_builtin_research_profile()
-        .map_err(AnyhowError::msg)?;
-    let feedback_policy_hash = profile.spec.feedback_policy.content_hash()?;
-    let candidate_family = signal_candidate_family(&dataset, &model.profile_ref, label_cutoff)?;
-    let cycle = NewFeedbackCycle::try_seal(FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
-        profile_ref: model.profile_ref,
-        feedback_policy_hash,
-        label_cutoff,
-        capability_registry_hashes: dataset.source_lineage.capability_registry_hashes,
-        champion_model_version_id: model.model_version_id,
-        champion_serving_contract_hash: model.serving_contract_hash,
-        candidate_family,
-    })?)?;
-    let cycle_id = cycle.feedback_cycle_id();
-    let trigger = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
-        feedback_cycle_id: cycle_id,
-        event_sequence: 1,
-        stage: FeedbackStage::Trigger,
-        event_kind: FeedbackStageEventKind::Triggered,
-        trigger_family: Some(FeedbackTriggerFamily::Scheduled),
-        research_job_id: None,
-        actor: Some("feedback-dataset-e2e".to_owned()),
-        reason_code: Some("w2_f06_real_coverage".to_owned()),
-        evidence_uri: None,
-        evidence_hash: None,
-        occurred_at: label_cutoff,
-    })?;
-    let cycles = PgFeedbackCycleRepository::new(db.clone());
-    cycles.record_trigger(cycle, trigger).await?;
-    let claim = cycles
-        .claim_cycle(WorkerId::from_v7(), 90)
-        .await?
-        .context("claim real feedback coverage cycle")?;
-    ensure!(
-        claim.cycle.feedback_cycle_id == cycle_id,
-        "feedback coordinator claimed another cycle"
-    );
-    Ok(claim.cycle)
-}
-
-fn signal_candidate_family(
-    seed: &TrainingDatasetInfo,
-    profile_ref: &ResearchProfileRef,
-    label_cutoff: DateTime<Utc>,
-) -> Result<FeedbackCandidateFamily> {
-    let policy_id = seed.source_lineage.decision_policy_snapshot_id;
-    let request = |purpose, window_start, cutoff| -> Result<FeedbackDatasetBuildRequest> {
-        let mut source_lineage = seed.source_lineage.clone();
-        source_lineage.source_window_start = window_start;
-        source_lineage.source_window_end = cutoff;
-        source_lineage.pit_cutoff = cutoff;
-        Ok(FeedbackDatasetBuildRequest {
-            training_dataset_id: TrainingDatasetId::from_v7(),
-            model_spec_id: seed.model_spec_id,
-            model_spec_definition_hash: seed.model_spec_definition_hash,
-            source_lineage,
-            window: FeedbackCohortWindow::try_new(profile_ref.clone(), window_start, cutoff)?,
-            purpose,
-        })
+    let reports = PgRecommendationReportRepository::new(db.clone())
+        .list_committed_between(window_start, cutoff)
+        .await?;
+    let profile_ref = fixture_profile_ref();
+    let funnels = facts
+        .report_funnel_between(
+            &profile_ref,
+            window_start.timestamp_millis(),
+            cutoff.timestamp_millis(),
+        )
+        .await?;
+    let raw_funnel_count = ch
+        .client()
+        .query("SELECT count() FROM quant_report_market_funnel")
+        .fetch_one::<u64>()
+        .await?;
+    let sample = match reports.first() {
+        Some(report) => facts
+            .report_market_funnel_page(&report.recommendation_report_id, None, None, 0, 1)
+            .await?
+            .into_iter()
+            .next(),
+        None => None,
     };
-    let recipe = FeedbackCandidateRecipe::try_seal(
-        request(
-            DatasetPurpose::Training,
-            label_cutoff - Duration::days(9),
-            label_cutoff - Duration::days(7),
-        )?,
-        request(
-            DatasetPurpose::Calibration,
-            label_cutoff - Duration::days(6),
-            label_cutoff - Duration::days(4),
-        )?,
-        CalibrationMethod::Platt,
-        DownsideSource::MfeMae,
-        policy_id,
-    )?;
-    let comparison_contract = FeedbackComparisonContract::try_from_policy(
-        &profile_ref
-            .resolve_builtin_research_profile()
-            .map_err(AnyhowError::msg)?
-            .spec
-            .feedback_policy,
-    )?;
-    FeedbackCandidateFamily::try_seal(FeedbackCandidateFamilyInput {
-        shared_evaluation: request(
-            DatasetPurpose::Evaluation,
-            label_cutoff - Duration::days(3),
-            label_cutoff,
-        )?,
-        comparison_contract,
-        candidates: vec![recipe],
-    })
-    .map_err(Into::into)
-}
-
-fn signal_service(
-    db: &DatabaseConnection,
-    store: Arc<dyn ArtifactStore>,
-) -> Result<FeedbackSignalService> {
-    let preimages = ModelServingRegistryFixture {
-        db: db.clone(),
-        artifact_store: Arc::clone(&store),
-        evidence_scope: PublishedTradePolicyFixture::evidence_scope()?,
-        evidence_attestor: Some(PublishedTradePolicyFixture::evidence_attestor()?),
-    }
-    .build_preimages();
-    Ok(FeedbackSignalService::new(FeedbackSignalServiceDeps {
-        cycles: Arc::new(PgFeedbackCycleRepository::new(db.clone())),
-        models: Arc::new(PgModelRegistryRepository::new(db.clone())),
-        preimages,
-        cohort_repository: Arc::new(PgFeedbackCohortRepository::new(db.clone())),
-        feature_repository: Arc::new(PgFeatureRepository::new(db.clone())),
-        factor_repository: Arc::new(PgFactorRepository::new(db.clone())),
-        artifact_store: store,
-    }))
-}
-
-fn assert_parity_unchanged(
-    before: &FeatureParityStateInfo,
-    after: &FeatureParityStateInfo,
-) -> Result<()> {
     ensure!(
-        after.state_id == before.state_id
-            && after.state == before.state
-            && after.transition == before.transition
-            && after.cause_run_id == before.cause_run_id
-            && after.recovery_run_id == before.recovery_run_id
-            && after.previous_state_id == before.previous_state_id,
-        "coverage execution mutated the deterministic parity latch"
+        reports.len() == FEEDBACK_SCALE_REPORT_COUNT
+            && funnels.len() == FEEDBACK_SCALE_REPORT_COUNT,
+        "complete scored-serving population is not queryable at the frozen cutoff: reports={} filtered_funnels={} raw_funnels={} window=[{}, {}) expected_profile={profile_ref:?} sample={sample:?}",
+        reports.len(),
+        funnels.len(),
+        raw_funnel_count,
+        window_start,
+        cutoff,
     );
     Ok(())
 }
@@ -541,7 +410,7 @@ async fn reconcile_outcomes(
             Some("Split"),
         )
         .await?;
-    let first_resolved_at = first.decision_at + Duration::milliseconds(1);
+    let first_resolved_at = floor_millisecond(db.statement_time().await)?;
     seed_resolution_cursor(db, 100, first.decision_at - Duration::seconds(1)).await?;
     let first_reconciliation = reconciliation_service(
         db,
@@ -579,7 +448,7 @@ async fn reconcile_outcomes(
             Some("Split"),
         )
         .await?;
-    let second_resolved_at = second.decision_at + Duration::milliseconds(1);
+    let second_resolved_at = floor_millisecond(db.statement_time().await)?;
     let second_reconciliation = reconciliation_service(
         db,
         ch,
@@ -619,11 +488,46 @@ struct ServingSeed {
     capture: DecisionCaptureEvidence,
 }
 
+struct FeedbackReportSeedContext<'a> {
+    db: &'a DatabaseConnection,
+    infra: &'a SharedDemoInfra,
+    artifacts: &'a Arc<dyn ArtifactStore>,
+    clickhouse: &'a ClickHouseConfig,
+    schema: &'a FeatureSchema,
+    model: &'a ModelVersionInfo,
+    sinks: &'a ServingEvidenceSinks,
+}
+
+struct SeededFeedbackPopulation {
+    reports: Vec<ExecutionTxnIds>,
+    serving: Vec<ServingSeed>,
+}
+
+async fn seed_feedback_population(
+    context: &FeedbackReportSeedContext<'_>,
+    count: usize,
+) -> Result<SeededFeedbackPopulation> {
+    let mut reports = Vec::with_capacity(count);
+    let mut serving = Vec::with_capacity(count);
+    for ordinal in 0..count {
+        let (ids, evidence) = Box::pin(seed_feedback_report(context, ordinal)).await?;
+        reports.push(ids);
+        serving.push(evidence);
+    }
+    Ok(SeededFeedbackPopulation { reports, serving })
+}
+
 async fn seed_feedback_report(
-    db: &DatabaseConnection,
-    infra: &SharedDemoInfra,
+    context: &FeedbackReportSeedContext<'_>,
     ordinal: usize,
 ) -> Result<(ExecutionTxnIds, ServingSeed)> {
+    let db = context.db;
+    let infra = context.infra;
+    let artifacts = context.artifacts;
+    let clickhouse = context.clickhouse;
+    let schema = context.schema;
+    let model = context.model;
+    let sinks = context.sinks;
     let config = ReportSeedConfig {
         event_id: format!("feedback-dataset-event-{ordinal}"),
         market_id: format!("0xfeedback-dataset-market-{ordinal}"),
@@ -632,7 +536,19 @@ async fn seed_feedback_report(
         token_id: format!("{}", 90_000 + ordinal),
         trigger_key: format!("feedback-dataset:{ordinal}"),
     };
-    let ids = prepare_report_on_infra(db, infra, &config).await;
+    let database_now = db.statement_time().await;
+    let profile = fixture_profile_ref()
+        .resolve_builtin_research_profile()
+        .map_err(AnyhowError::msg)?;
+    let horizon_secs = i64::try_from(profile.spec.target_horizon_secs)
+        .context("feedback profile horizon exceeds chrono's signed range")?;
+    let historical_decision_at = database_now
+        .checked_sub_signed(Duration::seconds(horizon_secs))
+        .and_then(|value| value.checked_sub_signed(Duration::hours(1)))
+        .context("feedback decision timestamp underflow")?;
+    let decision_at = DateTime::from_timestamp_millis(historical_decision_at.timestamp_millis())
+        .context("database time is outside chrono's millisecond range")?;
+    let ids = prepare_report_on_infra(db, infra, &config, decision_at).await;
     let mut options = ReportBuildOptions::published_single(&ids);
     if ordinal == 0 {
         options.runtime_mode = QuantRuntimeMode::ReportOnly;
@@ -646,7 +562,7 @@ async fn seed_feedback_report(
         .feature_vector
         .try_to_new(&serving.capture.snapshot.boundary, &serving.capture)?;
     feature.feature_vector_id = recommendation.evidence_refs.feature_vector_id;
-    PgFeatureRepository::new(db.clone()).create(feature).await?;
+    let persisted_feature = PgFeatureRepository::new(db.clone()).create(feature).await?;
     let factor_values = ids.factor_values();
     let factor_context = FactorValueInsertContext {
         model_run_id: &ids.model_run,
@@ -662,14 +578,62 @@ async fn seed_feedback_report(
                 .collect::<StdResult<Vec<_>, _>>()?,
         )
         .await?;
+    let event_time = ids.decision_at.timestamp_millis();
+    let evidence_ingestion_time = next_millisecond(db.statement_time().await)?.timestamp_millis();
+    let feature_rows = feature_events(
+        &serving.feature_vector,
+        &persisted_feature,
+        &serving.capture.snapshot.boundary,
+        &ids.decision_policy_snapshot,
+        schema,
+        evidence_ingestion_time,
+    )?;
+    let feature_vector_ids = [recommendation.evidence_refs.feature_vector_id];
+    let feature_evidence =
+        feature_commitment(&feature_rows)?.bind_model_vectors(&feature_vector_ids)?;
+    let inference_context =
+        build_market_inference_context(&serving.feature_vector, &serving.selected_market)
+            .context("feedback Dataset fixture has no executable inference context")?;
+    let input_table = FactorInferenceTable {
+        model_run_id: ids.model_run,
+        decision_at: ids.decision_at,
+        rows: vec![FactorInferenceRow {
+            market_id: recommendation.market_id.clone(),
+            token_id: recommendation.token_id.clone(),
+            factors: factor_values.clone(),
+            context: inference_context,
+        }],
+    };
+    let serving_contract = model.verified_serving_contract()?;
+    let bindings = serving_contract.bindings();
+    let input_audit = input_table.weighted_input_audit(WeightedInputAuditContract {
+        model_version_id: model.model_version_id,
+        input_contract_hash: bindings.transform.input_contract_hash,
+        transform_hash: bindings.transform.input_transform_hash,
+        training_input_hash: bindings.transform.training_input_hash,
+    })?;
+    let vectors = [serving.feature_vector.clone()];
+    let input_rows = ModelInputEvidenceBatch::try_new(&vectors, &feature_vector_ids)?.project(
+        &ids.model_run,
+        &serving.capture.snapshot.boundary,
+        &input_audit,
+        event_time,
+    )?;
+    let completion = completion_marker(
+        &ids.model_run,
+        &serving.capture.snapshot.boundary,
+        &feature_evidence,
+        &input_rows,
+        evidence_ingestion_time,
+    )?;
+    verify_completion(&completion, &feature_rows, &input_rows)?;
+    sinks.features.write_batch(feature_rows).await?;
+    sinks.inputs.write_batch(input_rows).await?;
+    sinks.completions.write_batch(vec![completion]).await?;
     ids.complete_model_run(db).await;
-    persist_and_publish_report(
-        db,
-        build_custom_report_transaction(&ids, options),
-        &config.trigger_key,
-        10,
-    )
-    .await;
+    let mut transaction = build_custom_report_transaction(&ids, options);
+    materialize_report_facts(artifacts, clickhouse, &mut transaction).await?;
+    persist_and_publish_report(db, transaction, &config.trigger_key, 10).await;
     Ok((
         ids,
         ServingSeed {
@@ -752,14 +716,32 @@ fn serving_evidence(
         token_id: Some(recommendation.token_id.clone()),
         decision_at: ids.decision_at,
         generic_schema_version: SchemaVersion::FIRST,
-        generic: BTreeMap::from([(
-            MID,
-            FeatureCell::observed(
-                FeatureValue::Probability(Probability::new(dec!(0.42))),
-                Some(source_ref),
-                FeatureStaleness::Known { age_ms: 0 },
+        generic: BTreeMap::from([
+            (
+                BEST_ASK,
+                FeatureCell::observed(
+                    FeatureValue::Probability(Probability::new(dec!(0.43))),
+                    Some(source_ref.clone()),
+                    FeatureStaleness::Known { age_ms: 0 },
+                ),
             ),
-        )]),
+            (
+                MID,
+                FeatureCell::observed(
+                    FeatureValue::Probability(Probability::new(dec!(0.42))),
+                    Some(source_ref.clone()),
+                    FeatureStaleness::Known { age_ms: 0 },
+                ),
+            ),
+            (
+                SECONDARY_BEST_ASK,
+                FeatureCell::observed(
+                    FeatureValue::Probability(Probability::new(dec!(0.59))),
+                    Some(source_ref),
+                    FeatureStaleness::Known { age_ms: 0 },
+                ),
+            ),
+        ]),
         domain: None,
         data_quality: DataQualityStatus::Fresh,
     };
@@ -811,7 +793,7 @@ fn source_example(seed: &ServingSeed, resolved_at: DateTime<Utc>) -> TrainingExa
             .expect("serving feature token"),
         selected_market: seed.selected_market.clone(),
         decision_boundary: seed.capture.snapshot.boundary.clone(),
-        sample_source: TrainingSampleSource::RecommendationFeedback,
+        sample_source: TrainingSampleSource::PublishedDecisionDiagnostic,
         feature_vector: seed.feature_vector.clone(),
         factor_values: seed.factor_values.clone(),
         labels: vec![TrainingLabel {
@@ -863,6 +845,7 @@ async fn feedback_service(
     db: &DatabaseConnection,
     store: Arc<dyn ArtifactStore>,
     fact_read: Arc<ChQuantFactReadRepository>,
+    ch: Arc<ClickHousePool>,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
 ) -> Result<FeedbackDatasetService> {
     let runtime = PgPolicyRepository::new(db.clone())
@@ -873,7 +856,7 @@ async fn feedback_service(
     let training = TrainingDatasetService::new(
         TrainingDatasetServiceDeps {
             compute: Arc::new(ComputeExecutor::new().expect("feedback compute executor")),
-            fact_read,
+            fact_read: Arc::clone(&fact_read) as Arc<dyn QuantFactReadRepository>,
             catalog_repo: Arc::new(PgCatalogLedgerRepository::new(db.clone())),
             market_repo: Arc::new(PgMarketRepository::new(db.clone())),
             artifact_store: Arc::clone(&store),
@@ -898,7 +881,10 @@ async fn feedback_service(
         20_000,
     )?;
     Ok(FeedbackDatasetService::new(FeedbackDatasetServiceDeps {
-        cohort_repository: Arc::new(PgFeedbackCohortRepository::new(db.clone())),
+        report_repository: Arc::new(PgRecommendationReportRepository::new(db.clone())),
+        fact_repository: fact_read,
+        serving_evidence_repository: Arc::new(ChFeatureParityEventRepository::new(ch))
+            as Arc<dyn ServingEvidenceRepository>,
         feature_repository: Arc::new(PgFeatureRepository::new(db.clone())),
         factor_repository: Arc::new(PgFactorRepository::new(db.clone())),
         artifact_store: store,
@@ -1064,6 +1050,19 @@ fn feedback_window(
     FeedbackCohortWindow::try_new(fixture_profile_ref(), window_start, cutoff).map_err(Into::into)
 }
 
+fn next_millisecond(value: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    let timestamp = value
+        .timestamp_millis()
+        .checked_add(1)
+        .context("millisecond timestamp overflow")?;
+    DateTime::from_timestamp_millis(timestamp).context("timestamp is outside chrono's range")
+}
+
+fn floor_millisecond(value: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    DateTime::from_timestamp_millis(value.timestamp_millis())
+        .context("timestamp is outside chrono's range")
+}
+
 fn assert_cohort(
     artifact: &TrainingDatasetArtifact,
     candidate_count: u64,
@@ -1077,11 +1076,20 @@ fn assert_cohort(
         .as_ref()
         .context("feedback Dataset cohort manifest")?;
     ensure!(
-        cohort.counts.candidate_count() == candidate_count
+        cohort.cohort == FeedbackCohort::ModelScoreLearning
+            && cohort.counts.candidate_count() == candidate_count
             && cohort.counts.eligible_count() == included_count
             && cohort.counts.included_count() == included_count
             && cohort.artifact.row_count == included_count
-            && example_count == included_count,
+            && example_count == included_count
+            && artifact.coverage.planned_samples == candidate_count
+            && artifact.coverage.built_examples == included_count
+            && artifact.coverage.labels_available == included_count
+            && artifact.coverage.labels_not_mature == candidate_count - included_count
+            && artifact
+                .examples
+                .iter()
+                .all(|example| example.sample_source == TrainingSampleSource::ModelScoreFeedback),
         "feedback cohort accounting does not reconcile"
     );
     Ok(())
@@ -1189,7 +1197,7 @@ async fn pg_count(db: &DatabaseConnection, table: &str) -> Result<u64> {
         "quant_training_dataset" => {
             "SELECT COUNT(*) AS row_count
              FROM quant_training_dataset
-             WHERE feedback_cohort = 'model_learning'"
+             WHERE feedback_cohort = 'model_score_learning'"
         }
         "quant_recommendation_resolution_outcome" => {
             "SELECT COUNT(*) AS row_count FROM quant_recommendation_resolution_outcome"

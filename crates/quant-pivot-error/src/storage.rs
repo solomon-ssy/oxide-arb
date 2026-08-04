@@ -10,7 +10,7 @@ use clickhouse::error::Error as ClickhouseError;
 use deadpool_redis::PoolError;
 #[cfg(feature = "storage")]
 use redis::RedisError;
-use sea_orm::DbErr;
+use sea_orm::{DbErr, RuntimeErr, SqlxError};
 use thiserror::Error;
 
 /// Logical persistence entity names for typed [`StorageError`] variants.
@@ -108,6 +108,8 @@ pub mod entity {
     pub const QUANT_RESEARCH_JOB: &str = "quant_research_job";
     /// `quant_feedback_cycle`.
     pub const QUANT_FEEDBACK_CYCLE: &str = "quant_feedback_cycle";
+    /// `quant_feedback_coordinator_fault`.
+    pub const QUANT_FEEDBACK_COORDINATOR_FAULT: &str = "quant_feedback_coordinator_fault";
     /// `quant_feedback_scheduler_state`.
     pub const QUANT_FEEDBACK_SCHEDULER_STATE: &str = "quant_feedback_scheduler_state";
     /// `quant_feedback_stage_event`.
@@ -122,6 +124,8 @@ pub mod entity {
     pub const QUANT_FEEDBACK_EVALUATION_USE: &str = "quant_feedback_evaluation_use";
     /// `quant_feedback_promotion_permit`.
     pub const QUANT_FEEDBACK_PROMOTION_PERMIT: &str = "quant_feedback_promotion_permit";
+    /// `quant_model_route_shadow_binding`.
+    pub const QUANT_MODEL_ROUTE_SHADOW_BINDING: &str = "quant_model_route_shadow_binding";
     /// `quant_feature_parity_run`.
     pub const QUANT_FEATURE_PARITY_RUN: &str = "quant_feature_parity_run";
     /// `quant_feature_parity_state`.
@@ -265,6 +269,29 @@ fn display_optional_entity(entity: Option<&'static str>) -> String {
 }
 
 impl StorageError {
+    /// Whether this error proves a transient transport/capacity failure that a
+    /// durable worker may retry without masking schema or business defects.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Connection(_) | Self::Timeout { .. } => true,
+            Self::Database(error) => match error {
+                DbErr::ConnectionAcquire(_) | DbErr::Conn(_) => true,
+                DbErr::Exec(RuntimeErr::SqlxError(error))
+                | DbErr::Query(RuntimeErr::SqlxError(error)) => matches!(
+                    error.as_ref(),
+                    SqlxError::Io(_)
+                        | SqlxError::Tls(_)
+                        | SqlxError::PoolTimedOut
+                        | SqlxError::PoolClosed
+                        | SqlxError::WorkerCrashed
+                ),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Construct an explicit duplicate-key error.
     pub fn duplicate(entity: &'static str, key: impl Display) -> Self {
         Self::Duplicate {
@@ -325,6 +352,8 @@ impl StorageError {
 
 #[cfg(test)]
 mod tests {
+    use sea_orm::ConnAcquireErr;
+
     use entity::{QUANT_ORDER_INTENT, USER};
 
     use super::*;
@@ -347,5 +376,16 @@ mod tests {
             to: "draft".to_owned(),
         };
         assert!(error.to_string().contains("submitted -> draft"));
+    }
+
+    #[test]
+    fn transient_taxonomy_fails_closed() {
+        assert!(StorageError::Connection("connection reset".to_owned()).is_transient());
+        assert!(
+            StorageError::Database(DbErr::ConnectionAcquire(ConnAcquireErr::Timeout))
+                .is_transient()
+        );
+        assert!(!StorageError::invariant_violation(None, "bad contract").is_transient());
+        assert!(!StorageError::Database(DbErr::Type("bad type".to_owned())).is_transient());
     }
 }

@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// System-owned schema version for [`QualityGateReport`].
-pub const QUALITY_GATE_REPORT_FORMAT_VERSION: u16 = 2;
+pub const QUALITY_GATE_REPORT_FORMAT_VERSION: u16 = 3;
 const QUALITY_GATE_REPORT_HASH_DOMAIN: &str = "quant-pivot/model-quality-gate-report";
 
 /// What a gate evaluation is gating.
@@ -70,7 +70,7 @@ impl GateIntent {
     }
 
     #[must_use]
-    pub const fn requires_backtest(self) -> bool {
+    pub const fn requires_validation_evidence(self) -> bool {
         matches!(
             self,
             Self::Candidate | Self::RouteActivation | Self::AutoExecution
@@ -97,9 +97,10 @@ pub enum GateId {
     NoPitLeakage,
     MaxDrawdown,
     LiquidityExitFeasible,
-    ShadowOverlapStability,
-    BacktestRequired,
+    ShadowDecisionOverlap,
+    ValidationEvidenceRequired,
     CpcvRequired,
+    CpcvPathCount,
     RankIc,
     DeflatedSharpe,
     Pbo,
@@ -125,9 +126,10 @@ impl GateId {
             Self::NoPitLeakage => "no_pit_leakage",
             Self::MaxDrawdown => "max_drawdown",
             Self::LiquidityExitFeasible => "liquidity_exit_feasible",
-            Self::ShadowOverlapStability => "shadow_overlap_stability",
-            Self::BacktestRequired => "backtest_required",
+            Self::ShadowDecisionOverlap => "shadow_decision_overlap",
+            Self::ValidationEvidenceRequired => "validation_evidence_required",
             Self::CpcvRequired => "cpcv_required",
+            Self::CpcvPathCount => "cpcv_path_count",
             Self::RankIc => "rank_ic",
             Self::DeflatedSharpe => "deflated_sharpe",
             Self::Pbo => "pbo",

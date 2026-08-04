@@ -35,18 +35,23 @@ use quant_pivot_models::{
             TradePolicyValidationJobParams,
         },
         ports::{
-            BacktestPort, CalibratedModelSealCommand, CalibrationArtifactFitPort, CpcvBacktestPort,
-            FeatureParityExecutionPort, FeedbackAttributionPlanJobParams,
-            FeedbackCalibrationJobParams, FeedbackComparisonExecutionPort,
-            FeedbackComparisonExecutionResult, FeedbackComparisonJobParams,
-            FeedbackCoverageExecutionPort, FeedbackCpcvJobParams, FeedbackDatasetSealJobParams,
-            FeedbackDecisionExecutionPort, FeedbackDecisionExecutionResult,
-            FeedbackDecisionJobParams, FeedbackDriftExecutionPort, FeedbackGovernanceExecutionPort,
-            FeedbackLearningExecutionPort, FeedbackLearningExecutionResult,
-            FeedbackShadowExecutionPort, FeedbackShadowExecutionResult, FeedbackShadowJobParams,
-            FeedbackTrainingJobParams, FeedbackTruthFreezeJobParams, FeedbackValidationJobParams,
+            BacktestPort, CalibratedModelSealCommand, CalibrationArtifactFitPort,
+            CandidateRecipePlanExecutionPort, CandidateRecipePlanExecutionResult,
+            CandidateRecipePlanJobParams, CommittedPolicyApplyPort, CpcvBacktestPort,
+            FeatureParityExecutionOutcome, FeatureParityExecutionPort,
+            FeedbackAttributionJobParams, FeedbackCalibrationJobParams,
+            FeedbackComparisonExecutionPort, FeedbackComparisonExecutionResult,
+            FeedbackComparisonJobParams, FeedbackCoverageExecutionPort, FeedbackCpcvJobParams,
+            FeedbackDatasetSealJobParams, FeedbackDecisionExecutionPort,
+            FeedbackDecisionExecutionResult, FeedbackDecisionJobParams, FeedbackDriftExecutionPort,
+            FeedbackGovernanceExecutionPort, FeedbackLearningExecutionPort,
+            FeedbackLearningExecutionResult, FeedbackShadowExecutionPort,
+            FeedbackShadowExecutionResult, FeedbackShadowJobParams, FeedbackTrainingJobParams,
+            FeedbackTruthFreezeJobParams, FeedbackValidationJobParams,
             ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
-            ModelGovernancePort, ModelTrainingPort, TradePolicyPort, TrainingDatasetPort,
+            ModelGovernancePort, ModelTrainingPort, ShadowBindingExecutionPort,
+            ShadowBindingExecutionResult, ShadowBindingJobParams, TradePolicyPort,
+            TrainingDatasetPort,
         },
         quant::{
             JobProgressSink, ResearchJobArtifactRef, ResearchJobFinalization, ResearchJobInfo,
@@ -56,21 +61,20 @@ use quant_pivot_models::{
     enums::quant::{
         ResearchJobErrorCode, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
     },
-    types::{
-        DatasetCoverage, ResearchJobError, ResearchJobId, ResearchJobParams, ResearchJobProgress,
-        WorkerId,
-    },
+    types::{DatasetCoverage, ResearchJobError, ResearchJobParams, ResearchJobProgress},
 };
 use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
     traits::{
-        AttributionArtifactRepository, CalibrationArtifactRepository,
+        AttributionArtifactRepository, CalibrationArtifactRepository, ClobMarketInfoRepository,
         ExecutionAttemptOutcomeRepository, FactWriter, FactorRepository, FeatureParityRepository,
         FeatureRepository, FeedbackCohortRepository, FeedbackCycleRepository,
-        FeedbackSchedulerRepository, MarketSelectionRepository, ModelRegistryRepository,
-        PolicyRepository, PromotionPermitRepository, RecommendationExecutionRollupRepository,
-        RecommendationReportRepository, ReportRunRepository, ResolutionObservationRepository,
-        ServingEvidenceRepository, TradePolicyRepository,
+        FeedbackRecipeTemplateRepository, FeedbackSchedulerRepository, MarketSelectionRepository,
+        ModelCandidateManifestRepository, ModelRegistryRepository,
+        ModelRouteShadowBindingRepository, PolicyRepository, PromotionPermitRepository,
+        RecommendationExecutionRollupRepository, RecommendationReportRepository,
+        ReportRunRepository, ResearchJobRepository, ResearchJobRetryOutcome,
+        ResolutionObservationRepository, ServingEvidenceRepository, TradePolicyRepository,
     },
 };
 use tokio::{
@@ -106,7 +110,7 @@ use crate::{
         feedback_comparison_stage::{FeedbackComparisonStageAdapter, FeedbackComparisonStageDeps},
         feedback_coordinator::{
             FeedbackCoordinator, FeedbackCoordinatorConfig, FeedbackCoordinatorDeps,
-            FeedbackStagePort,
+            FeedbackShadowCancellationPort, FeedbackStagePort,
         },
         feedback_decision::{FeedbackDecisionExecutionDeps, FeedbackDecisionExecutionService},
         feedback_decision_stage::{FeedbackDecisionStageAdapter, FeedbackDecisionStageDeps},
@@ -119,8 +123,17 @@ use crate::{
         feedback_governance_stage::{FeedbackGovernanceStageAdapter, FeedbackGovernanceStageDeps},
         feedback_learning::{FeedbackLearningExecutionDeps, FeedbackLearningExecutionService},
         feedback_learning_stage::{FeedbackLearningStageAdapter, FeedbackLearningStageDeps},
+        feedback_recipe::{CandidateRecipePlanExecutionDeps, CandidateRecipePlanExecutionService},
+        feedback_recipe_stage::{FeedbackRecipeStageAdapter, FeedbackRecipeStageDeps},
         feedback_scheduler::{FeedbackScheduler, FeedbackSchedulerConfig},
         feedback_shadow::{FeedbackShadowExecutionDeps, FeedbackShadowExecutionService},
+        feedback_shadow_binding::{
+            ShadowBindingCancellationDeps, ShadowBindingCancellationService,
+            ShadowBindingExecutionDeps, ShadowBindingExecutionService,
+        },
+        feedback_shadow_binding_stage::{
+            FeedbackShadowBindingStageAdapter, FeedbackShadowBindingStageDeps,
+        },
         feedback_shadow_stage::{FeedbackShadowStageAdapter, FeedbackShadowStageDeps},
         feedback_signal_stage::{FeedbackSignalStageAdapter, FeedbackSignalStageDeps},
         feedback_signals::{FeedbackSignalService, FeedbackSignalServiceDeps},
@@ -130,7 +143,7 @@ use crate::{
     },
 };
 
-const ALL_KINDS: [ResearchJobKind; 21] = [
+const ALL_KINDS: [ResearchJobKind; 23] = [
     ResearchJobKind::DatasetBuild,
     ResearchJobKind::ModelTrain,
     ResearchJobKind::Backtest,
@@ -142,14 +155,16 @@ const ALL_KINDS: [ResearchJobKind; 21] = [
     ResearchJobKind::TradePolicyValidation,
     ResearchJobKind::FeedbackTruthFreeze,
     ResearchJobKind::FeedbackCoverage,
-    ResearchJobKind::FeedbackAttributionPlan,
+    ResearchJobKind::FeedbackAttribution,
     ResearchJobKind::FeedbackDrift,
+    ResearchJobKind::FeedbackRecipePlan,
     ResearchJobKind::FeedbackDatasetSeal,
     ResearchJobKind::FeedbackTraining,
     ResearchJobKind::FeedbackCalibration,
     ResearchJobKind::FeedbackCpcv,
     ResearchJobKind::FeedbackValidation,
     ResearchJobKind::FeedbackComparison,
+    ResearchJobKind::FeedbackShadowBind,
     ResearchJobKind::FeedbackShadow,
     ResearchJobKind::FeedbackDecision,
 ];
@@ -163,6 +178,15 @@ struct JobOutcome {
     result: Option<ResearchJobResultRef>,
     artifact: Option<ResearchJobArtifactRef>,
     coverage: Option<DatasetCoverage>,
+}
+
+/// Worker-level disposition of one bounded execution attempt.
+enum JobDisposition {
+    Completed(Box<JobOutcome>),
+    AwaitingEvidence {
+        progress: ResearchJobProgress,
+        retry_after: Duration,
+    },
 }
 
 /// Owns the standalone calibration-job invariant: a successful raw fit is not
@@ -228,9 +252,11 @@ struct ResearchJobExecutor {
     trade_policies: Arc<dyn TradePolicyPort>,
     feedback_coverage: Arc<dyn FeedbackCoverageExecutionPort>,
     feedback_drift: Arc<dyn FeedbackDriftExecutionPort>,
+    feedback_recipe: Arc<dyn CandidateRecipePlanExecutionPort>,
     feedback_governance: Arc<dyn FeedbackGovernanceExecutionPort>,
     feedback_learning: Arc<dyn FeedbackLearningExecutionPort>,
     feedback_comparison: Arc<dyn FeedbackComparisonExecutionPort>,
+    feedback_shadow_binding: Arc<dyn ShadowBindingExecutionPort>,
     feedback_shadow: Arc<dyn FeedbackShadowExecutionPort>,
     feedback_decision: Arc<dyn FeedbackDecisionExecutionPort>,
 }
@@ -342,17 +368,17 @@ impl ResearchJobExecutor {
 
     async fn execute_attribution(
         &self,
-        params: FeedbackAttributionPlanJobParams,
+        params: FeedbackAttributionJobParams,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<JobOutcome> {
         let outcome = self
             .feedback_governance
-            .plan_attribution(params, progress, cancel)
+            .materialize_attribution(params, progress, cancel)
             .await?;
         Ok(JobOutcome {
             result: Some(ResearchJobResultRef {
-                kind: ResearchJobResultKind::FeedbackAttributionPlanArtifact,
+                kind: ResearchJobResultKind::FeedbackAttributionManifest,
                 id: outcome.artifact_id.as_uuid(),
             }),
             artifact: Some(outcome.artifact),
@@ -378,6 +404,29 @@ impl ResearchJobExecutor {
             artifact: Some(outcome.artifact),
             coverage: None,
         })
+    }
+
+    fn recipe_outcome(outcome: CandidateRecipePlanExecutionResult) -> JobOutcome {
+        JobOutcome {
+            result: Some(ResearchJobResultRef {
+                kind: ResearchJobResultKind::CandidateRecipePlanArtifact,
+                id: outcome.artifact_id.as_uuid(),
+            }),
+            artifact: Some(outcome.artifact),
+            coverage: None,
+        }
+    }
+
+    async fn execute_recipe_plan(
+        &self,
+        params: CandidateRecipePlanJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<JobOutcome> {
+        self.feedback_recipe
+            .plan_recipe(params, progress, cancel)
+            .await
+            .map(Self::recipe_outcome)
     }
 
     fn learning_outcome(outcome: FeedbackLearningExecutionResult) -> JobOutcome {
@@ -482,6 +531,29 @@ impl ResearchJobExecutor {
             .map(Self::comparison_outcome)
     }
 
+    fn shadow_binding_outcome(outcome: ShadowBindingExecutionResult) -> JobOutcome {
+        JobOutcome {
+            result: Some(ResearchJobResultRef {
+                kind: ResearchJobResultKind::ShadowBindingArtifact,
+                id: outcome.artifact_id.as_uuid(),
+            }),
+            artifact: Some(outcome.artifact),
+            coverage: None,
+        }
+    }
+
+    async fn execute_shadow_binding(
+        &self,
+        params: ShadowBindingJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<JobOutcome> {
+        self.feedback_shadow_binding
+            .bind_shadow(params, progress, cancel)
+            .await
+            .map(Self::shadow_binding_outcome)
+    }
+
     fn shadow_outcome(outcome: FeedbackShadowExecutionResult) -> JobOutcome {
         JobOutcome {
             result: Some(ResearchJobResultRef {
@@ -568,14 +640,86 @@ impl ResearchJobExecutor {
         .into())
     }
 
+    async fn execute_feedback_job(
+        &self,
+        params: ResearchJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<JobOutcome> {
+        match params {
+            ResearchJobParams::FeedbackTruthFreeze(params) => {
+                self.execute_truth_freeze(params, progress, cancel).await
+            }
+            ResearchJobParams::FeedbackCoverage(params) => {
+                self.execute_coverage(params, progress, cancel).await
+            }
+            ResearchJobParams::FeedbackAttribution(params) => {
+                self.execute_attribution(params, progress, cancel).await
+            }
+            ResearchJobParams::FeedbackDrift(params) => {
+                self.execute_drift(params, progress, cancel).await
+            }
+            ResearchJobParams::FeedbackRecipePlan(params) => {
+                self.execute_recipe_plan(*params, progress, cancel).await
+            }
+            ResearchJobParams::FeedbackDatasetSeal(params) => {
+                self.execute_dataset_seal(params, progress, cancel).await
+            }
+            ResearchJobParams::FeedbackTraining(params) => {
+                self.execute_feedback_training(params, progress, cancel)
+                    .await
+            }
+            ResearchJobParams::FeedbackCalibration(params) => {
+                self.execute_feedback_calibration(params, progress, cancel)
+                    .await
+            }
+            ResearchJobParams::FeedbackCpcv(params) => {
+                self.execute_feedback_cpcv(params, progress, cancel).await
+            }
+            ResearchJobParams::FeedbackValidation(params) => {
+                self.execute_validation(params, progress, cancel).await
+            }
+            ResearchJobParams::FeedbackComparison(params) => {
+                self.execute_feedback_comparison(*params, progress, cancel)
+                    .await
+            }
+            ResearchJobParams::FeedbackShadowBind(params) => {
+                self.execute_shadow_binding(*params, progress, cancel).await
+            }
+            ResearchJobParams::FeedbackShadow(params) => {
+                self.execute_feedback_shadow(*params, progress, cancel)
+                    .await
+            }
+            ResearchJobParams::FeedbackDecision(params) => {
+                self.execute_feedback_decision(*params, progress, cancel)
+                    .await
+            }
+            unexpected @ (ResearchJobParams::DatasetBuild(_)
+            | ResearchJobParams::ModelTrain(_)
+            | ResearchJobParams::Backtest(_)
+            | ResearchJobParams::CpcvBacktest(_)
+            | ResearchJobParams::BiasTableFit(_)
+            | ResearchJobParams::ModelCalibrationFit(_)
+            | ResearchJobParams::FeatureParity(_)
+            | ResearchJobParams::TradePolicyFit(_)
+            | ResearchJobParams::TradePolicyValidation(_)) => Err(ResearchError::Serialization {
+                detail: format!(
+                    "non-feedback research job {} reached the feedback executor",
+                    unexpected.kind()
+                ),
+            }
+            .into()),
+        }
+    }
+
     async fn execute(
         &self,
         job: &ResearchJobInfo,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
-    ) -> QuantResult<JobOutcome> {
+    ) -> QuantResult<JobDisposition> {
         Self::require_job_kind(job)?;
-        match job.params_json.clone() {
+        let outcome = match job.params_json.clone() {
             ResearchJobParams::DatasetBuild(request) => {
                 self.execute_dataset(request, progress, cancel).await
             }
@@ -633,18 +777,29 @@ impl ResearchJobExecutor {
                     .await
             }
             ResearchJobParams::FeatureParity(params) => {
-                let view = self
+                let outcome = self
                     .feature_parity
                     .execute(params, progress, cancel)
                     .await?;
-                Ok(JobOutcome {
-                    result: Some(ResearchJobResultRef {
-                        kind: ResearchJobResultKind::FeatureParityRun,
-                        id: view.parity_run_id.as_uuid(),
+                match outcome {
+                    FeatureParityExecutionOutcome::Completed(view) => Ok(JobOutcome {
+                        result: Some(ResearchJobResultRef {
+                            kind: ResearchJobResultKind::FeatureParityRun,
+                            id: view.parity_run_id.as_uuid(),
+                        }),
+                        artifact: None,
+                        coverage: None,
                     }),
-                    artifact: None,
-                    coverage: None,
-                })
+                    FeatureParityExecutionOutcome::AwaitingMaterialization { retry_after } => {
+                        return Ok(JobDisposition::AwaitingEvidence {
+                            progress: ResearchJobProgress::indeterminate(
+                                "pending_materialization",
+                                0,
+                            ),
+                            retry_after,
+                        });
+                    }
+                }
             }
             ResearchJobParams::TradePolicyFit(params) => {
                 let view = self
@@ -670,57 +825,20 @@ impl ResearchJobExecutor {
                 self.execute_policy_validation(params, progress, cancel)
                     .await
             }
-            ResearchJobParams::FeedbackTruthFreeze(params) => {
-                self.execute_truth_freeze(params, progress, cancel).await
-            }
-            ResearchJobParams::FeedbackCoverage(params) => {
-                self.execute_coverage(params, progress, cancel).await
-            }
-            ResearchJobParams::FeedbackAttributionPlan(params) => {
-                self.execute_attribution(params, progress, cancel).await
-            }
-            ResearchJobParams::FeedbackDrift(params) => {
-                self.execute_drift(params, progress, cancel).await
-            }
-            ResearchJobParams::FeedbackDatasetSeal(params) => {
-                self.execute_dataset_seal(params, progress, cancel).await
-            }
-            ResearchJobParams::FeedbackTraining(params) => {
-                self.execute_feedback_training(params, progress, cancel)
-                    .await
-            }
-            ResearchJobParams::FeedbackCalibration(params) => {
-                self.execute_feedback_calibration(params, progress, cancel)
-                    .await
-            }
-            ResearchJobParams::FeedbackCpcv(params) => {
-                self.execute_feedback_cpcv(params, progress, cancel).await
-            }
-            ResearchJobParams::FeedbackValidation(params) => {
-                self.execute_validation(params, progress, cancel).await
-            }
-            ResearchJobParams::FeedbackComparison(params) => {
-                self.execute_feedback_comparison(*params, progress, cancel)
-                    .await
-            }
-            ResearchJobParams::FeedbackShadow(params) => {
-                self.execute_feedback_shadow(*params, progress, cancel)
-                    .await
-            }
-            ResearchJobParams::FeedbackDecision(params) => {
-                self.execute_feedback_decision(*params, progress, cancel)
-                    .await
-            }
-        }
+            params => self.execute_feedback_job(params, progress, cancel).await,
+        }?;
+        Ok(JobDisposition::Completed(Box::new(outcome)))
     }
 }
 
 struct FeedbackExecutionPorts {
     coverage: Arc<dyn FeedbackCoverageExecutionPort>,
     drift: Arc<dyn FeedbackDriftExecutionPort>,
+    recipe: Arc<dyn CandidateRecipePlanExecutionPort>,
     governance: Arc<dyn FeedbackGovernanceExecutionPort>,
     learning: Arc<dyn FeedbackLearningExecutionPort>,
     comparison: Arc<dyn FeedbackComparisonExecutionPort>,
+    shadow_binding: Arc<dyn ShadowBindingExecutionPort>,
     shadow: Arc<dyn FeedbackShadowExecutionPort>,
     decision: Arc<dyn FeedbackDecisionExecutionPort>,
 }
@@ -728,12 +846,13 @@ struct FeedbackExecutionPorts {
 impl FeedbackExecutionPorts {
     fn from_context(
         context: &AppContext,
+        recipe_datasets: Arc<CoreTrainingDatasetPort>,
         datasets: Arc<dyn TrainingDatasetPort>,
         training: Arc<dyn ModelTrainingPort>,
         calibration_fit: Arc<dyn ModelCalibrationFitPort>,
         backtests: Arc<CoreBacktestPort>,
         cpcv: Arc<dyn CpcvBacktestPort>,
-    ) -> Self {
+    ) -> QuantResult<Self> {
         let signals = Arc::new(FeedbackSignalService::new(FeedbackSignalServiceDeps {
             cycles: Arc::clone(&context.infra.repos.feedback_cycle)
                 as Arc<dyn FeedbackCycleRepository>,
@@ -748,9 +867,26 @@ impl FeedbackExecutionPorts {
                 as Arc<dyn FactorRepository>,
             artifact_store: Arc::clone(&context.research.artifact_store),
         }));
-        Self {
+        Ok(Self {
             coverage: Arc::clone(&signals) as Arc<dyn FeedbackCoverageExecutionPort>,
             drift: signals as Arc<dyn FeedbackDriftExecutionPort>,
+            recipe: Arc::new(CandidateRecipePlanExecutionService::new(
+                CandidateRecipePlanExecutionDeps {
+                    cycles: Arc::clone(&context.infra.repos.feedback_cycle)
+                        as Arc<dyn FeedbackCycleRepository>,
+                    templates: Arc::clone(&context.infra.repos.feedback_recipe_template)
+                        as Arc<dyn FeedbackRecipeTemplateRepository>,
+                    models: Arc::clone(&context.research.model_registry_repo)
+                        as Arc<dyn ModelRegistryRepository>,
+                    jobs: Arc::clone(&context.infra.repos.research_job)
+                        as Arc<dyn ResearchJobRepository>,
+                    policies: Arc::clone(&context.infra.repos.runtime_config)
+                        as Arc<dyn PolicyRepository>,
+                    training_datasets: recipe_datasets,
+                    serving_preimages: Arc::clone(&context.research.serving_preimages),
+                    artifacts: Arc::clone(&context.research.artifact_store),
+                },
+            )),
             governance: Arc::new(FeedbackGovernanceExecutionService::new(
                 FeedbackGovernanceExecutionDeps {
                     resolutions: Arc::clone(&context.infra.repos.resolution_observation)
@@ -761,7 +897,7 @@ impl FeedbackExecutionPorts {
                         as Arc<dyn RecommendationExecutionRollupRepository>,
                     attribution: Arc::clone(&context.infra.repos.attribution_artifact)
                         as Arc<dyn AttributionArtifactRepository>,
-                    attribution_materializer: Arc::new(FeedbackAttributionMaterializer::new(
+                    attribution_materializer: Arc::new(FeedbackAttributionMaterializer::try_new(
                         FeedbackAttributionDeps {
                             cohorts: Arc::clone(&context.infra.repos.feedback_cohort)
                                 as Arc<dyn FeedbackCohortRepository>,
@@ -775,6 +911,8 @@ impl FeedbackExecutionPorts {
                             attempts: Arc::clone(&context.infra.repos.execution_attempt_outcome)
                                 as Arc<dyn ExecutionAttemptOutcomeRepository>,
                             facts: Arc::clone(&context.research.quant_fact_read),
+                            clob_market_info: Arc::clone(&context.infra.repos.clob_market_info)
+                                as Arc<dyn ClobMarketInfoRepository>,
                             serving_evidence: Arc::new(ChFeatureParityEventRepository::new(
                                 Arc::clone(&context.infra.ch),
                             ))
@@ -783,8 +921,14 @@ impl FeedbackExecutionPorts {
                                 as Arc<dyn AttributionArtifactRepository>,
                             artifacts: Arc::clone(&context.research.artifact_store),
                             metrics: Arc::clone(&context.infra.metrics),
+                            compute: Arc::clone(&context.compute),
+                            compute_budget: context
+                                .config
+                                .quant
+                                .research_jobs
+                                .feedback_attribution_compute,
                         },
-                    )),
+                    )?),
                     model_governance: Arc::clone(&context.research.model_governance),
                     artifacts: Arc::clone(&context.research.artifact_store),
                     metrics: Arc::clone(&context.infra.metrics),
@@ -808,6 +952,16 @@ impl FeedbackExecutionPorts {
                     artifacts: Arc::clone(&context.research.artifact_store),
                 },
             )),
+            shadow_binding: Arc::new(ShadowBindingExecutionService::new(
+                ShadowBindingExecutionDeps {
+                    bindings: Arc::clone(&context.infra.repos.model_route_shadow_binding)
+                        as Arc<dyn ModelRouteShadowBindingRepository>,
+                    policy_apply: Arc::clone(&context.governance.committed_policy)
+                        as Arc<dyn CommittedPolicyApplyPort>,
+                    route_evidence: Arc::clone(&context.research.model_route_evidence),
+                    artifacts: Arc::clone(&context.research.artifact_store),
+                },
+            )),
             shadow: Arc::new(FeedbackShadowExecutionService::new(
                 FeedbackShadowExecutionDeps {
                     observations: Arc::clone(&context.research.shadow_comparison_repo),
@@ -819,12 +973,12 @@ impl FeedbackExecutionPorts {
                     artifacts: Arc::clone(&context.research.artifact_store),
                 },
             )),
-        }
+        })
     }
 }
 
 impl ResearchJobExecutor {
-    fn from_context(context: &AppContext, config: ResearchJobsConfig) -> Self {
+    fn from_context(context: &AppContext, config: &ResearchJobsConfig) -> QuantResult<Self> {
         let runtime_config =
             Arc::clone(&context.infra.repos.runtime_config) as Arc<dyn PolicyRepository>;
         let bias_tables = Arc::clone(&context.infra.repos.calibration_artifact)
@@ -843,15 +997,15 @@ impl ResearchJobExecutor {
                 Arc::clone(&context.research.model_run_repo),
                 Arc::clone(&runtime_config),
             ));
-        let datasets = Arc::new(CoreTrainingDatasetPort::from_research(
+        let recipe_datasets = Arc::new(CoreTrainingDatasetPort::from_research(
             &context.research,
             Arc::clone(&runtime_config),
             Arc::clone(&bias_tables),
-            Arc::clone(&context.infra.repos.feedback_cohort) as Arc<dyn FeedbackCohortRepository>,
             config.max_spine_samples,
             config.plan_sample_slices,
             config.plan_sample_markets,
-        )) as Arc<dyn TrainingDatasetPort>;
+        ));
+        let datasets = Arc::clone(&recipe_datasets) as Arc<dyn TrainingDatasetPort>;
         let training = Arc::new(CoreModelTrainingPort::from_research(
             &context.research,
             Arc::clone(&runtime_config),
@@ -860,35 +1014,40 @@ impl ResearchJobExecutor {
         let serving_evidence = Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
             &context.infra.ch,
         ))) as Arc<dyn ServingEvidenceRepository>;
-        let parity_replay = Arc::new(DurableFeatureParitySource::new(DurableFeatureParityDeps {
-            parity: Arc::clone(&context.infra.repos.feature_parity)
-                as Arc<dyn FeatureParityRepository>,
-            model_runs: Arc::clone(&context.research.model_run_repo),
-            serving_generations: Arc::clone(&context.research.serving_generations),
-            runtime_configs: Arc::clone(&runtime_config),
-            selections: Arc::clone(&context.research.market_selection_repo),
-            feature_vectors: Arc::clone(&context.research.feature_repo),
-            factors: Arc::clone(&context.research.factor_repo),
-            reports: Arc::clone(&context.infra.repos.recommendation_report)
-                as Arc<dyn RecommendationReportRepository>,
-            report_runs: Arc::clone(&context.infra.repos.report_run)
-                as Arc<dyn ReportRunRepository>,
-            serving_evidence,
-            fact_read: Arc::clone(&context.research.quant_fact_read),
-            catalog: Arc::clone(&context.research.catalog_ledger_repo),
-            clob_market_info: Arc::clone(&context.research.clob_market_info_repo),
-            linkages: Arc::clone(&context.research.market_linkage_repo),
-            calibration_artifacts: Arc::clone(&bias_tables),
-        }));
+        let parity_replay = Arc::new(DurableFeatureParitySource::try_new(
+            DurableFeatureParityDeps {
+                parity: Arc::clone(&context.infra.repos.feature_parity)
+                    as Arc<dyn FeatureParityRepository>,
+                model_runs: Arc::clone(&context.research.model_run_repo),
+                serving_generations: Arc::clone(&context.research.serving_generations),
+                runtime_configs: Arc::clone(&runtime_config),
+                selections: Arc::clone(&context.research.market_selection_repo),
+                feature_vectors: Arc::clone(&context.research.feature_repo),
+                factors: Arc::clone(&context.research.factor_repo),
+                reports: Arc::clone(&context.infra.repos.recommendation_report)
+                    as Arc<dyn RecommendationReportRepository>,
+                report_runs: Arc::clone(&context.infra.repos.report_run)
+                    as Arc<dyn ReportRunRepository>,
+                serving_evidence,
+                fact_read: Arc::clone(&context.research.quant_fact_read),
+                catalog: Arc::clone(&context.research.catalog_ledger_repo),
+                clob_market_info: Arc::clone(&context.research.clob_market_info_repo),
+                linkages: Arc::clone(&context.research.market_linkage_repo),
+                calibration_artifacts: Arc::clone(&bias_tables),
+                compute: Arc::clone(&context.compute),
+                compute_budget: config.feature_parity_compute,
+            },
+        )?);
         let feedback = FeedbackExecutionPorts::from_context(
             context,
+            recipe_datasets,
             Arc::clone(&datasets),
             Arc::clone(&training),
             Arc::clone(&calibration_fit),
             Arc::clone(&backtests),
             Arc::clone(&cpcv),
-        );
-        Self {
+        )?;
+        Ok(Self {
             datasets: Arc::clone(&datasets),
             training,
             backtests: backtests as Arc<dyn BacktestPort>,
@@ -932,12 +1091,14 @@ impl ResearchJobExecutor {
             })),
             feedback_coverage: feedback.coverage,
             feedback_drift: feedback.drift,
+            feedback_recipe: feedback.recipe,
             feedback_governance: feedback.governance,
             feedback_learning: feedback.learning,
             feedback_comparison: feedback.comparison,
+            feedback_shadow_binding: feedback.shadow_binding,
             feedback_shadow: feedback.shadow,
             feedback_decision: feedback.decision,
-        }
+        })
     }
 }
 
@@ -945,15 +1106,24 @@ impl FeedbackCoordinator {
     fn from_context(
         context: &AppContext,
         engine: ResearchJobEngine,
-        config: ResearchJobsConfig,
+        config: &ResearchJobsConfig,
     ) -> QuantResult<Self> {
         let cycles =
             Arc::clone(&context.infra.repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>;
         let jobs = Arc::clone(engine.repo());
+        let recipes = Arc::new(FeedbackRecipeStageAdapter::try_new(
+            FeedbackRecipeStageDeps {
+                cycles: Arc::clone(&cycles),
+                jobs: Arc::clone(&jobs),
+                artifacts: Arc::clone(&context.research.artifact_store),
+                max_recovery_attempts: config.max_recovery_attempts,
+            },
+        )?);
         let learning = Arc::new(FeedbackLearningStageAdapter::try_new(
             FeedbackLearningStageDeps {
                 jobs: Arc::clone(&jobs),
                 artifacts: Arc::clone(&context.research.artifact_store),
+                recipes: Arc::clone(&recipes),
                 max_recovery_attempts: config.max_recovery_attempts,
             },
         )?);
@@ -973,6 +1143,35 @@ impl FeedbackCoordinator {
                 learning_stages: Arc::clone(&learning),
             },
         ));
+        let shadow_binding = Arc::new(FeedbackShadowBindingStageAdapter::try_new(
+            FeedbackShadowBindingStageDeps {
+                cycles: Arc::clone(&cycles),
+                jobs: Arc::clone(&jobs),
+                models: Arc::clone(&context.research.model_registry_repo),
+                policies: Arc::clone(&context.infra.repos.runtime_config)
+                    as Arc<dyn PolicyRepository>,
+                manifests: Arc::clone(&context.infra.repos.model_candidate_manifest)
+                    as Arc<dyn ModelCandidateManifestRepository>,
+                artifacts: Arc::clone(&context.research.artifact_store),
+                recipes: Arc::clone(&recipes),
+                total_shadow_model_budget_bytes: context
+                    .config
+                    .research
+                    .model_serving_registry
+                    .max_total_shadow_model_bytes,
+                max_recovery_attempts: config.max_recovery_attempts,
+            },
+        )?);
+        let shadow_cancellation = Arc::new(ShadowBindingCancellationService::new(
+            ShadowBindingCancellationDeps {
+                bindings: Arc::clone(&context.infra.repos.model_route_shadow_binding)
+                    as Arc<dyn ModelRouteShadowBindingRepository>,
+                policies: Arc::clone(&context.infra.repos.runtime_config)
+                    as Arc<dyn PolicyRepository>,
+                policy_apply: Arc::clone(&context.governance.committed_policy)
+                    as Arc<dyn CommittedPolicyApplyPort>,
+            },
+        )) as Arc<dyn FeedbackShadowCancellationPort>;
         let stages = Arc::new(FeedbackStageDispatcher::new(FeedbackStageDispatcherDeps {
             signals: Arc::new(FeedbackSignalStageAdapter::try_new(
                 FeedbackSignalStageDeps {
@@ -982,6 +1181,7 @@ impl FeedbackCoordinator {
                 },
             )?),
             governance: Arc::clone(&governance),
+            recipes: Arc::clone(&recipes),
             learning: Arc::clone(&learning),
             comparison: Arc::new(FeedbackComparisonStageAdapter::try_new(
                 FeedbackComparisonStageDeps {
@@ -990,18 +1190,21 @@ impl FeedbackCoordinator {
                     models: Arc::clone(&context.research.model_registry_repo),
                     path_sets: Arc::clone(&context.research.backtest_path_set_repo),
                     artifacts: Arc::clone(&context.research.artifact_store),
-                    learning_stages: learning,
+                    learning_stages: Arc::clone(&learning),
                     governance_stages: governance,
                     evaluation_reservations: reservations,
                     max_recovery_attempts: config.max_recovery_attempts,
                 },
             )?),
+            shadow_binding: Arc::clone(&shadow_binding),
             shadow: Arc::new(FeedbackShadowStageAdapter::try_new(
                 FeedbackShadowStageDeps {
                     cycles: Arc::clone(&cycles),
                     jobs: Arc::clone(&jobs),
                     artifacts: Arc::clone(&context.research.artifact_store),
                     serving_generations: Arc::clone(&context.research.serving_generations),
+                    recipes: Arc::clone(&recipes),
+                    shadow_bindings: shadow_binding,
                     max_recovery_attempts: config.max_recovery_attempts,
                 },
             )?),
@@ -1010,6 +1213,7 @@ impl FeedbackCoordinator {
                     cycles: Arc::clone(&cycles),
                     jobs,
                     artifacts: Arc::clone(&context.research.artifact_store),
+                    recipes,
                     max_recovery_attempts: config.max_recovery_attempts,
                 },
             )?),
@@ -1026,6 +1230,7 @@ impl FeedbackCoordinator {
                 as Arc<dyn RecommendationExecutionRollupRepository>,
             jobs: engine,
             stages,
+            shadow_cancellation,
             metrics: Arc::clone(&context.infra.metrics),
             alerts: Arc::clone(&context.governance.alerts),
             config: FeedbackCoordinatorConfig::try_from(config)?,
@@ -1037,7 +1242,7 @@ impl AppContext {
     fn build_feedback_scheduler(
         &self,
         engine: &ResearchJobEngine,
-        config: ResearchJobsConfig,
+        config: &ResearchJobsConfig,
     ) -> QuantResult<FeedbackScheduler> {
         let runtime_config =
             Arc::clone(&self.infra.repos.runtime_config) as Arc<dyn PolicyRepository>;
@@ -1047,7 +1252,6 @@ impl AppContext {
             &self.research,
             runtime_config,
             bias_tables,
-            Arc::clone(&self.infra.repos.feedback_cohort) as Arc<dyn FeedbackCohortRepository>,
             config.max_spine_samples,
             config.plan_sample_slices,
             config.plan_sample_markets,
@@ -1064,6 +1268,8 @@ impl AppContext {
             serving_preimages: Arc::clone(&self.research.serving_preimages),
             serving_generations: Arc::clone(&self.research.serving_generations),
             route_governance: Arc::clone(&self.research.model_route_governance),
+            resolutions: Arc::clone(&self.infra.repos.resolution_observation)
+                as Arc<dyn ResolutionObservationRepository>,
             training_datasets,
             feedback_wake: engine.feedback_wake(),
             shutdown: self.shutdown.clone(),
@@ -1089,14 +1295,15 @@ impl AppContext {
         runner: &mut AppRunner,
         engine: ResearchJobEngine,
     ) -> QuantResult<()> {
-        let config = self.config.quant.research_jobs;
-        let executor = ResearchJobExecutor::from_context(self, config);
-        let coordinator = FeedbackCoordinator::from_context(self, engine.clone(), config)?;
-        let scheduler = self.build_feedback_scheduler(&engine, config)?;
+        let config = Arc::new(self.config.quant.research_jobs);
+        let executor = ResearchJobExecutor::from_context(self, config.as_ref())?;
+        let coordinator = FeedbackCoordinator::from_context(self, engine.clone(), config.as_ref())?;
+        let scheduler = self.build_feedback_scheduler(&engine, config.as_ref())?;
         let metrics = Arc::clone(&self.infra.metrics);
         let worker_engine = engine;
+        let worker_config = Arc::clone(&config);
         runner.spawn(TaskId::ResearchJobWorker, move |token| async move {
-            run_worker(worker_engine, executor, config, metrics, token).await;
+            run_worker(worker_engine, executor, worker_config, metrics, token).await;
         });
         runner.spawn(TaskId::FeedbackCoordinator, move |token| async move {
             coordinator.run(token).await;
@@ -1111,7 +1318,7 @@ impl AppContext {
 async fn run_worker(
     engine: ResearchJobEngine,
     executor: ResearchJobExecutor,
-    config: ResearchJobsConfig,
+    config: Arc<ResearchJobsConfig>,
     metrics: Arc<MetricsHub>,
     token: CancellationToken,
 ) {
@@ -1140,7 +1347,7 @@ async fn run_worker(
         }
         drain_finished(&mut tasks, &mut inflight);
 
-        let eligible = eligible_kinds(&inflight, &config);
+        let eligible = eligible_kinds(&inflight, config.as_ref());
         if eligible.is_empty() {
             wait_for_slot(&token, &mut tasks, &mut inflight, poll).await;
             continue;
@@ -1161,6 +1368,7 @@ async fn run_worker(
                 let executor = executor.clone();
                 let metrics = Arc::clone(&metrics);
                 let shutdown = token.clone();
+                let config = Arc::clone(&config);
                 tasks.spawn(async move {
                     let kind = job.kind;
                     run_one(engine, executor, job, config, metrics, shutdown).await;
@@ -1273,7 +1481,7 @@ async fn run_one(
     engine: ResearchJobEngine,
     executor: ResearchJobExecutor,
     job: ResearchJobInfo,
-    config: ResearchJobsConfig,
+    config: Arc<ResearchJobsConfig>,
     metrics: Arc<MetricsHub>,
     shutdown: CancellationToken,
 ) {
@@ -1383,50 +1591,98 @@ async fn run_one(
         }
     };
 
-    finalize(&engine, &job_id, engine.instance_id(), job.kind, terminal).await;
+    settle(&engine, &job, terminal, config.as_ref(), &metrics).await;
     engine.clear_cancel(&job_id);
 }
 
 enum Terminal {
     Succeeded(Box<JobOutcome>),
+    AwaitingEvidence {
+        progress: ResearchJobProgress,
+        retry_after: Duration,
+    },
     Failed(String),
+    Retryable(String),
     Cancelled,
 }
 
 impl Terminal {
-    fn from_result(result: QuantResult<JobOutcome>) -> Self {
+    fn from_result(result: QuantResult<JobDisposition>) -> Self {
         match result {
-            Ok(outcome) => Self::Succeeded(Box::new(outcome)),
+            Ok(JobDisposition::Completed(outcome)) => Self::Succeeded(outcome),
+            Ok(JobDisposition::AwaitingEvidence {
+                progress,
+                retry_after,
+            }) => Self::AwaitingEvidence {
+                progress,
+                retry_after,
+            },
             // A cooperative cancel funnels through the build token and surfaces
             // as a terminal `Cancelled` (not a failure).
             Err(QuantError::Research(ResearchError::Cancelled { .. })) => Self::Cancelled,
+            Err(error) if is_transient_error(&error) => Self::Retryable(error.to_string()),
             Err(error) => Self::Failed(error.to_string()),
         }
     }
 }
 
-async fn finalize(
+fn is_transient_error(error: &QuantError) -> bool {
+    match error {
+        QuantError::Research(ResearchError::ArtifactTransport { .. }) => true,
+        QuantError::Storage(error) => error.is_transient(),
+        _ => false,
+    }
+}
+
+async fn settle(
     engine: &ResearchJobEngine,
-    job_id: &ResearchJobId,
-    owner: &WorkerId,
-    kind: ResearchJobKind,
+    job: &ResearchJobInfo,
     terminal: Terminal,
+    config: &ResearchJobsConfig,
+    metrics: &MetricsHub,
 ) {
+    let job_id = job.job_id;
+    let kind = job.kind;
     let finalization = match terminal {
         Terminal::Succeeded(outcome) => {
             ResearchJobFinalization::succeeded(outcome.result, outcome.artifact, outcome.coverage)
         }
-        Terminal::Failed(message) => ResearchJobFinalization::failed(ResearchJobError::new(
-            ResearchJobErrorCode::ExecutionFailed,
-            &message,
-        )),
+        Terminal::Failed(message) => {
+            warn!(
+                %job_id,
+                kind = %kind,
+                error = %message,
+                "research job execution failed"
+            );
+            ResearchJobFinalization::failed(ResearchJobError::new(
+                ResearchJobErrorCode::ExecutionFailed,
+                message,
+            ))
+        }
+        Terminal::AwaitingEvidence {
+            progress,
+            retry_after,
+        } => {
+            engine
+                .settle_evidence_wait(job, progress, retry_after, metrics)
+                .await;
+            return;
+        }
+        Terminal::Retryable(message) => {
+            engine.settle_retry(job, message, config, metrics).await;
+            return;
+        }
         Terminal::Cancelled => ResearchJobFinalization::cancelled(ResearchJobError::new(
             ResearchJobErrorCode::Cancelled,
             "cancelled by operator",
         )),
     };
     let status = finalization.status();
-    match engine.repo().finalize(job_id, owner, finalization).await {
+    match engine
+        .repo()
+        .finalize(&job_id, engine.instance_id(), finalization)
+        .await
+    {
         Ok(info) => {
             let pct = if status == ResearchJobStatus::Succeeded {
                 Some(1.0)
@@ -1443,6 +1699,98 @@ async fn finalize(
             );
         }
         Err(error) => error!(%error, kind = %kind, "failed to finalize research job"),
+    }
+}
+
+impl ResearchJobEngine {
+    async fn settle_evidence_wait(
+        &self,
+        job: &ResearchJobInfo,
+        progress: ResearchJobProgress,
+        retry_after: Duration,
+        metrics: &MetricsHub,
+    ) {
+        match self
+            .repo()
+            .await_evidence(&job.job_id, self.instance_id(), progress, retry_after)
+            .await
+        {
+            Ok(info) => {
+                metrics.record_research_heartbeat("evidence_wait", "scheduled");
+                self.publish(&info, Some("pending_materialization".to_owned()), None);
+            }
+            Err(StorageError::StateConflict { .. }) => {
+                metrics.record_research_heartbeat("evidence_wait", "lease_lost");
+                warn!(
+                    job_id = %job.job_id,
+                    kind = %job.kind,
+                    "stale worker skipped evidence wait after lease loss"
+                );
+            }
+            Err(error) => {
+                metrics.record_research_heartbeat("evidence_wait", "storage_error");
+                error!(
+                    job_id = %job.job_id,
+                    kind = %job.kind,
+                    %error,
+                    "failed to persist research-job evidence wait"
+                );
+            }
+        }
+    }
+
+    async fn settle_retry(
+        &self,
+        job: &ResearchJobInfo,
+        message: String,
+        config: &ResearchJobsConfig,
+        metrics: &MetricsHub,
+    ) {
+        let job_id = job.job_id;
+        let kind = job.kind;
+        let retry_after = Duration::from_secs(config.execution_retry_delay(job.recovery_attempt));
+        match self
+            .repo()
+            .retry_transient(&job_id, self.instance_id(), message.clone(), retry_after)
+            .await
+        {
+            Ok(ResearchJobRetryOutcome::Scheduled(info)) => {
+                metrics.record_research_heartbeat("execution_retry", "scheduled");
+                warn!(
+                    %job_id,
+                    kind = %kind,
+                    attempt = info.recovery_attempt,
+                    max_attempts = info.max_recovery_attempts,
+                    next_attempt_at = ?info.next_attempt_at,
+                    error = %message,
+                    "research job transient failure scheduled for durable retry"
+                );
+                self.publish(&info, Some("retry_scheduled".to_owned()), None);
+            }
+            Ok(ResearchJobRetryOutcome::Exhausted(info)) => {
+                metrics.record_research_heartbeat("execution_retry", "exhausted");
+                warn!(
+                    %job_id,
+                    kind = %kind,
+                    attempts = info.recovery_attempt,
+                    error = %message,
+                    "research job transient failures exhausted automatic retries"
+                );
+                self.publish(&info, Some("retry_exhausted".to_owned()), None);
+            }
+            Err(StorageError::StateConflict { .. }) => {
+                metrics.record_research_heartbeat("execution_retry", "lease_lost");
+                warn!(
+                    %job_id,
+                    kind = %kind,
+                    "stale worker skipped transient retry after lease loss"
+                );
+            }
+            Err(error) => {
+                metrics.record_research_heartbeat("execution_retry", "storage_error");
+                error!(%error, kind = %kind, "failed to persist research-job retry");
+            }
+        }
     }
 }
 
@@ -1477,7 +1825,7 @@ mod tests {
     use tokio::sync::watch;
     use tokio_util::sync::CancellationToken;
 
-    use super::{ChannelProgressSink, MetricsHub, ModelCalibrationJobExecutor};
+    use super::{ChannelProgressSink, MetricsHub, ModelCalibrationJobExecutor, is_transient_error};
     use crate::service::model_serving_test_support::{model_artifact, model_version};
 
     struct CalibrationFitFixture {
@@ -1622,6 +1970,22 @@ mod tests {
             1,
             "a consumed slot must not count as a superseded value"
         );
+    }
+
+    #[test]
+    fn artifact_retry_is_typed() {
+        let transport = ResearchError::ArtifactTransport {
+            uri: "s3://evidence/object".to_owned(),
+            detail: "request retries exhausted".to_owned(),
+        }
+        .into();
+        let contract = ResearchError::ArtifactIo {
+            uri: "s3://evidence/object".to_owned(),
+            detail: "object lock is not configured".to_owned(),
+        }
+        .into();
+        assert!(is_transient_error(&transport));
+        assert!(!is_transient_error(&contract));
     }
 
     #[tokio::test]

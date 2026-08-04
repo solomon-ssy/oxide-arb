@@ -11,16 +11,21 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashSet;
 use quant_pivot_error::{
-    QuantResult,
+    QuantError, QuantResult,
     feedback::FeedbackError,
-    storage::{StorageError, entity::QUANT_FEEDBACK_CYCLE},
+    research::ResearchError,
+    storage::{
+        StorageError,
+        entity::{QUANT_FEEDBACK_CYCLE, QUANT_FEEDBACK_STAGE_EVENT},
+    },
 };
 use quant_pivot_models::{
     config::ResearchJobsConfig,
     domain::quant::{
-        FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackSchedulerStateInfo,
-        FeedbackStageEventInfo, FeedbackStageEventInput, FeedbackStageJobIdentity, NewDriftReport,
-        NewFeedbackStageEvent, NewResearchJob, ResearchJobInfo,
+        FeedbackCoordinatorFaultReason, FeedbackCycleInfo, FeedbackCycleTerminal,
+        FeedbackSchedulerStateInfo, FeedbackStageEventInfo, FeedbackStageEventInput,
+        FeedbackStageJobIdentity, NewDriftReport, NewFeedbackStageEvent, NewResearchJob,
+        ResearchJobInfo,
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
@@ -32,9 +37,9 @@ use quant_pivot_models::{
     types::{ArtifactUri, ContentHash, FeedbackCycleId, ResearchJobError, ResearchJobId},
 };
 use quant_pivot_repository::traits::{
-    ExecutionAttemptOutcomeRepository, FeedbackCycleCasOutcome, FeedbackCycleClaim,
-    FeedbackCycleClaimMode, FeedbackCycleLeaseGuard, FeedbackCycleRepository,
-    FeedbackSchedulerRepository, FeedbackStageWriteOutcome,
+    ExecutionAttemptOutcomeRepository, FeedbackCoordinatorFaultWriteOutcome,
+    FeedbackCycleCasOutcome, FeedbackCycleClaim, FeedbackCycleClaimMode, FeedbackCycleLeaseGuard,
+    FeedbackCycleRepository, FeedbackSchedulerRepository, FeedbackStageWriteOutcome,
     RecommendationExecutionRollupRepository, ResearchJobEnqueueOutcome,
     ResolutionObservationRepository,
 };
@@ -186,10 +191,10 @@ impl FeedbackCoordinatorConfig {
     }
 }
 
-impl TryFrom<ResearchJobsConfig> for FeedbackCoordinatorConfig {
+impl TryFrom<&ResearchJobsConfig> for FeedbackCoordinatorConfig {
     type Error = FeedbackError;
 
-    fn try_from(config: ResearchJobsConfig) -> Result<Self, Self::Error> {
+    fn try_from(config: &ResearchJobsConfig) -> Result<Self, Self::Error> {
         let lease_ttl_secs = u64::try_from(config.lease_ttl_secs).map_err(|_| {
             FeedbackError::InvalidCoordinatorConfig {
                 detail: "lease TTL must be positive".to_owned(),
@@ -272,6 +277,16 @@ pub struct FeedbackStageSuccess {
     evidence_hash: ContentHash,
     directive: FeedbackStageDirective,
     drift_reports: Vec<NewDriftReport>,
+}
+
+/// Durable scheduler action returned before a stage job exists.
+#[derive(Debug)]
+pub enum FeedbackStagePreparation {
+    Ready(Box<NewResearchJob>),
+    Deferred {
+        resume_after: DateTime<Utc>,
+        reason_code: &'static str,
+    },
 }
 
 impl FeedbackStageSuccess {
@@ -367,13 +382,21 @@ pub trait FeedbackStagePort: Send + Sync {
         cycle: &FeedbackCycleInfo,
         lease: FeedbackCycleLeaseGuard,
         identity: FeedbackStageJobIdentity,
-    ) -> QuantResult<NewResearchJob>;
+    ) -> QuantResult<FeedbackStagePreparation>;
 
     async fn succeeded(
         &self,
         cycle: &FeedbackCycleInfo,
         job: &ResearchJobInfo,
     ) -> QuantResult<FeedbackStageSuccess>;
+}
+
+/// Releases an active route-owned shadow before a cancelled cycle becomes
+/// terminal. Implementations must be idempotent and converge the committed
+/// policy before returning success.
+#[async_trait]
+pub trait FeedbackShadowCancellationPort: Send + Sync {
+    async fn release_cycle(&self, cycle: &FeedbackCycleInfo, reason_code: &str) -> QuantResult<()>;
 }
 
 /// Dependencies for the one resident feedback coordinator.
@@ -385,6 +408,7 @@ pub struct FeedbackCoordinatorDeps {
     pub rollups: Arc<dyn RecommendationExecutionRollupRepository>,
     pub jobs: ResearchJobEngine,
     pub stages: Arc<dyn FeedbackStagePort>,
+    pub shadow_cancellation: Arc<dyn FeedbackShadowCancellationPort>,
     pub metrics: Arc<MetricsHub>,
     pub alerts: Arc<AlertDispatcher>,
     pub config: FeedbackCoordinatorConfig,
@@ -400,6 +424,7 @@ pub struct FeedbackCoordinator {
     rollups: Arc<dyn RecommendationExecutionRollupRepository>,
     jobs: ResearchJobEngine,
     stages: Arc<dyn FeedbackStagePort>,
+    shadow_cancellation: Arc<dyn FeedbackShadowCancellationPort>,
     wake: FeedbackCoordinatorWake,
     metrics: Arc<MetricsHub>,
     alerts: Arc<AlertDispatcher>,
@@ -419,6 +444,7 @@ impl FeedbackCoordinator {
             rollups: deps.rollups,
             jobs: deps.jobs,
             stages: deps.stages,
+            shadow_cancellation: deps.shadow_cancellation,
             wake,
             metrics: deps.metrics,
             alerts: deps.alerts,
@@ -528,6 +554,10 @@ impl FeedbackCoordinator {
                 Ok(ReconcileState::Waiting) => {}
                 Ok(ReconcileState::Finished | ReconcileState::LeaseLost) => break,
                 Err(error) => {
+                    if let Some(detail) = Self::invalid_state_detail(&error) {
+                        self.quarantine_cycle(lease, &detail).await;
+                        break;
+                    }
                     warn!(%cycle_id, %error, "feedback-cycle reconciliation failed closed");
                 }
             }
@@ -549,6 +579,97 @@ impl FeedbackCoordinator {
         self.stuck_seen.remove(&cycle_id);
     }
 
+    fn invalid_state_detail(error: &QuantError) -> Option<String> {
+        match error {
+            QuantError::Feedback(
+                FeedbackError::InvalidCoordinatorState { detail }
+                | FeedbackError::InvalidCycleState { detail }
+                | FeedbackError::InvalidStageEvent { detail }
+                | FeedbackError::InvalidJobIdentity { detail }
+                | FeedbackError::InvalidJobContract { detail },
+            ) => Some(detail.clone()),
+            QuantError::Research(
+                error @ (ResearchError::Serialization { .. }
+                | ResearchError::ArtifactHashMismatch { .. }
+                | ResearchError::SchemaHashMismatch { .. }
+                | ResearchError::Determinism { .. }
+                | ResearchError::InvalidModelArtifact { .. }),
+            ) => Some(format!(
+                "persisted stage artifact failed validation: {error}"
+            )),
+            QuantError::Storage(StorageError::InvariantViolation {
+                entity: Some(entity),
+                detail,
+            }) if matches!(*entity, QUANT_FEEDBACK_CYCLE | QUANT_FEEDBACK_STAGE_EVENT) => Some(
+                format!("persisted coordinator row failed validation: {detail}"),
+            ),
+            _ => None,
+        }
+    }
+
+    async fn quarantine_cycle(&self, lease: FeedbackCycleLeaseGuard, detail: &str) {
+        let reason = FeedbackCoordinatorFaultReason::invalid_state(detail);
+        match self.cycles.quarantine_cycle(lease, reason).await {
+            Ok(commit) => {
+                self.record_cycle(&commit.cycle);
+                let fault = match &commit.fault {
+                    FeedbackCoordinatorFaultWriteOutcome::Inserted(fault)
+                    | FeedbackCoordinatorFaultWriteOutcome::AlreadyPresent(fault) => fault,
+                };
+                self.metrics
+                    .record_research_heartbeat("feedback_coordinator_quarantine", "committed");
+                self.dispatch_ops_alert(Alert::new(
+                    format!(
+                        "feedback-coordinator-quarantine:{}",
+                        lease.feedback_cycle_id
+                    ),
+                    AlertLevel::Critical,
+                    AlertCategory::SchedulerHealth,
+                    AlertSource::Scheduler,
+                    "Feedback cycle quarantined after coordinator-state corruption",
+                    format!(
+                        "cycle={} generation={} fault_id={} code={}; the cycle is immutable and must be replaced by a new cycle",
+                        lease.feedback_cycle_id,
+                        lease.expected_generation,
+                        fault.feedback_coordinator_fault_id,
+                        fault.fault_code
+                    ),
+                    fault.observed_at,
+                ))
+                .await;
+            }
+            Err(StorageError::StateConflict { .. } | StorageError::IllegalTransition { .. }) => {
+                self.metrics
+                    .record_research_heartbeat("feedback_coordinator_quarantine", "lease_lost");
+            }
+            Err(error) => {
+                self.metrics
+                    .record_research_heartbeat("feedback_coordinator_quarantine", "storage_error");
+                warn!(
+                    cycle_id = %lease.feedback_cycle_id,
+                    %error,
+                    "feedback-cycle quarantine persistence failed; lease will expire without renewal"
+                );
+                self.dispatch_ops_alert(Alert::new(
+                    format!(
+                        "feedback-coordinator-quarantine-persistence:{}",
+                        lease.feedback_cycle_id
+                    ),
+                    AlertLevel::Critical,
+                    AlertCategory::SchedulerHealth,
+                    AlertSource::Scheduler,
+                    "Feedback cycle corruption could not be persisted",
+                    format!(
+                        "cycle={} generation={}; coordinator stopped renewal and requires database recovery",
+                        lease.feedback_cycle_id, lease.expected_generation
+                    ),
+                    Utc::now(),
+                ))
+                .await;
+            }
+        }
+    }
+
     async fn reconcile_cycle(
         &self,
         lease: &mut FeedbackCycleLeaseGuard,
@@ -559,7 +680,11 @@ impl FeedbackCoordinator {
                 StorageError::not_found(QUANT_FEEDBACK_CYCLE, lease.feedback_cycle_id).into(),
             );
         };
-        cycle.validate()?;
+        cycle
+            .validate()
+            .map_err(|error| FeedbackError::InvalidCoordinatorState {
+                detail: format!("feedback cycle projection failed validation: {error}"),
+            })?;
         if cycle.status.is_terminal() {
             return Ok(ReconcileState::Finished);
         }
@@ -637,7 +762,7 @@ impl FeedbackCoordinator {
                 }
                 self.append_drift_reports(&cycle, *lease, &success).await?;
                 if let Some(reason) = timeline.cancel_reason {
-                    self.finish_cancelled(*lease, reason).await
+                    self.finish_cancelled(&cycle, *lease, reason).await
                 } else {
                     match success.directive() {
                         FeedbackStageDirective::Advance => {
@@ -668,7 +793,7 @@ impl FeedbackCoordinator {
             }
             TimelinePosition::Failed { reason_code, .. } => {
                 if let Some(reason) = timeline.cancel_reason {
-                    self.finish_cancelled(*lease, reason).await
+                    self.finish_cancelled(&cycle, *lease, reason).await
                 } else {
                     let outcome = self
                         .cycles
@@ -679,8 +804,12 @@ impl FeedbackCoordinator {
                 }
             }
             TimelinePosition::Cancelled { reason_code, .. } => {
-                self.finish_cancelled(*lease, timeline.cancel_reason.unwrap_or(reason_code))
-                    .await
+                self.finish_cancelled(
+                    &cycle,
+                    *lease,
+                    timeline.cancel_reason.unwrap_or(reason_code),
+                )
+                .await
             }
         }
     }
@@ -696,7 +825,7 @@ impl FeedbackCoordinator {
     ) -> QuantResult<ReconcileState> {
         let Some(job_id) = job_id else {
             if let Some(reason) = timeline.cancel_reason {
-                return self.finish_cancelled(lease, reason).await;
+                return self.finish_cancelled(cycle, lease, reason).await;
             }
             return self
                 .enqueue_stage(cycle, lease, stage, timeline.next_sequence)
@@ -735,12 +864,14 @@ impl FeedbackCoordinator {
         }
 
         match job.status {
-            ResearchJobStatus::Queued => {
+            ResearchJobStatus::Queued
+            | ResearchJobStatus::AwaitingEvidence
+            | ResearchJobStatus::RetryScheduled => {
                 if timeline.cancel_reason.is_some() {
                     let cancelled = self
                         .jobs
                         .repo()
-                        .cancel_if_queued(
+                        .cancel_if_pending(
                             &job_id,
                             ResearchJobError::new(
                                 ResearchJobErrorCode::Cancelled,
@@ -852,7 +983,26 @@ impl FeedbackCoordinator {
             }
             (info, false)
         } else {
-            let job = self.stages.prepare(cycle, lease, identity).await?;
+            let job = match self.stages.prepare(cycle, lease, identity).await? {
+                FeedbackStagePreparation::Ready(job) => *job,
+                FeedbackStagePreparation::Deferred {
+                    resume_after,
+                    reason_code,
+                } => {
+                    let deferred = self.cycles.defer_cycle(lease, resume_after).await?;
+                    self.metrics
+                        .record_research_heartbeat("feedback_stage_deferred", reason_code);
+                    info!(
+                        cycle_id = %cycle.feedback_cycle_id,
+                        %stage,
+                        %resume_after,
+                        reason_code,
+                        generation = deferred.generation,
+                        "feedback stage deferred to its durable resume boundary"
+                    );
+                    return Ok(ReconcileState::LeaseLost);
+                }
+            };
             job.validate_enqueue()?;
             if job.job_id != identity.job_id()
                 || job.feedback_cycle_id != Some(cycle.feedback_cycle_id)
@@ -916,9 +1066,13 @@ impl FeedbackCoordinator {
 
     async fn finish_cancelled(
         &self,
+        cycle: &FeedbackCycleInfo,
         lease: FeedbackCycleLeaseGuard,
         reason_code: String,
     ) -> QuantResult<ReconcileState> {
+        self.shadow_cancellation
+            .release_cycle(cycle, &reason_code)
+            .await?;
         let outcome = self
             .cycles
             .finalize_cycle(lease, FeedbackCycleTerminal::try_cancelled(reason_code)?)
@@ -1037,7 +1191,7 @@ impl FeedbackCoordinator {
         self.metrics.set_feedback_truth(
             inbox_age_secs,
             resolution.quarantined_count,
-            Self::database_lag(database_time, resolution.verified_through),
+            Self::database_lag(database_time, resolution.terminal_through),
             Self::database_lag(database_time, attempts.sealed_through),
             Self::database_lag(database_time, rollups.sealed_through),
         );
@@ -1298,7 +1452,14 @@ impl FeedbackTimeline {
         let mut scan = TimelineScan::new(stage);
 
         for (index, event) in events.iter().enumerate() {
-            event.validate()?;
+            event
+                .validate()
+                .map_err(|error| FeedbackError::InvalidCoordinatorState {
+                    detail: format!(
+                        "feedback timeline event {} failed integrity validation: {error}",
+                        event.event_sequence
+                    ),
+                })?;
             let expected_sequence =
                 i64::try_from(index + 1).map_err(|_| FeedbackError::InvalidCoordinatorState {
                     detail: "feedback timeline exceeds signed sequence capacity".to_owned(),

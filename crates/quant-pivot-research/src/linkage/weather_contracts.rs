@@ -9,7 +9,7 @@ use std::{ops::Range, str::FromStr, sync::LazyLock};
 
 use chrono::{DateTime, Datelike, Months, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::{TornadoRegionBindingConfig, TornadoRegionScopeConfig, WeatherVerticalBindingsConfig},
     domain::quant::{
@@ -25,7 +25,7 @@ use quant_pivot_models::{
     enums::domain::ResolverTier,
     types::{DomainInstrumentKey, DomainSourceId, IcaoStation, Probability},
 };
-use regex::{Captures, Regex};
+use regex::{Captures, Error as RegexError, Regex};
 use rust_decimal::Decimal;
 
 use super::extractor::{ExtractedCandidate, SubjectExtractor};
@@ -35,107 +35,245 @@ const HKO_CLIMATE_ANCHOR: &str = "weather.gov.hk/en/cis/climat.htm";
 const NCEI_TORNADO_ANCHOR: &str = "ncei.noaa.gov/access/monitoring/tornadoes/time-series";
 const NHC_SCALE_ANCHOR: &str = "nhc.noaa.gov/aboutsshws.php";
 const NHC_LANDFALL_ANCHOR: &str = "nhc.noaa.gov/aboutgloss.shtml#landfall";
-static PRECIPITATION_THRESHOLD: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static PRECIPITATION_THRESHOLD: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(above|over|exceeds?|more than|at least|below|under|less than|at most)\s+(\d+(?:\.\d+)?)\s*(mm|millimeters?|inches?)\b",
     )
-    .ok()
 });
-static PRECIPITATION_SUFFIX: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(\d+(?:\.\d+)?)\s*(mm|millimeters?|inches?)\s+(or more|or less)\b").ok()
+static PRECIPITATION_SUFFIX: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(\d+(?:\.\d+)?)\s*(mm|millimeters?|inches?)\s+(or more|or less)\b")
 });
-static PRECIPITATION_BETWEEN: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static PRECIPITATION_BETWEEN: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\bbetween\s+(\d+(?:\.\d+)?)\s*(?:-|and)\s*(\d+(?:\.\d+)?)\s*(mm|millimeters?|inches?)\b",
     )
-    .ok()
 });
-static AQI_COMPARATOR: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static AQI_COMPARATOR: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(above|over|exceeds?|at least|below|under|less than|at most)\s+(\d{1,3})\b")
-        .ok()
 });
-static TORNADO_COMPARATOR: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static TORNADO_COMPARATOR: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(above|over|exceeds?|more than|at least|below|under|less than|fewer than|at most)\s+(\d+)\s+tornadoes?\b",
     )
-    .ok()
 });
-static TORNADO_SUFFIX: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(\d+)\s+(or more|or fewer)\s+tornadoes?\b").ok());
-static TORNADO_RANGE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(\d+)\s+to\s+(\d+)\s+tornadoes?\b").ok());
-static TORNADO_YEAR: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(?:in|during)\s+(\d{4})\b").ok());
-static TORNADO_RELEASE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static TORNADO_SUFFIX: LazyLock<Result<Regex, RegexError>> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(\d+)\s+(or more|or fewer)\s+tornadoes?\b"));
+static TORNADO_RANGE: LazyLock<Result<Regex, RegexError>> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(\d+)\s+to\s+(\d+)\s+tornadoes?\b"));
+static TORNADO_YEAR: LazyLock<Result<Regex, RegexError>> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:in|during)\s+(\d{4})\b"));
+static TORNADO_RELEASE: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"(?is)scheduled\s+to\s+be\s+released\s+on\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4}),.*?\bor\s+(\d{1,2}):(\d{2})\s+(AM|PM)\s+ET\b",
     )
-    .ok()
 });
-static MONTH_YEAR: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static MONTH_YEAR: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})\b",
     )
-    .ok()
 });
-static CYCLONE_CATEGORY: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?i)\bcategory\s+([1-5])\s+hurricane\b").ok());
-static CYCLONE_STORM: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?i)\b([A-Z]{2}\d{6})\b").ok());
-static GLOBAL_COMPARATOR: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static CYCLONE_CATEGORY: LazyLock<Result<Regex, RegexError>> =
+    LazyLock::new(|| Regex::new(r"(?i)\bcategory\s+([1-5])\s+hurricane\b"));
+static CYCLONE_STORM: LazyLock<Result<Regex, RegexError>> =
+    LazyLock::new(|| Regex::new(r"(?i)\b([A-Z]{2}\d{6})\b"));
+static GLOBAL_COMPARATOR: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(above|over|exceeds?|more than|at least|below|under|less than|at most)\s+(-?\d+(?:\.\d+)?)\s*[°º]?\s*c\b",
     )
-    .ok()
 });
-static GLOBAL_BETWEEN: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static GLOBAL_BETWEEN: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\bbetween\s+(-?\d+(?:\.\d+)?)\s*[°º]?\s*c\s+and\s+(-?\d+(?:\.\d+)?)\s*[°º]?\s*c\b",
     )
-    .ok()
 });
-static GLOBAL_YEAR: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(?:will\s+)?(\d{4})\b").ok());
-static GLOBAL_MONTH_RANK: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(\d+)(?:st|nd|rd|th)(\s+or\s+lower)?\s+hottest\s+on\s+record\b").ok()
+static GLOBAL_YEAR: LazyLock<Result<Regex, RegexError>> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:will\s+)?(\d{4})\b"));
+static GLOBAL_MONTH_RANK: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(\d+)(?:st|nd|rd|th)(\s+or\s+lower)?\s+hottest\s+on\s+record\b")
 });
-static SEA_ICE_COMPARATOR: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static SEA_ICE_COMPARATOR: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(above|over|exceeds?|more than|at least|below|under|less than|at most)\s+(\d+(?:\.\d+)?)\s*(?:m|million)\s+(?:square\s+kilometers?|sq\.?\s*km|km(?:²|2))\b",
     )
-    .ok()
 });
-static SEA_ICE_DATE_RANGE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static SEA_ICE_DATE_RANGE: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4})\s+(?:through|and)\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4})\b",
     )
-    .ok()
 });
-static SEA_ICE_MONTH: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static SEA_ICE_MONTH: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})\b",
     )
-    .ok()
 });
-static WIND_COMPARATOR: LazyLock<Option<Regex>> = LazyLock::new(|| {
+static WIND_COMPARATOR: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(above|over|exceeds?|at least|below|under|less than|at most)\s+(\d+(?:\.\d+)?)\s*(knots?|kt|mph|miles per hour|km/h)\b",
     )
-    .ok()
 });
+
+#[derive(Debug, Clone, Copy)]
+struct WeatherContractRegexes {
+    precipitation_threshold: &'static Regex,
+    precipitation_suffix: &'static Regex,
+    precipitation_between: &'static Regex,
+    aqi_comparator: &'static Regex,
+    tornado_comparator: &'static Regex,
+    tornado_suffix: &'static Regex,
+    tornado_range: &'static Regex,
+    tornado_year: &'static Regex,
+    tornado_release: &'static Regex,
+    month_year: &'static Regex,
+    cyclone_category: &'static Regex,
+    cyclone_storm: &'static Regex,
+    global_comparator: &'static Regex,
+    global_between: &'static Regex,
+    global_year: &'static Regex,
+    global_month_rank: &'static Regex,
+    sea_ice_comparator: &'static Regex,
+    sea_ice_date_range: &'static Regex,
+    sea_ice_month: &'static Regex,
+    wind_comparator: &'static Regex,
+}
+
+impl WeatherContractRegexes {
+    fn load() -> QuantResult<Self> {
+        let regexes = Self {
+            precipitation_threshold: required_regex(
+                &PRECIPITATION_THRESHOLD,
+                "precipitation_threshold",
+            )?,
+            precipitation_suffix: required_regex(&PRECIPITATION_SUFFIX, "precipitation_suffix")?,
+            precipitation_between: required_regex(&PRECIPITATION_BETWEEN, "precipitation_between")?,
+            aqi_comparator: required_regex(&AQI_COMPARATOR, "aqi_comparator")?,
+            tornado_comparator: required_regex(&TORNADO_COMPARATOR, "tornado_comparator")?,
+            tornado_suffix: required_regex(&TORNADO_SUFFIX, "tornado_suffix")?,
+            tornado_range: required_regex(&TORNADO_RANGE, "tornado_range")?,
+            tornado_year: required_regex(&TORNADO_YEAR, "tornado_year")?,
+            tornado_release: required_regex(&TORNADO_RELEASE, "tornado_release")?,
+            month_year: required_regex(&MONTH_YEAR, "month_year")?,
+            cyclone_category: required_regex(&CYCLONE_CATEGORY, "cyclone_category")?,
+            cyclone_storm: required_regex(&CYCLONE_STORM, "cyclone_storm")?,
+            global_comparator: required_regex(&GLOBAL_COMPARATOR, "global_comparator")?,
+            global_between: required_regex(&GLOBAL_BETWEEN, "global_between")?,
+            global_year: required_regex(&GLOBAL_YEAR, "global_year")?,
+            global_month_rank: required_regex(&GLOBAL_MONTH_RANK, "global_month_rank")?,
+            sea_ice_comparator: required_regex(&SEA_ICE_COMPARATOR, "sea_ice_comparator")?,
+            sea_ice_date_range: required_regex(&SEA_ICE_DATE_RANGE, "sea_ice_date_range")?,
+            sea_ice_month: required_regex(&SEA_ICE_MONTH, "sea_ice_month")?,
+            wind_comparator: required_regex(&WIND_COMPARATOR, "wind_comparator")?,
+        };
+        regexes.validate_golden()?;
+        Ok(regexes)
+    }
+
+    fn validate_golden(&self) -> QuantResult<()> {
+        for (name, regex, sample) in [
+            (
+                "precipitation_threshold",
+                self.precipitation_threshold,
+                "above 100 mm",
+            ),
+            (
+                "precipitation_suffix",
+                self.precipitation_suffix,
+                "100 mm or more",
+            ),
+            (
+                "precipitation_between",
+                self.precipitation_between,
+                "between 100 and 120 mm",
+            ),
+            ("aqi_comparator", self.aqi_comparator, "below 100"),
+            (
+                "tornado_comparator",
+                self.tornado_comparator,
+                "at least 100 tornadoes",
+            ),
+            (
+                "tornado_suffix",
+                self.tornado_suffix,
+                "100 or fewer tornadoes",
+            ),
+            ("tornado_range", self.tornado_range, "100 to 120 tornadoes"),
+            ("tornado_year", self.tornado_year, "during 2026"),
+            (
+                "tornado_release",
+                self.tornado_release,
+                "scheduled to be released on January 12, 2027, or 10:00 AM ET",
+            ),
+            ("month_year", self.month_year, "January 2026"),
+            (
+                "cyclone_category",
+                self.cyclone_category,
+                "category 3 hurricane",
+            ),
+            ("cyclone_storm", self.cyclone_storm, "AL012026"),
+            ("global_comparator", self.global_comparator, "above 1.25 C"),
+            (
+                "global_between",
+                self.global_between,
+                "between 1.2 C and 1.3 C",
+            ),
+            ("global_year", self.global_year, "will 2026"),
+            (
+                "global_month_rank",
+                self.global_month_rank,
+                "2nd hottest on record",
+            ),
+            (
+                "sea_ice_comparator",
+                self.sea_ice_comparator,
+                "below 4.5 million square kilometers",
+            ),
+            (
+                "sea_ice_date_range",
+                self.sea_ice_date_range,
+                "January 1, 2026 through January 31, 2026",
+            ),
+            ("sea_ice_month", self.sea_ice_month, "January 2026"),
+            ("wind_comparator", self.wind_comparator, "at least 50 knots"),
+        ] {
+            if !regex.is_match(sample) {
+                return Err(QuantError::config(format!(
+                    "built-in Weather parser golden sample `{name}` no longer matches"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn required_regex(
+    compiled: &'static Result<Regex, RegexError>,
+    name: &'static str,
+) -> QuantResult<&'static Regex> {
+    compiled.as_ref().map_err(|error| {
+        QuantError::config(format!(
+            "built-in Weather parser regex `{name}` failed to compile: {error}"
+        ))
+    })
+}
 
 /// Deploy-frozen parser inputs for official location/source identities.
 #[derive(Debug, Clone)]
 pub struct WeatherContractExtractor {
     bindings: WeatherVerticalBindingsConfig,
+    regexes: WeatherContractRegexes,
 }
 
 impl WeatherContractExtractor {
-    #[must_use]
-    pub fn new(bindings: &WeatherVerticalBindingsConfig) -> Self {
-        Self {
+    /// Validate every built-in parser expression and freeze deploy bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed boot configuration failure when any built-in parser
+    /// expression cannot compile.
+    pub fn try_new(bindings: &WeatherVerticalBindingsConfig) -> QuantResult<Self> {
+        Ok(Self {
             bindings: bindings.clone(),
-        }
+            regexes: WeatherContractRegexes::load()?,
+        })
     }
 
     fn parse_precipitation(&self, metadata: &LinkageSourceMetadata) -> Option<ExtractedCandidate> {
@@ -147,14 +285,14 @@ impl WeatherContractExtractor {
         let source_span = literal_span(metadata, HKO_CLIMATE_ANCHOR, "truth_policy")?;
         let site_span = literal_span(metadata, &binding.site_key, "site_key")?;
         let station_span = entailed_from(site_span.clone(), "station_key");
-        let (comparator, comparator_span) = precipitation_comparator(metadata)?;
+        let (comparator, comparator_span) = precipitation_comparator(metadata, &self.regexes)?;
         let rounding_text = find_any(
             metadata,
             &["one decimal place", "1 decimal place", "whole millimeter"],
             "rounding",
             GroundingKind::LiteralSpan,
         )?;
-        let (window, window_span) = month_window(metadata, &binding.timezone)?;
+        let (window, window_span) = month_window(metadata, &binding.timezone, &self.regexes)?;
         Some(ExtractedCandidate {
             subject: MarketSubject::WeatherPrecipitation(WeatherPrecipitationSubject {
                 site_key: binding.site_key.clone(),
@@ -209,7 +347,7 @@ impl WeatherContractExtractor {
                 metadata_contains(metadata, &binding.area) && binding.timezone.parse::<Tz>().is_ok()
             })?;
         let area_span = literal_span(metadata, &binding.area, "reporting_area_key")?;
-        let captures = AQI_COMPARATOR.as_ref()?.captures(&metadata.question)?;
+        let captures = self.regexes.aqi_comparator.captures(&metadata.question)?;
         let (comparator, comparator_span) = metric_comparator(&captures, Decimal::ONE)?;
         let window = local_window(metadata.end_date?, &binding.timezone, CalendarSpan::Day)?;
         Some(ExtractedCandidate {
@@ -243,12 +381,12 @@ impl WeatherContractExtractor {
     fn parse_tornado(&self, metadata: &LinkageSourceMetadata) -> Option<ExtractedCandidate> {
         let source_span = literal_span(metadata, NCEI_TORNADO_ANCHOR, "truth_policy")?;
         let (binding, region_span) = tornado_binding(metadata, &self.bindings.tornado_regions)?;
-        let (comparator, comparator_span) = tornado_comparator(metadata)?;
-        let (window, window_span) = tornado_window(metadata, &binding.timezone)?;
+        let (comparator, comparator_span) = tornado_comparator(metadata, &self.regexes)?;
+        let (window, window_span) = tornado_window(metadata, &binding.timezone, &self.regexes)?;
         let mut release_span = None;
         let (finalization, final_source, instrument_key) = match &binding.scope {
             TornadoRegionScopeConfig::UnitedStates => {
-                let (not_before, span) = tornado_release(metadata)?;
+                let (not_before, span) = tornado_release(metadata, &self.regexes)?;
                 release_span = Some(span);
                 (
                     WeatherTornadoFinalization::FirstPublishedAfter { not_before },
@@ -293,9 +431,9 @@ impl WeatherContractExtractor {
     fn parse_cyclone(&self, metadata: &LinkageSourceMetadata) -> Option<ExtractedCandidate> {
         let scale_span = literal_span(metadata, NHC_SCALE_ANCHOR, "truth_policy")?;
         let landfall_span = literal_span(metadata, NHC_LANDFALL_ANCHOR, "outcome")?;
-        let storm_match = CYCLONE_STORM.as_ref()?.find(&metadata.question)?;
+        let storm_match = self.regexes.cyclone_storm.find(&metadata.question)?;
         let storm_key = storm_match.as_str().to_ascii_uppercase();
-        let category_captures = CYCLONE_CATEGORY.as_ref()?.captures(&metadata.question)?;
+        let category_captures = self.regexes.cyclone_category.captures(&metadata.question)?;
         let category = category_captures.get(1)?.as_str().parse::<u8>().ok()?;
         let category_match = category_captures.get(0)?;
         let basin = cyclone_basin(&storm_key)?;
@@ -362,13 +500,16 @@ impl WeatherContractExtractor {
         })
     }
 
-    fn parse_global_temperature(metadata: &LinkageSourceMetadata) -> Option<ExtractedCandidate> {
+    fn parse_global_temperature(
+        &self,
+        metadata: &LinkageSourceMetadata,
+    ) -> Option<ExtractedCandidate> {
         let source_span = literal_span(metadata, GISTEMP_ANCHOR, "truth_policy")?;
-        let monthly_rank = global_month_rank(metadata);
+        let monthly_rank = global_month_rank(metadata, &self.regexes);
         let annual_rank = global_rank(metadata);
         let (outcome, outcome_span, window, window_span, instrument_key, version_span) =
             if let Some((rank, rank_span)) = monthly_rank {
-                let (window, window_span) = month_window(metadata, "UTC")?;
+                let (window, window_span) = month_window(metadata, "UTC", &self.regexes)?;
                 (
                     GlobalTemperatureOutcome::MonthlyRecordRank { rank },
                     rank_span,
@@ -383,7 +524,7 @@ impl WeatherContractExtractor {
                     )?,
                 )
             } else if let Some((rank, rank_span)) = annual_rank {
-                let (window, window_span) = global_year_window(metadata)?;
+                let (window, window_span) = global_year_window(metadata, &self.regexes)?;
                 (
                     GlobalTemperatureOutcome::AnnualRecordRank { rank },
                     rank_span,
@@ -396,8 +537,8 @@ impl WeatherContractExtractor {
                 if metadata_contains(metadata, "any month") {
                     return None;
                 }
-                let (comparator, span) = global_comparator(metadata)?;
-                let (window, window_span) = month_window(metadata, "UTC")?;
+                let (comparator, span) = global_comparator(metadata, &self.regexes)?;
+                let (window, window_span) = month_window(metadata, "UTC", &self.regexes)?;
                 (
                     GlobalTemperatureOutcome::MonthlyAnomaly { comparator },
                     rename_span(span, "outcome"),
@@ -437,7 +578,7 @@ impl WeatherContractExtractor {
         })
     }
 
-    fn parse_sea_ice(metadata: &LinkageSourceMetadata) -> Option<ExtractedCandidate> {
+    fn parse_sea_ice(&self, metadata: &LinkageSourceMetadata) -> Option<ExtractedCandidate> {
         let source_span = find_any(
             metadata,
             &["national snow and ice data center", "nsidc.org/data/g02135"],
@@ -457,7 +598,7 @@ impl WeatherContractExtractor {
                 SeaIceHemisphere::Northern if metadata_contains(metadata, "nh-daily-extent") => {
                     let product_span = literal_span(metadata, "nh-daily-extent", "product")?;
                     let (aggregation, aggregation_span) = sea_ice_daily_aggregation(metadata)?;
-                    let (window, window_span) = sea_ice_date_range(metadata)?;
+                    let (window, window_span) = sea_ice_date_range(metadata, &self.regexes)?;
                     (
                         SeaIceProduct::DailyExtent,
                         product_span,
@@ -470,7 +611,7 @@ impl WeatherContractExtractor {
                 SeaIceHemisphere::Southern if metadata_contains(metadata, "sh-daily-extent") => {
                     let product_span = literal_span(metadata, "sh-daily-extent", "product")?;
                     let (aggregation, aggregation_span) = sea_ice_daily_aggregation(metadata)?;
-                    let (window, window_span) = sea_ice_date_range(metadata)?;
+                    let (window, window_span) = sea_ice_date_range(metadata, &self.regexes)?;
                     (
                         SeaIceProduct::DailyExtent,
                         product_span,
@@ -485,7 +626,7 @@ impl WeatherContractExtractor {
                 {
                     let product_span = literal_span(metadata, "/monthly/data/", "product")?;
                     let aggregation_span = literal_span(metadata, "monthly mean", "aggregation")?;
-                    let (window, window_span) = sea_ice_month_window(metadata)?;
+                    let (window, window_span) = sea_ice_month_window(metadata, &self.regexes)?;
                     (
                         SeaIceProduct::MonthlyExtent,
                         product_span,
@@ -497,7 +638,10 @@ impl WeatherContractExtractor {
                 }
                 _ => return None,
             };
-        let captures = SEA_ICE_COMPARATOR.as_ref()?.captures(&metadata.question)?;
+        let captures = self
+            .regexes
+            .sea_ice_comparator
+            .captures(&metadata.question)?;
         let (comparator, comparator_span) = metric_comparator(&captures, Decimal::ONE)?;
         let concentration_span =
             entailed_from(product_span.clone(), "concentration_threshold_percent");
@@ -555,7 +699,7 @@ impl WeatherContractExtractor {
         })?;
         let station = IcaoStation::parse(&binding.station).ok()?;
         let station_span = literal_span(metadata, &binding.station, "station_key")?;
-        let captures = WIND_COMPARATOR.as_ref()?.captures(&metadata.question)?;
+        let captures = self.regexes.wind_comparator.captures(&metadata.question)?;
         let (comparator, comparator_span) = metric_comparator(&captures, wind_scale(&captures)?)?;
         let statistic_text = if metadata_contains(metadata, "wind gust") {
             "wind gust"
@@ -628,16 +772,17 @@ impl SubjectExtractor for WeatherContractExtractor {
             .or_else(|| self.parse_aqi(metadata))
             .or_else(|| self.parse_tornado(metadata))
             .or_else(|| self.parse_cyclone(metadata))
-            .or_else(|| Self::parse_global_temperature(metadata))
-            .or_else(|| Self::parse_sea_ice(metadata))
+            .or_else(|| self.parse_global_temperature(metadata))
+            .or_else(|| self.parse_sea_ice(metadata))
             .or_else(|| self.parse_wind(metadata)))
     }
 }
 
 fn precipitation_comparator(
     metadata: &LinkageSourceMetadata,
+    regexes: &WeatherContractRegexes,
 ) -> Option<(WeatherValueComparator, GroundingSpan)> {
-    if let Some(captures) = PRECIPITATION_BETWEEN.as_ref()?.captures(&metadata.question) {
+    if let Some(captures) = regexes.precipitation_between.captures(&metadata.question) {
         if !metadata_contains(metadata, "falls exactly between two brackets")
             || !metadata_contains(metadata, "higher bracket")
         {
@@ -663,7 +808,7 @@ fn precipitation_comparator(
             )?,
         ));
     }
-    if let Some(captures) = PRECIPITATION_SUFFIX.as_ref()?.captures(&metadata.question) {
+    if let Some(captures) = regexes.precipitation_suffix.captures(&metadata.question) {
         let threshold = Decimal::from_str(captures.get(1)?.as_str()).ok()?
             * measurement_scale(captures.get(2)?.as_str())?;
         let comparator = match captures.get(3)?.as_str().to_ascii_lowercase().as_str() {
@@ -689,16 +834,17 @@ fn precipitation_comparator(
             )?,
         ));
     }
-    let captures = PRECIPITATION_THRESHOLD
-        .as_ref()?
+    let captures = regexes
+        .precipitation_threshold
         .captures(&metadata.question)?;
     metric_comparator(&captures, measurement_scale(captures.get(3)?.as_str())?)
 }
 
 fn global_comparator(
     metadata: &LinkageSourceMetadata,
+    regexes: &WeatherContractRegexes,
 ) -> Option<(WeatherValueComparator, GroundingSpan)> {
-    if let Some(captures) = GLOBAL_BETWEEN.as_ref()?.captures(&metadata.question) {
+    if let Some(captures) = regexes.global_between.captures(&metadata.question) {
         let lower = Decimal::from_str(captures.get(1)?.as_str()).ok()?;
         let upper = Decimal::from_str(captures.get(2)?.as_str()).ok()?;
         let matched = captures.get(0)?;
@@ -718,7 +864,7 @@ fn global_comparator(
             )?,
         ));
     }
-    let captures = GLOBAL_COMPARATOR.as_ref()?.captures(&metadata.question)?;
+    let captures = regexes.global_comparator.captures(&metadata.question)?;
     metric_comparator(&captures, Decimal::ONE)
 }
 
@@ -757,8 +903,9 @@ fn global_rank(metadata: &LinkageSourceMetadata) -> Option<(GlobalTemperatureRan
 
 fn global_month_rank(
     metadata: &LinkageSourceMetadata,
+    regexes: &WeatherContractRegexes,
 ) -> Option<(GlobalTemperatureRank, GroundingSpan)> {
-    let captures = GLOBAL_MONTH_RANK.as_ref()?.captures(&metadata.question)?;
+    let captures = regexes.global_month_rank.captures(&metadata.question)?;
     let rank = captures.get(1)?.as_str().parse::<u16>().ok()?;
     if rank == 0 {
         return None;
@@ -783,8 +930,9 @@ fn global_month_rank(
 
 fn global_year_window(
     metadata: &LinkageSourceMetadata,
+    regexes: &WeatherContractRegexes,
 ) -> Option<(WeatherContractWindow, GroundingSpan)> {
-    let captures = GLOBAL_YEAR.as_ref()?.captures(&metadata.question)?;
+    let captures = regexes.global_year.captures(&metadata.question)?;
     let year = i32::from_str(captures.get(1)?.as_str()).ok()?;
     let start = NaiveDate::from_ymd_opt(year, 1, 1)?;
     let end = NaiveDate::from_ymd_opt(year.checked_add(1)?, 1, 1)?;
@@ -835,8 +983,9 @@ fn tornado_binding<'a>(
 
 fn tornado_comparator(
     metadata: &LinkageSourceMetadata,
+    regexes: &WeatherContractRegexes,
 ) -> Option<(WeatherValueComparator, GroundingSpan)> {
-    if let Some(captures) = TORNADO_RANGE.as_ref()?.captures(&metadata.question) {
+    if let Some(captures) = regexes.tornado_range.captures(&metadata.question) {
         let lower = Decimal::from_str(captures.get(1)?.as_str()).ok()?;
         let upper = Decimal::from_str(captures.get(2)?.as_str()).ok()?;
         let matched = captures.get(0)?;
@@ -856,7 +1005,7 @@ fn tornado_comparator(
             )?,
         ));
     }
-    if let Some(captures) = TORNADO_SUFFIX.as_ref()?.captures(&metadata.question) {
+    if let Some(captures) = regexes.tornado_suffix.captures(&metadata.question) {
         let threshold = Decimal::from_str(captures.get(1)?.as_str()).ok()?;
         let comparator = match captures.get(2)?.as_str().to_ascii_lowercase().as_str() {
             "or more" => WeatherValueComparator::Above {
@@ -881,20 +1030,21 @@ fn tornado_comparator(
             )?,
         ));
     }
-    let captures = TORNADO_COMPARATOR.as_ref()?.captures(&metadata.question)?;
+    let captures = regexes.tornado_comparator.captures(&metadata.question)?;
     metric_comparator(&captures, Decimal::ONE)
 }
 
 fn tornado_window(
     metadata: &LinkageSourceMetadata,
     timezone: &str,
+    regexes: &WeatherContractRegexes,
 ) -> Option<(WeatherContractWindow, GroundingSpan)> {
-    if let Some(window) = month_window(metadata, timezone) {
+    if let Some(window) = month_window(metadata, timezone, regexes) {
         return Some(window);
     }
     let timezone = timezone.parse::<Tz>().ok()?;
     for (source, text) in source_fields(metadata) {
-        let Some(captures) = TORNADO_YEAR.as_ref()?.captures(text) else {
+        let Some(captures) = regexes.tornado_year.captures(text) else {
             continue;
         };
         let year = i32::from_str(captures.get(1)?.as_str()).ok()?;
@@ -919,9 +1069,12 @@ fn tornado_window(
     None
 }
 
-fn tornado_release(metadata: &LinkageSourceMetadata) -> Option<(DateTime<Utc>, GroundingSpan)> {
+fn tornado_release(
+    metadata: &LinkageSourceMetadata,
+    regexes: &WeatherContractRegexes,
+) -> Option<(DateTime<Utc>, GroundingSpan)> {
     let description = metadata.description.as_deref()?;
-    let captures = TORNADO_RELEASE.as_ref()?.captures(description)?;
+    let captures = regexes.tornado_release.captures(description)?;
     let month = sea_ice_month(captures.get(1)?.as_str())?;
     let day = u32::from_str(captures.get(2)?.as_str()).ok()?;
     let year = i32::from_str(captures.get(3)?.as_str()).ok()?;
@@ -959,10 +1112,11 @@ fn tornado_release(metadata: &LinkageSourceMetadata) -> Option<(DateTime<Utc>, G
 fn month_window(
     metadata: &LinkageSourceMetadata,
     timezone: &str,
+    regexes: &WeatherContractRegexes,
 ) -> Option<(WeatherContractWindow, GroundingSpan)> {
     let timezone = timezone.parse::<Tz>().ok()?;
     for (source, text) in source_fields(metadata) {
-        let Some(captures) = MONTH_YEAR.as_ref()?.captures(text) else {
+        let Some(captures) = regexes.month_year.captures(text) else {
             continue;
         };
         let month = sea_ice_month(captures.get(1)?.as_str())?;
@@ -1002,9 +1156,10 @@ fn sea_ice_daily_aggregation(
 
 fn sea_ice_date_range(
     metadata: &LinkageSourceMetadata,
+    regexes: &WeatherContractRegexes,
 ) -> Option<(WeatherContractWindow, GroundingSpan)> {
     for (source, text) in source_fields(metadata) {
-        let Some(captures) = SEA_ICE_DATE_RANGE.as_ref()?.captures(text) else {
+        let Some(captures) = regexes.sea_ice_date_range.captures(text) else {
             continue;
         };
         let start = sea_ice_date(&captures, 1, 2, 3)?;
@@ -1037,8 +1192,9 @@ fn sea_ice_date_range(
 
 fn sea_ice_month_window(
     metadata: &LinkageSourceMetadata,
+    regexes: &WeatherContractRegexes,
 ) -> Option<(WeatherContractWindow, GroundingSpan)> {
-    let captures = SEA_ICE_MONTH.as_ref()?.captures(&metadata.question)?;
+    let captures = regexes.sea_ice_month.captures(&metadata.question)?;
     let month = sea_ice_month(captures.get(1)?.as_str())?;
     let year = i32::from_str(captures.get(2)?.as_str()).ok()?;
     let start = NaiveDate::from_ymd_opt(year, month, 1)?;
@@ -1302,6 +1458,8 @@ fn source_fields(metadata: &LinkageSourceMetadata) -> Vec<(GroundingField, &str)
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
         config::WeatherVerticalBindingsConfig,
@@ -1311,9 +1469,16 @@ mod tests {
         },
         types::{DomainInstrumentKey, MarketId},
     };
+    use regex::{Error as RegexError, Regex};
     use rust_decimal_macros::dec;
 
-    use super::{SubjectExtractor, WeatherContractExtractor};
+    use super::{SubjectExtractor, WeatherContractExtractor, required_regex};
+
+    static INVALID_REGEX: LazyLock<Result<Regex, RegexError>> = LazyLock::new(|| {
+        let mut pattern = String::with_capacity(1);
+        pattern.push('(');
+        Regex::new(&pattern)
+    });
 
     fn metadata(question: &str, description: &str) -> LinkageSourceMetadata {
         metadata_at(
@@ -1339,9 +1504,21 @@ mod tests {
         }
     }
 
+    impl WeatherContractExtractor {
+        fn fixture() -> Self {
+            Self::try_new(&WeatherVerticalBindingsConfig::default())
+                .expect("built-in Weather parser")
+        }
+    }
+
+    #[test]
+    fn regex_boot_fails() {
+        assert!(required_regex(&INVALID_REGEX, "invalid_test").is_err());
+    }
+
     #[test]
     fn official_daily_aqi_parses() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let candidate = extractor
             .extract(&metadata(
                 "Will Philadelphia PM2.5 AQI be below 100?",
@@ -1359,7 +1536,7 @@ mod tests {
 
     #[test]
     fn hourly_aqi_rejects() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let candidate = extractor
             .extract(&metadata(
                 "Will East Rutherford PM2.5 AQI be above 100?",
@@ -1372,7 +1549,7 @@ mod tests {
 
     #[test]
     fn national_tornado_range_parses() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let candidate = extractor
             .extract(&metadata_at(
                 "Will 100 to 129 tornadoes occur in the United States in July 2026?",
@@ -1409,7 +1586,7 @@ mod tests {
 
     #[test]
     fn national_tornado_year_parses() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let candidate = extractor
             .extract(&metadata_at(
                 "Will 1250 or more tornadoes occur in the United States in 2026?",
@@ -1423,7 +1600,7 @@ mod tests {
 
     #[test]
     fn precipitation_converts_inches() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let candidate = extractor
             .extract(&metadata_at(
                 "Will Hong Kong have more than 2 inches of precipitation in July?",
@@ -1443,7 +1620,7 @@ mod tests {
 
     #[test]
     fn precipitation_owns_upper_boundary() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let candidate = extractor
             .extract(&metadata_at(
                 "Will Hong Kong have between 400-425mm of precipitation in July?",
@@ -1474,7 +1651,7 @@ mod tests {
 
     #[test]
     fn sea_ice_minimum_range() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let candidate = extractor
             .extract(&metadata_at(
                 "Will the minimum Arctic sea ice extent this summer be less than 4m square kilometers?",
@@ -1501,7 +1678,7 @@ mod tests {
 
     #[test]
     fn sea_ice_monthly_explicit() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let candidate = extractor
             .extract(&metadata_at(
                 "Will the September 2025 monthly mean Arctic sea ice extent be below 5 million square kilometers?",
@@ -1520,7 +1697,7 @@ mod tests {
 
     #[test]
     fn global_monthly_range_parses() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let candidate = extractor
             .extract(&metadata_at(
                 "Will global temperature increase by between 1.10ºC and 1.14ºC in July 2026?",
@@ -1548,7 +1725,7 @@ mod tests {
 
     #[test]
     fn global_monthly_rank_parses() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let candidate = extractor
             .extract(&metadata_at(
                 "Will August 2026 be the 4th or lower hottest on record?",
@@ -1576,7 +1753,7 @@ mod tests {
 
     #[test]
     fn global_exact_rank_parses() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let candidate = extractor
             .extract(&metadata_at(
                 "Will 2026 be the second-hottest year on record?",
@@ -1603,7 +1780,7 @@ mod tests {
 
     #[test]
     fn cyclone_requires_frozen_binding() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let description = "Use https://www.nhc.noaa.gov/aboutsshws.php and the landfall \
                            definition at https://www.nhc.noaa.gov/aboutgloss.shtml#landfall.";
         let configured = extractor
@@ -1625,7 +1802,7 @@ mod tests {
 
     #[test]
     fn wind_requires_truth_source() {
-        let extractor = WeatherContractExtractor::new(&WeatherVerticalBindingsConfig::default());
+        let extractor = WeatherContractExtractor::fixture();
         let aviation_only = extractor
             .extract(&metadata(
                 "Will the KMWN maximum wind gust be above 100 mph?",

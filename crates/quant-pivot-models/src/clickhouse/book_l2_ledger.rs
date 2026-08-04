@@ -40,6 +40,29 @@ pub struct BookL2LedgerRow {
     pub schema_version: ChSchemaVersion,
 }
 
+/// Per-token lower bound for one point-in-time L2 replay batch.
+///
+/// A batch reader must match both the stream session and sequence for each
+/// token. A global time or sequence lower bound is not equivalent because one
+/// stale token could otherwise make the query scan unrelated history for every
+/// active token in the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookLedgerReplayAnchor {
+    pub token_id: TokenId,
+    pub stream_session_id: Uuid,
+    pub from_sequence: u64,
+}
+
+impl From<&BookL2LedgerRow> for BookLedgerReplayAnchor {
+    fn from(row: &BookL2LedgerRow) -> Self {
+        Self {
+            token_id: row.token_id.clone(),
+            stream_session_id: row.stream_session_id,
+            from_sequence: row.token_sequence,
+        }
+    }
+}
+
 impl BookL2LedgerRow {
     pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion::FIRST;
 

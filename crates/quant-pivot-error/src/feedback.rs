@@ -77,6 +77,21 @@ pub enum FeedbackError {
     #[error("model-route bootstrap conflict: {detail}")]
     BootstrapTransactionConflict { detail: String },
 
+    #[error("model-route shadow slot {route} is occupied by binding {binding_id}")]
+    ShadowOccupied { route: String, binding_id: String },
+
+    #[error(
+        "model-route shadow memory budget exceeded: active={active_bytes}, requested={requested_bytes}, limit={limit_bytes}"
+    )]
+    ShadowMemoryBudgetExceeded {
+        active_bytes: u64,
+        requested_bytes: u64,
+        limit_bytes: u64,
+    },
+
+    #[error("model-route shadow-binding conflict: {detail}")]
+    ShadowBindingConflict { detail: String },
+
     #[error("model-route runtime convergence conflict: {detail}")]
     ModelRouteConvergenceConflict { detail: String },
 

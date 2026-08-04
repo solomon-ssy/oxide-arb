@@ -12,7 +12,7 @@
 //! hash fully determine the materialized state) while the streaming source can
 //! observe fresh facts.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -24,7 +24,7 @@ use quant_pivot_models::{
             CatalogEventChangeInfo, CatalogMarketChangeInfo, CatalogSnapshotInfo, CatalogWindowInfo,
         },
     },
-    types::{CatalogEventChangeId, MarketId, TokenId},
+    types::{CatalogEventChangeId, ClobMarketInfoVersion, MarketId, TokenId},
 };
 
 use super::{
@@ -41,6 +41,7 @@ pub struct MaterializedPitEngine {
     books: HashMap<TokenId, Vec<BookSnapshotAt>>,
     markets: HashMap<MarketId, Vec<CatalogMarketChangeInfo>>,
     events: HashMap<CatalogEventChangeId, CatalogEventChangeInfo>,
+    market_info: HashMap<MarketId, Vec<ClobMarketInfoVersion>>,
     max_book_staleness: Duration,
 }
 
@@ -53,6 +54,7 @@ impl MaterializedPitEngine {
     pub fn new(
         mut books: HashMap<TokenId, Vec<BookSnapshotAt>>,
         catalog: CatalogWindowInfo,
+        market_info_versions: Vec<ClobMarketInfoVersion>,
         max_book_staleness: Duration,
     ) -> QuantResult<Self> {
         for series in books.values_mut() {
@@ -96,10 +98,34 @@ impl MaterializedPitEngine {
                     })
             });
         }
+        let mut market_info: HashMap<MarketId, Vec<ClobMarketInfoVersion>> = HashMap::new();
+        for version in market_info_versions {
+            version
+                .validate()
+                .map_err(|detail| ResearchError::PitResolution {
+                    detail: format!(
+                        "materialized CLOB market-info version {} is invalid: {detail}",
+                        version.version_id
+                    ),
+                })?;
+            market_info
+                .entry(version.market_id.clone())
+                .or_default()
+                .push(version);
+        }
+        for series in market_info.values_mut() {
+            series.sort_by(|left, right| {
+                left.effective_at
+                    .cmp(&right.effective_at)
+                    .then_with(|| left.available_at.cmp(&right.available_at))
+                    .then_with(|| left.payload_hash.cmp(&right.payload_hash))
+            });
+        }
         Ok(Self {
             books,
             markets,
             events,
+            market_info,
             max_book_staleness,
         })
     }
@@ -166,16 +192,19 @@ impl PointInTimeSnapshotSource for MaterializedPitEngine {
                 })
             })
             .cloned()
-            .collect();
-        resolve_catalog_snapshot(
+            .collect::<Vec<_>>();
+        let mut resolved = resolve_catalog_snapshot(
             &CatalogSnapshotInfo {
                 market: market.clone(),
-                event,
-                event_markets,
+                event: Arc::new(event),
+                event_markets: Arc::from(event_markets),
             },
             boundary,
-        )
-        .map(Some)
+        )?;
+        resolved.context.fee_schedule = self
+            .visible_market_info(market_id, boundary)
+            .map(ClobMarketInfoVersion::fee_schedule);
+        Ok(Some(resolved))
     }
 }
 
@@ -216,6 +245,21 @@ impl MaterializedPitEngine {
                     .get(&market.event_change_id)
                     .is_some_and(|event| event_visible(event, boundary))
         })
+    }
+
+    fn visible_market_info(
+        &self,
+        market_id: &MarketId,
+        boundary: &DecisionBoundary,
+    ) -> Option<&ClobMarketInfoVersion> {
+        self.market_info
+            .get(market_id)?
+            .iter()
+            .rev()
+            .find(|version| {
+                version.effective_at <= boundary.knowledge_cutoff()
+                    && version.available_at <= boundary.decision_at()
+            })
     }
 }
 
@@ -258,13 +302,16 @@ mod tests {
             common::{CategorySet, MarketCategory, TickSize},
             market::{EventStatus, MarketStatus},
         },
+        hashing::CanonicalDigest,
         types::{
             CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId,
-            CatalogMarketObjectId, CatalogSyncBatchId, ContentHash, EventId, MarketId, Price,
+            CatalogMarketObjectId, CatalogSyncBatchId, ClobFeeDetails, ClobMarketInfoVersion,
+            ClobMarketInfoVersionId, ClobTokenDescriptor, ContentHash, EventId, MarketId, Price,
             Shares, TokenId,
         },
     };
     use rust_decimal::Decimal;
+    use serde_json::json;
 
     use super::MaterializedPitEngine;
     use crate::pit::{BookSnapshotAt, PointInTimeSnapshotSource};
@@ -294,6 +341,46 @@ mod tests {
 
     fn hash(seed: char) -> ContentHash {
         ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    }
+
+    fn market_info(
+        market_id: &MarketId,
+        effective_at: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        platform_rate: Decimal,
+    ) -> ClobMarketInfoVersion {
+        let raw_payload = json!({ "platform_rate": platform_rate.to_string() });
+        ClobMarketInfoVersion {
+            version_id: ClobMarketInfoVersionId::from_v7(),
+            market_id: market_id.clone(),
+            tokens: vec![
+                ClobTokenDescriptor {
+                    token_id: TokenId::new("yes"),
+                    outcome: "Yes".to_owned(),
+                },
+                ClobTokenDescriptor {
+                    token_id: TokenId::new("no"),
+                    outcome: "No".to_owned(),
+                },
+            ],
+            tick_size: TickSize::Hundredth,
+            minimum_order_size: Decimal::ONE,
+            neg_risk: false,
+            taker_order_delay_enabled: false,
+            minimum_order_age_secs: None,
+            blockaid_check_enabled: false,
+            fee_details: ClobFeeDetails {
+                rate: platform_rate,
+                exponent: 1,
+                taker_only: true,
+            },
+            builder_maker_fee_rate_bps: 0,
+            builder_taker_fee_rate_bps: 0,
+            effective_at,
+            available_at,
+            payload_hash: CanonicalDigest::content_hash_json(&raw_payload).expect("payload hash"),
+            raw_payload,
+        }
     }
 
     fn catalog_window(
@@ -418,6 +505,7 @@ mod tests {
                 market_changes: Vec::new(),
                 event_changes: Vec::new(),
             },
+            Vec::new(),
             Duration::seconds(2),
         )
         .expect("engine");
@@ -437,6 +525,7 @@ mod tests {
                 market_changes: Vec::new(),
                 event_changes: Vec::new(),
             },
+            Vec::new(),
             Duration::seconds(2),
         )
         .expect("engine");
@@ -460,8 +549,9 @@ mod tests {
         );
         catalog.market_changes[1].available_at =
             Utc.timestamp_millis_opt(7_000).single().expect("ts");
-        let engine = MaterializedPitEngine::new(HashMap::new(), catalog, Duration::seconds(60))
-            .expect("engine");
+        let engine =
+            MaterializedPitEngine::new(HashMap::new(), catalog, Vec::new(), Duration::seconds(60))
+                .expect("engine");
         let before_available = DecisionClock::new(0)
             .boundary(Utc.timestamp_millis_opt(6_000).single().expect("ts"))
             .expect("boundary");
@@ -492,5 +582,86 @@ mod tests {
                 .expect("market")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn market_fee_resolves_bitemporally() {
+        let market_id = MarketId::new("fee-market");
+        let other_market_id = MarketId::new("other-market");
+        let catalog_at = Utc
+            .timestamp_millis_opt(1_000)
+            .single()
+            .expect("catalog time");
+        let first_at = Utc
+            .timestamp_millis_opt(2_000)
+            .single()
+            .expect("first time");
+        let second_at = Utc
+            .timestamp_millis_opt(4_000)
+            .single()
+            .expect("second time");
+        let second_available = Utc
+            .timestamp_millis_opt(7_000)
+            .single()
+            .expect("second availability");
+        let exact_at = Utc
+            .timestamp_millis_opt(8_000)
+            .single()
+            .expect("exact time");
+        let future_at = Utc
+            .timestamp_millis_opt(9_000)
+            .single()
+            .expect("future time");
+        let versions = vec![
+            market_info(&market_id, first_at, first_at, Decimal::new(1, 2)),
+            market_info(&market_id, second_at, second_available, Decimal::new(2, 2)),
+            market_info(&market_id, exact_at, exact_at, Decimal::new(3, 2)),
+            market_info(&market_id, future_at, future_at, Decimal::new(4, 2)),
+            market_info(&other_market_id, first_at, first_at, Decimal::new(9, 2)),
+        ];
+        let engine = MaterializedPitEngine::new(
+            HashMap::new(),
+            catalog_window(&market_id, &[(catalog_at, MarketStatus::Active)]),
+            versions,
+            Duration::seconds(60),
+        )
+        .expect("engine");
+
+        let before_delayed_available = DecisionClock::new(0)
+            .boundary(Utc.timestamp_millis_opt(6_000).single().expect("boundary"))
+            .expect("boundary");
+        let first = engine
+            .market_snapshot_at(&market_id, &before_delayed_available)
+            .await
+            .expect("market")
+            .expect("snapshot")
+            .context
+            .fee_schedule
+            .expect("fee schedule");
+        assert_eq!(first.platform_rate, Decimal::new(1, 2));
+
+        let after_delayed_available = DecisionClock::new(0)
+            .boundary(Utc.timestamp_millis_opt(7_500).single().expect("boundary"))
+            .expect("boundary");
+        let second = engine
+            .market_snapshot_at(&market_id, &after_delayed_available)
+            .await
+            .expect("market")
+            .expect("snapshot")
+            .context
+            .fee_schedule
+            .expect("fee schedule");
+        assert_eq!(second.platform_rate, Decimal::new(2, 2));
+
+        let at_exact_boundary = DecisionClock::new(0).boundary(exact_at).expect("boundary");
+        let exact = engine
+            .market_snapshot_at(&market_id, &at_exact_boundary)
+            .await
+            .expect("market")
+            .expect("snapshot")
+            .context
+            .fee_schedule
+            .expect("fee schedule");
+        assert_eq!(exact.platform_rate, Decimal::new(3, 2));
     }
 }

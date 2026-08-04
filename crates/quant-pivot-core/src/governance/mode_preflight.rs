@@ -21,7 +21,8 @@ use quant_pivot_models::{
         execution::KillSwitchState,
         quant::{ExecutionWalletKind, QuantRuntimeMode},
     },
-    runtime_config::{BuyModelRoute, DecisionPolicySnapshot, ModelVersionRef},
+    runtime_config::{BuyModelRoute, DecisionPolicySnapshot},
+    types::ModelVersionId,
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ModelRegistryRepository, ReconciliationRepository,
@@ -237,17 +238,17 @@ impl DefaultModePreflight {
         &self,
         config: &DecisionPolicySnapshot,
     ) -> QuantResult<PreflightCheck> {
-        let active_reference = BuyModelRoute::try_from(&config.recommendation.selection)
-            .map_err(|error| error.to_string())
-            .and_then(|route| {
-                config
-                    .model_routing
-                    .model
-                    .active_pointer(route)
-                    .map_err(|error| error.to_string())
-            });
-        let active = match active_reference {
-            Ok(reference) => self.active_status(reference).await?,
+        let route = BuyModelRoute::try_from(&config.recommendation.selection)
+            .map_err(|error| error.to_string());
+        let active_binding = route.as_ref().map_err(Clone::clone).and_then(|route| {
+            config
+                .model_routing
+                .model
+                .champion(*route)
+                .map_err(|error| error.to_string())
+        });
+        let active = match active_binding {
+            Ok(binding) => self.active_status(binding.model_version_id).await?,
             Err(error) => Err(error),
         };
         if active.is_ok() {
@@ -257,9 +258,13 @@ impl DefaultModePreflight {
                 "active route model is loadable",
             ));
         }
-        let shadow = match &config.model_routing.model.shadow_model_version_id {
-            Some(reference) => self.shadow_status(reference).await?,
-            None => Err("no shadow model configured".to_owned()),
+        let shadow = match route
+            .ok()
+            .and_then(|route| config.model_routing.model.buy_routes.get(&route))
+            .and_then(|binding| binding.shadow.as_ref())
+        {
+            Some(binding) => self.shadow_status(binding.model_version_id).await?,
+            None => Err("selected route has no shadow model configured".to_owned()),
         };
         match shadow {
             Ok(()) => Ok(PreflightCheck::hard(
@@ -288,7 +293,7 @@ impl DefaultModePreflight {
                 config
                     .model_routing
                     .model
-                    .active_pointer(route)
+                    .champion(route)
                     .map_err(|error| error.to_string())
             }) {
             Ok(reference) => reference,
@@ -300,7 +305,7 @@ impl DefaultModePreflight {
                 ));
             }
         };
-        let id = reference.id;
+        let id = reference.model_version_id;
         let Some(version) = self.deps.model_registry.find_model_version(&id).await? else {
             return Ok(PreflightCheck::hard(
                 "active_route_model",
@@ -323,24 +328,46 @@ impl DefaultModePreflight {
         config: &DecisionPolicySnapshot,
         now: DateTime<Utc>,
     ) -> QuantResult<PreflightCheck> {
-        let Some(reference) = &config.model_routing.model.shadow_model_version_id else {
+        let route = match BuyModelRoute::try_from(&config.recommendation.selection) {
+            Ok(route) => route,
+            Err(error) => {
+                return Ok(PreflightCheck::hard(
+                    "shadow_period_complete",
+                    false,
+                    format!("selected report route is invalid: {error}"),
+                ));
+            }
+        };
+        let binding = match config.model_routing.model.route_binding(route) {
+            Ok(binding) => binding,
+            Err(error) => {
+                return Ok(PreflightCheck::hard(
+                    "shadow_period_complete",
+                    false,
+                    format!("selected route has no binding: {error}"),
+                ));
+            }
+        };
+        let Some(shadow) = &binding.shadow else {
             return Ok(PreflightCheck::hard(
                 "shadow_period_complete",
                 true,
-                "no shadow configured; active model cleared its publish-time shadow gate",
+                "selected route has no shadow; champion cleared its promotion-time shadow gate",
             ));
         };
-        let id = reference.id;
+        let id = shadow.model_version_id;
         let required = config
             .profile_artifacts
             .research_method
             .model_promotion
             .required_shadow_window_secs;
-        let since = now - Duration::seconds(i64::try_from(required).unwrap_or(i64::MAX));
+        let since = shadow.bound_at;
         let summary = self.deps.shadow_comparison.summary(&id, since).await?;
         let covered = match (summary.window_start, summary.window_end) {
             (Some(start), Some(end)) => {
                 (end - start).num_seconds() >= i64::try_from(required).unwrap_or(i64::MAX)
+                    && now - shadow.bound_at
+                        >= Duration::seconds(i64::try_from(required).unwrap_or(i64::MAX))
             }
             _ => false,
         };
@@ -401,16 +428,14 @@ impl DefaultModePreflight {
         )
     }
 
-    async fn active_status(&self, reference: &ModelVersionRef) -> QuantResult<Result<(), String>> {
-        let id = reference.id;
+    async fn active_status(&self, id: ModelVersionId) -> QuantResult<Result<(), String>> {
         let Some(version) = self.deps.model_registry.find_model_version(&id).await? else {
             return Ok(Err(format!("active model {id} not found")));
         };
         Ok(active_load_ok(&version))
     }
 
-    async fn shadow_status(&self, reference: &ModelVersionRef) -> QuantResult<Result<(), String>> {
-        let id = reference.id;
+    async fn shadow_status(&self, id: ModelVersionId) -> QuantResult<Result<(), String>> {
         let Some(version) = self.deps.model_registry.find_model_version(&id).await? else {
             return Ok(Err(format!("shadow model {id} not found")));
         };

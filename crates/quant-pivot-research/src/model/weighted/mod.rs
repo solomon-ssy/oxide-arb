@@ -39,23 +39,25 @@ use quant_pivot_models::{
         factor::{FactorAlphaOrientation, FactorServingPlane},
     },
 };
-use rust_decimal::{Decimal, prelude::ToPrimitive};
+use rust_decimal::Decimal;
 
 use crate::{
-    factors::{FrozenReferenceQuantiles, NormalizedFactor, value::FactorScoringProjection},
+    factors::{FrozenReferenceQuantiles, value::FactorScoringProjection},
     features::FeatureName,
     model::{
         artifact::{ModelArtifact, ModelArtifactHeader, ModelPayload, WeightedFactorModelPayload},
         calibrator::ResolvedCalibration,
         factor_heads::score_factor_heads,
         runtime::{
-            FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelInputAuditRow,
-            ModelInputAuditState, ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput,
-            QuantModelRuntime,
+            FactorInferenceRow, FactorInferenceTable, MarketInferenceContext,
+            ModelCalibrationScore, ModelInputAuditRow, ModelRankScore, ModelRankTarget,
+            ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput, QuantModelRuntime,
+            WeightedInputAuditContract,
         },
         signal::{FactorContribution, ModelExplanation, SignalCandidate, SignalWarning},
     },
     precision::RESEARCH_DECIMAL_SCALE,
+    training::TOKEN_PAYOUT_RATIO,
 };
 
 /// How many positive / negative contributions the explanation surfaces.
@@ -216,7 +218,11 @@ impl WeightedFactorRuntime {
         row: &FactorInferenceRow,
         model_run_id: &ModelRunId,
         as_of: DateTime<Utc>,
-    ) -> QuantResult<Option<SignalCandidate>> {
+    ) -> QuantResult<(
+        ModelCalibrationScore,
+        ModelRankScore,
+        Option<SignalCandidate>,
+    )> {
         let outcome_binding = Self::outcome_binding(row)?;
         let substitution_reliability = self.substitution_reliability(&row.context);
         let horizon_multiplier = self.payload.horizon_multipliers.multiplier_for(
@@ -231,11 +237,44 @@ impl WeightedFactorRuntime {
             substitution_reliability,
             horizon_multiplier,
         )?;
+        let scored_side = if score.yes_alpha.is_sign_negative() {
+            OutcomeSide::No
+        } else {
+            OutcomeSide::Yes
+        };
+        let scored_token =
+            match scored_side {
+                OutcomeSide::Yes => row.token_id.clone(),
+                OutcomeSide::No => row.context.secondary_token_id.clone().ok_or_else(|| {
+                    ResearchError::Inference {
+                        detail: format!(
+                            "market {} has no canonical NO token for model-score calibration",
+                            row.market_id
+                        ),
+                    }
+                })?,
+            };
+        let calibration_score = ModelCalibrationScore {
+            market_id: row.market_id.clone(),
+            token_id: scored_token,
+            outcome_side: scored_side,
+            composite_score: clamp_unit(score.composite_score),
+            prediction_horizon_secs: self.header.prediction_horizon_secs(),
+        };
+        let rank_score = ModelRankScore {
+            market_id: row.market_id.clone(),
+            token_id: row.token_id.clone(),
+            score: score.yes_alpha,
+            target: ModelRankTarget {
+                label_name: TOKEN_PAYOUT_RATIO,
+                label_horizon_secs: 0,
+            },
+        };
         let Some(outcome_side) = score.outcome_side else {
-            return Ok(None);
+            return Ok((calibration_score, rank_score, None));
         };
         let Some((token_id, entry_price_ref)) = Self::resolve_entry(row, outcome_side) else {
-            return Ok(None);
+            return Ok((calibration_score, rank_score, None));
         };
         let contributions = self.row_contributions(row, &outcome_binding)?;
         let composite_score = clamp_unit(score.composite_score);
@@ -260,32 +299,40 @@ impl WeightedFactorRuntime {
             score.yes_alpha
         );
 
-        Ok(Some(SignalCandidate {
-            signal_candidate_id: SignalCandidateId::from_v7(),
-            model_run_id: *model_run_id,
-            market_id: row.market_id.clone(),
-            token_id,
-            outcome_side,
-            composite_score,
-            confidence,
-            expected_return_bps: estimate.expected_return_bps,
-            downside_bps: estimate.downside_bps,
-            win_probability: estimate.win_probability,
-            entry_price_ref,
-            suggested_horizon_secs: self.header.prediction_horizon_secs(),
-            factor_breakdown: contributions,
-            model_explanation: ModelExplanation {
-                headline,
-                top_positive,
-                top_negative,
-            },
-            rejection_warnings: context_warnings(&row.context, liquidity_score, data_quality_score),
-            rank_before_portfolio: 0,
-            liquidity_score,
-            data_quality_score,
-            model_score_percentile: Probability::ZERO,
-            decision_at: as_of,
-        }))
+        Ok((
+            calibration_score,
+            rank_score,
+            Some(SignalCandidate {
+                signal_candidate_id: SignalCandidateId::from_v7(),
+                model_run_id: *model_run_id,
+                market_id: row.market_id.clone(),
+                token_id,
+                outcome_side,
+                composite_score,
+                confidence,
+                expected_return_bps: estimate.expected_return_bps,
+                downside_bps: estimate.downside_bps,
+                win_probability: estimate.win_probability,
+                entry_price_ref,
+                suggested_horizon_secs: self.header.prediction_horizon_secs(),
+                factor_breakdown: contributions,
+                model_explanation: ModelExplanation {
+                    headline,
+                    top_positive,
+                    top_negative,
+                },
+                rejection_warnings: context_warnings(
+                    &row.context,
+                    liquidity_score,
+                    data_quality_score,
+                ),
+                rank_before_portfolio: 0,
+                liquidity_score,
+                data_quality_score,
+                model_score_percentile: Probability::ZERO,
+                decision_at: as_of,
+            }),
+        ))
     }
 
     fn outcome_binding(row: &FactorInferenceRow) -> QuantResult<OutcomeTokenBinding> {
@@ -400,59 +447,12 @@ impl WeightedFactorRuntime {
 
     fn input_audit(&self, table: &FactorInferenceTable) -> QuantResult<Vec<ModelInputAuditRow>> {
         let transform = &self.header.serving_contract().bindings().transform;
-        let input_contract_hash = transform.input_contract_hash;
-        let transform_hash = transform.input_transform_hash;
-        let training_input_hash = transform.training_input_hash;
-        let row_count = table
-            .rows
-            .iter()
-            .try_fold(0usize, |count, row| count.checked_add(row.factors.len()))
-            .ok_or_else(|| ResearchError::Inference {
-                detail: "weighted model-input audit row count overflow".to_owned(),
-            })?;
-        let mut audit = Vec::with_capacity(row_count);
-        for row in &table.rows {
-            for factor in &row.factors {
-                let (raw_state, score) = match &factor.normalization {
-                    NormalizedFactor::Scored { score, .. } => {
-                        (ModelInputAuditState::Scored, Some(score.inner()))
-                    }
-                    NormalizedFactor::MissingInput => (ModelInputAuditState::MissingInput, None),
-                    NormalizedFactor::NotApplicable => (ModelInputAuditState::NotApplicable, None),
-                    NormalizedFactor::Indeterminate { .. } => {
-                        (ModelInputAuditState::Indeterminate, None)
-                    }
-                };
-                let encoded_value_bits = score
-                    .map(|value| {
-                        value
-                            .to_f64()
-                            .filter(|value| value.is_finite())
-                            .ok_or_else(|| ResearchError::Inference {
-                                detail: format!(
-                                    "weighted factor `{}` normalized score cannot be represented as finite f64",
-                                    factor.name
-                                ),
-                            })
-                            .map(f64::to_bits)
-                    })
-                    .transpose()?;
-                audit.push(ModelInputAuditRow {
-                    model_version_id: self.header.model_version_id(),
-                    model_family: self.header.model_family(),
-                    market_id: row.market_id.clone(),
-                    raw_input_name: factor.name.to_string(),
-                    raw_state,
-                    raw_value: factor.raw_value.map(|value| value.to_string()),
-                    encoded_column: format!("{}.normalized_score", factor.name),
-                    encoded_value_bits,
-                    input_contract_hash,
-                    transform_hash,
-                    training_input_hash,
-                });
-            }
-        }
-        Ok(audit)
+        table.weighted_input_audit(WeightedInputAuditContract {
+            model_version_id: self.header.model_version_id(),
+            input_contract_hash: transform.input_contract_hash,
+            transform_hash: transform.input_transform_hash,
+            training_input_hash: transform.training_input_hash,
+        })
     }
 }
 
@@ -503,14 +503,19 @@ impl QuantModelRuntime for WeightedFactorRuntime {
             })?;
         let input_audit = self.input_audit(&table)?;
 
-        let mut candidates: Vec<SignalCandidate> = table
+        let scored = table
             .rows
             .iter()
             .map(|row| self.score_row(row, &table.model_run_id, table.decision_at))
-            .collect::<QuantResult<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+            .collect::<QuantResult<Vec<_>>>()?;
+        let mut calibration_scores = Vec::with_capacity(scored.len());
+        let mut rank_scores = Vec::with_capacity(scored.len());
+        let mut candidates = Vec::new();
+        for (calibration, rank, candidate) in scored {
+            calibration_scores.push(calibration);
+            rank_scores.push(rank);
+            candidates.extend(candidate);
+        }
 
         candidates.sort_by(|left, right| {
             right
@@ -538,6 +543,8 @@ impl QuantModelRuntime for WeightedFactorRuntime {
             })?;
 
         Ok(ModelRuntimeOutput {
+            calibration_scores,
+            rank_scores,
             candidates,
             runtime_metrics: ModelRuntimeMetrics {
                 markets_scored,
@@ -826,6 +833,10 @@ mod tests {
             .await
             .expect("missing quote is an explicit market-level rejection");
         assert!(output.candidates.is_empty());
+        assert_eq!(output.calibration_scores.len(), 1);
+        assert_eq!(output.calibration_scores[0].outcome_side, OutcomeSide::No);
+        assert_eq!(output.rank_scores.len(), 1);
+        assert!(output.rank_scores[0].score.is_sign_negative());
         assert_eq!(output.runtime_metrics.markets_scored, 1);
     }
 
@@ -910,6 +921,18 @@ mod tests {
             output.candidates.is_empty(),
             "a neutral net signal must not emit a candidate"
         );
+        assert_eq!(
+            output.calibration_scores.len(),
+            1,
+            "decision deadband must not censor calibration evidence"
+        );
+        assert_eq!(output.calibration_scores[0].outcome_side, OutcomeSide::Yes);
+        assert_eq!(
+            output.calibration_scores[0].composite_score,
+            Probability::ZERO
+        );
+        assert_eq!(output.rank_scores.len(), 1);
+        assert_eq!(output.rank_scores[0].score, Decimal::ZERO);
     }
 
     #[tokio::test]

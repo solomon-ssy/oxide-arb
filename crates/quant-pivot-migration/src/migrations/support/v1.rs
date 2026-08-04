@@ -356,10 +356,10 @@ const FEEDBACK_CYCLE_GUARD_SQL: &str = "CREATE FUNCTION \
     RAISE EXCEPTION 'feedback-cycle row is immutable after terminalization; DELETE is not permitted'; \
     END IF; \
     IF (to_jsonb(NEW) - ARRAY['status', 'decision', 'terminal_reason_code', 'generation', \
-    'lease_owner', 'lease_expires_at', 'cancel_requested_at', 'started_at', 'completed_at', \
+    'lease_owner', 'lease_expires_at', 'stage_resume_after', 'cancel_requested_at', 'started_at', 'completed_at', \
     'updated_at']) IS DISTINCT FROM \
     (to_jsonb(OLD) - ARRAY['status', 'decision', 'terminal_reason_code', 'generation', \
-    'lease_owner', 'lease_expires_at', 'cancel_requested_at', 'started_at', 'completed_at', \
+    'lease_owner', 'lease_expires_at', 'stage_resume_after', 'cancel_requested_at', 'started_at', 'completed_at', \
     'updated_at']) THEN \
     RAISE EXCEPTION 'feedback-cycle frozen identity cannot change'; \
     END IF; \
@@ -371,6 +371,7 @@ const FEEDBACK_CYCLE_GUARD_SQL: &str = "CREATE FUNCTION \
     OR NEW.terminal_reason_code IS DISTINCT FROM OLD.terminal_reason_code \
     OR NEW.lease_owner IS DISTINCT FROM OLD.lease_owner \
     OR NEW.lease_expires_at IS DISTINCT FROM OLD.lease_expires_at \
+    OR NEW.stage_resume_after IS DISTINCT FROM OLD.stage_resume_after \
     OR NEW.cancel_requested_at IS DISTINCT FROM OLD.cancel_requested_at \
     OR NEW.started_at IS DISTINCT FROM OLD.started_at \
     OR NEW.completed_at IS DISTINCT FROM OLD.completed_at \
@@ -386,8 +387,17 @@ const FEEDBACK_CYCLE_GUARD_SQL: &str = "CREATE FUNCTION \
     NEW.updated_at = statement_timestamp(); \
     RETURN NEW; \
     END IF; \
+    IF NEW.status = 'quarantined'::public.qp_feedback_cycle_status \
+    AND (NEW.terminal_reason_code IS DISTINCT FROM 'invalid_coordinator_state'::text \
+    OR NOT EXISTS (SELECT 1 FROM public.quant_feedback_coordinator_fault AS fault \
+    WHERE fault.feedback_cycle_id = OLD.feedback_cycle_id \
+    AND fault.lease_generation = OLD.generation \
+    AND fault.worker_id = OLD.lease_owner)) THEN \
+    RAISE EXCEPTION 'coordinator quarantine requires exact WORM fault evidence'; \
+    END IF; \
     IF OLD.status IN ('succeeded'::public.qp_feedback_cycle_status, \
-    'failed'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status) \
+    'failed'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status, \
+    'quarantined'::public.qp_feedback_cycle_status) \
     OR NEW.generation <> OLD.generation + 1 \
     OR NOT ((OLD.status = 'queued'::public.qp_feedback_cycle_status AND \
     NEW.status IN ('running'::public.qp_feedback_cycle_status, \
@@ -395,7 +405,8 @@ const FEEDBACK_CYCLE_GUARD_SQL: &str = "CREATE FUNCTION \
     (OLD.status = 'running'::public.qp_feedback_cycle_status AND \
     NEW.status IN ('running'::public.qp_feedback_cycle_status, \
     'succeeded'::public.qp_feedback_cycle_status, 'failed'::public.qp_feedback_cycle_status, \
-    'cancelled'::public.qp_feedback_cycle_status))) THEN \
+    'cancelled'::public.qp_feedback_cycle_status, \
+    'quarantined'::public.qp_feedback_cycle_status))) THEN \
     RAISE EXCEPTION 'illegal feedback-cycle CAS transition from % generation % to % generation %', \
     OLD.status, OLD.generation, NEW.status, NEW.generation; \
     END IF; \
@@ -418,6 +429,77 @@ const FEEDBACK_OUTBOX_GUARD_SQL: &str = "CREATE FUNCTION \
     RAISE EXCEPTION 'feedback outbox immutable identity or delivery lifecycle changed illegally'; \
     END IF; \
     NEW.updated_at = statement_timestamp(); \
+    RETURN NEW; END; $function$";
+
+const MODEL_ROUTE_SHADOW_BINDING_GUARD_SQL: &str = "CREATE FUNCTION \
+    public.trigger_guard_model_route_shadow_binding() RETURNS trigger LANGUAGE plpgsql AS \
+    $function$ BEGIN \
+    IF TG_OP = 'DELETE' THEN \
+    RAISE EXCEPTION 'route-owned shadow binding is durable; DELETE is not permitted'; \
+    END IF; \
+    IF (to_jsonb(NEW) - ARRAY['status', 'lifecycle_generation', 'terminated_at', 'updated_at', \
+    'termination_policy_activation_id', 'termination_request_hash', \
+    'termination_reason_code', 'termination_note', 'termination_actor_role']) \
+    IS DISTINCT FROM \
+    (to_jsonb(OLD) - ARRAY['status', 'lifecycle_generation', 'terminated_at', 'updated_at', \
+    'termination_policy_activation_id', 'termination_request_hash', \
+    'termination_reason_code', 'termination_note', 'termination_actor_role']) THEN \
+    RAISE EXCEPTION 'route-owned shadow binding immutable identity or receipt cannot change'; \
+    END IF; \
+    IF OLD.status <> 'active'::public.qp_shadow_binding_status \
+    OR NEW.status NOT IN ('rejected'::public.qp_shadow_binding_status, \
+    'promoted'::public.qp_shadow_binding_status, 'cancelled'::public.qp_shadow_binding_status) \
+    OR NEW.lifecycle_generation <> OLD.lifecycle_generation + 1 \
+    OR NEW.terminated_at IS NOT NULL \
+    OR NEW.updated_at IS DISTINCT FROM OLD.updated_at THEN \
+    RAISE EXCEPTION 'illegal route-owned shadow binding terminal CAS transition'; \
+    END IF; \
+    IF NEW.status IN ('rejected'::public.qp_shadow_binding_status, \
+    'cancelled'::public.qp_shadow_binding_status, \
+    'promoted'::public.qp_shadow_binding_status) AND \
+    (OLD.termination_policy_activation_id IS NOT NULL \
+    OR NEW.termination_policy_activation_id IS NULL) THEN \
+    RAISE EXCEPTION 'terminal shadow transition requires one immutable activation identity'; \
+    ELSIF NEW.status IN ('rejected'::public.qp_shadow_binding_status, \
+    'cancelled'::public.qp_shadow_binding_status) AND \
+    (OLD.termination_request_hash IS NOT NULL OR OLD.termination_reason_code IS NOT NULL \
+    OR OLD.termination_note IS NOT NULL OR OLD.termination_actor_role IS NOT NULL \
+    OR NEW.termination_request_hash IS NULL OR NEW.termination_reason_code IS NULL \
+    OR NEW.termination_note IS NULL OR NEW.termination_actor_role IS NULL) THEN \
+    RAISE EXCEPTION 'governed shadow termination requires one immutable evidence set'; \
+    ELSIF NEW.status = 'promoted'::public.qp_shadow_binding_status AND \
+    (NEW.termination_request_hash IS NOT NULL OR NEW.termination_reason_code IS NOT NULL \
+    OR NEW.termination_note IS NOT NULL OR NEW.termination_actor_role IS NOT NULL) THEN \
+    RAISE EXCEPTION 'promotion shadow transition cannot add rejection or cancellation evidence'; \
+    ELSIF NEW.status NOT IN ('rejected'::public.qp_shadow_binding_status, \
+    'cancelled'::public.qp_shadow_binding_status, \
+    'promoted'::public.qp_shadow_binding_status) AND \
+    (NEW.termination_policy_activation_id IS DISTINCT FROM OLD.termination_policy_activation_id \
+    OR NEW.termination_request_hash IS DISTINCT FROM OLD.termination_request_hash \
+    OR NEW.termination_reason_code IS DISTINCT FROM OLD.termination_reason_code \
+    OR NEW.termination_note IS DISTINCT FROM OLD.termination_note \
+    OR NEW.termination_actor_role IS DISTINCT FROM OLD.termination_actor_role) THEN \
+    RAISE EXCEPTION 'non-governed shadow transition cannot add termination evidence'; \
+    END IF; \
+    IF NEW.status IN ('rejected'::public.qp_shadow_binding_status, \
+    'cancelled'::public.qp_shadow_binding_status, \
+    'promoted'::public.qp_shadow_binding_status) THEN \
+    SELECT activation.activated_at INTO NEW.terminated_at \
+    FROM public.policy_activation AS activation \
+    WHERE activation.policy_activation_id = NEW.termination_policy_activation_id \
+    AND ((NEW.status = 'rejected'::public.qp_shadow_binding_status \
+    AND activation.activation_kind = 'model_shadow_rejection'::public.qp_policy_activation_kind) \
+    OR (NEW.status = 'cancelled'::public.qp_shadow_binding_status \
+    AND activation.activation_kind = 'model_shadow_cancellation'::public.qp_policy_activation_kind) \
+    OR (NEW.status = 'promoted'::public.qp_shadow_binding_status \
+    AND activation.activation_kind = 'model_promotion'::public.qp_policy_activation_kind)); \
+    IF NEW.terminated_at IS NULL THEN \
+    RAISE EXCEPTION 'terminal shadow activation kind or timestamp is invalid'; \
+    END IF; \
+    ELSE \
+    NEW.terminated_at = statement_timestamp(); \
+    END IF; \
+    NEW.updated_at = NEW.terminated_at; \
     RETURN NEW; END; $function$";
 
 const PROMOTION_PERMIT_GUARD_SQL: &str = "CREATE FUNCTION \
@@ -482,11 +564,11 @@ const RESEARCH_JOB_GUARD_SQL: &str = "CREATE FUNCTION \
     $function$ BEGIN \
     IF (to_jsonb(NEW) - ARRAY['status', 'progress_json', 'result_kind', 'result_ref', \
     'result_artifact_uri', 'result_artifact_hash', \
-    'error_json', 'coverage_json', 'recovery_attempt', 'lease_owner', 'lease_expires_at', \
+    'error_json', 'coverage_json', 'recovery_attempt', 'next_attempt_at', 'lease_owner', 'lease_expires_at', \
     'started_at', 'finished_at', 'heartbeat_at', 'updated_at']) IS DISTINCT FROM \
     (to_jsonb(OLD) - ARRAY['status', 'progress_json', 'result_kind', 'result_ref', \
     'result_artifact_uri', 'result_artifact_hash', \
-    'error_json', 'coverage_json', 'recovery_attempt', 'lease_owner', 'lease_expires_at', \
+    'error_json', 'coverage_json', 'recovery_attempt', 'next_attempt_at', 'lease_owner', 'lease_expires_at', \
     'started_at', 'finished_at', 'heartbeat_at', 'updated_at']) THEN \
     RAISE EXCEPTION 'research-job immutable identity and enqueue contract cannot change'; \
     END IF; \
@@ -543,6 +625,7 @@ pub(in crate::migrations) enum TriggerProgram {
     GuardCalibrationArtifact,
     GuardFeedbackCycle,
     GuardFeedbackOutbox,
+    GuardModelRouteShadowBinding,
     GuardPromotionPermit,
     GuardFactorValue,
     GuardModelRun,
@@ -559,6 +642,7 @@ impl TriggerProgram {
             Self::GuardCalibrationArtifact => "trigger_guard_calibration_artifact",
             Self::GuardFeedbackCycle => "trigger_guard_feedback_cycle",
             Self::GuardFeedbackOutbox => "trigger_guard_feedback_outbox",
+            Self::GuardModelRouteShadowBinding => "trigger_guard_model_route_shadow_binding",
             Self::GuardPromotionPermit => "trigger_guard_promotion_permit",
             Self::GuardFactorValue => "trigger_guard_factor_value",
             Self::GuardModelRun => "trigger_guard_model_run",
@@ -650,6 +734,7 @@ pub(in crate::migrations) async fn create_trigger_programs(
         CALIBRATION_ARTIFACT_GUARD_SQL,
         FEEDBACK_CYCLE_GUARD_SQL,
         FEEDBACK_OUTBOX_GUARD_SQL,
+        MODEL_ROUTE_SHADOW_BINDING_GUARD_SQL,
         PROMOTION_PERMIT_GUARD_SQL,
         RESEARCH_JOB_GUARD_SQL,
         "CREATE FUNCTION public.trigger_guard_factor_value() RETURNS trigger LANGUAGE plpgsql AS \
@@ -796,6 +881,7 @@ pub(in crate::migrations) async fn drop_trigger_programs(
         "trigger_guard_research_job",
         "trigger_guard_factor_value",
         "trigger_guard_promotion_permit",
+        "trigger_guard_model_route_shadow_binding",
         "trigger_guard_feedback_outbox",
         "trigger_guard_feedback_cycle",
         "trigger_guard_calibration_artifact",

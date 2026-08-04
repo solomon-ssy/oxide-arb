@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use actix_web::{http::Method, web::Data};
 use chrono::Utc;
 use quant_pivot_models::{
-    domain::api::DomainSourceExpectationView,
+    domain::api::{DomainSourceExpectationView, DomainSourcesSnapshot},
     enums::rbac::{Operation, ResourceType},
     types::{DomainInstrumentKey, DomainSourceId},
 };
@@ -34,9 +34,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 /// `GET /api/research/domain-sources` — ingest checkpoint health for every
 /// `(source, instrument)` stream.
-pub async fn list(
-    state: Data<AppState>,
-) -> Result<WebResponse<Vec<DomainSourceExpectationView>>, WebError> {
+pub async fn list(state: Data<AppState>) -> Result<WebResponse<DomainSourcesSnapshot>, WebError> {
     let (expectations, cursors) = tokio::try_join!(
         state.domain_source_expectations.list_all(),
         state.domain_source_cursors.list_all(),
@@ -51,7 +49,7 @@ pub async fn list(
         })
         .collect::<HashMap<(DomainSourceId, DomainInstrumentKey), _>>();
     let observed_at = Utc::now();
-    let rows = expectations
+    let items = expectations
         .into_iter()
         .map(|expectation| {
             let cursor = cursors.remove(&(
@@ -65,5 +63,8 @@ pub async fn list(
             )
         })
         .collect();
-    Ok(WebResponse::ok(rows))
+    Ok(WebResponse::ok(DomainSourcesSnapshot::new(
+        observed_at,
+        items,
+    )))
 }

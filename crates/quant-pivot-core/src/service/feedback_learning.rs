@@ -1,6 +1,6 @@
 //! Durable execution for feedback-owned Dataset, training, calibration, and CPCV batches.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use quant_pivot_error::{
@@ -14,9 +14,9 @@ use quant_pivot_models::{
             FeedbackCalibrationCommand, FeedbackCalibrationJobParams, FeedbackCpcvJobParams,
             FeedbackDatasetBuildCommand, FeedbackDatasetRole, FeedbackDatasetSealJobParams,
             FeedbackLearningExecutionPort, FeedbackLearningExecutionResult,
-            FeedbackLearningStageArtifactRef, FeedbackTrainingJobParams,
-            ModelCalibrationFitOutcome, ModelCalibrationFitPort, ModelGovernancePort,
-            ModelTrainingPort, TrainingDatasetPort,
+            FeedbackLearningStageArtifactRef, FeedbackRecipeResourceBudget,
+            FeedbackTrainingJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+            ModelGovernancePort, ModelTrainingPort, TrainingDatasetPort,
         },
         quant::{JobProgressSink, ModelVersionInfo, ResearchJobArtifactRef, TrainingDatasetInfo},
     },
@@ -35,6 +35,7 @@ use quant_pivot_research::{
         FeedbackTrainingStageResult,
     },
 };
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 const COHORT_MANIFEST_DOMAIN: &str = "quant-pivot/feedback-learning-cohort-manifest";
@@ -62,6 +63,12 @@ pub struct FeedbackLearningExecutionService {
     artifacts: Arc<dyn ArtifactStore>,
 }
 
+struct CpcvBatchPlan {
+    calibrated: BTreeMap<ContentHash, ModelVersionId>,
+    results: Vec<FeedbackCpcvStageResult>,
+    total: Option<u64>,
+}
+
 impl FeedbackLearningExecutionService {
     #[must_use]
     pub fn new(deps: FeedbackLearningExecutionDeps) -> Self {
@@ -87,14 +94,19 @@ impl FeedbackLearningExecutionService {
         let mut results = Vec::with_capacity(params.commands.len());
         for (index, command) in params.commands.iter().cloned().enumerate() {
             Self::require_active(&cancel, FeedbackStage::DatasetSeal)?;
-            let info = self
-                .datasets
-                .build_feedback(
-                    command.request.clone(),
-                    Arc::clone(&progress),
-                    cancel.clone(),
-                )
-                .await?;
+            let info = Self::execute_bounded(
+                FeedbackStage::DatasetSeal,
+                command.resource_budget,
+                &cancel,
+                |command_cancel| {
+                    self.datasets.build_feedback(
+                        command.request.clone(),
+                        Arc::clone(&progress),
+                        command_cancel,
+                    )
+                },
+            )
+            .await?;
             results.push(Self::dataset_result(&command, &info)?);
             progress.report(ResearchJobProgress::with_total(
                 "feedback-dataset-seal",
@@ -151,14 +163,19 @@ impl FeedbackLearningExecutionService {
                 .require_dataset(&expected.training_dataset_id, DatasetPurpose::Training)
                 .await?;
             Self::verify_dataset_evidence(&dataset, expected)?;
-            let view = self
-                .training
-                .train(
-                    command.params.clone(),
-                    Arc::clone(&progress),
-                    cancel.clone(),
-                )
-                .await?;
+            let view = Self::execute_bounded(
+                FeedbackStage::Training,
+                command.resource_budget,
+                &cancel,
+                |command_cancel| {
+                    self.training.train(
+                        command.params.clone(),
+                        Arc::clone(&progress),
+                        command_cancel,
+                    )
+                },
+            )
+            .await?;
             if view.model_version_id != command.params.model_version_id
                 || view.model_run_id != Some(command.params.model_run_id)
             {
@@ -449,14 +466,19 @@ impl FeedbackLearningExecutionService {
                 .require_dataset(&dataset.training_dataset_id, DatasetPurpose::Calibration)
                 .await?;
             Self::verify_dataset_evidence(&calibration_dataset, dataset)?;
-            let outcome = self
-                .calibration_fit
-                .fit(
-                    command.params.clone(),
-                    Arc::clone(&progress),
-                    cancel.clone(),
-                )
-                .await?;
+            let outcome = Self::execute_bounded(
+                FeedbackStage::Calibration,
+                command.resource_budget,
+                &cancel,
+                |command_cancel| {
+                    self.calibration_fit.fit(
+                        command.params.clone(),
+                        Arc::clone(&progress),
+                        command_cancel,
+                    )
+                },
+            )
+            .await?;
             results.push(
                 self.calibration_result(command, source_model, calibration_dataset, outcome)
                     .await?,
@@ -607,6 +629,106 @@ impl FeedbackLearningExecutionService {
         cancel: CancellationToken,
     ) -> QuantResult<FeedbackLearningExecutionResult> {
         params.validate()?;
+        let CpcvBatchPlan {
+            calibrated,
+            mut results,
+            total,
+        } = self.prepare_cpcv_batch(&params).await?;
+        results.reserve(params.commands.len());
+        for (index, command) in params.commands.iter().cloned().enumerate() {
+            Self::require_active(&cancel, FeedbackStage::Cpcv)?;
+            let expected_model = calibrated
+                .get(&command.candidate_recipe_hash)
+                .ok_or_else(|| Self::contract("CPCV command has no calibrated candidate"))?;
+            if command.params.model_version_id != *expected_model {
+                return Err(Self::contract(
+                    "CPCV command model differs from Calibration evidence",
+                ));
+            }
+            let path_set_id =
+                command.params.request.path_set_id.ok_or_else(|| {
+                    Self::contract("CPCV command lost its preassigned path-set id")
+                })?;
+            let expected_path_count = i64::try_from(command.cpcv_spec.expected_path_count()?)
+                .map_err(|error| {
+                    Self::contract(format!("CPCV expected path count exceeds i64: {error}"))
+                })?;
+            let expected_combination_count = i64::try_from(
+                command.cpcv_spec.expected_combination_count()?,
+            )
+            .map_err(|error| {
+                Self::contract(format!(
+                    "CPCV expected combination count exceeds i64: {error}"
+                ))
+            })?;
+            let view = Self::execute_bounded(
+                FeedbackStage::Cpcv,
+                command.resource_budget,
+                &cancel,
+                |command_cancel| {
+                    self.cpcv.run(
+                        command.params.clone(),
+                        Arc::clone(&progress),
+                        command_cancel,
+                    )
+                },
+            )
+            .await?;
+            if view.path_set_id != path_set_id {
+                return Err(Self::contract(
+                    "CPCV port returned another preassigned path-set id",
+                ));
+            }
+            let stored = self
+                .cpcv
+                .find_path_set(&path_set_id)
+                .await?
+                .ok_or_else(|| StorageError::not_found("quant_backtest_path_set", path_set_id))?;
+            if stored.path_set_hash != view.path_set_hash
+                || stored.model_version_id != command.params.model_version_id
+                || stored.model_run_id != command.params.model_run_id
+                || stored.training_dataset_id != command.params.request.training_dataset_id
+                || stored.decision_policy_snapshot_id
+                    != command.params.request.decision_policy_snapshot_id
+                || stored.path_count != expected_path_count
+                || stored.combination_count != expected_combination_count
+            {
+                return Err(Self::contract(
+                    "CPCV path-set identity, methodology counts, or policy differs from its frozen command",
+                ));
+            }
+            results.push(FeedbackCpcvStageResult::Evaluated {
+                candidate_recipe_hash: command.candidate_recipe_hash,
+                model_version_id: stored.model_version_id,
+                training_dataset_id: stored.training_dataset_id,
+                path_set_id: stored.path_set_id,
+                model_run_id: stored.model_run_id,
+                path_set_hash: stored.path_set_hash,
+            });
+            if let Some(total) = total {
+                progress.report(ResearchJobProgress::with_total(
+                    "feedback-cpcv",
+                    Self::batch_progress(index)?,
+                    total,
+                ));
+            }
+        }
+        results.sort_unstable_by_key(FeedbackCpcvStageResult::candidate_recipe_hash);
+        let artifact = FeedbackLearningStageArtifact::try_new(
+            params.feedback_cycle_id,
+            params.cycle_idempotency_hash,
+            params.candidate_family_hash,
+            params.input_hash()?,
+            Some(params.previous),
+            FeedbackLearningStageResults::Cpcv(results),
+        )?;
+        self.persist(artifact).await
+    }
+
+    async fn prepare_cpcv_batch(
+        &self,
+        params: &FeedbackCpcvJobParams,
+    ) -> QuantResult<CpcvBatchPlan> {
         let calibration_artifact = self
             .load_previous(
                 &params.previous,
@@ -649,7 +771,7 @@ impl FeedbackLearningExecutionService {
         } else {
             Some(Self::batch_total(params.commands.len())?)
         };
-        let mut results = calibration_results
+        let results = calibration_results
             .iter()
             .filter_map(|result| match result {
                 FeedbackCalibrationStageResult::Calibrated { .. } => None,
@@ -676,76 +798,11 @@ impl FeedbackLearningExecutionService {
                 }),
             })
             .collect::<Vec<_>>();
-        results.reserve(params.commands.len());
-        for (index, command) in params.commands.iter().cloned().enumerate() {
-            Self::require_active(&cancel, FeedbackStage::Cpcv)?;
-            let expected_model = calibrated
-                .get(&command.candidate_recipe_hash)
-                .ok_or_else(|| Self::contract("CPCV command has no calibrated candidate"))?;
-            if command.params.model_version_id != *expected_model {
-                return Err(Self::contract(
-                    "CPCV command model differs from Calibration evidence",
-                ));
-            }
-            let path_set_id =
-                command.params.request.path_set_id.ok_or_else(|| {
-                    Self::contract("CPCV command lost its preassigned path-set id")
-                })?;
-            let view = self
-                .cpcv
-                .run(
-                    command.params.clone(),
-                    Arc::clone(&progress),
-                    cancel.clone(),
-                )
-                .await?;
-            if view.path_set_id != path_set_id {
-                return Err(Self::contract(
-                    "CPCV port returned another preassigned path-set id",
-                ));
-            }
-            let stored = self
-                .cpcv
-                .find_path_set(&path_set_id)
-                .await?
-                .ok_or_else(|| StorageError::not_found("quant_backtest_path_set", path_set_id))?;
-            if stored.path_set_hash != view.path_set_hash
-                || stored.model_version_id != command.params.model_version_id
-                || stored.model_run_id != command.params.model_run_id
-                || stored.training_dataset_id != command.params.request.training_dataset_id
-                || stored.decision_policy_snapshot_id
-                    != command.params.request.decision_policy_snapshot_id
-            {
-                return Err(Self::contract(
-                    "CPCV path-set read-back differs from its frozen command",
-                ));
-            }
-            results.push(FeedbackCpcvStageResult::Evaluated {
-                candidate_recipe_hash: command.candidate_recipe_hash,
-                model_version_id: stored.model_version_id,
-                training_dataset_id: stored.training_dataset_id,
-                path_set_id: stored.path_set_id,
-                model_run_id: stored.model_run_id,
-                path_set_hash: stored.path_set_hash,
-            });
-            if let Some(total) = total {
-                progress.report(ResearchJobProgress::with_total(
-                    "feedback-cpcv",
-                    Self::batch_progress(index)?,
-                    total,
-                ));
-            }
-        }
-        results.sort_unstable_by_key(FeedbackCpcvStageResult::candidate_recipe_hash);
-        let artifact = FeedbackLearningStageArtifact::try_new(
-            params.feedback_cycle_id,
-            params.cycle_idempotency_hash,
-            params.candidate_family_hash,
-            params.input_hash()?,
-            Some(params.previous),
-            FeedbackLearningStageResults::Cpcv(results),
-        )?;
-        self.persist(artifact).await
+        Ok(CpcvBatchPlan {
+            calibrated,
+            results,
+            total,
+        })
     }
 
     async fn load_previous(
@@ -756,14 +813,14 @@ impl FeedbackLearningExecutionService {
     ) -> QuantResult<FeedbackLearningStageArtifact> {
         reference.validate_for(reference.feedback_cycle_id, stage)?;
         let bytes = self.artifacts.get(&reference.artifact.uri).await?;
-        if FeedbackLearningStageCodec::bytes_hash(&bytes) != reference.artifact.content_hash {
+        if CanonicalDigest::content_hash_bytes(&bytes) != reference.artifact.content_hash {
             return Err(Self::contract(
                 "learning-stage predecessor bytes differ from their terminal hash",
             ));
         }
         let artifact = FeedbackLearningStageCodec::decode(&bytes)?;
         if artifact.feedback_cycle_id != reference.feedback_cycle_id
-            || artifact.stage() != reference.stage
+            || artifact.results.stage() != reference.stage
             || artifact.artifact_id != reference.artifact_id
             || artifact.input_hash != reference.input_hash
             || artifact.candidate_family_hash != candidate_family_hash
@@ -781,7 +838,7 @@ impl FeedbackLearningExecutionService {
     ) -> QuantResult<FeedbackLearningExecutionResult> {
         let artifact_id = artifact.artifact_id;
         let bytes = FeedbackLearningStageCodec::encode(&artifact)?;
-        let content_hash = FeedbackLearningStageCodec::bytes_hash(&bytes);
+        let content_hash = CanonicalDigest::content_hash_bytes(&bytes);
         let key = ArtifactKey::new(
             ArtifactNamespace::FeedbackLearning,
             content_hash.hex(),
@@ -789,12 +846,12 @@ impl FeedbackLearningExecutionService {
         )?;
         let uri = self.artifacts.put(key, &bytes).await?;
         let persisted = self.artifacts.get(&uri).await?;
-        if FeedbackLearningStageCodec::bytes_hash(&persisted) != content_hash
+        if CanonicalDigest::content_hash_bytes(&persisted) != content_hash
             || FeedbackLearningStageCodec::decode(&persisted)? != artifact
         {
             return Err(ResearchError::ArtifactHashMismatch {
                 expected: content_hash.to_string(),
-                actual: FeedbackLearningStageCodec::bytes_hash(&persisted).to_string(),
+                actual: CanonicalDigest::content_hash_bytes(&persisted).to_string(),
             }
             .into());
         }
@@ -853,6 +910,39 @@ impl FeedbackLearningExecutionService {
         Ok(())
     }
 
+    async fn execute_bounded<T, F, Fut>(
+        stage: FeedbackStage,
+        budget: FeedbackRecipeResourceBudget,
+        cancel: &CancellationToken,
+        operation: F,
+    ) -> QuantResult<T>
+    where
+        F: FnOnce(CancellationToken) -> Fut,
+        Fut: Future<Output = QuantResult<T>>,
+    {
+        budget.validate()?;
+        let command_cancel = cancel.child_token();
+        let outcome = timeout(
+            Duration::from_secs(budget.deadline_secs),
+            operation(command_cancel.clone()),
+        )
+        .await;
+        outcome.unwrap_or_else(|_| {
+            command_cancel.cancel();
+            Err(ResearchError::ComputeDeadlineExceeded {
+                operation: match stage {
+                    FeedbackStage::DatasetSeal => "feedback_dataset_seal",
+                    FeedbackStage::Training => "feedback_training",
+                    FeedbackStage::Calibration => "feedback_calibration",
+                    FeedbackStage::Cpcv => "feedback_cpcv",
+                    _ => "feedback_learning",
+                },
+                deadline_secs: budget.deadline_secs,
+            }
+            .into())
+        })
+    }
+
     fn contract(detail: impl Into<String>) -> QuantError {
         FeedbackError::InvalidJobContract {
             detail: detail.into(),
@@ -897,5 +987,59 @@ impl FeedbackLearningExecutionPort for FeedbackLearningExecutionService {
         cancel: CancellationToken,
     ) -> QuantResult<FeedbackLearningExecutionResult> {
         self.execute_cpcv_batch(params, progress, cancel).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, OnceLock};
+
+    use quant_pivot_error::{QuantError, research::ResearchError};
+    use quant_pivot_models::{
+        domain::ports::FeedbackRecipeResourceBudget, enums::quant::FeedbackStage,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    use super::FeedbackLearningExecutionService;
+
+    #[tokio::test]
+    async fn deadline_cancels_work() {
+        let observed = Arc::new(OnceLock::new());
+        let captured = Arc::clone(&observed);
+        let parent = CancellationToken::new();
+        let result = FeedbackLearningExecutionService::execute_bounded(
+            FeedbackStage::Training,
+            FeedbackRecipeResourceBudget {
+                max_concurrency: 1,
+                max_working_set_bytes: 1,
+                max_resident_model_bytes: 1,
+                deadline_secs: 1,
+            },
+            &parent,
+            move |cancel| {
+                let _ = captured.set(cancel.clone());
+                async move {
+                    cancel.cancelled().await;
+                    Err::<(), QuantError>(
+                        ResearchError::Cancelled {
+                            detail: "deadline fixture observed cancellation".to_owned(),
+                        }
+                        .into(),
+                    )
+                }
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(QuantError::Research(
+                ResearchError::ComputeDeadlineExceeded {
+                    operation: "feedback_training",
+                    deadline_secs: 1,
+                }
+            ))
+        ));
+        assert!(observed.get().is_some_and(CancellationToken::is_cancelled));
+        assert!(!parent.is_cancelled());
     }
 }

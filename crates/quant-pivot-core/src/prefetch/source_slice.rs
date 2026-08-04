@@ -1,7 +1,7 @@
 //! Immutable Source Slice materialization over the durable PIT ledgers.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::Hash,
     sync::Arc,
     time::Duration,
@@ -29,8 +29,8 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::DomainConfig,
     types::{
-        ArtifactUri, CapabilityRegistryHashes, ClobMarketInfoVersion, ContentHash,
-        DATASET_ARTIFACT_FORMAT_VERSION, ResearchProfileArtifact, ResearchProfileDataSource,
+        ArtifactUri, CapabilityRegistryHashes, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
+        MarketId, ResearchProfileArtifact, ResearchProfileDataSource,
         SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SourceSliceCatalogProof, SourceSliceId,
         SourceSliceInvalidSession, SourceSliceManifest, SourceSliceManifestRef,
         SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs,
@@ -77,7 +77,6 @@ pub struct FrozenSourceSlice {
     pub window_end: DateTime<Utc>,
     pub pit_cutoff: DateTime<Utc>,
     pub prefetched: Prefetched,
-    pub clob_market_info: Vec<ClobMarketInfoVersion>,
     pub l2_ledger: Vec<BookL2LedgerRow>,
     pub sessions: Vec<BookStreamSessionRow>,
     pub invalid_sessions: Vec<SourceSliceInvalidSession>,
@@ -85,7 +84,6 @@ pub struct FrozenSourceSlice {
 
 struct SourceSliceInputs {
     prefetched: Prefetched,
-    clob_market_info: Vec<ClobMarketInfoVersion>,
     l2_ledger: Vec<BookL2LedgerRow>,
     sessions: Vec<BookStreamSessionRow>,
     gap_records: Vec<SourceSliceRecord>,
@@ -141,6 +139,17 @@ impl SourceSliceReader {
         let manifest = self.read_manifest_artifact(source_slice).await?;
         let records = self.read_objects(&manifest).await?;
         decode_frozen_source_slice(&manifest, records)
+    }
+
+    /// Verify the immutable manifest binding without materializing its fact
+    /// objects. Serving cold loads use this boundary because inference does not
+    /// consume historical Source Slice rows; research replay still calls
+    /// [`Self::read_ref`] and verifies every object byte and decoded row.
+    pub async fn verify_manifest_ref(
+        &self,
+        source_slice: &SourceSliceManifestRef,
+    ) -> QuantResult<SourceSliceManifest> {
+        self.read_manifest_artifact(source_slice).await
     }
 
     async fn read_manifest(
@@ -402,6 +411,7 @@ fn decode_frozen_source_slice(
             trade_tape,
             resolutions,
             catalog,
+            clob_market_info,
             domain_observations,
             crypto_reports,
             weather_observations,
@@ -409,7 +419,6 @@ fn decode_frozen_source_slice(
             weather_calibrations,
             linkages,
         },
-        clob_market_info,
         l2_ledger,
         sessions,
         invalid_sessions: manifest.invalid_sessions.clone(),
@@ -501,7 +510,7 @@ impl SourceSliceMaterializer {
         }
         let inputs = self.load_inputs(identity, cancel).await?;
         let mut objects = self.write_platform_objects(&inputs).await?;
-        objects.extend(self.write_domain_objects(&inputs).await?);
+        objects.extend(self.write_domain_objects(&inputs, profile).await?);
         objects.sort_by(|left, right| {
             (left.kind, left.uri.as_str()).cmp(&(right.kind, right.uri.as_str()))
         });
@@ -531,6 +540,7 @@ impl SourceSliceMaterializer {
             .into());
         }
         let market_changes = self.deps.catalog.markets_at(&market_ids, &boundary).await?;
+        require_catalog_coverage(&market_ids, &market_changes)?;
         let samples = replay_samples(&market_changes)?;
         if samples.is_empty() {
             return Err(ResearchError::DatasetBuild {
@@ -541,6 +551,7 @@ impl SourceSliceMaterializer {
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.deps.facts),
             Arc::clone(&self.deps.catalog),
+            Arc::clone(&self.deps.clob_market_info),
             Arc::clone(&self.deps.linkage),
             Arc::clone(&self.deps.calibration),
             self.max_book_staleness,
@@ -577,20 +588,9 @@ impl SourceSliceMaterializer {
             .facts
             .book_stream_sessions(session_ids, identity.pit_cutoff.timestamp_millis())
             .await?;
-        let clob_market_info = self
-            .deps
-            .clob_market_info
-            .window(
-                &market_ids,
-                identity.window_start,
-                identity.window_end,
-                identity.pit_cutoff,
-            )
-            .await?;
         let (gap_records, invalid_sessions) = prefetched.gap_evidence()?;
         Ok(SourceSliceInputs {
             prefetched,
-            clob_market_info,
             l2_ledger,
             sessions,
             gap_records,
@@ -630,7 +630,7 @@ impl SourceSliceMaterializer {
             self.write_object(
                 SourceSliceObjectKind::ClobMarketInfo,
                 records(
-                    &inputs.clob_market_info,
+                    &prefetched.clob_market_info,
                     |row| Some(row.effective_at),
                     |row| Some(row.available_at),
                 )?,
@@ -705,75 +705,90 @@ impl SourceSliceMaterializer {
     async fn write_domain_objects(
         &self,
         inputs: &SourceSliceInputs,
+        profile: &ResearchProfileArtifact,
     ) -> QuantResult<Vec<SourceSliceObjectRef>> {
         let prefetched = &inputs.prefetched;
-        let linkages = flatten(&prefetched.linkages);
-        let mut objects = vec![
-            self.write_object(
-                SourceSliceObjectKind::MarketLinkage,
-                records(
-                    &linkages,
-                    |row| Some(row.effective_at),
-                    |row| Some(row.available_at),
-                )?,
-            )
-            .await?,
-        ];
-        let domain = flatten(&prefetched.domain_observations);
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::DomainObservation,
-                records(&domain, |row| Some(row.observed_at), |row| row.available_at)?,
-            )
-            .await?,
-        );
-        let crypto = flatten(&prefetched.crypto_reports);
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::CryptoPriceReport,
-                records(
-                    &crypto,
-                    |row| Some(row.event_time),
-                    |row| Some(row.available_at),
-                )?,
-            )
-            .await?,
-        );
-        let weather_observations = flatten(&prefetched.weather_observations);
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::WeatherObservation,
-                records(
-                    &weather_observations,
-                    |row| Some(row.observed_at),
-                    |row| Some(row.available_at),
-                )?,
-            )
-            .await?,
-        );
-        let weather_forecasts = flatten(&prefetched.weather_forecasts);
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::WeatherForecast,
-                records(
-                    &weather_forecasts,
-                    |row| Some(row.valid_time),
-                    |row| Some(row.available_at),
-                )?,
-            )
-            .await?,
-        );
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::CalibrationReference,
-                records(
-                    &prefetched.weather_calibrations,
-                    |row| Some(row.fit_window_end),
-                    |row| Some(row.published_at),
-                )?,
-            )
-            .await?,
-        );
+        let required = SourceSliceManifest::required_object_kinds(profile);
+        let mut objects = Vec::new();
+        if required.contains(&SourceSliceObjectKind::MarketLinkage) {
+            let linkages = flatten(&prefetched.linkages);
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::MarketLinkage,
+                    records(
+                        &linkages,
+                        |row| Some(row.effective_at),
+                        |row| Some(row.available_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::DomainObservation) {
+            let domain = flatten(&prefetched.domain_observations);
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::DomainObservation,
+                    records(&domain, |row| Some(row.observed_at), |row| row.available_at)?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::CryptoPriceReport) {
+            let crypto = flatten(&prefetched.crypto_reports);
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::CryptoPriceReport,
+                    records(
+                        &crypto,
+                        |row| Some(row.event_time),
+                        |row| Some(row.available_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::WeatherObservation) {
+            let weather_observations = flatten(&prefetched.weather_observations);
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::WeatherObservation,
+                    records(
+                        &weather_observations,
+                        |row| Some(row.observed_at),
+                        |row| Some(row.available_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::WeatherForecast) {
+            let weather_forecasts = flatten(&prefetched.weather_forecasts);
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::WeatherForecast,
+                    records(
+                        &weather_forecasts,
+                        |row| Some(row.valid_time),
+                        |row| Some(row.available_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::CalibrationReference) {
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::CalibrationReference,
+                    records(
+                        &prefetched.weather_calibrations,
+                        |row| Some(row.fit_window_end),
+                        |row| Some(row.published_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
         Ok(objects)
     }
 
@@ -987,6 +1002,36 @@ fn replay_samples(versions: &[CatalogMarketChangeInfo]) -> QuantResult<Vec<Repla
         left.market_id == right.market_id && left.token_id == right.token_id
     });
     Ok(samples)
+}
+
+fn require_catalog_coverage(
+    observed: &[MarketId],
+    resolved: &[CatalogMarketChangeInfo],
+) -> QuantResult<()> {
+    let resolved_ids = resolved
+        .iter()
+        .map(|version| &version.market_id)
+        .collect::<HashSet<_>>();
+    let missing = observed
+        .iter()
+        .filter(|market_id| !resolved_ids.contains(market_id))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let sample = missing
+        .iter()
+        .take(5)
+        .map(|market_id| market_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(ResearchError::DatasetBuild {
+        detail: format!(
+            "catalog ledger omitted {} PIT-observed markets; first missing: {sample}",
+            missing.len()
+        ),
+    }
+    .into())
 }
 
 fn stream_session_ids(ledger: &[BookL2LedgerRow]) -> Vec<Uuid> {
@@ -1268,4 +1313,148 @@ fn ensure_not_cancelled(cancel: &CancellationToken, stage: &'static str) -> Quan
         .into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{env, path::Path, sync::Arc};
+
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_error::{QuantError, research::ResearchError};
+    use quant_pivot_models::{
+        hashing::CanonicalDigest,
+        types::{
+            ArtifactUri, CapabilityRegistryHashes, CatalogSyncBatchId, ContentHash,
+            DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId, MarketId,
+            ReaderContractVersion, ResearchEvaluationTrack, SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
+            SchemaContractVersion, SourceSliceCatalogProof, SourceSliceManifest,
+            SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef,
+            SourceSlicePitCutoffs, builtin_research_profiles,
+        },
+    };
+    use quant_pivot_research::artifact::{
+        ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore,
+    };
+    use uuid::Uuid;
+
+    use super::{SourceSliceReader, require_catalog_coverage};
+
+    fn hash(byte: char) -> ContentHash {
+        ContentHash::parse(&format!("blake3:{}", byte.to_string().repeat(64))).expect("hash")
+    }
+
+    fn manifest(root: &Path) -> SourceSliceManifest {
+        let window_start = Utc.timestamp_opt(100, 0).single().expect("source start");
+        let window_end = Utc.timestamp_opt(120, 0).single().expect("source end");
+        let pit_cutoff = Utc.timestamp_opt(130, 0).single().expect("source cutoff");
+        let materialized_at = Utc.timestamp_opt(140, 0).single().expect("materialized at");
+        let kind = SourceSliceObjectKind::CatalogMarket;
+        let schema_hash =
+            CanonicalDigest::content_hash_json(&("source_slice_parquet_envelope_v2", kind))
+                .expect("source schema hash");
+        SourceSliceManifest {
+            format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
+            profile_ref: builtin_research_profiles()
+                .expect("built-in profiles")
+                .remove(0)
+                .profile_ref,
+            evaluation_track: ResearchEvaluationTrack::ResearchOnly,
+            research_program_hash: hash('1'),
+            window_start,
+            window_end,
+            pit_cutoff,
+            materialized_at,
+            catalog_proof: SourceSliceCatalogProof {
+                base_complete_batch_id: CatalogSyncBatchId::new(Uuid::from_u128(1)),
+                terminal_batch_id: CatalogSyncBatchId::new(Uuid::from_u128(2)),
+                committed_through: pit_cutoff,
+                ordered_batch_chain_hash: hash('2'),
+                market_count: 1,
+                event_count: 1,
+                snapshot_hash: hash('3'),
+            },
+            reader_contract_version: ReaderContractVersion::v1(),
+            schema_contract_version: SchemaContractVersion::v1(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            runtime_config_hash: hash('4'),
+            dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+            capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![hash('5')])
+                .expect("capabilities"),
+            pit_cutoffs: SourceSlicePitCutoffs {
+                catalog_available_at: pit_cutoff,
+                clob_market_info_available_at: pit_cutoff,
+                l2_available_at: pit_cutoff,
+                trade_tape_available_at: pit_cutoff,
+                weather_available_at: None,
+                calibration_available_at: None,
+                resolution_available_at: pit_cutoff,
+            },
+            invalid_sessions: Vec::new(),
+            objects: vec![SourceSliceObjectRef {
+                kind,
+                uri: ArtifactUri::parse(format!(
+                    "file://{}",
+                    root.join("missing.parquet").display()
+                ))
+                .expect("missing source object URI"),
+                object_version: "missing-v1".to_owned(),
+                byte_hash: hash('6'),
+                schema_hash,
+                row_count: 0,
+                min_event_at: None,
+                max_event_at: None,
+                min_available_at: None,
+                max_available_at: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn missing_catalog_fails() {
+        let observed = [MarketId::new("missing-market")];
+        let result = require_catalog_coverage(&observed, &[]);
+
+        assert!(matches!(
+            result,
+            Err(QuantError::Research(ResearchError::DatasetBuild { detail }))
+                if detail.contains("missing-market")
+        ));
+    }
+
+    #[tokio::test]
+    async fn manifest_only_skips_objects() {
+        let root = env::temp_dir().join(format!("quant-pivot-source-manifest-{}", Uuid::now_v7()));
+        let store = LocalArtifactStore::new(root.clone());
+        let manifest = manifest(&root);
+        let bytes = CanonicalDigest::canonical_json_bytes(&manifest).expect("manifest bytes");
+        let manifest_hash = CanonicalDigest::content_hash_bytes(&bytes);
+        let uri = store
+            .put(
+                ArtifactKey::new(ArtifactNamespace::SourceSlice, "manifest-only", "json")
+                    .expect("manifest key"),
+                &bytes,
+            )
+            .await
+            .expect("persist manifest");
+        let reference = SourceSliceManifestRef {
+            manifest_uri: uri,
+            manifest_hash,
+        };
+        let reader = SourceSliceReader::new(Arc::new(store));
+        let verified = reader
+            .verify_manifest_ref(&reference)
+            .await
+            .expect("verify manifest without source objects");
+        let full = reader.read_ref(&reference).await;
+        tokio::fs::remove_dir_all(&root)
+            .await
+            .expect("remove manifest fixture");
+
+        assert_eq!(verified, manifest);
+        assert!(matches!(
+            full,
+            Err(QuantError::Research(ResearchError::ArtifactIo { uri, .. }))
+                if uri.contains("missing.parquet")
+        ));
+    }
 }

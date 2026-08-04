@@ -8,6 +8,7 @@ use quant_pivot_core::service::{
         FeedbackEvaluationReservationDeps, FeedbackEvaluationReservationService,
     },
     feedback_learning_stage::{FeedbackLearningStageAdapter, FeedbackLearningStageDeps},
+    feedback_recipe_stage::{FeedbackRecipeStageAdapter, FeedbackRecipeStageDeps},
 };
 use quant_pivot_models::{
     domain::{
@@ -16,9 +17,9 @@ use quant_pivot_models::{
             RunCpcvBacktestRequest, TrainModelRequest,
         },
         ports::{
-            FeedbackCalibrationCommand, FeedbackCalibrationJobParams, FeedbackCpcvCommand,
-            FeedbackCpcvJobParams, FeedbackDatasetBuildCommand, FeedbackDatasetRole,
-            FeedbackDatasetSealJobParams, FeedbackLearningStageArtifactRef,
+            FeedbackCalibrationCommand, FeedbackCalibrationJobParams, FeedbackCandidateFamily,
+            FeedbackCpcvCommand, FeedbackCpcvJobParams, FeedbackDatasetBuildCommand,
+            FeedbackDatasetRole, FeedbackDatasetSealJobParams, FeedbackLearningStageArtifactRef,
             FeedbackTrainingCommand, FeedbackTrainingJobParams, GovernanceActor,
             ModelCalibrationFitJobParams,
         },
@@ -31,6 +32,7 @@ use quant_pivot_models::{
         CalibrationMethod, DatasetPurpose, DownsideSource, FeedbackCycleStatus, FeedbackStage,
         ResearchJobResultKind,
     },
+    hashing::CanonicalDigest,
     types::{
         ArtifactUri, BacktestPathSetId, CalibrationArtifactId, ContentHash,
         DecisionPolicySnapshotId, FeedbackLearningStageArtifactId, ModelRunId, ModelVersionId,
@@ -58,7 +60,9 @@ use quant_pivot_system_tests::{
 };
 use sea_orm::DatabaseConnection;
 
-use super::feedback_boot_schema::{FeedbackSchemaFixture, content_hash, prepare_fixture};
+use super::feedback_boot_schema::{
+    FeedbackSchemaFixture, content_hash, persist_recipe_plan_fixture, prepare_fixture,
+};
 
 struct ArtifactRoot {
     path: PathBuf,
@@ -109,11 +113,11 @@ async fn record_cycle(
     claim
 }
 
-fn dataset_params(
+pub fn dataset_params(
     cycle: &FeedbackCycleInfo,
+    family: &FeedbackCandidateFamily,
     candidate_family_hash: ContentHash,
 ) -> FeedbackDatasetSealJobParams {
-    let family = &cycle.candidate_family;
     let mut commands = Vec::with_capacity(family.candidates().len() * 2 + 1);
     commands.extend(
         family
@@ -123,6 +127,7 @@ fn dataset_params(
                 role: FeedbackDatasetRole::CandidateTraining {
                     candidate_recipe_hash: candidate.candidate_recipe_hash(),
                 },
+                resource_budget: candidate.resource_budget(),
                 request: candidate.training().clone(),
             }),
     );
@@ -134,11 +139,13 @@ fn dataset_params(
                 role: FeedbackDatasetRole::CandidateCalibration {
                     candidate_recipe_hash: candidate.candidate_recipe_hash(),
                 },
+                resource_budget: candidate.resource_budget(),
                 request: candidate.calibration().clone(),
             }),
     );
     commands.push(FeedbackDatasetBuildCommand {
         role: FeedbackDatasetRole::SharedEvaluation,
+        resource_budget: family.candidates()[0].resource_budget(),
         request: family.shared_evaluation().clone(),
     });
     FeedbackDatasetSealJobParams::try_new(
@@ -150,43 +157,48 @@ fn dataset_params(
     .expect("valid DatasetSeal params")
 }
 
-fn dataset_results(params: &FeedbackDatasetSealJobParams) -> Vec<FeedbackDatasetStageResult> {
-    params
-        .commands
-        .iter()
-        .enumerate()
-        .map(|(index, command)| {
-            let seed = char::from_digit(
-                u32::try_from(index.saturating_add(2)).expect("small Dataset result index"),
-                16,
-            )
-            .expect("hex Dataset result seed");
-            FeedbackDatasetStageResult {
-                role: command.role,
-                training_dataset_id: command.request.training_dataset_id,
-                purpose: command.request.purpose,
-                dataset_hash: content_hash(seed),
-                manifest_hash: content_hash('a'),
-                artifact_bytes_hash: content_hash('b'),
-                parquet_uri: ArtifactUri::parse(format!(
-                    "s3://feedback-learning/{}.parquet",
-                    command.request.training_dataset_id
-                ))
-                .expect("valid Dataset result URI"),
-                cohort_manifest_hash: content_hash('d'),
-                sample_count: 100,
-            }
-        })
-        .collect()
+pub trait FeedbackDatasetParamsExt {
+    fn dataset_results(&self) -> Vec<FeedbackDatasetStageResult>;
 }
 
-async fn persist_artifact(
+impl FeedbackDatasetParamsExt for FeedbackDatasetSealJobParams {
+    fn dataset_results(&self) -> Vec<FeedbackDatasetStageResult> {
+        self.commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| {
+                let seed = char::from_digit(
+                    u32::try_from(index.saturating_add(2)).expect("small Dataset result index"),
+                    16,
+                )
+                .expect("hex Dataset result seed");
+                FeedbackDatasetStageResult {
+                    role: command.role,
+                    training_dataset_id: command.request.training_dataset_id,
+                    purpose: command.request.purpose,
+                    dataset_hash: content_hash(seed),
+                    manifest_hash: content_hash('a'),
+                    artifact_bytes_hash: content_hash('b'),
+                    parquet_uri: ArtifactUri::parse(format!(
+                        "s3://feedback-learning/{}.parquet",
+                        command.request.training_dataset_id
+                    ))
+                    .expect("valid Dataset result URI"),
+                    cohort_manifest_hash: content_hash('d'),
+                    sample_count: 100,
+                }
+            })
+            .collect()
+    }
+}
+
+pub async fn persist_artifact(
     store: &Arc<dyn ArtifactStore>,
     artifact: &FeedbackLearningStageArtifact,
 ) -> ResearchJobArtifactRef {
     let bytes = FeedbackLearningStageCodec::encode(artifact)
         .expect("encode feedback learning-stage artifact");
-    let content_hash = FeedbackLearningStageCodec::bytes_hash(&bytes);
+    let content_hash = CanonicalDigest::content_hash_bytes(&bytes);
     let key = ArtifactKey::new(
         ArtifactNamespace::FeedbackLearning,
         content_hash.hex(),
@@ -247,7 +259,7 @@ async fn finalize_job(
     .expect("finalize learning-stage job")
 }
 
-fn candidate_dataset(
+pub fn candidate_dataset(
     params: &FeedbackDatasetSealJobParams,
     purpose: DatasetPurpose,
 ) -> TrainingDatasetId {
@@ -262,12 +274,23 @@ fn candidate_dataset(
 }
 
 fn stage_adapter(
+    cycles: &Arc<PgFeedbackCycleRepository>,
     jobs: &Arc<PgResearchJobRepository>,
     store: Arc<dyn ArtifactStore>,
 ) -> FeedbackLearningStageAdapter {
+    let recipes = Arc::new(
+        FeedbackRecipeStageAdapter::try_new(FeedbackRecipeStageDeps {
+            cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
+            jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
+            artifacts: Arc::clone(&store),
+            max_recovery_attempts: 3,
+        })
+        .expect("RecipePlan-stage adapter"),
+    );
     FeedbackLearningStageAdapter::try_new(FeedbackLearningStageDeps {
         jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
         artifacts: store,
+        recipes,
         max_recovery_attempts: 3,
     })
     .expect("learning-stage adapter")
@@ -277,27 +300,36 @@ pub async fn cycle_drift_rejected() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let fixture = Box::pin(prepare_fixture(&db)).await;
-    let cycles = PgFeedbackCycleRepository::new(db.clone());
-    let cycle = record_cycle(&cycles, &fixture, false).await.cycle;
+    let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
+    let cycle = record_cycle(cycles.as_ref(), &fixture, false).await.cycle;
     let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
     let artifact_root = ArtifactRoot::create();
     let store: Arc<dyn ArtifactStore> =
         Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
-    let adapter = stage_adapter(&jobs, store);
-    let params = dataset_params(&cycle, content_hash('f'));
+    let adapter = stage_adapter(&cycles, &jobs, store);
+    let params = dataset_params(&cycle, &fixture.candidate_family, content_hash('f'));
     let identity =
         FeedbackStageJobIdentity::try_root(cycle.feedback_cycle_id, FeedbackStage::DatasetSeal)
             .expect("DatasetSeal root identity");
     adapter
-        .prepare_dataset_seal(&cycle, identity, params)
+        .prepare_dataset_seal(&cycle, identity, params, &fixture.candidate_family)
         .expect_err("DatasetSeal adapter must reject candidate-family drift");
-    let mut plan_drift = dataset_params(&cycle, cycle.candidate_family_hash);
+    let mut plan_drift = dataset_params(
+        &cycle,
+        &fixture.candidate_family,
+        fixture.candidate_family_hash,
+    );
     plan_drift.commands[0].request.training_dataset_id = TrainingDatasetId::from_v7();
     let exact_identity =
         FeedbackStageJobIdentity::try_root(cycle.feedback_cycle_id, FeedbackStage::DatasetSeal)
             .expect("DatasetSeal exact-family identity");
     adapter
-        .prepare_dataset_seal(&cycle, exact_identity, plan_drift)
+        .prepare_dataset_seal(
+            &cycle,
+            exact_identity,
+            plan_drift,
+            &fixture.candidate_family,
+        )
         .expect_err("DatasetSeal adapter must reject a recipe Dataset-plan drift");
 }
 
@@ -305,26 +337,35 @@ pub async fn result_drift_rejected() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let fixture = Box::pin(prepare_fixture(&db)).await;
-    let cycles = PgFeedbackCycleRepository::new(db.clone());
-    let cycle = record_cycle(&cycles, &fixture, true).await.cycle;
+    let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
+    let cycle = record_cycle(cycles.as_ref(), &fixture, true).await.cycle;
     let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
     let artifact_root = ArtifactRoot::create();
     let store: Arc<dyn ArtifactStore> =
         Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
-    let adapter = stage_adapter(&jobs, Arc::clone(&store));
-    let params = dataset_params(&cycle, cycle.candidate_family_hash);
+    let adapter = stage_adapter(&cycles, &jobs, Arc::clone(&store));
+    let params = dataset_params(
+        &cycle,
+        &fixture.second_candidate_family,
+        fixture.second_candidate_family_hash,
+    );
     let identity =
         FeedbackStageJobIdentity::try_root(cycle.feedback_cycle_id, FeedbackStage::DatasetSeal)
             .expect("DatasetSeal root identity");
     let job = adapter
-        .prepare_dataset_seal(&cycle, identity, params.clone())
+        .prepare_dataset_seal(
+            &cycle,
+            identity,
+            params.clone(),
+            &fixture.second_candidate_family,
+        )
         .expect("prepare exact DatasetSeal job");
-    let mut results = dataset_results(&params);
+    let mut results = params.dataset_results();
     results[0].training_dataset_id = TrainingDatasetId::from_v7();
     let artifact = FeedbackLearningStageArtifact::try_new(
         cycle.feedback_cycle_id,
         cycle.idempotency_hash,
-        cycle.candidate_family_hash,
+        fixture.second_candidate_family_hash,
         params.input_hash().expect("DatasetSeal input hash"),
         None,
         FeedbackLearningStageResults::DatasetSeal(results),
@@ -359,32 +400,59 @@ struct ExactChainFixture {
     _artifact_root: ArtifactRoot,
     cycle: FeedbackCycleInfo,
     lease: FeedbackCycleLeaseGuard,
+    cycles: Arc<PgFeedbackCycleRepository>,
     jobs: Arc<PgResearchJobRepository>,
     store: Arc<dyn ArtifactStore>,
     adapter: FeedbackLearningStageAdapter,
+    family: FeedbackCandidateFamily,
+    family_hash: ContentHash,
     dataset_params: FeedbackDatasetSealJobParams,
     recipe: ContentHash,
 }
 
 impl ExactChainFixture {
     async fn new(db: &DatabaseConnection, schema: &FeedbackSchemaFixture, second: bool) -> Self {
-        let cycles = PgFeedbackCycleRepository::new(db.clone());
-        let claim = record_cycle(&cycles, schema, second).await;
+        let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
+        let claim = record_cycle(cycles.as_ref(), schema, second).await;
         let cycle = claim.cycle;
+        let (family, family_hash) = if second {
+            (
+                schema.second_candidate_family.clone(),
+                schema.second_candidate_family_hash,
+            )
+        } else {
+            (
+                schema.candidate_family.clone(),
+                schema.candidate_family_hash,
+            )
+        };
         let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
         let artifact_root = ArtifactRoot::create();
         let store: Arc<dyn ArtifactStore> =
             Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
-        let adapter = stage_adapter(&jobs, Arc::clone(&store));
-        let dataset_params = dataset_params(&cycle, cycle.candidate_family_hash);
-        let recipe = cycle.candidate_family.candidates()[0].candidate_recipe_hash();
+        persist_recipe_plan_fixture(
+            cycles.as_ref(),
+            jobs.as_ref(),
+            &store,
+            claim.lease,
+            &cycle,
+            &family,
+            2,
+        )
+        .await;
+        let adapter = stage_adapter(&cycles, &jobs, Arc::clone(&store));
+        let dataset_params = dataset_params(&cycle, &family, family_hash);
+        let recipe = family.candidates()[0].candidate_recipe_hash();
         Self {
             _artifact_root: artifact_root,
             cycle,
             lease: claim.lease,
+            cycles,
             jobs,
             store,
             adapter,
+            family,
+            family_hash,
             dataset_params,
             recipe,
         }
@@ -398,17 +466,22 @@ impl ExactChainFixture {
         .expect("DatasetSeal root identity");
         let job = self
             .adapter
-            .prepare_dataset_seal(&self.cycle, identity, self.dataset_params.clone())
+            .prepare_dataset_seal(
+                &self.cycle,
+                identity,
+                self.dataset_params.clone(),
+                &self.family,
+            )
             .expect("prepare DatasetSeal");
         let artifact = FeedbackLearningStageArtifact::try_new(
             self.cycle.feedback_cycle_id,
             self.cycle.idempotency_hash,
-            self.cycle.candidate_family_hash,
+            self.family_hash,
             self.dataset_params
                 .input_hash()
                 .expect("DatasetSeal input hash"),
             None,
-            FeedbackLearningStageResults::DatasetSeal(dataset_results(&self.dataset_params)),
+            FeedbackLearningStageResults::DatasetSeal(self.dataset_params.dataset_results()),
         )
         .expect("DatasetSeal artifact");
         let artifact_ref = persist_artifact(&self.store, &artifact).await;
@@ -442,10 +515,11 @@ impl ExactChainFixture {
         let params = FeedbackTrainingJobParams::try_new(
             self.cycle.feedback_cycle_id,
             self.cycle.idempotency_hash,
-            self.cycle.candidate_family_hash,
+            self.family_hash,
             dataset.previous.clone(),
             vec![FeedbackTrainingCommand {
                 candidate_recipe_hash: self.recipe,
+                resource_budget: self.family.candidates()[0].resource_budget(),
                 params: ModelTrainJobParams {
                     model_version_id,
                     model_run_id,
@@ -470,7 +544,7 @@ impl ExactChainFixture {
         let artifact = FeedbackLearningStageArtifact::try_new(
             self.cycle.feedback_cycle_id,
             self.cycle.idempotency_hash,
-            self.cycle.candidate_family_hash,
+            self.family_hash,
             params.input_hash().expect("Training input hash"),
             Some(params.previous.clone()),
             FeedbackLearningStageResults::Training(vec![FeedbackTrainingStageResult {
@@ -512,18 +586,18 @@ impl ExactChainFixture {
     ) -> CalibrationChainEvidence {
         let model_run_id = ModelRunId::from_v7();
         let policy_id = self
-            .cycle
-            .candidate_family
+            .family
             .candidate(self.recipe)
             .expect("frozen candidate recipe")
             .decision_policy_snapshot_id();
         let params = FeedbackCalibrationJobParams::try_new(
             self.cycle.feedback_cycle_id,
             self.cycle.idempotency_hash,
-            self.cycle.candidate_family_hash,
+            self.family_hash,
             training.previous.clone(),
             vec![FeedbackCalibrationCommand {
                 candidate_recipe_hash: self.recipe,
+                resource_budget: self.family.candidates()[0].resource_budget(),
                 params: ModelCalibrationFitJobParams {
                     model_run_id,
                     request: FitModelCalibratorRequest {
@@ -553,7 +627,7 @@ impl ExactChainFixture {
         let artifact = FeedbackLearningStageArtifact::try_new(
             self.cycle.feedback_cycle_id,
             self.cycle.idempotency_hash,
-            self.cycle.candidate_family_hash,
+            self.family_hash,
             params.input_hash().expect("Calibration input hash"),
             Some(params.previous.clone()),
             FeedbackLearningStageResults::Calibration(vec![
@@ -606,10 +680,12 @@ impl ExactChainFixture {
         let params = FeedbackCpcvJobParams::try_new(
             self.cycle.feedback_cycle_id,
             self.cycle.idempotency_hash,
-            self.cycle.candidate_family_hash,
+            self.family_hash,
             calibration.previous.clone(),
             vec![FeedbackCpcvCommand {
                 candidate_recipe_hash: self.recipe,
+                resource_budget: self.family.candidates()[0].resource_budget(),
+                cpcv_spec: self.family.candidates()[0].cpcv_spec().clone(),
                 params: CpcvBacktestJobParams {
                     model_version_id: calibration.calibrated_model_version_id,
                     model_run_id,
@@ -634,7 +710,7 @@ impl ExactChainFixture {
         let artifact = FeedbackLearningStageArtifact::try_new(
             self.cycle.feedback_cycle_id,
             self.cycle.idempotency_hash,
-            self.cycle.candidate_family_hash,
+            self.family_hash,
             params.input_hash().expect("CPCV input hash"),
             Some(params.previous.clone()),
             FeedbackLearningStageResults::Cpcv(vec![FeedbackCpcvStageResult::Evaluated {
@@ -669,7 +745,7 @@ impl ExactChainFixture {
             terminal.uri,
             b"{}".to_vec(),
         ));
-        stage_adapter(&self.jobs, tampered_store)
+        stage_adapter(&self.cycles, &self.jobs, tampered_store)
             .succeeded_cpcv(&self.cycle, &info)
             .await
             .expect_err("CPCV restart must reject tampered object bytes");
@@ -694,7 +770,11 @@ pub async fn exact_chain_replays() {
                 as Arc<dyn FeedbackCycleRepository>,
             datasets: Arc::new(PgTrainingDatasetRepository::new(db.clone()))
                 as Arc<dyn TrainingDatasetRepository>,
-            learning_stages: Arc::new(stage_adapter(&first.jobs, Arc::clone(&first.store))),
+            learning_stages: Arc::new(stage_adapter(
+                &first.cycles,
+                &first.jobs,
+                Arc::clone(&first.store),
+            )),
         });
     let inserted = reservations
         .reserve(first.lease, cpcv.clone())
@@ -736,7 +816,11 @@ pub async fn exact_chain_replays() {
                 as Arc<dyn FeedbackCycleRepository>,
             datasets: Arc::new(PgTrainingDatasetRepository::new(db))
                 as Arc<dyn TrainingDatasetRepository>,
-            learning_stages: Arc::new(stage_adapter(&second.jobs, Arc::clone(&second.store))),
+            learning_stages: Arc::new(stage_adapter(
+                &second.cycles,
+                &second.jobs,
+                Arc::clone(&second.store),
+            )),
         })
         .reserve(second.lease, second_cpcv)
         .await

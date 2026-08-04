@@ -1,4 +1,4 @@
-//! Canonical truth, attribution-plan, and sole quality-gate execution.
+//! Canonical truth, attribution-manifest, and sole quality-gate execution.
 
 use std::{sync::Arc, time::Duration};
 
@@ -9,8 +9,8 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     domain::{
         ports::{
-            CandidateQualityGateEvidence, FeedbackAttributionPlanArtifact,
-            FeedbackAttributionPlanJobParams, FeedbackAttributionProduced, FeedbackAttributionUse,
+            CandidateQualityGateEvidence, FeedbackAttributionJobParams,
+            FeedbackAttributionManifest, FeedbackAttributionProduced, FeedbackAttributionUse,
             FeedbackCandidateValidation, FeedbackGovernanceExecutionPort,
             FeedbackGovernanceExecutionResult, FeedbackTruthFreezeArtifact,
             FeedbackTruthFreezeJobParams, FeedbackValidationArtifact, FeedbackValidationJobParams,
@@ -19,8 +19,9 @@ use quant_pivot_models::{
         quant::{JobProgressSink, ResearchJobArtifactRef},
     },
     enums::quant::FeedbackStage,
+    hashing::CanonicalDigest,
     types::{
-        ContentHash, FeedbackAttributionPlanArtifactId, FeedbackTruthFreezeArtifactId,
+        ContentHash, FeedbackAttributionManifestId, FeedbackTruthFreezeArtifactId,
         FeedbackValidationArtifactId, ResearchJobProgress,
     },
 };
@@ -117,7 +118,7 @@ impl FeedbackGovernanceExecutionService {
 
     async fn load_truth(
         &self,
-        params: &FeedbackAttributionPlanJobParams,
+        params: &FeedbackAttributionJobParams,
     ) -> QuantResult<FeedbackTruthFreezeArtifact> {
         let bytes = self.artifacts.get(&params.truth_artifact.uri).await?;
         Self::require_hash(
@@ -143,7 +144,7 @@ impl FeedbackGovernanceExecutionService {
         let bytes = self.artifacts.get(&reference.uri).await?;
         Self::require_hash(
             reference.content_hash,
-            FeedbackLearningStageCodec::bytes_hash(&bytes),
+            CanonicalDigest::content_hash_bytes(&bytes),
         )?;
         FeedbackLearningStageCodec::decode(&bytes)
     }
@@ -156,7 +157,7 @@ impl FeedbackGovernanceExecutionService {
     ) -> QuantResult<Vec<FeedbackCandidateValidation>> {
         let cpcv = self.load_learning(&params.cpcv.artifact).await?;
         if cpcv.feedback_cycle_id != params.feedback_cycle_id
-            || cpcv.stage() != FeedbackStage::Cpcv
+            || cpcv.results.stage() != FeedbackStage::Cpcv
             || cpcv.artifact_id != params.cpcv.artifact_id
             || cpcv.input_hash != params.cpcv.input_hash
         {
@@ -239,8 +240,8 @@ impl FeedbackGovernanceExecutionService {
 
     async fn persist_attribution(
         &self,
-        artifact: FeedbackAttributionPlanArtifact,
-    ) -> QuantResult<FeedbackGovernanceExecutionResult<FeedbackAttributionPlanArtifactId>> {
+        artifact: FeedbackAttributionManifest,
+    ) -> QuantResult<FeedbackGovernanceExecutionResult<FeedbackAttributionManifestId>> {
         let artifact_id = artifact.artifact_id;
         let bytes = FeedbackGovernanceCodec::encode_attribution(&artifact)?;
         let reference = self
@@ -337,14 +338,14 @@ impl FeedbackGovernanceExecutionPort for FeedbackGovernanceExecutionService {
         self.persist_truth(artifact).await
     }
 
-    async fn plan_attribution(
+    async fn materialize_attribution(
         &self,
-        params: FeedbackAttributionPlanJobParams,
+        params: FeedbackAttributionJobParams,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
-    ) -> QuantResult<FeedbackGovernanceExecutionResult<FeedbackAttributionPlanArtifactId>> {
+    ) -> QuantResult<FeedbackGovernanceExecutionResult<FeedbackAttributionManifestId>> {
         params.validate()?;
-        Self::require_active(&cancel, "attribution_plan")?;
+        Self::require_active(&cancel, "attribution_manifest")?;
         self.load_truth(&params).await?;
         self.attribution_materializer
             .materialize(&params, progress.as_ref(), &cancel)
@@ -384,10 +385,10 @@ impl FeedbackGovernanceExecutionPort for FeedbackGovernanceExecutionService {
             })
             .collect();
         progress.report(ResearchJobProgress::indeterminate(
-            "attribution-plan-seal",
+            "attribution-manifest-seal",
             0,
         ));
-        let artifact = FeedbackAttributionPlanArtifact::try_new(&params, uses, produced)?;
+        let artifact = FeedbackAttributionManifest::try_new(&params, uses, produced)?;
         self.persist_attribution(artifact).await
     }
 

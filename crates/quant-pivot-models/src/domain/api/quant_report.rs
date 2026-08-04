@@ -243,7 +243,7 @@ pub struct ReportFunnelMarketView {
     pub model_run_id: Option<ModelRunId>,
     pub market_id: MarketId,
     pub event_id: EventId,
-    pub token_id: TokenId,
+    pub primary_token_id: TokenId,
     pub terminal_stage: ReportFunnelStage,
     pub primary_reason: ReportFunnelReason,
     pub secondary_diagnostics: ReportFunnelDiagnostics,

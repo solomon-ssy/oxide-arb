@@ -223,7 +223,7 @@ impl ModelServingPlaneLoader for VerifiedModelServingPlaneLoader {
     ) -> Result<Arc<LoadedModelServingRuntime>, ResearchError> {
         let source = self
             .preimages
-            .load(&version)
+            .load_runtime(&version)
             .await
             .map_err(|error| load_failure_for(&version, "preimage_graph", &error))?;
         let runtime = source
@@ -508,6 +508,8 @@ mod tests {
 
         async fn infer_batch(&self, _input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
             Ok(ModelRuntimeOutput {
+                calibration_scores: Vec::new(),
+                rank_scores: Vec::new(),
                 candidates: Vec::new(),
                 runtime_metrics: ModelRuntimeMetrics {
                     markets_scored: 0,
@@ -629,6 +631,7 @@ mod tests {
             max_pending_loads: 32,
             max_concurrent_loads: 4,
             load_timeout_ms: 2_000,
+            max_total_shadow_model_bytes: 2_147_483_648,
         }
     }
 

@@ -36,13 +36,13 @@ use quant_pivot_models::{
     enums::domain::DomainFamily,
     runtime_config::DomainConfig,
     types::{
-        Bps, DomainInstrumentKey, MarketId, PayoutRatio, Price, TokenId, Usd,
-        calibration::PublishedWeatherStationLeadBias,
+        Bps, ClobMarketInfoVersion, DomainInstrumentKey, MarketId, PayoutRatio, Price, TokenId,
+        Usd, calibration::PublishedWeatherStationLeadBias,
     },
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, CatalogLedgerRepository, MarketLinkageRepository,
-    QuantFactReadRepository,
+    CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
+    MarketLinkageRepository, QuantFactReadRepository,
 };
 use quant_pivot_research::{
     domain::{crypto_lookback_secs, oracle_instrument, weather_history_start},
@@ -99,6 +99,9 @@ pub struct Prefetched {
     pub resolutions: HashMap<MarketId, Vec<MarketResolutionRow>>,
     /// Every immutable market/event revision required by the replay window.
     pub catalog: CatalogWindowInfo,
+    /// Every bitemporal CLOB market-info revision required by the replay window,
+    /// including the latest visible pre-window baseline for each market.
+    pub clob_market_info: Vec<ClobMarketInfoVersion>,
     /// External domain observations per instrument, ascending.
     pub domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
     /// Source-native Crypto reports per settlement instrument, ascending.
@@ -146,6 +149,7 @@ pub(crate) fn historical_window_from_prefetched(
 pub struct HistoricalWindowLoader {
     fact_read: Arc<dyn QuantFactReadRepository>,
     catalog_repo: Arc<dyn CatalogLedgerRepository>,
+    clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
     max_book_staleness: Duration,
@@ -158,6 +162,7 @@ impl HistoricalWindowLoader {
     pub fn new(
         fact_read: Arc<dyn QuantFactReadRepository>,
         catalog_repo: Arc<dyn CatalogLedgerRepository>,
+        clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
         linkage_repo: Arc<dyn MarketLinkageRepository>,
         calibration_repo: Arc<dyn CalibrationArtifactRepository>,
         max_book_staleness: Duration,
@@ -165,6 +170,7 @@ impl HistoricalWindowLoader {
         Self {
             fact_read,
             catalog_repo,
+            clob_market_info_repo,
             linkage_repo,
             calibration_repo,
             max_book_staleness,
@@ -200,6 +206,21 @@ impl HistoricalWindowLoader {
             .await
             .map_err(QuantError::from)?;
         let catalog_markets = decode_catalog_markets(&catalog)?;
+        let market_info_from = checked_sub_duration(
+            spec.window_start,
+            spec.knowledge_lag,
+            "historical CLOB market-info knowledge lag",
+        )?;
+        let clob_market_info = self
+            .clob_market_info_repo
+            .window(
+                &markets,
+                market_info_from,
+                end_boundary.knowledge_cutoff(),
+                spec.available_by,
+            )
+            .await
+            .map_err(QuantError::from)?;
 
         // Expand books to both binary outcome tokens named by every catalog
         // revision. The model context uses the exact PIT best ask for whichever
@@ -287,6 +308,7 @@ impl HistoricalWindowLoader {
             trade_tape,
             resolutions,
             catalog,
+            clob_market_info,
             domain_observations,
             crypto_reports,
             weather_observations,
@@ -836,6 +858,7 @@ fn build_materialized_pit(
         MaterializedPitEngine::new(
             books,
             prefetched.catalog.clone(),
+            prefetched.clob_market_info.clone(),
             chrono_duration(max_staleness, "training.max_book_staleness_ms")?,
         )?,
         book_decode_failures,

@@ -11,19 +11,19 @@ use crate::{
     enums::{common::MarketCategory, model::ModelFamily},
     hashing::CanonicalDigest,
     types::{
-        BacktestPathSetId, CalibrationArtifactId, ContentHash, FeatureParityRunId,
-        FeatureParityStateId, FeedbackCycleId, ModelCandidateManifestId, ModelSpecId,
-        ModelVersionId, ResearchProfileRef, TrainingDatasetId,
+        BacktestPathSetId, CalibrationArtifactId, ContentHash, FeedbackCycleId,
+        ModelCandidateManifestId, ModelSpecId, ModelVersionId, ResearchProfileRef,
+        TrainingDatasetId,
         model_serving::{ModelServingBindings, ModelServingEstimatorBinding},
     },
 };
 
-const MANIFEST_FORMAT_VERSION: u32 = 3;
+const MANIFEST_FORMAT_VERSION: u32 = 4;
 const MANIFEST_HASH_DOMAIN: &str = "quant-pivot/model-candidate-manifest";
 const EXPLANATION_FORMAT_VERSION: u32 = 3;
 const EXPLANATION_HASH_DOMAIN: &str = "quant-pivot/candidate-explanation-validation";
-const PROMOTION_GATE_FORMAT_VERSION: u32 = 1;
-const PROMOTION_GATE_HASH_DOMAIN: &str = "quant-pivot/promotion-gate-artifact";
+const PROMOTION_GATE_FORMAT_VERSION: u32 = 2;
+const PROMOTION_GATE_HASH_DOMAIN: &str = "quant-pivot/candidate-readiness-gate";
 
 /// Explainability method validated before a candidate can enter governance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,7 +217,8 @@ impl TryFrom<&ModelServingBindings> for CandidateExplanationValidation {
     }
 }
 
-/// Immutable aggregate proving one candidate passed every promotion gate.
+/// Immutable aggregate proving one candidate passed every pre-shadow
+/// readiness gate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromotionGateArtifact {
@@ -231,18 +232,13 @@ pub struct PromotionGateArtifact {
     pub feedback_policy_hash: ContentHash,
     pub decision_policy_snapshot_hash: ContentHash,
     pub truth_freeze_hash: ContentHash,
-    pub attribution_plan_hash: ContentHash,
+    pub attribution_manifest_hash: ContentHash,
     pub validation_artifact_hash: ContentHash,
     pub quality_gate_report_hash: ContentHash,
     pub comparison_artifact_hash: ContentHash,
-    pub shadow_artifact_hash: ContentHash,
-    pub decision_artifact_hash: ContentHash,
     pub cpcv_path_set_id: BacktestPathSetId,
     pub cpcv_path_set_hash: ContentHash,
     pub explanation_validation_hash: ContentHash,
-    pub feature_parity_run_id: FeatureParityRunId,
-    pub feature_parity_state_id: FeatureParityStateId,
-    pub feature_parity_evidence_hash: ContentHash,
 }
 
 #[derive(Serialize)]
@@ -256,21 +252,16 @@ struct PromotionGatePreimage<'a> {
     feedback_policy_hash: ContentHash,
     decision_policy_snapshot_hash: ContentHash,
     truth_freeze_hash: ContentHash,
-    attribution_plan_hash: ContentHash,
+    attribution_manifest_hash: ContentHash,
     validation_artifact_hash: ContentHash,
     quality_gate_report_hash: ContentHash,
     comparison_artifact_hash: ContentHash,
-    shadow_artifact_hash: ContentHash,
-    decision_artifact_hash: ContentHash,
     cpcv_path_set_id: BacktestPathSetId,
     cpcv_path_set_hash: ContentHash,
     explanation_validation_hash: ContentHash,
-    feature_parity_run_id: FeatureParityRunId,
-    feature_parity_state_id: FeatureParityStateId,
-    feature_parity_evidence_hash: ContentHash,
 }
 
-/// Complete server-derived inputs for the final promotion gate.
+/// Complete server-derived inputs for the pre-shadow readiness gate.
 pub struct PromotionGateArtifactInput {
     pub feedback_cycle_id: FeedbackCycleId,
     pub candidate_recipe_hash: ContentHash,
@@ -280,18 +271,13 @@ pub struct PromotionGateArtifactInput {
     pub feedback_policy_hash: ContentHash,
     pub decision_policy_snapshot_hash: ContentHash,
     pub truth_freeze_hash: ContentHash,
-    pub attribution_plan_hash: ContentHash,
+    pub attribution_manifest_hash: ContentHash,
     pub validation_artifact_hash: ContentHash,
     pub quality_gate_report_hash: ContentHash,
     pub comparison_artifact_hash: ContentHash,
-    pub shadow_artifact_hash: ContentHash,
-    pub decision_artifact_hash: ContentHash,
     pub cpcv_path_set_id: BacktestPathSetId,
     pub cpcv_path_set_hash: ContentHash,
     pub explanation_validation_hash: ContentHash,
-    pub feature_parity_run_id: FeatureParityRunId,
-    pub feature_parity_state_id: FeatureParityStateId,
-    pub feature_parity_evidence_hash: ContentHash,
 }
 
 impl PromotionGateArtifact {
@@ -308,18 +294,13 @@ impl PromotionGateArtifact {
             feedback_policy_hash: input.feedback_policy_hash,
             decision_policy_snapshot_hash: input.decision_policy_snapshot_hash,
             truth_freeze_hash: input.truth_freeze_hash,
-            attribution_plan_hash: input.attribution_plan_hash,
+            attribution_manifest_hash: input.attribution_manifest_hash,
             validation_artifact_hash: input.validation_artifact_hash,
             quality_gate_report_hash: input.quality_gate_report_hash,
             comparison_artifact_hash: input.comparison_artifact_hash,
-            shadow_artifact_hash: input.shadow_artifact_hash,
-            decision_artifact_hash: input.decision_artifact_hash,
             cpcv_path_set_id: input.cpcv_path_set_id,
             cpcv_path_set_hash: input.cpcv_path_set_hash,
             explanation_validation_hash: input.explanation_validation_hash,
-            feature_parity_run_id: input.feature_parity_run_id,
-            feature_parity_state_id: input.feature_parity_state_id,
-            feature_parity_evidence_hash: input.feature_parity_evidence_hash,
         })?;
         let artifact = Self {
             format_version: PROMOTION_GATE_FORMAT_VERSION,
@@ -332,18 +313,13 @@ impl PromotionGateArtifact {
             feedback_policy_hash: input.feedback_policy_hash,
             decision_policy_snapshot_hash: input.decision_policy_snapshot_hash,
             truth_freeze_hash: input.truth_freeze_hash,
-            attribution_plan_hash: input.attribution_plan_hash,
+            attribution_manifest_hash: input.attribution_manifest_hash,
             validation_artifact_hash: input.validation_artifact_hash,
             quality_gate_report_hash: input.quality_gate_report_hash,
             comparison_artifact_hash: input.comparison_artifact_hash,
-            shadow_artifact_hash: input.shadow_artifact_hash,
-            decision_artifact_hash: input.decision_artifact_hash,
             cpcv_path_set_id: input.cpcv_path_set_id,
             cpcv_path_set_hash: input.cpcv_path_set_hash,
             explanation_validation_hash: input.explanation_validation_hash,
-            feature_parity_run_id: input.feature_parity_run_id,
-            feature_parity_state_id: input.feature_parity_state_id,
-            feature_parity_evidence_hash: input.feature_parity_evidence_hash,
         };
         artifact.validate()?;
         Ok(artifact)
@@ -385,18 +361,13 @@ impl PromotionGateArtifact {
             feedback_policy_hash: self.feedback_policy_hash,
             decision_policy_snapshot_hash: self.decision_policy_snapshot_hash,
             truth_freeze_hash: self.truth_freeze_hash,
-            attribution_plan_hash: self.attribution_plan_hash,
+            attribution_manifest_hash: self.attribution_manifest_hash,
             validation_artifact_hash: self.validation_artifact_hash,
             quality_gate_report_hash: self.quality_gate_report_hash,
             comparison_artifact_hash: self.comparison_artifact_hash,
-            shadow_artifact_hash: self.shadow_artifact_hash,
-            decision_artifact_hash: self.decision_artifact_hash,
             cpcv_path_set_id: self.cpcv_path_set_id,
             cpcv_path_set_hash: self.cpcv_path_set_hash,
             explanation_validation_hash: self.explanation_validation_hash,
-            feature_parity_run_id: self.feature_parity_run_id,
-            feature_parity_state_id: self.feature_parity_state_id,
-            feature_parity_evidence_hash: self.feature_parity_evidence_hash,
         }
     }
 

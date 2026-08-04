@@ -77,21 +77,24 @@ pub struct LayeredResolver {
 
 impl LayeredResolver {
     /// The production resolver: Tier 0 → Tier 1, default grounding gate.
-    #[must_use]
-    pub fn deterministic(
+    ///
+    /// # Errors
+    ///
+    /// Fails boot when any built-in deterministic parser cannot initialize.
+    pub fn try_deterministic(
         weather_stations: WeatherStationRegistry,
         weather_bindings: &WeatherVerticalBindingsConfig,
-    ) -> Self {
-        Self {
+    ) -> QuantResult<Self> {
+        Ok(Self {
             tiers: vec![
                 Box::new(Tier0SlugExtractor),
                 Box::new(CryptoSubjectParser),
-                Box::new(WeatherContractExtractor::new(weather_bindings)),
-                Box::new(WeatherDailyTemperatureExtractor::new(weather_stations)),
+                Box::new(WeatherContractExtractor::try_new(weather_bindings)?),
+                Box::new(WeatherDailyTemperatureExtractor::try_new(weather_stations)?),
             ],
             validator: Box::new(DefaultSubjectValidator),
             resolver_version: DOMAIN_RESOLVER_VERSION,
-        }
+        })
     }
 
     /// The frozen ruleset version this resolver stamps on every record.
@@ -478,10 +481,11 @@ mod tests {
 
     #[test]
     fn tier0_wins_before_rejects() {
-        let resolver = LayeredResolver::deterministic(
+        let resolver = LayeredResolver::try_deterministic(
             WeatherStationRegistry::default(),
             &WeatherVerticalBindingsConfig::default(),
-        );
+        )
+        .expect("deterministic resolver");
 
         let tier0 = resolver
             .resolve(
@@ -550,10 +554,11 @@ mod tests {
 
     #[test]
     fn public_chainlink_assets_rejects() {
-        let resolver = LayeredResolver::deterministic(
+        let resolver = LayeredResolver::try_deterministic(
             WeatherStationRegistry::default(),
             &WeatherVerticalBindingsConfig::default(),
-        );
+        )
+        .expect("deterministic resolver");
         let btc = resolver
             .resolve(
                 &metadata(
@@ -602,10 +607,11 @@ mod tests {
 
     #[test]
     fn public_binance_routes_rtds() {
-        let resolver = LayeredResolver::deterministic(
+        let resolver = LayeredResolver::try_deterministic(
             WeatherStationRegistry::default(),
             &WeatherVerticalBindingsConfig::default(),
-        );
+        )
+        .expect("deterministic resolver");
         let outcome = resolver
             .resolve(
                 &metadata(

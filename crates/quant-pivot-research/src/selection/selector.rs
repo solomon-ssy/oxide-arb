@@ -461,6 +461,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selector_hash_ignores_scale() {
+        let request = request_with(selection_config());
+        let candidate = healthy_candidate("0xscale");
+        let canonical = ConfiguredMarketSelector::new()
+            .build_snapshot(request.clone(), vec![candidate.clone()])
+            .await
+            .expect("canonical snapshot");
+
+        let mut scaled_request = request;
+        scaled_request.selection.min_liquidity_usd =
+            DecimalValue::new(rust_decimal_macros::dec!(1000.000000));
+        scaled_request.selection.min_volume_24h_usd =
+            DecimalValue::new(rust_decimal_macros::dec!(1000.000000));
+        let mut scaled_candidate = candidate;
+        scaled_candidate.liquidity_usd = Some(Usd::new(rust_decimal_macros::dec!(10000.000000)));
+        scaled_candidate.volume_24h_usd = Some(Usd::new(rust_decimal_macros::dec!(5000.000000)));
+        scaled_candidate.best_bid = Some(Price::new(rust_decimal_macros::dec!(0.490000)));
+        scaled_candidate.best_ask = Some(Price::new(rust_decimal_macros::dec!(0.510000)));
+        scaled_candidate.depth_usd = Some(Usd::new(rust_decimal_macros::dec!(2000.000000)));
+        let scaled = ConfiguredMarketSelector::new()
+            .build_snapshot(scaled_request, vec![scaled_candidate])
+            .await
+            .expect("scaled snapshot");
+
+        assert_eq!(canonical.selector_hash, scaled.selector_hash);
+    }
+
+    #[tokio::test]
     async fn selector_hash_changes_changes() {
         let candidates = vec![healthy_candidate("0xa"), healthy_candidate("0xb")];
         let mut request_a = request_with(selection_config());

@@ -20,7 +20,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use quant_pivot_allocator as _;
 use quant_pivot_migration::{
     acquire_schema_mutation_lease, apply_under_lease, inspect_preproduction_postgres,
-    plan as plan_postgres_migrations, reset_preproduction_postgres,
+    plan as plan_postgres_migrations,
 };
 use quant_pivot_models::{
     config::{ClickHouseConfig, DeployConfig, PostgresConfig},
@@ -595,7 +595,11 @@ impl PreproductionResetApplyArgs {
         validate_reset_journal(&journal, &deploy, &self.confirm_nonce, &self.confirm)?;
         let current_inventory = reset_inventory(&deploy).await?;
         if current_inventory != journal.inventory {
-            bail!("reset target inventory changed after planning; create a new reset plan");
+            bail!(
+                "reset target inventory changed after planning; create a new reset plan \
+                 (planned={:?}, current={current_inventory:?})",
+                journal.inventory
+            );
         }
         if current_inventory.postgres_connection_count != 0 {
             bail!("PostgreSQL target still has active connections");
@@ -612,14 +616,17 @@ impl PreproductionResetApplyArgs {
                 .await
                 .context("release reset schema mutation lease after stale plan")?;
             bail!(
-                "reset target changed while acquiring the schema mutation lease; create a new plan"
+                "reset target changed while acquiring the schema mutation lease; create a new plan \
+                 (planned={:?}, locked={locked_inventory:?})",
+                journal.inventory
             );
         }
         transition_reset_journal(&self.journal_file, &mut journal, ResetStage::Applying)?;
 
         let mutation_result = tokio::select! {
           result = async {
-            reset_preproduction_postgres(&deploy.db.postgres, &lease)
+            lease
+                .reset_preproduction_postgres(&deploy.db.postgres)
                 .await
                 .context("recreate exact PostgreSQL quant_pivot database")?;
             transition_reset_journal(
@@ -1294,6 +1301,7 @@ async fn generate_clean_postgres_manifest() -> Result<()> {
         .await
         .context("resolve disposable PostgreSQL manifest port")?;
     let config = PostgresConfig {
+        host: "127.0.0.1".to_owned(),
         port,
         user: "postgres".to_owned(),
         password: password.as_str().into(),

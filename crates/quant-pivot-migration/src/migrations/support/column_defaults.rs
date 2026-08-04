@@ -439,8 +439,18 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
+        table: "quant_feedback_coordinator_fault",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
         table: "quant_feedback_scheduler_state",
         column: "attempt",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_scheduler_state",
+        column: "coalesced_gap_count",
         value: DefaultValue::Integer(0),
     },
     ColumnDefaultSpec {
@@ -456,6 +466,11 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     ColumnDefaultSpec {
         table: "quant_feedback_scheduler_state",
         column: "revision",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_scheduler_state",
+        column: "settlement_failure_count",
         value: DefaultValue::Integer(0),
     },
     ColumnDefaultSpec {
@@ -509,6 +524,11 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
+        table: "quant_feedback_recipe_template",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
         table: "quant_feedback_stage_event",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
@@ -521,6 +541,16 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     ColumnDefaultSpec {
         table: "quant_feedback_trigger_event",
         column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_model_route_shadow_binding",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_model_route_shadow_binding",
+        column: "updated_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
@@ -783,7 +813,12 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     ColumnDefaultSpec {
         table: "quant_resolution_observation_projection",
         column: "status",
-        value: DefaultValue::PostgresLiteral("'pending_mapping'::qp_resolution_projection_status"),
+        value: DefaultValue::PostgresLiteral("'pending'::qp_resolution_projection_status"),
+    },
+    ColumnDefaultSpec {
+        table: "quant_resolution_observation_projection",
+        column: "revision",
+        value: DefaultValue::Integer(0),
     },
     ColumnDefaultSpec {
         table: "quant_resolution_observation_projection",
@@ -798,6 +833,11 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     ColumnDefaultSpec {
         table: "quant_resolution_observation_projection",
         column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_resolution_projection_remediation",
+        column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {

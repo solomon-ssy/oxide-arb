@@ -6,20 +6,17 @@ use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, feedback::FeedbackError};
 use quant_pivot_models::{
     domain::quant::{
-        CandidateExplanationValidation, ModelCandidateManifestDocument, ModelCandidateManifestInfo,
-        ModelCandidateManifestInput, ModelVersionInfo, NewModelCandidateManifest,
-        PromotionGateArtifact, PromotionGateArtifactInput, PromotionPermitInfo,
-        PromotionPermitScope, PromotionPermitScopeInput, PromotionPermitStatus,
-        PromotionPolicyProjection, PromotionPreflight, PromotionPreflightInput,
-        PromotionServingConstraints, PromotionServingConstraintsInput,
+        CandidateExplanationValidation, ModelCandidateManifestInfo, ModelVersionInfo,
+        PromotionPermitInfo, PromotionPermitScope, PromotionPermitScopeInput,
+        PromotionPermitStatus, PromotionPolicyProjection, PromotionPreflight,
+        PromotionPreflightInput, PromotionServingConstraints, PromotionServingConstraintsInput,
     },
     enums::{common::MarketCategory, model::ModelFamily},
     runtime_config::{ActivePolicyBundle, BuyModelRoute},
     types::{FeedbackCycleId, PromotionPermitId},
 };
 use quant_pivot_repository::traits::{
-    FeedbackCycleRepository, ModelCandidateManifestRepository, ModelCandidateManifestWriteOutcome,
-    PromotionPermitRepository,
+    FeedbackCycleRepository, ModelCandidateManifestRepository, PromotionPermitRepository,
 };
 
 use crate::{
@@ -182,7 +179,7 @@ impl PromotionPreflightService {
         let candidate_id = evidence.shadow_contract.candidate_model_version_id();
         let projection = PromotionPolicyProjection::try_new(&bundle, category, candidate_id)?;
         Self::verify_evidence(&evidence, &bundle, &projection)?;
-        self.verify_generation(&evidence, category)?;
+        self.verify_generation(&evidence, category, projection.shadow_binding_generation())?;
 
         let champion = self
             .deps
@@ -204,7 +201,7 @@ impl PromotionPreflightService {
             .await
             .map_err(Self::route_error)?;
         let manifest = self
-            .ensure_manifest(&evidence, &candidate, category, &parity)
+            .require_manifest(&evidence, &candidate, category)
             .await?;
         let constraints = Self::serving_constraints(&candidate, &manifest, category, &parity)?;
         let constraints_hash = constraints.constraints_hash()?;
@@ -222,6 +219,7 @@ impl PromotionPreflightService {
             expected_runtime_control_revision: runtime.revision,
             expected_decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
             expected_snapshot_hash: bundle.snapshot_hash,
+            expected_route_generation: projection.shadow_binding_generation(),
             champion_model_version_id: champion.model_version_id,
             champion_serving_contract_hash: champion.serving_contract_hash,
             candidate_model_version_id: constraints.candidate_model_version_id(),
@@ -284,6 +282,7 @@ impl PromotionPreflightService {
         &self,
         evidence: &PromotionDecisionEvidence,
         category: MarketCategory,
+        expected_route_generation: u64,
     ) -> QuantResult<()> {
         let route = BuyModelRoute::try_from(Some(category))
             .map_err(|error| Self::invalid(error.to_string()))?;
@@ -298,21 +297,34 @@ impl PromotionPreflightService {
             })?
             .published_shadow_identity()?;
         let contract = &evidence.shadow_contract;
-        if identity.route != route
+        let binding = &evidence.shadow_binding;
+        if binding.route != route
+            || binding.committed_policy_generation != contract.policy_bundle_generation()
+            || binding.committed_snapshot_id != contract.decision_policy_snapshot_id()
+            || binding.committed_snapshot_hash != contract.decision_policy_snapshot_hash()
+            || binding.champion_model_version_id != contract.champion_model_version_id()
+            || binding.champion_serving_contract_hash != contract.champion_serving_contract_hash()
+            || binding.candidate_model_version_id != contract.candidate_model_version_id()
+            || binding.candidate_serving_contract_hash != contract.candidate_serving_contract_hash()
+            || identity.route != route
             || identity.category_scope != Some(category)
             || identity.research_profile_artifact_id != contract.profile_ref().artifact_id()
             || identity.decision_policy_snapshot_id != contract.decision_policy_snapshot_id()
             || identity.decision_policy_snapshot_hash != contract.decision_policy_snapshot_hash()
             || identity.policy_bundle_generation != contract.policy_bundle_generation()
-            || identity.active_model_version_id != contract.champion_model_version_id()
-            || identity.active_serving_contract_hash != contract.champion_serving_contract_hash()
-            || identity.shadow_model_version_id != contract.candidate_model_version_id()
-            || identity.shadow_serving_contract_hash != contract.candidate_serving_contract_hash()
-            || identity.minimum_topn_overlap != contract.minimum_topn_overlap()
+            || identity.champion_model_version_id != contract.champion_model_version_id()
+            || identity.champion_serving_contract_hash != contract.champion_serving_contract_hash()
+            || identity.candidate_model_version_id != contract.candidate_model_version_id()
+            || identity.candidate_serving_contract_hash
+                != contract.candidate_serving_contract_hash()
+            || identity.route_generation != expected_route_generation
+            || identity.route_generation != binding.binding_generation
+            || identity.shadow_bound_at != binding.bound_at
+            || identity.minimum_topn_decision_overlap != contract.minimum_topn_decision_overlap()
             || identity.required_shadow_window_secs != contract.required_window_secs()
         {
             return Err(Self::invalid(
-                "F10 contract differs from the atomically published serving generation",
+                "ShadowBind/F10 contract differs from the atomically published serving generation",
             ));
         }
         Ok(())
@@ -391,12 +403,11 @@ impl PromotionPreflightService {
         .map_err(Into::into)
     }
 
-    async fn ensure_manifest(
+    async fn require_manifest(
         &self,
         evidence: &PromotionDecisionEvidence,
         candidate: &ModelVersionInfo,
         category: MarketCategory,
-        parity: &ModelRouteParityProof,
     ) -> QuantResult<ModelCandidateManifestInfo> {
         let contract = candidate
             .verified_serving_contract()
@@ -404,66 +415,109 @@ impl PromotionPreflightService {
         let bindings = contract.bindings();
         let explanation = CandidateExplanationValidation::try_from(bindings)
             .map_err(|error| Self::invalid(error.to_string()))?;
-        let calibration = bindings
-            .model
-            .calibration
-            .as_ref()
-            .map(|binding| (binding.artifact_id, binding.content_hash));
-        let promotion_gate = PromotionGateArtifact::try_seal(PromotionGateArtifactInput {
-            feedback_cycle_id: evidence.cycle.feedback_cycle_id,
-            candidate_recipe_hash: evidence.candidate_recipe_hash,
-            candidate_model_version_id: candidate.model_version_id,
-            profile_ref: candidate.profile_ref.clone(),
-            category,
-            feedback_policy_hash: evidence.cycle.feedback_policy_hash,
-            decision_policy_snapshot_hash: evidence.shadow_contract.decision_policy_snapshot_hash(),
-            truth_freeze_hash: evidence.dag.truth_freeze_hash,
-            attribution_plan_hash: evidence.dag.attribution_plan_hash,
-            validation_artifact_hash: evidence.dag.validation_artifact_hash,
-            quality_gate_report_hash: evidence.dag.quality_gate_report_hash,
-            comparison_artifact_hash: evidence.dag.comparison_artifact_hash,
-            shadow_artifact_hash: evidence.dag.shadow_artifact_hash,
-            decision_artifact_hash: evidence.dag.decision_artifact_hash,
-            cpcv_path_set_id: evidence.dag.cpcv_path_set_id,
-            cpcv_path_set_hash: evidence.dag.cpcv_path_set_hash,
-            explanation_validation_hash: explanation.report_hash,
-            feature_parity_run_id: parity.run_id,
-            feature_parity_state_id: parity.state_id,
-            feature_parity_evidence_hash: parity.evidence_hash,
-        })
-        .map_err(|error| Self::invalid(error.to_string()))?;
-        let document = ModelCandidateManifestDocument::try_new(ModelCandidateManifestInput {
-            feedback_cycle_id: evidence.cycle.feedback_cycle_id,
-            candidate_recipe_hash: evidence.candidate_recipe_hash,
-            model_version_id: candidate.model_version_id,
-            model_spec_id: candidate.model_spec_id,
-            model_family: candidate.model_family,
-            model_artifact_hash: candidate.artifact_hash,
-            serving_contract_hash: candidate.serving_contract_hash,
-            training_dataset_id: bindings.dataset.manifest.training_dataset_id,
-            training_dataset_hash: bindings.transform.training_dataset_hash,
-            feature_schema_hash: bindings.schemas.feature_schema_hash,
-            input_contract_hash: bindings.transform.input_contract_hash,
-            input_transform_hash: bindings.transform.input_transform_hash,
-            calibration_artifact_id: calibration.map(|(artifact_id, _)| artifact_id),
-            calibration_artifact_hash: calibration.map(|(_, content_hash)| content_hash),
-            cpcv_path_set_id: evidence.dag.cpcv_path_set_id,
-            cpcv_path_set_hash: evidence.dag.cpcv_path_set_hash,
-            profile_ref: candidate.profile_ref.clone(),
-            category,
-            feedback_policy_hash: evidence.cycle.feedback_policy_hash,
-            decision_policy_snapshot_hash: evidence.shadow_contract.decision_policy_snapshot_hash(),
-            explanation_validation: explanation.clone(),
-            promotion_gate,
-        })
-        .map_err(|error| Self::invalid(error.to_string()))?;
-        let candidate_manifest = NewModelCandidateManifest::try_new(document)
+        let manifest = self
+            .deps
+            .manifests
+            .find_candidate(
+                evidence.cycle.feedback_cycle_id,
+                evidence.candidate_recipe_hash,
+            )
+            .await?
+            .ok_or_else(|| {
+                Self::invalid("CandidateReady cycle has no pre-shadow candidate readiness manifest")
+            })?;
+        manifest
+            .validate()
             .map_err(|error| Self::invalid(error.to_string()))?;
-        let outcome = self.deps.manifests.insert(candidate_manifest).await?;
-        Ok(match outcome {
-            ModelCandidateManifestWriteOutcome::Inserted(manifest)
-            | ModelCandidateManifestWriteOutcome::AlreadyPresent(manifest) => manifest,
-        })
+        let document = &manifest.document;
+        let gate = &document.promotion_gate;
+        let mismatches = [
+            (
+                document.feedback_cycle_id != evidence.cycle.feedback_cycle_id,
+                "feedback_cycle_id",
+            ),
+            (
+                document.candidate_recipe_hash != evidence.candidate_recipe_hash,
+                "candidate_recipe_hash",
+            ),
+            (
+                document.model_version_id != candidate.model_version_id,
+                "model_version_id",
+            ),
+            (
+                document.model_spec_id != candidate.model_spec_id,
+                "model_spec_id",
+            ),
+            (
+                document.model_family != candidate.model_family,
+                "model_family",
+            ),
+            (
+                document.model_artifact_hash != candidate.artifact_hash,
+                "model_artifact_hash",
+            ),
+            (
+                document.serving_contract_hash != candidate.serving_contract_hash,
+                "serving_contract_hash",
+            ),
+            (
+                document.training_dataset_id != bindings.dataset.manifest.training_dataset_id,
+                "training_dataset_id",
+            ),
+            (document.profile_ref != candidate.profile_ref, "profile_ref"),
+            (document.category != category, "category"),
+            (
+                document.feedback_policy_hash != evidence.cycle.feedback_policy_hash,
+                "feedback_policy_hash",
+            ),
+            (
+                document.decision_policy_snapshot_hash
+                    != evidence.cycle.decision_policy_snapshot_hash,
+                "decision_policy_snapshot_hash",
+            ),
+            (
+                document.explanation_validation != explanation,
+                "explanation_validation",
+            ),
+            (
+                gate.truth_freeze_hash != evidence.dag.truth_freeze_hash,
+                "truth_freeze_hash",
+            ),
+            (
+                gate.attribution_manifest_hash != evidence.dag.attribution_manifest_hash,
+                "attribution_manifest_hash",
+            ),
+            (
+                gate.validation_artifact_hash != evidence.dag.validation_artifact_hash,
+                "validation_artifact_hash",
+            ),
+            (
+                gate.quality_gate_report_hash != evidence.dag.quality_gate_report_hash,
+                "quality_gate_report_hash",
+            ),
+            (
+                gate.comparison_artifact_hash != evidence.dag.comparison_artifact_hash,
+                "comparison_artifact_hash",
+            ),
+            (
+                gate.cpcv_path_set_id != evidence.dag.cpcv_path_set_id,
+                "cpcv_path_set_id",
+            ),
+            (
+                gate.cpcv_path_set_hash != evidence.dag.cpcv_path_set_hash,
+                "cpcv_path_set_hash",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(mismatch, field)| mismatch.then_some(field))
+        .collect::<Vec<_>>();
+        if !mismatches.is_empty() {
+            return Err(Self::invalid(format!(
+                "pre-shadow candidate manifest differs from terminal CandidateReady evidence: {}",
+                mismatches.join(", ")
+            )));
+        }
+        Ok(manifest)
     }
 
     fn invalid(detail: impl Into<String>) -> QuantError {

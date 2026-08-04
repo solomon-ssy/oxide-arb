@@ -19,9 +19,9 @@ use quant_pivot_models::{
         FeedbackDecision, FeedbackDriftMetric, FeedbackStage, ResearchJobResultKind,
     },
     types::{
-        ArtifactUri, DatasetCohortCounts, FeatureParityRunId, FeatureValue,
-        FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackDriftArtifactId, ModelVersionId,
-        RecommendationId, ResearchJobParams, RoleCode, TrainingDatasetId, WorkerId,
+        ArtifactUri, CapabilityRegistryHashes, DatasetCohortCounts, FeatureParityRunId,
+        FeatureValue, FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackDriftArtifactId,
+        ModelVersionId, RecommendationId, ResearchJobParams, RoleCode, TrainingDatasetId, WorkerId,
         stable_name::FeatureName,
     },
 };
@@ -77,7 +77,7 @@ fn empty_counts() -> DatasetCohortCounts {
 }
 
 #[derive(Clone, Copy)]
-enum CoverageScenario {
+pub enum CoverageScenario {
     NoLabels,
     LowCoverage,
     Advance,
@@ -101,8 +101,9 @@ fn baseline_ref(evaluation_window: &FeedbackCohortWindow) -> ChampionBaselineRef
     }
 }
 
-fn coverage_artifact(
+pub fn coverage_artifact(
     cycle: &FeedbackCycleInfo,
+    capability_registry_hashes: CapabilityRegistryHashes,
     scenario: CoverageScenario,
 ) -> FeedbackCoverageArtifact {
     let profile = cycle
@@ -180,7 +181,7 @@ fn coverage_artifact(
         profile_ref: cycle.profile_ref.clone(),
         feedback_policy: policy,
         feedback_policy_hash: cycle.feedback_policy_hash,
-        capability_registry_hashes: cycle.capability_registry_hashes.clone(),
+        capability_registry_hashes,
         champion_model_version_id: cycle.champion_model_version_id,
         champion_serving_contract_hash: cycle.champion_serving_contract_hash,
         evaluation_window,
@@ -264,7 +265,7 @@ fn drift_artifact(
     artifact
 }
 
-async fn persist_coverage(
+pub async fn persist_coverage(
     store: &Arc<dyn ArtifactStore>,
     artifact: &FeedbackCoverageArtifact,
 ) -> ResearchJobArtifactRef {
@@ -489,7 +490,20 @@ impl SignalStageHarness {
             WorkerId::from_v7(),
         )
         .await;
-        let artifact = coverage_artifact(&cycle, scenario);
+        let family = if new_cycle.feedback_cycle_id() == fixture.cycle_id {
+            &fixture.candidate_family
+        } else {
+            &fixture.second_candidate_family
+        };
+        let artifact = coverage_artifact(
+            &cycle,
+            family
+                .shared_evaluation()
+                .source_lineage
+                .capability_registry_hashes
+                .clone(),
+            scenario,
+        );
         assert!(matches!(
             artifact.gate_outcome,
             CoverageGateOutcome::NoAction { reason, .. } if reason == expected_reason
@@ -561,7 +575,16 @@ impl SignalStageHarness {
             WorkerId::from_v7(),
         )
         .await;
-        let coverage = coverage_artifact(&cycle, CoverageScenario::Advance);
+        let coverage = coverage_artifact(
+            &cycle,
+            fixture
+                .second_candidate_family
+                .shared_evaluation()
+                .source_lineage
+                .capability_registry_hashes
+                .clone(),
+            CoverageScenario::Advance,
+        );
         assert!(matches!(
             coverage.gate_outcome,
             CoverageGateOutcome::Advance { .. }

@@ -34,6 +34,8 @@ mod basis_alert;
 mod calibration_artifact;
 #[path = "repository/catalog/catalog_ledger.rs"]
 mod catalog_ledger;
+#[path = "repository/catalog/clob_market_info.rs"]
+mod clob_market_info;
 #[path = "repository/research/comparison_report.rs"]
 mod comparison_report;
 #[path = "repository/catalog/domain_projection.rs"]
@@ -100,6 +102,8 @@ mod report_scheduler;
 mod research_job;
 #[path = "repository/research/research_readiness.rs"]
 mod research_readiness;
+#[path = "repository/accounting/resolution_projection.rs"]
+mod resolution_projection;
 #[path = "repository/governance/runtime_control.rs"]
 mod runtime_control;
 #[path = "repository/research/trade_policy_trial.rs"]
@@ -160,6 +164,7 @@ async fn run_catalog_scenarios() -> Result<(), String> {
         catalog_ledger::identical_reconcile_only_audit,
         catalog_ledger::projection_upsert_updates_status,
         catalog_ledger::object_rejected_before_commit,
+        clob_market_info::concurrent_retries_deduplicate,
         domain_projection::crypto_source_sequence_bigint,
         domain_projection::crypto_rejected_before_write,
         domain_source_expectation::source_exists_before_optimistically,
@@ -285,6 +290,7 @@ async fn run_research_scenarios() -> Result<(), String> {
         comparison_report::quant_model_comparison_crud,
         comparison_report::comparison_rejects_tampering,
         feature_parity::cold_not_no_job,
+        feature_parity::failure_opens_latch_atomically,
         feature_parity::full_window_unique_active,
         feature_parity::recovery_cover_open_clear,
         model_registry::create_model_duplicate_duplicate,
@@ -302,6 +308,15 @@ async fn run_research_scenarios() -> Result<(), String> {
         training_dataset::model_version_training_key,
     );
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clob_market_info_contracts() {
+    Box::pin(with_postgres_suite(
+        clob_market_info::concurrent_retries_deduplicate(),
+    ))
+    .await
+    .expect("start CLOB market-info PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -340,8 +355,10 @@ async fn research_job_recovery_contracts() {
         run_scenarios!(
             research_job::job_kind_match_params,
             research_job::finalize_requires_running_owner,
+            research_job::evidence_wait_releases_slot,
             research_job::stale_rejected_after_reclaim,
             research_job::requeue_inflight_requeues_recovery,
+            research_job::transient_retry_is_bounded,
             research_job::requeue_inflight_ignores_rows,
             research_job::requeue_inflight_quarantines_cap,
             research_job::double_finalize_returns_conflict,
@@ -417,6 +434,18 @@ async fn feedback_boot_schema_contracts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_recipe_contracts() {
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            feedback_boot_schema::attribution_pit_contracts,
+            feedback_boot_schema::recipe_catalog_contracts,
+        );
+    }))
+    .await
+    .expect("start feedback recipe PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn promotion_permit_schema_contracts() {
     Box::pin(with_postgres_suite(
         promotion_permit::schema_roundtrip_revoke(),
@@ -440,6 +469,7 @@ async fn feedback_cycle_repository_contracts() {
         run_scenarios!(
             feedback_cycle_repository::trigger_exact_retry,
             feedback_cycle_repository::governed_mutation_contracts,
+            feedback_cycle_repository::forced_child_contracts,
             feedback_cycle_repository::read_page_contracts,
             feedback_cycle_repository::outbox_delivery_contracts,
             feedback_cycle_repository::skip_locked_claims,
@@ -453,11 +483,24 @@ async fn feedback_cycle_repository_contracts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn feedback_scheduler_contracts() {
-    Box::pin(with_postgres_suite(
-        feedback_scheduler::scheduler_lease_contracts(),
-    ))
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            feedback_scheduler::scheduler_lease_contracts,
+            feedback_scheduler::pending_recovery_contracts,
+            feedback_scheduler::gap_settlement_contracts,
+        );
+    }))
     .await
     .expect("start feedback-scheduler PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resolution_projection_contracts() {
+    Box::pin(with_postgres_suite(
+        resolution_projection::remediation_lifecycle_contracts(),
+    ))
+    .await
+    .expect("start resolution-projection PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -466,12 +509,16 @@ async fn feedback_coordinator_contracts() {
         run_scenarios!(
             feedback_coordinator::enqueue_gap_recovers,
             feedback_coordinator::terminal_wake_advances,
+            feedback_coordinator::cancellation_release_retries,
             feedback_coordinator::running_cancel_waits,
             feedback_coordinator::job_orphan_restarts,
             feedback_coordinator::failed_job_stops,
             feedback_coordinator::dag_completes,
             feedback_coordinator::empty_recovery_starts,
             feedback_coordinator::lease_recovery_resumes,
+            feedback_coordinator::stage_deferral_resumes,
+            feedback_coordinator::deferred_cancel_finishes,
+            feedback_coordinator::corrupt_timeline_quarantines,
             feedback_coordinator::bounded_metrics_alerts,
         );
     }))
@@ -518,6 +565,7 @@ async fn feedback_decision_stage_contracts() {
             feedback_decision_stage::model_route_promotion_contracts,
             feedback_decision_stage::promotion_runtime_apply_contracts,
             feedback_decision_stage::promotion_fault_matrix_contracts,
+            feedback_decision_stage::shadow_cancellation_contracts,
         );
     }))
     .await

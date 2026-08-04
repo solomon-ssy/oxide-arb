@@ -54,9 +54,8 @@ use quant_pivot_research::{
     governance::shadow::{ShadowComparisonRequest, compute_shadow_comparison},
     hashing::ResearchHasher,
     model::{
-        InferenceStage, ModelInputAuditRow, ModelRuntimeInput, ModelRuntimeOutput,
-        QuantModelRuntime, SignalCandidate, annotate, canonical_business_prediction_hash,
-        signal_candidate_event,
+        InferenceStage, ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime, SignalCandidate,
+        canonical_business_prediction_hash, finalize_candidates, signal_candidate_event,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -67,7 +66,7 @@ use crate::{
     observability::{
         alert_dispatcher::{Alert, AlertDispatcher},
         model_input_fact_writer::ModelInputEventWriter,
-        serving_evidence::FeatureEvidenceCommitment,
+        serving_evidence::{FeatureEvidenceCommitment, ModelInputEvidenceBatch},
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
     projection::inference_batch::build_runtime_input,
@@ -303,7 +302,7 @@ impl ModelRunner {
             .ensure_policy(request.decision_policy_snapshot_id)?;
         request.serving.validate_active()?;
         ensure_route_membership(request.serving.route(), request.selection)?;
-        let run_version_id = request.serving.active_model_version_id();
+        let run_version_id = request.serving.champion_model_version_id();
         let run_serving = request.serving.active_runtime();
 
         let model_run_id = ModelRunId::from_v7();
@@ -410,7 +409,7 @@ impl ModelRunner {
         let mut output = self
             .infer_active(model_run_id, request, loaded, &aligned)
             .await?;
-        finalize_candidate_batch(&mut output.candidates)
+        finalize_candidates(&mut output.candidates)
             .map_err(|error| (InferenceStage::ActiveInference, error))?;
 
         let output_hash = canonical_business_prediction_hash(&output.candidates)
@@ -429,14 +428,17 @@ impl ModelRunner {
         let floor = request.serving.candidate_score_floor();
         let min_confidence = request.serving.min_model_confidence();
         let event_time = Utc::now().timestamp_millis();
-        let model_input_rows = project_model_input_rows(
-            model_run_id,
-            &request.boundary,
-            &aligned,
-            &output.input_audit,
-            event_time,
-        )
-        .map_err(|error| (InferenceStage::ActiveInference, error))?;
+        let model_input_rows =
+            ModelInputEvidenceBatch::try_new(aligned.vectors.as_ref(), &aligned.vector_ids)
+                .and_then(|batch| {
+                    batch.project(
+                        model_run_id,
+                        &request.boundary,
+                        &output.input_audit,
+                        event_time,
+                    )
+                })
+                .map_err(|error| (InferenceStage::ActiveInference, error))?;
 
         let emitted = u32::try_from(output.candidates.len()).map_err(|error| {
             (
@@ -549,7 +551,7 @@ impl ModelRunner {
         let (aligned, mut output) = self
             .score_shadow_cross_section(loaded, model_run_id, request)
             .await?;
-        finalize_candidate_batch(&mut output.candidates)
+        finalize_candidates(&mut output.candidates)
             .map_err(|error| (InferenceStage::ShadowInference, error))?;
 
         let output_hash = canonical_business_prediction_hash(&output.candidates)
@@ -558,14 +560,17 @@ impl ModelRunner {
         let diff = shadow_diff(&active.active_index, &output.candidates, threshold);
 
         let event_time = Utc::now().timestamp_millis();
-        let model_input_rows = project_model_input_rows(
-            model_run_id,
-            &request.boundary,
-            &aligned,
-            &output.input_audit,
-            event_time,
-        )
-        .map_err(|error| (InferenceStage::ShadowInference, error))?;
+        let model_input_rows =
+            ModelInputEvidenceBatch::try_new(aligned.vectors.as_ref(), &aligned.vector_ids)
+                .and_then(|batch| {
+                    batch.project(
+                        model_run_id,
+                        &request.boundary,
+                        &output.input_audit,
+                        event_time,
+                    )
+                })
+                .map_err(|error| (InferenceStage::ShadowInference, error))?;
         let emitted = u32::try_from(output.candidates.len()).map_err(|error| {
             (
                 InferenceStage::ShadowInference,
@@ -590,16 +595,10 @@ impl ModelRunner {
             )
             .await
             .map_err(|error| (InferenceStage::ShadowInference, error))?;
-        self.model_run_repo
-            .succeed(model_run_id, output_hash, Some(*shadow_version_id))
-            .await
-            .map_err(|error| (InferenceStage::ShadowInference, QuantError::from(error)))?;
-        self.signal_writer.write_batch(rows);
-
-        // Persist the richer signal-layer shadow comparison (TopN overlap + rank /
-        // score deltas) and raise a critical alert on a hard divergence. This is
-        // governance evidence and best-effort: a persistence hiccup must not fail
-        // the isolated shadow path.
+        // The comparison is governed promotion evidence, so it must be durable
+        // before the shadow run may succeed. Failure remains isolated from the
+        // active result, but the shadow attempt is terminally failed instead of
+        // manufacturing a successful observation.
         self.persist_shadow_comparison(
             request,
             active,
@@ -607,7 +606,14 @@ impl ModelRunner {
             weight_source,
             &output.candidates,
         )
-        .await;
+        .await
+        .map_err(|error| (InferenceStage::ShadowInference, error))?;
+
+        self.model_run_repo
+            .succeed(model_run_id, output_hash, Some(*shadow_version_id))
+            .await
+            .map_err(|error| (InferenceStage::ShadowInference, QuantError::from(error)))?;
+        self.signal_writer.write_batch(rows);
 
         Ok(ShadowRunOutcome {
             model_run_id: Some(*model_run_id),
@@ -772,33 +778,25 @@ impl ModelRunner {
         shadow_version_id: &ModelVersionId,
         weight_source: ModelWeightSource,
         shadow_candidates: &[SignalCandidate],
-    ) {
-        let observation = match request.serving.published_shadow_identity() {
-            Ok(observation) => observation,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "skipping non-production or incomplete shadow observation"
-                );
-                return;
-            }
-        };
-        if observation.active_model_version_id != active.active_version_id
-            || observation.shadow_model_version_id != *shadow_version_id
+    ) -> QuantResult<()> {
+        let observation = request.serving.published_shadow_identity()?;
+        if observation.champion_model_version_id != active.active_version_id
+            || observation.candidate_model_version_id != *shadow_version_id
         {
-            tracing::warn!(
-                active_model_version_id = %active.active_version_id,
-                shadow_model_version_id = %shadow_version_id,
-                "skipping shadow observation whose pinned generation subjects drifted"
-            );
-            return;
+            return Err(ResearchError::Inference {
+                detail: format!(
+                    "shadow observation subjects drifted from pinned generation: champion={} candidate={}",
+                    active.active_version_id, shadow_version_id
+                ),
+            }
+            .into());
         }
         let threshold = request.serving.shadow_diff_threshold();
-        let comparison = match compute_shadow_comparison(&ShadowComparisonRequest {
-            active_model_version_id: active.active_version_id,
-            shadow_model_version_id: *shadow_version_id,
-            active_serving_contract_hash: observation.active_serving_contract_hash,
-            shadow_serving_contract_hash: observation.shadow_serving_contract_hash,
+        let comparison = compute_shadow_comparison(&ShadowComparisonRequest {
+            champion_model_version_id: active.active_version_id,
+            candidate_model_version_id: *shadow_version_id,
+            champion_serving_contract_hash: observation.champion_serving_contract_hash,
+            candidate_serving_contract_hash: observation.candidate_serving_contract_hash,
             research_profile_artifact_id: observation.research_profile_artifact_id,
             category_scope: observation.category_scope,
             decision_policy_snapshot_id: observation.decision_policy_snapshot_id,
@@ -810,13 +808,10 @@ impl ModelRunner {
             shadow: shadow_candidates,
             top_n: request.top_n,
             score_divergence_threshold: threshold,
-        }) {
-            Ok(comparison) => comparison,
-            Err(error) => {
-                tracing::warn!(%error, "skipping shadow comparison: computation failed");
-                return;
-            }
-        };
+        })?;
+
+        let row = new_shadow_comparison(&comparison);
+        let _ = self.shadow_comparison_repo.create(row).await?;
 
         if comparison.hard_divergence {
             self.alerts.critical(
@@ -825,18 +820,14 @@ impl ModelRunner {
                     active.active_version_id
                 ),
                 format!(
-                    "mean_abs_score_delta={}, topn_overlap={}, side_disagreement_rate={}",
+                    "mean_abs_score_delta={}, topn_decision_overlap={}, side_disagreement_rate={}",
                     comparison.score_delta.mean_abs_score_delta,
-                    comparison.topn_overlap.inner(),
+                    comparison.topn_decision_overlap.inner(),
                     comparison.score_delta.side_disagreement_rate,
                 ),
             );
         }
-
-        let row = new_shadow_comparison(&comparison);
-        if let Err(error) = self.shadow_comparison_repo.create(row).await {
-            tracing::warn!(%error, "failed to persist shadow comparison");
-        }
+        Ok(())
     }
 
     /// Insert a fresh `Running` run row.
@@ -904,112 +895,6 @@ async fn finalize_shadow_failure(
     }
 }
 
-/// Bind runtime-produced input evidence to the exact persisted feature vector
-/// and decision boundary, then fingerprint the complete replay identity.
-pub(crate) fn project_model_input_rows(
-    model_run_id: &ModelRunId,
-    boundary: &DecisionBoundary,
-    aligned: &AlignedFeatureCrossSection,
-    audit: &[ModelInputAuditRow],
-    event_time: i64,
-) -> QuantResult<Vec<QuantModelInputEventRow>> {
-    #[derive(Serialize)]
-    struct Fingerprint<'a> {
-        model_run_id: &'a ModelRunId,
-        model_version_id: &'a ModelVersionId,
-        feature_vector_id: &'a FeatureVectorId,
-        market_id: &'a MarketId,
-        model_family: String,
-        boundary: &'a DecisionBoundary,
-        raw_input_name: &'a str,
-        raw_state: &'a str,
-        raw_value: Option<&'a str>,
-        encoded_column: &'a str,
-        encoded_value_bits: Option<u64>,
-        input_contract_hash: &'a ContentHash,
-        transform_hash: &'a ContentHash,
-        training_input_hash: &'a ContentHash,
-    }
-
-    let mut vector_by_market = HashMap::with_capacity(aligned.vectors.len());
-    for (vector, vector_id) in aligned.vectors.iter().zip(&aligned.vector_ids) {
-        if vector_by_market
-            .insert(vector.market_id.clone(), *vector_id)
-            .is_some()
-        {
-            return Err(ResearchError::Inference {
-                detail: format!(
-                    "duplicate feature-vector binding for model-input market {}",
-                    vector.market_id
-                ),
-            }
-            .into());
-        }
-    }
-
-    audit
-        .iter()
-        .map(|row| {
-            let feature_vector_id = vector_by_market.get(&row.market_id).ok_or_else(|| {
-                ResearchError::Inference {
-                    detail: format!(
-                        "model-input audit for market {} has no persisted feature-vector binding",
-                        row.market_id
-                    ),
-                }
-            })?;
-            if row.raw_input_name.is_empty() || row.encoded_column.is_empty() {
-                return Err(ResearchError::Inference {
-                    detail: format!(
-                        "model-input audit for market {} has an empty input/encoded name",
-                        row.market_id
-                    ),
-                }
-                .into());
-            }
-            let model_family = row.model_family.to_string();
-            let raw_state = row.raw_state.as_str();
-            let fingerprint = ResearchHasher::canonical(&Fingerprint {
-                model_run_id,
-                model_version_id: &row.model_version_id,
-                feature_vector_id,
-                market_id: &row.market_id,
-                model_family: model_family.clone(),
-                boundary,
-                raw_input_name: &row.raw_input_name,
-                raw_state,
-                raw_value: row.raw_value.as_deref(),
-                encoded_column: &row.encoded_column,
-                encoded_value_bits: row.encoded_value_bits,
-                input_contract_hash: &row.input_contract_hash,
-                transform_hash: &row.transform_hash,
-                training_input_hash: &row.training_input_hash,
-            })?;
-            Ok(QuantModelInputEventRow {
-                event_time,
-                decision_at: boundary.decision_at().timestamp_millis(),
-                knowledge_cutoff: boundary.knowledge_cutoff().timestamp_millis(),
-                model_run_id: *model_run_id,
-                model_version_id: row.model_version_id,
-                recommendation_report_id: None,
-                market_id: row.market_id.clone(),
-                feature_vector_id: *feature_vector_id,
-                model_family,
-                raw_input_name: row.raw_input_name.clone(),
-                raw_state: raw_state.to_owned(),
-                raw_value: row.raw_value.clone(),
-                encoded_column: row.encoded_column.clone(),
-                encoded_value_bits: row.encoded_value_bits,
-                input_contract_hash: row.input_contract_hash.to_string(),
-                transform_hash: row.transform_hash.to_string(),
-                training_input_hash: row.training_input_hash.to_string(),
-                audit_fingerprint: fingerprint.to_string(),
-                ingestion_time: event_time,
-            })
-        })
-        .collect()
-}
-
 /// Split emitted candidates into their fact rows and the accepted subset (score
 /// + confidence above the configured floors).
 fn partition_candidates(
@@ -1040,27 +925,6 @@ fn partition_candidates(
         }
     }
     (rows, accepted, decisions)
-}
-
-/// Establish the pre-portfolio order for one exact report route.
-fn finalize_candidate_batch(candidates: &mut [SignalCandidate]) -> QuantResult<()> {
-    candidates.sort_by(|left, right| {
-        right
-            .composite_score
-            .inner()
-            .cmp(&left.composite_score.inner())
-            .then_with(|| left.market_id.cmp(&right.market_id))
-            .then_with(|| left.token_id.cmp(&right.token_id))
-            .then_with(|| left.outcome_side.as_str().cmp(right.outcome_side.as_str()))
-    });
-    for (index, candidate) in candidates.iter_mut().enumerate() {
-        candidate.rank_before_portfolio =
-            u32::try_from(index + 1).map_err(|error| ResearchError::Inference {
-                detail: format!("global candidate rank does not fit u32: {error}"),
-            })?;
-    }
-    annotate(candidates);
-    Ok(())
 }
 
 /// The empty string for an accepted candidate, or the deterministic reason a
@@ -1251,10 +1115,10 @@ fn shadow_diff(
 fn new_shadow_comparison(comparison: &ShadowComparison) -> NewShadowComparison {
     NewShadowComparison {
         shadow_comparison_id: comparison.shadow_comparison_id,
-        active_model_version_id: comparison.active_model_version_id,
-        shadow_model_version_id: comparison.shadow_model_version_id,
-        active_serving_contract_hash: comparison.active_serving_contract_hash,
-        shadow_serving_contract_hash: comparison.shadow_serving_contract_hash,
+        champion_model_version_id: comparison.champion_model_version_id,
+        candidate_model_version_id: comparison.candidate_model_version_id,
+        champion_serving_contract_hash: comparison.champion_serving_contract_hash,
+        candidate_serving_contract_hash: comparison.candidate_serving_contract_hash,
         research_profile_artifact_id: comparison.research_profile_artifact_id.clone(),
         category_scope: comparison.category_scope,
         decision_policy_snapshot_id: comparison.decision_policy_snapshot_id,
@@ -1262,7 +1126,7 @@ fn new_shadow_comparison(comparison: &ShadowComparison) -> NewShadowComparison {
         policy_bundle_generation: comparison.policy_bundle_generation,
         weight_source: comparison.weight_source,
         decision_at: comparison.decision_at,
-        topn_overlap: comparison.topn_overlap,
+        topn_decision_overlap: comparison.topn_decision_overlap,
         rank_delta_json: comparison.rank_delta,
         score_delta_json: comparison.score_delta,
         matured_outcome_json: comparison.matured_outcome_delta,
@@ -1299,7 +1163,7 @@ fn input_hash(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::collections::BTreeMap;
 
     use chrono::Utc;
     use quant_pivot_models::{
@@ -1317,7 +1181,9 @@ mod tests {
         selection::SelectedMarket,
     };
 
-    use super::{AlignedFeatureCrossSection, ensure_route_membership, project_model_input_rows};
+    use crate::observability::serving_evidence::ModelInputEvidenceBatch;
+
+    use super::ensure_route_membership;
     #[test]
     fn route_authority_rejects_mismatch() {
         let selected_market = |category| SelectedMarket {
@@ -1381,43 +1247,41 @@ mod tests {
             training_input_hash: hash,
         }];
         let first_id = FeatureVectorId::from_v7();
-        let first = AlignedFeatureCrossSection {
-            markets: Vec::new(),
-            vectors: Arc::from([vector.clone()]),
-            vector_ids: vec![first_id],
-        };
+        let first_vectors = [vector.clone()];
+        let first_ids = [first_id];
         let boundary = DecisionClock::new(7)
             .boundary(decision_at)
             .expect("boundary");
         let model_run_id = ModelRunId::from_v7();
-        let first_row = project_model_input_rows(
-            &model_run_id,
-            &boundary,
-            &first,
-            &audit,
-            decision_at.timestamp_millis(),
-        )
-        .expect("projection")
-        .pop()
-        .expect("row");
+        let first_row = ModelInputEvidenceBatch::try_new(&first_vectors, &first_ids)
+            .and_then(|batch| {
+                batch.project(
+                    &model_run_id,
+                    &boundary,
+                    &audit,
+                    decision_at.timestamp_millis(),
+                )
+            })
+            .expect("projection")
+            .pop()
+            .expect("row");
         assert_eq!(first_row.feature_vector_id, first_id);
         assert!(!first_row.audit_fingerprint.is_empty());
 
-        let second = AlignedFeatureCrossSection {
-            markets: Vec::new(),
-            vectors: Arc::from([vector]),
-            vector_ids: vec![FeatureVectorId::from_v7()],
-        };
-        let second_row = project_model_input_rows(
-            &model_run_id,
-            &boundary,
-            &second,
-            &audit,
-            decision_at.timestamp_millis(),
-        )
-        .expect("projection")
-        .pop()
-        .expect("row");
+        let second_vectors = [vector];
+        let second_ids = [FeatureVectorId::from_v7()];
+        let second_row = ModelInputEvidenceBatch::try_new(&second_vectors, &second_ids)
+            .and_then(|batch| {
+                batch.project(
+                    &model_run_id,
+                    &boundary,
+                    &audit,
+                    decision_at.timestamp_millis(),
+                )
+            })
+            .expect("projection")
+            .pop()
+            .expect("row");
         assert_ne!(
             first_row.audit_fingerprint, second_row.audit_fingerprint,
             "feature-vector identity must participate in the audit fingerprint"

@@ -7,10 +7,11 @@ use quant_pivot_error::storage::{StorageError, entity::QUANT_FEEDBACK_SCHEDULER_
 use quant_pivot_models::{
     domain::quant::{
         FeedbackSchedulerClaim, FeedbackSchedulerControl, FeedbackSchedulerLease,
-        FeedbackSchedulerStateInfo, FeedbackSchedulerSuccess, NewFeedbackSchedulerState,
-        cadence_cutoff,
+        FeedbackSchedulerRetry, FeedbackSchedulerStateInfo, FeedbackSchedulerSuccess,
+        NewFeedbackSchedulerState, cadence_cutoff, next_cadence_after,
     },
     entities::quant_feedback_scheduler_state::{ActiveModel, Column, Entity, Model},
+    enums::quant::FeedbackSchedulerFailureKind,
     types::{ResearchProfileId, WorkerId},
 };
 use sea_orm::{
@@ -25,7 +26,6 @@ use crate::{postgres::primitives, traits::FeedbackSchedulerRepository};
 
 const MAX_LEASE_SECS: u64 = 3_600;
 const MAX_RETRY_SECS: i64 = 86_400;
-const MAX_ERROR_CHARS: usize = 4_096;
 
 /// Durable `PostgreSQL` feedback scheduler implementation.
 pub struct PgFeedbackSchedulerRepository {
@@ -100,25 +100,15 @@ impl FeedbackSchedulerRepository for PgFeedbackSchedulerRepository {
             if state.matches_profile(&candidate) {
                 stored
             } else {
-                if state
-                    .lease_expires_at
-                    .is_some_and(|expires_at| expires_at > now)
-                {
+                if state.pending_cutoff.is_some() {
                     return Err(StorageError::state_conflict(
                         QUANT_FEEDBACK_SCHEDULER_STATE,
                         Some(&candidate.research_profile_id),
-                        "cannot replace a governed profile while its scheduler lease is live",
+                        "cannot replace a governed profile while a scheduled cutoff is pending",
                     ));
                 }
-                let next_due_at = state
-                    .last_cutoff
-                    .map(|cutoff| {
-                        cutoff
-                            .checked_add_signed(Duration::seconds(candidate.cadence_secs))
-                            .ok_or_else(|| invariant("scheduler next due time overflowed"))
-                    })
-                    .transpose()?
-                    .unwrap_or(candidate.next_due_at);
+                let next_due_at = next_cadence_after(now, candidate.cadence_secs)
+                    .map_err(|error| invariant(error.to_string()))?;
                 let mut active = stored.into_active_model();
                 active.research_profile_artifact_id = Set(candidate.research_profile_artifact_id);
                 active.profile_hash = Set(candidate.profile_hash);
@@ -126,9 +116,12 @@ impl FeedbackSchedulerRepository for PgFeedbackSchedulerRepository {
                 active.cadence_secs = Set(candidate.cadence_secs);
                 active.cooldown_secs = Set(candidate.cooldown_secs);
                 active.next_due_at = Set(next_due_at);
+                active.pending_cutoff = Set(None);
+                active.pending_started_at = Set(None);
                 active.lease_owner = Set(None);
                 active.lease_expires_at = Set(None);
                 active.retry_at = Set(None);
+                active.last_failure_kind = Set(None);
                 active.last_error = Set(None);
                 active.revision = Set(Self::next_revision(state.revision)?);
                 active.updated_at = Set(now);
@@ -146,14 +139,23 @@ impl FeedbackSchedulerRepository for PgFeedbackSchedulerRepository {
                 cadence_secs: Set(candidate.cadence_secs),
                 cooldown_secs: Set(candidate.cooldown_secs),
                 next_due_at: Set(candidate.next_due_at),
+                pending_cutoff: Set(None),
+                pending_started_at: Set(None),
                 last_cycle_id: Set(None),
                 last_cutoff: Set(None),
                 cooldown_until: Set(None),
+                coalesced_gap_count: NotSet,
+                last_coalesced_from: Set(None),
+                last_coalesced_to: Set(None),
                 lease_owner: Set(None),
                 lease_expires_at: Set(None),
                 attempt: NotSet,
                 retry_at: Set(None),
+                last_failure_kind: Set(None),
                 last_error: Set(None),
+                settlement_failure_count: NotSet,
+                last_settlement_failed_at: Set(None),
+                last_settlement_error: Set(None),
                 paused: NotSet,
                 pause_revision: NotSet,
                 pause_reason_code: Set(None),
@@ -204,11 +206,19 @@ impl FeedbackSchedulerRepository for PgFeedbackSchedulerRepository {
         let now = primitives::statement_timestamp(&transaction).await?;
         let row = Entity::find()
             .filter(Column::Paused.eq(false))
-            .filter(Column::NextDueAt.lte(now))
             .filter(
                 Condition::any()
-                    .add(Column::CooldownUntil.is_null())
-                    .add(Column::CooldownUntil.lte(now)),
+                    .add(Column::PendingCutoff.is_not_null())
+                    .add(
+                        Condition::all()
+                            .add(Column::PendingCutoff.is_null())
+                            .add(Column::NextDueAt.lte(now))
+                            .add(
+                                Condition::any()
+                                    .add(Column::CooldownUntil.is_null())
+                                    .add(Column::CooldownUntil.lte(now)),
+                            ),
+                    ),
             )
             .filter(
                 Condition::any()
@@ -235,17 +245,61 @@ impl FeedbackSchedulerRepository for PgFeedbackSchedulerRepository {
             .checked_add(1)
             .ok_or_else(|| invariant("feedback scheduler attempt counter overflowed"))?;
         let revision = Self::next_revision(row.revision)?;
-        let target_cutoff = if row.retry_at.is_some() {
-            row.next_due_at
+        let starting_pending = row.pending_cutoff.is_none();
+        let target_cutoff = if let Some(pending_cutoff) = row.pending_cutoff {
+            pending_cutoff
         } else {
             cadence_cutoff(now, row.cadence_secs).map_err(|error| invariant(error.to_string()))?
         };
+        let (coalesced_gap_count, last_coalesced_from, last_coalesced_to) = if starting_pending {
+            let gap_seconds = target_cutoff
+                .signed_duration_since(row.next_due_at)
+                .num_seconds();
+            if gap_seconds < 0 || gap_seconds.rem_euclid(row.cadence_secs) != 0 {
+                return Err(invariant(
+                    "scheduler due cursor and pending cutoff are not cadence-aligned",
+                ));
+            }
+            let skipped = gap_seconds.div_euclid(row.cadence_secs);
+            let total = row
+                .coalesced_gap_count
+                .checked_add(skipped)
+                .ok_or_else(|| invariant("scheduler coalesced gap counter overflowed"))?;
+            let range = if skipped == 0 {
+                (row.last_coalesced_from, row.last_coalesced_to)
+            } else {
+                (
+                    Some(row.next_due_at),
+                    Some(
+                        target_cutoff
+                            .checked_sub_signed(Duration::seconds(row.cadence_secs))
+                            .ok_or_else(|| {
+                                invariant("scheduler coalesced gap range underflowed")
+                            })?,
+                    ),
+                )
+            };
+            (total, range.0, range.1)
+        } else {
+            (
+                row.coalesced_gap_count,
+                row.last_coalesced_from,
+                row.last_coalesced_to,
+            )
+        };
         let mut active = row.into_active_model();
-        active.next_due_at = Set(target_cutoff);
+        if starting_pending {
+            active.pending_cutoff = Set(Some(target_cutoff));
+            active.pending_started_at = Set(Some(now));
+            active.coalesced_gap_count = Set(coalesced_gap_count);
+            active.last_coalesced_from = Set(last_coalesced_from);
+            active.last_coalesced_to = Set(last_coalesced_to);
+        }
         active.lease_owner = Set(Some(worker_id));
         active.lease_expires_at = Set(Some(now + lease_duration));
         active.attempt = Set(attempt);
         active.retry_at = Set(None);
+        active.last_failure_kind = Set(None);
         active.last_error = Set(None);
         active.revision = Set(revision);
         active.updated_at = Set(now);
@@ -288,10 +342,8 @@ impl FeedbackSchedulerRepository for PgFeedbackSchedulerRepository {
         success
             .validate(&state, now)
             .map_err(|error| invariant(error.to_string()))?;
-        let next_due_at = success
-            .label_cutoff
-            .checked_add_signed(Duration::seconds(state.cadence_secs))
-            .ok_or_else(|| invariant("feedback scheduler next due time overflowed"))?;
+        let next_due_at = next_cadence_after(now, state.cadence_secs)
+            .map_err(|error| invariant(error.to_string()))?;
         let cooldown_until = now
             .checked_add_signed(Duration::seconds(state.cooldown_secs))
             .ok_or_else(|| invariant("feedback scheduler cooldown time overflowed"))?;
@@ -299,11 +351,14 @@ impl FeedbackSchedulerRepository for PgFeedbackSchedulerRepository {
         active.last_cycle_id = Set(Some(success.feedback_cycle_id));
         active.last_cutoff = Set(Some(success.label_cutoff));
         active.next_due_at = Set(next_due_at);
+        active.pending_cutoff = Set(None);
+        active.pending_started_at = Set(None);
         active.cooldown_until = Set(Some(cooldown_until));
         active.lease_owner = Set(None);
         active.lease_expires_at = Set(None);
         active.attempt = Set(0);
         active.retry_at = Set(None);
+        active.last_failure_kind = Set(None);
         active.last_error = Set(None);
         active.revision = Set(Self::next_revision(state.revision)?);
         active.updated_at = Set(now);
@@ -357,22 +412,18 @@ impl FeedbackSchedulerRepository for PgFeedbackSchedulerRepository {
     async fn settle_retry(
         &self,
         lease: FeedbackSchedulerLease,
-        retry_delay_secs: u64,
-        error: String,
+        retry: FeedbackSchedulerRetry,
     ) -> Result<FeedbackSchedulerStateInfo, StorageError> {
+        retry
+            .validate()
+            .map_err(|error| invariant(error.to_string()))?;
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
         let now = primitives::statement_timestamp(&transaction).await?;
-        let retry_delay = i64::try_from(retry_delay_secs).map_err(|conversion| {
+        let retry_delay = i64::try_from(retry.retry_delay_secs).map_err(|conversion| {
             invariant(format!("scheduler retry delay overflowed: {conversion}"))
         })?;
-        if retry_delay <= 0
-            || retry_delay > MAX_RETRY_SECS
-            || error.trim().is_empty()
-            || error.chars().count() > MAX_ERROR_CHARS
-        {
-            return Err(invariant(
-                "scheduler retry must be future, bounded to one day, and include a bounded error",
-            ));
+        if retry_delay > MAX_RETRY_SECS {
+            return Err(invariant("scheduler retry exceeds repository bound"));
         }
         let retry_at = now + Duration::seconds(retry_delay);
         let row = Entity::find_by_id(lease.research_profile_id.clone())
@@ -389,7 +440,16 @@ impl FeedbackSchedulerRepository for PgFeedbackSchedulerRepository {
         active.lease_owner = Set(None);
         active.lease_expires_at = Set(None);
         active.retry_at = Set(Some(retry_at));
-        active.last_error = Set(Some(error));
+        active.last_failure_kind = Set(Some(retry.failure_kind));
+        active.last_error = Set(Some(retry.error.clone()));
+        if retry.failure_kind == FeedbackSchedulerFailureKind::Settlement {
+            active.settlement_failure_count = Set(state
+                .settlement_failure_count
+                .checked_add(1)
+                .ok_or_else(|| invariant("scheduler settlement failure counter overflowed"))?);
+            active.last_settlement_failed_at = Set(Some(now));
+            active.last_settlement_error = Set(Some(retry.error));
+        }
         active.revision = Set(Self::next_revision(state.revision)?);
         active.updated_at = Set(now);
         let result = Self::validated_info(

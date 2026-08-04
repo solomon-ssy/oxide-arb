@@ -1,5 +1,7 @@
 //! Research-job ledger persistence system contracts.
 
+use std::time::Duration;
+
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_error::{
     feedback::FeedbackError,
@@ -7,7 +9,7 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        api::BuildTrainingDatasetRequest,
+        api::{BuildTrainingDatasetRequest, FeatureParityJobParams, RunFullFeatureParityRequest},
         quant::{
             FeedbackStageEventInput, FeedbackStageJobIdentity, NewFeedbackStageEvent,
             NewResearchJob, ResearchJobFinalization,
@@ -18,14 +20,17 @@ use quant_pivot_models::{
         ResearchJobKind, ResearchJobStatus,
     },
     types::{
-        DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId, ResearchJobError, ResearchJobId,
-        ResearchJobParams, RoleCode, SchemaVersion, TrainingDatasetId, TrainingSampleSources,
-        WorkerId,
+        DecisionPolicySnapshotId, FeatureParityRunId, FeedbackCycleId, ModelSpecId,
+        ResearchJobError, ResearchJobId, ResearchJobParams, ResearchJobProgress, RoleCode,
+        SchemaVersion, TrainingDatasetId, TrainingSampleSources, WorkerId,
     },
 };
 use quant_pivot_repository::{
     postgres::{PgFeedbackCycleRepository, PgResearchJobRepository},
-    traits::{FeedbackCycleRepository, ResearchJobEnqueueOutcome, ResearchJobRepository},
+    traits::{
+        FeedbackCycleRepository, ResearchJobEnqueueOutcome, ResearchJobRepository,
+        ResearchJobRetryOutcome,
+    },
 };
 use quant_pivot_system_tests::{postgres::setup_pg, support::execution_pg_seed};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, IntoActiveModel, Statement};
@@ -57,6 +62,33 @@ fn new_job(job_id: ResearchJobId) -> NewResearchJob {
             sample_sources: TrainingSampleSources::default(),
             reason: "pg-research-job-it".to_owned(),
             training_dataset_id: Some(TrainingDatasetId::from_v7()),
+        }),
+        requested_by: None,
+        acting_role: RoleCode::new("system"),
+        parent_job_id: None,
+        recovery_attempt: 0,
+        max_recovery_attempts: 3,
+    }
+}
+
+fn parity_job(job_id: ResearchJobId) -> NewResearchJob {
+    let window_end = Utc::now();
+    NewResearchJob {
+        job_id,
+        feedback_cycle_id: None,
+        feedback_stage: None,
+        kind: ResearchJobKind::FeatureParity,
+        status: ResearchJobStatus::Queued,
+        model_spec_id: None,
+        decision_policy_snapshot_id: None,
+        params_json: ResearchJobParams::FeatureParity(FeatureParityJobParams {
+            parity_run_id: FeatureParityRunId::from_v7(),
+            materialization_timeout_secs: 600,
+            request: RunFullFeatureParityRequest {
+                window_start: Some(window_end - ChronoDuration::minutes(1)),
+                window_end: Some(window_end),
+                reason: "durable evidence-wait contract".to_owned(),
+            },
         }),
         requested_by: None,
         acting_role: RoleCode::new("system"),
@@ -507,16 +539,161 @@ pub async fn requeue_inflight_requeues_recovery() {
     assert_eq!(outcome.quarantined, 0);
 
     let row = repo.find_by_id(&job_id).await.expect("find").expect("row");
-    assert_eq!(row.status, ResearchJobStatus::Queued);
+    assert_eq!(row.status, ResearchJobStatus::RetryScheduled);
     assert_eq!(
         row.recovery_attempt, 1,
         "graceful requeue counts against cap"
     );
     assert!(row.lease_owner.is_none(), "lease cleared for re-pickup");
+    assert!(row.next_attempt_at.is_some(), "retry deadline is durable");
     assert!(
         row.started_at.is_none(),
         "started_at reset for the fresh run"
     );
+}
+
+pub async fn transient_retry_is_bounded() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let repo = PgResearchJobRepository::new(db);
+    let job_id = ResearchJobId::from_v7();
+    let mut job = new_job(job_id);
+    job.max_recovery_attempts = 1;
+    repo.enqueue(job).await.expect("enqueue");
+
+    let worker = WorkerId::from_v7();
+    let wrong_worker = WorkerId::from_v7();
+    let lease_expires = Utc::now() + ChronoDuration::seconds(90);
+    repo.lease_next(&[ResearchJobKind::DatasetBuild], &worker, lease_expires)
+        .await
+        .expect("lease")
+        .expect("job");
+
+    let scheduled = repo
+        .retry_transient(
+            &job_id,
+            &worker,
+            "temporary S3 transport failure".to_owned(),
+            Duration::from_millis(5),
+        )
+        .await
+        .expect("schedule typed retry");
+    let ResearchJobRetryOutcome::Scheduled(scheduled) = scheduled else {
+        panic!("first transient failure must schedule a retry");
+    };
+    assert_eq!(scheduled.status, ResearchJobStatus::RetryScheduled);
+    assert_eq!(scheduled.recovery_attempt, 1);
+    assert!(scheduled.next_attempt_at.is_some());
+    assert_eq!(
+        scheduled.error_json.as_ref().map(|error| error.code),
+        Some(ResearchJobErrorCode::ExecutionRetryScheduled)
+    );
+    assert!(
+        repo.lease_next(&[ResearchJobKind::DatasetBuild], &worker, lease_expires)
+            .await
+            .expect("poll before retry deadline")
+            .is_none(),
+        "retry-scheduled work must not hot-loop before its DB-clock deadline"
+    );
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let releasable = repo
+        .lease_next(&[ResearchJobKind::DatasetBuild], &worker, lease_expires)
+        .await
+        .expect("lease due retry")
+        .expect("retry is due");
+    assert_eq!(releasable.status, ResearchJobStatus::Running);
+    assert!(releasable.next_attempt_at.is_none());
+    assert!(releasable.error_json.is_none());
+
+    let stale = repo
+        .retry_transient(
+            &job_id,
+            &wrong_worker,
+            "stale worker".to_owned(),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("stale owner cannot schedule a retry");
+    assert!(matches!(stale, StorageError::StateConflict { .. }));
+
+    let exhausted = repo
+        .retry_transient(
+            &job_id,
+            &worker,
+            "temporary S3 transport failure repeated".to_owned(),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("exhaust retry cap");
+    let ResearchJobRetryOutcome::Exhausted(exhausted) = exhausted else {
+        panic!("second transient failure must exhaust the one-retry cap");
+    };
+    assert_eq!(exhausted.status, ResearchJobStatus::Failed);
+    assert!(exhausted.next_attempt_at.is_none());
+    assert_eq!(
+        exhausted.error_json.as_ref().map(|error| error.code),
+        Some(ResearchJobErrorCode::ExecutionRetryExhausted)
+    );
+}
+
+pub async fn evidence_wait_releases_slot() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let repo = PgResearchJobRepository::new(db);
+    let job_id = ResearchJobId::from_v7();
+    repo.enqueue(parity_job(job_id))
+        .await
+        .expect("enqueue parity");
+
+    let worker = WorkerId::from_v7();
+    let lease_expires = Utc::now() + ChronoDuration::seconds(90);
+    repo.lease_next(&[ResearchJobKind::FeatureParity], &worker, lease_expires)
+        .await
+        .expect("lease parity")
+        .expect("parity job");
+
+    let waiting = repo
+        .await_evidence(
+            &job_id,
+            &worker,
+            ResearchJobProgress::indeterminate("pending_materialization", 0),
+            Duration::from_millis(20),
+        )
+        .await
+        .expect("persist evidence wait");
+    assert_eq!(waiting.status, ResearchJobStatus::AwaitingEvidence);
+    assert_eq!(waiting.recovery_attempt, 0);
+    assert!(waiting.next_attempt_at.is_some());
+    assert!(waiting.lease_owner.is_none());
+    assert!(waiting.error_json.is_none());
+    assert_eq!(
+        waiting
+            .progress_json
+            .as_ref()
+            .map(|progress| progress.phase.as_str()),
+        Some("pending_materialization")
+    );
+    assert!(waiting.started_at.is_none());
+    assert!(waiting.heartbeat_at.is_none());
+    assert!(
+        repo.lease_next(&[ResearchJobKind::FeatureParity], &worker, lease_expires)
+            .await
+            .expect("poll before evidence deadline")
+            .is_none(),
+        "evidence wait must honor its DB-clock deadline"
+    );
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let resumed = repo
+        .lease_next(&[ResearchJobKind::FeatureParity], &worker, lease_expires)
+        .await
+        .expect("lease due evidence check")
+        .expect("evidence check is due");
+    assert_eq!(resumed.status, ResearchJobStatus::Running);
+    assert_eq!(resumed.recovery_attempt, 0);
+    assert!(resumed.next_attempt_at.is_none());
+    assert!(resumed.progress_json.is_none());
 }
 
 pub async fn requeue_inflight_ignores_rows() {

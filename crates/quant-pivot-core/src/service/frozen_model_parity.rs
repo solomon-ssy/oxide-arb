@@ -25,7 +25,7 @@ use quant_pivot_models::{
         model::ClassicalKind,
         quant::{
             FeatureParityEventStatus, FeatureParityRunKind, FeatureParityRunStatus,
-            FeatureParityStage, FeatureParityStateTransition, TrainingDatasetStatus,
+            FeatureParityStage, TrainingDatasetStatus,
         },
     },
     types::{
@@ -478,14 +478,6 @@ impl FrozenModelParityService {
                     failure_code: Some(DiagnosticCode::new("frozen_model_integrity")),
                     failure_detail: Some(error.to_string()),
                 },
-            )
-            .await?;
-        self.deps
-            .parity_repo
-            .open_latch(
-                run_id,
-                FeatureParityStateTransition::IntegrityFailure,
-                format!("frozen dataset/model parity failed: {error}"),
             )
             .await?;
         self.deps

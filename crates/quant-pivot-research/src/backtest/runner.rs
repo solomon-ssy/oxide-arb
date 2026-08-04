@@ -15,7 +15,7 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::{DataQualityStatus, FillRequirement, OutcomeSide},
     types::{
-        Bps, ContentHash, ExposureBreakdown, Usd,
+        Bps, ContentHash, ExposureBreakdown, MarketId, PayoutRatio, TokenId, Usd,
         backtest::{BacktestReportHashInput, PnlCurvePoint, PnlSimulation},
     },
 };
@@ -23,12 +23,16 @@ use rust_decimal::Decimal;
 
 use crate::{
     backtest::{
-        BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta, BacktestReport,
-        BacktestRequest, BacktestRunResult, BacktestTick, Backtester, MarketOutcome, PortfolioCaps,
+        BacktestDownsideTrajectory, BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta,
+        BacktestRankTarget, BacktestReport, BacktestRequest, BacktestRunResult, BacktestTick,
+        Backtester, MarketOutcome, ModelCalibrationOutcome, ModelRankOutcome, PortfolioCaps,
         PortfolioReturnObservation, SampleOutcome, metrics, simulator,
     },
     execution_semantics::{BookWalkOutcome, LiquidityRole, walk_buy_cash_budget},
-    model::runtime::{MarketInferenceContext, ModelInputAuditState, ModelRuntimeOutput},
+    model::{
+        SignalCandidate,
+        runtime::{MarketInferenceContext, ModelInputAuditState, ModelRuntimeOutput},
+    },
     portfolio::{
         allocator::{
             Allocation, AllocationInput, AllocationOutput, CandidateMeta, PortfolioAllocator,
@@ -68,6 +72,8 @@ impl Default for PortfolioReplayBacktester {
 /// Mutable replay accumulators threaded across ticks.
 #[derive(Default)]
 struct RunAccumulator {
+    calibration_outcomes: Vec<ModelCalibrationOutcome>,
+    rank_outcomes: Vec<ModelRankOutcome>,
     samples: Vec<SampleOutcome>,
     pnl_curve: Vec<PnlCurvePoint>,
     tick_weights: Vec<BTreeMap<String, Decimal>>,
@@ -113,8 +119,11 @@ impl Backtester for PortfolioReplayBacktester {
         let report = build_report(&inputs.request, &metrics)?;
         Ok(BacktestRunResult {
             report,
+            calibration_outcomes: acc.calibration_outcomes,
+            rank_outcomes: acc.rank_outcomes,
             sample_outcomes: acc.samples,
             portfolio_returns: acc.portfolio_returns,
+            tick_weights: acc.tick_weights,
         })
     }
 }
@@ -155,6 +164,14 @@ fn process_tick(
         .iter()
         .map(|snapshot| (snapshot.token_id.as_str(), snapshot))
         .collect();
+    let downside: BTreeMap<&str, &BacktestDownsideTrajectory> = tick
+        .downside_trajectories
+        .iter()
+        .map(|trajectory| (trajectory.token_id.as_str(), trajectory))
+        .collect();
+
+    record_calibration_outcomes(tick, output, &outcomes, &downside, acc)?;
+    record_rank_outcomes(tick, output, acc)?;
 
     let allocation = allocate_tick(output, allocator, caps, &meta)?;
     let alloc_by_id: BTreeMap<String, &Allocation> = allocation
@@ -172,7 +189,7 @@ fn process_tick(
         ) else {
             continue;
         };
-        let Some(yes_payout_ratio) = outcome.yes_payout_ratio else {
+        let Some(token_payout_ratio) = token_payout(outcome, candidate.outcome_side) else {
             continue;
         };
         let Some(allocation) = alloc_by_id.get(&candidate.signal_candidate_id.to_string()) else {
@@ -216,10 +233,6 @@ fn process_tick(
         if fill.outcome == BookWalkOutcome::Unfilled {
             continue;
         }
-        let token_payout_ratio = match candidate.outcome_side {
-            OutcomeSide::Yes => yes_payout_ratio,
-            OutcomeSide::No => yes_payout_ratio.complement(),
-        };
         let settlement =
             simulator::settle_executed_buy(&fill, token_payout_ratio).map_err(|error| {
                 ResearchError::ValidationMethodology {
@@ -248,7 +261,7 @@ fn process_tick(
             expected_return_bps: candidate.expected_return_bps,
             realized_return_bps: realized,
             token_payout_ratio,
-            max_adverse_excursion_bps: outcome.max_adverse_excursion_bps,
+            max_adverse_excursion_bps: candidate_downside(candidate, &downside)?,
             allocated_usd,
             entry_fee_usd: settlement.economics.entry_fee,
             filled_shares: settlement.economics.filled_shares,
@@ -279,6 +292,126 @@ fn process_tick(
         acc.tick_returns.push(tick_pnl / tick_allocated);
     }
     Ok(())
+}
+
+fn record_calibration_outcomes(
+    tick: &BacktestTick,
+    output: &ModelRuntimeOutput,
+    outcomes: &BTreeMap<&str, &MarketOutcome>,
+    downside: &BTreeMap<&str, &BacktestDownsideTrajectory>,
+    acc: &mut RunAccumulator,
+) -> QuantResult<()> {
+    for score in &output.calibration_scores {
+        let Some(outcome) = outcomes.get(score.market_id.as_str()) else {
+            continue;
+        };
+        let Some(token_payout_ratio) = token_payout(outcome, score.outcome_side) else {
+            continue;
+        };
+        acc.calibration_outcomes.push(ModelCalibrationOutcome {
+            decision_at: tick.decision_at,
+            market_id: score.market_id.clone(),
+            token_id: score.token_id.clone(),
+            composite_score: score.composite_score,
+            token_payout_ratio,
+            max_adverse_excursion_bps: score_downside(
+                &score.market_id,
+                &score.token_id,
+                score.prediction_horizon_secs,
+                downside,
+            )?,
+        });
+    }
+    Ok(())
+}
+
+fn record_rank_outcomes(
+    tick: &BacktestTick,
+    output: &ModelRuntimeOutput,
+    acc: &mut RunAccumulator,
+) -> QuantResult<()> {
+    let mut targets = BTreeMap::<&str, &BacktestRankTarget>::new();
+    for target in &tick.rank_targets {
+        if targets.insert(target.market_id.as_str(), target).is_some() {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "backtest tick {} duplicates rank target for market {}",
+                    tick.decision_at, target.market_id
+                ),
+            }
+            .into());
+        }
+    }
+    for score in &output.rank_scores {
+        let Some(target) = targets.get(score.market_id.as_str()) else {
+            continue;
+        };
+        if target.token_id != score.token_id || target.target != score.target {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "rank score/target binding mismatch for market {} at {}: \
+                     score token {} target {:?}, dataset token {} target {:?}",
+                    score.market_id,
+                    tick.decision_at,
+                    score.token_id,
+                    score.target,
+                    target.token_id,
+                    target.target
+                ),
+            }
+            .into());
+        }
+        acc.rank_outcomes.push(ModelRankOutcome {
+            decision_at: tick.decision_at,
+            market_id: score.market_id.clone(),
+            token_id: score.token_id.clone(),
+            score: score.score,
+            target: score.target.clone(),
+            realized: target.realized,
+        });
+    }
+    Ok(())
+}
+
+fn candidate_downside(
+    candidate: &SignalCandidate,
+    trajectories: &BTreeMap<&str, &BacktestDownsideTrajectory>,
+) -> QuantResult<Option<Decimal>> {
+    score_downside(
+        &candidate.market_id,
+        &candidate.token_id,
+        candidate.suggested_horizon_secs,
+        trajectories,
+    )
+}
+
+fn score_downside(
+    market_id: &MarketId,
+    token_id: &TokenId,
+    prediction_horizon_secs: u64,
+    trajectories: &BTreeMap<&str, &BacktestDownsideTrajectory>,
+) -> QuantResult<Option<Decimal>> {
+    let Some(trajectory) = trajectories.get(token_id.as_str()) else {
+        return Ok(None);
+    };
+    if trajectory.market_id != *market_id {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "backtest downside trajectory token {} belongs to market {}, expected {}",
+                token_id, trajectory.market_id, market_id
+            ),
+        }
+        .into());
+    }
+    trajectory.max_adverse_excursion_bps(prediction_horizon_secs)
+}
+
+fn token_payout(outcome: &MarketOutcome, side: OutcomeSide) -> Option<PayoutRatio> {
+    let yes_payout_ratio = outcome.yes_payout_ratio?;
+    Some(match side {
+        OutcomeSide::Yes => yes_payout_ratio,
+        OutcomeSide::No => yes_payout_ratio.complement(),
+    })
 }
 
 fn record_portfolio_return(
@@ -533,7 +666,7 @@ impl BacktestReport {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
         enums::{
@@ -552,19 +685,22 @@ mod tests {
     use super::PortfolioReplayBacktester;
     use crate::{
         backtest::{
-            BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta, BacktestRequest,
-            BacktestTick, Backtester, MarketOutcome, PortfolioCaps,
+            BacktestDownsidePoint, BacktestDownsideTrajectory, BacktestExecutionSnapshot,
+            BacktestInputs, BacktestMarketMeta, BacktestRankTarget, BacktestRequest, BacktestTick,
+            Backtester, MarketOutcome, PortfolioCaps,
         },
         execution_semantics::PitFeeSchedule,
-        factors::{FactorValue, NormalizedFactor},
+        factors::{FactorValue, NormalizedFactor, names::MOMENTUM_ROC},
         model::{
             artifact::ModelArtifact,
             runtime::{
-                FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelRuntimeInput,
+                FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelRankTarget,
+                ModelRuntimeInput,
             },
             weighted::WeightedFactorRuntime,
         },
         test_support::{content_hash as hash, weighted_factor_plane},
+        training::TOKEN_PAYOUT_RATIO,
     };
 
     impl WeightedFactorRuntime {
@@ -653,12 +789,30 @@ mod tests {
                 MarketOutcome {
                     market_id: MarketId::new("0xbull"),
                     yes_payout_ratio: Some(PayoutRatio::ONE),
-                    max_adverse_excursion_bps: None,
                 },
                 MarketOutcome {
                     market_id: MarketId::new("0xbear"),
                     yes_payout_ratio: Some(PayoutRatio::ZERO),
-                    max_adverse_excursion_bps: None,
+                },
+            ],
+            rank_targets: vec![
+                BacktestRankTarget {
+                    market_id: MarketId::new("0xbull"),
+                    token_id: TokenId::new("yes"),
+                    target: ModelRankTarget {
+                        label_name: TOKEN_PAYOUT_RATIO,
+                        label_horizon_secs: 0,
+                    },
+                    realized: Decimal::ONE,
+                },
+                BacktestRankTarget {
+                    market_id: MarketId::new("0xbear"),
+                    token_id: TokenId::new("yes"),
+                    target: ModelRankTarget {
+                        label_name: TOKEN_PAYOUT_RATIO,
+                        label_horizon_secs: 0,
+                    },
+                    realized: Decimal::ZERO,
                 },
             ],
             market_meta: meta,
@@ -666,6 +820,7 @@ mod tests {
                 execution_snapshot("0xbull", "yes", as_of, dec!(0.5)),
                 execution_snapshot("0xbear", "no", as_of, dec!(0.52)),
             ],
+            downside_trajectories: Vec::new(),
         }
     }
 
@@ -682,9 +837,45 @@ mod tests {
                 rows: Vec::new(),
             }),
             outcomes: Vec::new(),
+            rank_targets: Vec::new(),
             market_meta: Vec::new(),
             execution: Vec::new(),
+            downside_trajectories: Vec::new(),
         }
+    }
+
+    #[test]
+    fn downside_uses_executable_sides() {
+        let anchor = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let trajectory = BacktestDownsideTrajectory {
+            market_id: MarketId::new("market"),
+            token_id: TokenId::new("yes"),
+            anchor,
+            entry_ask: Price::new(dec!(0.50)),
+            data_available_until: anchor + Duration::hours(2),
+            points: vec![
+                BacktestDownsidePoint {
+                    at: anchor + Duration::hours(1),
+                    best_bid_low: Some(Price::new(dec!(0.45))),
+                },
+                BacktestDownsidePoint {
+                    at: anchor + Duration::hours(2),
+                    best_bid_low: Some(Price::new(dec!(0.40))),
+                },
+            ],
+        };
+        assert_eq!(
+            trajectory
+                .max_adverse_excursion_bps(3_600)
+                .expect("mature downside"),
+            Some(dec!(-1000))
+        );
+        assert_eq!(
+            trajectory
+                .max_adverse_excursion_bps(10_800)
+                .expect("immature downside"),
+            None
+        );
     }
 
     fn execution_snapshot(
@@ -819,6 +1010,114 @@ mod tests {
             .await
             .expect("b");
         assert_eq!(a.report.report_hash, b.report.report_hash);
+    }
+
+    #[tokio::test]
+    async fn score_planes_ignore_allocation() {
+        let model = WeightedFactorRuntime::backtest_fixture();
+        let run_id = ModelRunId::from_v7();
+        let mut caps = PortfolioCaps::backtest_fixture();
+        caps.total_budget_usd = Decimal::ZERO;
+        let result = PortfolioReplayBacktester::new()
+            .run(BacktestInputs {
+                request: BacktestRequest::test_fixture(),
+                model: &model,
+                ticks: vec![tick(0, &run_id)],
+                caps,
+            })
+            .await
+            .expect("zero-budget replay");
+
+        assert!(result.sample_outcomes.is_empty());
+        assert_eq!(result.report.sample_count, 0);
+        assert_eq!(result.calibration_outcomes.len(), 2);
+        assert!(
+            result
+                .calibration_outcomes
+                .iter()
+                .all(|sample| sample.token_payout_ratio == PayoutRatio::ONE),
+            "model-score calibration observes resolved predictions before allocation"
+        );
+        assert_eq!(result.rank_outcomes.len(), 2);
+        let bullish = result
+            .rank_outcomes
+            .iter()
+            .find(|sample| sample.market_id.as_str() == "0xbull")
+            .expect("bullish canonical rank observation");
+        let bearish = result
+            .rank_outcomes
+            .iter()
+            .find(|sample| sample.market_id.as_str() == "0xbear")
+            .expect("bearish canonical rank observation");
+        assert!(bullish.score.is_sign_positive());
+        assert_eq!(bullish.realized, Decimal::ONE);
+        assert!(bearish.score.is_sign_negative());
+        assert_eq!(bearish.realized, Decimal::ZERO);
+        assert!(bullish.score > bearish.score);
+    }
+
+    #[tokio::test]
+    async fn rank_target_mismatch_fails() {
+        let model = WeightedFactorRuntime::backtest_fixture();
+        let run_id = ModelRunId::from_v7();
+        let mut mismatched = tick(0, &run_id);
+        mismatched.rank_targets[0].target.label_horizon_secs = 60;
+
+        let error = PortfolioReplayBacktester::new()
+            .run(BacktestInputs {
+                request: BacktestRequest::test_fixture(),
+                model: &model,
+                ticks: vec![mismatched],
+                caps: PortfolioCaps::backtest_fixture(),
+            })
+            .await
+            .expect_err("rank target drift must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("rank score/target binding mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn deadband_keeps_calibration_scores() {
+        let model = WeightedFactorRuntime::backtest_fixture();
+        let run_id = ModelRunId::from_v7();
+        let mut score_only_tick = tick(0, &run_id);
+        let ModelRuntimeInput::FactorTable(table) = &mut score_only_tick.model_input else {
+            panic!("weighted fixture must use factor-table input");
+        };
+        for row in &mut table.rows {
+            for factor in &mut row.factors {
+                if factor.name.as_str() == MOMENTUM_ROC.as_str() {
+                    factor.raw_value = Some(Decimal::ZERO);
+                    factor.normalization = NormalizedFactor::cross_section(Probability::ZERO);
+                    factor.direction = FactorDirection::Neutral;
+                    factor.confidence = Probability::ZERO;
+                }
+            }
+        }
+        let result = PortfolioReplayBacktester::new()
+            .run(BacktestInputs {
+                request: BacktestRequest::test_fixture(),
+                model: &model,
+                ticks: vec![score_only_tick],
+                caps: PortfolioCaps::backtest_fixture(),
+            })
+            .await
+            .expect("score-only replay");
+
+        assert!(result.sample_outcomes.is_empty());
+        assert_eq!(result.report.sample_count, 0);
+        assert_eq!(result.calibration_outcomes.len(), 2);
+        assert!(
+            result
+                .calibration_outcomes
+                .iter()
+                .all(|sample| sample.composite_score == Probability::ZERO),
+            "deadband scores must remain in calibration without becoming decisions"
+        );
     }
 
     #[tokio::test]

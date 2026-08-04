@@ -5,17 +5,19 @@ use std::sync::Arc;
 use quant_pivot_error::{QuantResult, feedback::FeedbackError};
 use quant_pivot_models::{
     domain::{
-        ports::CommittedPolicyApplyPort,
+        ports::{CommittedPolicyApplyPort, RejectShadowBinding},
         quant::{
             BootstrapModelRoute, CommitModelRouteBootstrap, CommitModelRoutePromotion,
             ModelGovernanceAuditDetail, PromoteModelRoute,
         },
     },
     runtime_config::{ActivePolicyBundle, PolicyBundleIdentity},
+    types::{FeedbackCycleId, PolicyActivationId},
 };
 use quant_pivot_repository::traits::{
     ModelRouteBootstrapCommit, ModelRouteBootstrapRepository, ModelRoutePromotionCommit,
-    ModelRoutePromotionRepository, PolicyRepository,
+    ModelRoutePromotionRepository, ModelRouteShadowBindingRepository, PolicyRepository,
+    ShadowBindingRejectCommit,
 };
 
 use super::{
@@ -29,6 +31,7 @@ pub struct ModelRouteGovernanceServiceDeps {
     pub bootstrap_repository: Arc<dyn ModelRouteBootstrapRepository>,
     pub preflight: Arc<PromotionPreflightService>,
     pub repository: Arc<dyn ModelRoutePromotionRepository>,
+    pub shadow_bindings: Arc<dyn ModelRouteShadowBindingRepository>,
     pub policies: Arc<dyn PolicyRepository>,
     pub policy_apply: Arc<dyn CommittedPolicyApplyPort>,
 }
@@ -42,6 +45,32 @@ impl ModelRouteGovernanceService {
     #[must_use]
     pub const fn new(deps: ModelRouteGovernanceServiceDeps) -> Self {
         Self { deps }
+    }
+
+    /// Load one immutable persisted promotion receipt without mutating runtime
+    /// or recomputing a fresh preflight.
+    pub async fn find_activation(
+        &self,
+        policy_activation_id: &PolicyActivationId,
+    ) -> QuantResult<Option<ModelRoutePromotionCommit>> {
+        self.deps
+            .repository
+            .find_activation(policy_activation_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Load the unique persisted promotion receipt bound to one feedback
+    /// cycle without relying on shadow-termination metadata.
+    pub async fn find_cycle_activation(
+        &self,
+        feedback_cycle_id: &FeedbackCycleId,
+    ) -> QuantResult<Option<ModelRoutePromotionCommit>> {
+        self.deps
+            .repository
+            .find_cycle_activation(feedback_cycle_id)
+            .await
+            .map_err(Into::into)
     }
 
     async fn converge(&self, bundle: &ActivePolicyBundle) -> QuantResult<()> {
@@ -239,5 +268,17 @@ impl ModelRouteGovernanceService {
         Self::verify_replay(&request, &committed)?;
         self.converge(&committed.bundle).await?;
         Ok(committed)
+    }
+
+    /// Reject one exact active shadow slot, then converge runtime to the
+    /// champion-only committed route projection.
+    pub async fn reject_shadow(
+        &self,
+        command: RejectShadowBinding,
+    ) -> QuantResult<ShadowBindingRejectCommit> {
+        command.validate()?;
+        let commit = self.deps.shadow_bindings.reject(command).await?;
+        self.converge(&commit.bundle).await?;
+        Ok(commit)
     }
 }

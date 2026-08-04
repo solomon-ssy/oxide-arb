@@ -46,10 +46,10 @@ pub struct ShadowMaturedOutcomeDelta {
 #[serde(deny_unknown_fields)]
 pub struct ShadowComparison {
     pub shadow_comparison_id: ShadowComparisonId,
-    pub active_model_version_id: ModelVersionId,
-    pub shadow_model_version_id: ModelVersionId,
-    pub active_serving_contract_hash: ContentHash,
-    pub shadow_serving_contract_hash: ContentHash,
+    pub champion_model_version_id: ModelVersionId,
+    pub candidate_model_version_id: ModelVersionId,
+    pub champion_serving_contract_hash: ContentHash,
+    pub candidate_serving_contract_hash: ContentHash,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub category_scope: Option<MarketCategory>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
@@ -57,7 +57,7 @@ pub struct ShadowComparison {
     pub policy_bundle_generation: PolicyBundleGeneration,
     pub weight_source: ModelWeightSource,
     pub decision_at: DateTime<Utc>,
-    pub topn_overlap: Probability,
+    pub topn_decision_overlap: Probability,
     pub rank_delta: ShadowRankDelta,
     pub score_delta: ShadowScoreDelta,
     pub matured_outcome_delta: Option<ShadowMaturedOutcomeDelta>,

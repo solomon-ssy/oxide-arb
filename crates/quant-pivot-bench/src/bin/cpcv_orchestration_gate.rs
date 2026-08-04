@@ -8,8 +8,8 @@ use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::types::BacktestPathSetId;
 use quant_pivot_research::validation::{
     CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest, DefaultCombinatorialPurgedBacktester,
-    FoldModelSource, FoldRuntime, GroupEvaluation, GroupRowFilter, PolicyFoldRuntime, PurgeConfig,
-    ReplayEngine, TimelineGroup,
+    FoldModelSource, FoldRuntime, FoldTrainingIdentity, FoldTrainingRequest, GroupEvaluation,
+    GroupRowFilter, PolicyFoldRuntime, PurgeConfig, ReplayEngine, TimelineGroup,
 };
 use rayon::ThreadPoolBuilder;
 use rust_decimal::Decimal;
@@ -24,13 +24,24 @@ const OFFLINE_THREADS: usize = 2;
 struct GateFoldSource;
 
 impl FoldModelSource for GateFoldSource {
-    fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<FoldRuntime> {
+    fn train_fold(&self, request: FoldTrainingRequest<'_>) -> QuantResult<FoldRuntime> {
+        let FoldTrainingIdentity::Validation {
+            combination_index, ..
+        } = request.identity
+        else {
+            return Err(ResearchError::ValidationMethodology {
+                detail: "orchestration gate does not execute trial-grid estimators".to_owned(),
+            }
+            .into());
+        };
+        let filter = request.filter;
         let training_group_count = u64::try_from(filter.group_indices.len()).map_err(|error| {
             ResearchError::ValidationMethodology {
                 detail: format!("gate training group count does not fit u64: {error}"),
             }
         })?;
         Ok(FoldRuntime::Policy(PolicyFoldRuntime {
+            validation_fold_index: combination_index,
             candidate_index: 0,
             candidate_id: "cpcv-orchestration-gate".to_owned(),
             training_group_count,
@@ -60,6 +71,7 @@ impl ReplayEngine for GateReplay {
                     group_index,
                     return_value: Decimal::new(bucket - 50, 6),
                     rank_observations: Vec::new(),
+                    allocation_weights: None,
                 })
             })
             .collect()

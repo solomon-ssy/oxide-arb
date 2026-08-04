@@ -2,7 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::QpResolutionProjectionStatus;
+use super::sea_orm_active_enums::{QpResolutionProjectionErrorCode, QpResolutionProjectionStatus};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -13,10 +13,12 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub source_checkpoint_hash: String,
     pub status: QpResolutionProjectionStatus,
+    pub revision: i64,
     pub attempt_count: i32,
     pub claim_owner: Option<Uuid>,
     pub lease_expires_at: Option<DateTimeWithTimeZone>,
     pub next_attempt_at: Option<DateTimeWithTimeZone>,
+    pub last_error_code: Option<QpResolutionProjectionErrorCode>,
     #[sea_orm(column_type = "Text", nullable)]
     pub last_error: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
@@ -33,6 +35,9 @@ pub struct Model {
     )]
     pub quant_resolution_observation_inbox:
         BelongsTo<super::quant_resolution_observation_inbox::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_resolution_projection_remediation:
+        HasMany<super::quant_resolution_projection_remediation::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

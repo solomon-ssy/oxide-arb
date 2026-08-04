@@ -12,11 +12,14 @@ pub mod feedback_execution;
 pub mod feedback_governance;
 pub mod feedback_mutation;
 pub mod feedback_read;
+pub mod feedback_recipe;
+pub mod feedback_shadow_binding;
 pub mod market_linkage;
 pub mod model_governance;
 pub mod model_spec;
 pub mod model_training;
 pub mod order_intent;
+pub mod password_crypto;
 pub mod quant_report;
 pub mod reconciliation;
 pub mod research_catalog;
@@ -38,35 +41,51 @@ pub use calibration_artifact::{
 pub use execution_read::ExecutionReadPort;
 pub use execution_recovery::ExecutionRecoveryPort;
 pub use feature_integrity::{FeatureIntegrityActionContext, FeatureIntegrityPort};
-pub use feature_parity_execution::FeatureParityExecutionPort;
+pub use feature_parity_execution::{FeatureParityExecutionOutcome, FeatureParityExecutionPort};
 pub use feedback_execution::{
     FEEDBACK_LEARNING_MAX_CANDIDATES, FeedbackCalibrationCommand, FeedbackCalibrationJobParams,
     FeedbackCandidateFamily, FeedbackCandidateFamilyInput, FeedbackCandidateRecipe,
-    FeedbackComparisonAlternative, FeedbackComparisonArtifactRef, FeedbackComparisonCandidateRef,
-    FeedbackComparisonContract, FeedbackComparisonExecutionPort, FeedbackComparisonExecutionResult,
-    FeedbackComparisonGenerator, FeedbackComparisonJobInput, FeedbackComparisonJobParams,
-    FeedbackComparisonPValue, FeedbackComparisonResampling, FeedbackComparisonStatistic,
-    FeedbackComparisonStepdown, FeedbackComparisonTies, FeedbackCoverageExecutionPort,
-    FeedbackCoverageExecutionResult, FeedbackCpcvCommand, FeedbackCpcvJobParams,
-    FeedbackDatasetBuildCommand, FeedbackDatasetBuildRequest, FeedbackDatasetRole,
-    FeedbackDatasetSealJobParams, FeedbackDecisionExecutionPort, FeedbackDecisionExecutionResult,
-    FeedbackDecisionJobInput, FeedbackDecisionJobParams, FeedbackDriftArtifactRef,
-    FeedbackDriftExecutionPort, FeedbackDriftExecutionResult, FeedbackEvaluationUseRef,
-    FeedbackLearningExecutionPort, FeedbackLearningExecutionResult,
+    FeedbackCandidateRecipeInput, FeedbackComparisonAlternative, FeedbackComparisonArtifactRef,
+    FeedbackComparisonCandidateRef, FeedbackComparisonContract, FeedbackComparisonExecutionPort,
+    FeedbackComparisonExecutionResult, FeedbackComparisonGenerator, FeedbackComparisonJobInput,
+    FeedbackComparisonJobParams, FeedbackComparisonPValue, FeedbackComparisonResampling,
+    FeedbackComparisonStatistic, FeedbackComparisonStepdown, FeedbackComparisonTies,
+    FeedbackCoverageExecutionPort, FeedbackCoverageExecutionResult, FeedbackCpcvCommand,
+    FeedbackCpcvJobParams, FeedbackDatasetBuildCommand, FeedbackDatasetBuildRequest,
+    FeedbackDatasetRole, FeedbackDatasetSealJobParams, FeedbackDecisionExecutionPort,
+    FeedbackDecisionExecutionResult, FeedbackDecisionJobInput, FeedbackDecisionJobParams,
+    FeedbackDriftArtifactRef, FeedbackDriftExecutionPort, FeedbackDriftExecutionResult,
+    FeedbackEvaluationUseRef, FeedbackLearningExecutionPort, FeedbackLearningExecutionResult,
     FeedbackLearningStageArtifactRef, FeedbackShadowArtifactRef, FeedbackShadowContract,
     FeedbackShadowContractInput, FeedbackShadowExecutionPort, FeedbackShadowExecutionResult,
     FeedbackShadowJobParams, FeedbackShadowObservationSource, FeedbackShadowSubject,
     FeedbackShadowUnavailableReason, FeedbackTrainingCommand, FeedbackTrainingJobParams,
 };
 pub use feedback_governance::{
-    FeedbackAttributionPlanArtifact, FeedbackAttributionPlanJobParams, FeedbackAttributionProduced,
+    FeedbackAttributionJobParams, FeedbackAttributionManifest, FeedbackAttributionProduced,
     FeedbackAttributionUse, FeedbackCandidateValidation, FeedbackGovernanceExecutionPort,
     FeedbackGovernanceExecutionResult, FeedbackTruthBlocker, FeedbackTruthFreezeArtifact,
     FeedbackTruthFreezeJobParams, FeedbackValidationArtifact, FeedbackValidationArtifactRef,
     FeedbackValidationJobParams, FeedbackValidationTrialOutcome,
 };
-pub use feedback_mutation::FeedbackMutationPort;
+pub use feedback_mutation::{FeedbackActivationReadPort, FeedbackMutationPort};
 pub use feedback_read::FeedbackReadPort;
+pub use feedback_recipe::{
+    CandidateRecipePlanArtifact, CandidateRecipePlanExecutionPort,
+    CandidateRecipePlanExecutionResult, CandidateRecipePlanInput, CandidateRecipePlanJobParams,
+    CandidateRecipePlanOutcome, CandidateRecipeReadinessBlocker, CandidateRecipeSelection,
+    FeedbackAttributionManifestRef, FeedbackRecipeCalibrationSpec, FeedbackRecipeCpcvSpec,
+    FeedbackRecipeDiagnosticEvidence, FeedbackRecipeDiagnosticSpec, FeedbackRecipeDownsideSpec,
+    FeedbackRecipeDriftManifest, FeedbackRecipeOosAggregation, FeedbackRecipeOosEvidence,
+    FeedbackRecipeOosSummary, FeedbackRecipeResourceBudget, FeedbackRecipeTemplate,
+    FeedbackRecipeTemplateInput, FeedbackRecipeTrainingSpec,
+};
+pub use feedback_shadow_binding::{
+    CancelShadowBinding, RejectShadowBinding, ShadowBindingArtifact, ShadowBindingArtifactRef,
+    ShadowBindingCancellationReceipt, ShadowBindingExecutionPort, ShadowBindingExecutionResult,
+    ShadowBindingJobInput, ShadowBindingJobParams, ShadowBindingLifecycle, ShadowBindingReceipt,
+    ShadowBindingReceiptInput, ShadowBindingRejectionReceipt,
+};
 pub use market_linkage::MarketLinkageGovernancePort;
 pub use model_governance::{
     BootstrapQualityGateEvidence, BootstrapQualityGateInput, CalibratedModelSealCommand,
@@ -78,6 +97,7 @@ pub use order_intent::{
     ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand, ExecutionSubmitPort,
     OrderIntentPort, RejectIntentCommand,
 };
+pub use password_crypto::PasswordCryptoPort;
 pub use quant_report::{AdHocReportCommand, QuantReportPort};
 pub use reconciliation::ReconciliationPort;
 pub use research_catalog::ResearchCatalogPort;

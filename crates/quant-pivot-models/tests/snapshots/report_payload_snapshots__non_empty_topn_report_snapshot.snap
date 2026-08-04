@@ -8,8 +8,8 @@ expression: "TopNReportSnapshot::non_empty()"
     "profile_id": "weather_forecast_24h",
     "profile_ref": {
       "id": "weather_forecast_24h",
-      "version": 3,
-      "content_hash": "blake3:0dca50a71b5630ce844dfcfb55bec134c6d65e954d2a7b948807c97d53bafdc3"
+      "version": 4,
+      "content_hash": "blake3:c906d7676bb12b6a75a261c518224efd7391ffbc1bcbad471ec5ccf8baf90c10"
     },
     "report_kind": "top_n",
     "decision_at": "2023-11-14T22:11:20Z",
@@ -118,8 +118,8 @@ expression: "TopNReportSnapshot::non_empty()"
           "cohort_key": {
             "profile_ref": {
               "id": "pooled_1h_control",
-              "version": 3,
-              "content_hash": "blake3:c14628f49a8aae856f11d644d6c9f550eec749f055e7711dc4e0b7067a1bce84"
+              "version": 4,
+              "content_hash": "blake3:045ed413fb4ee177cbfa78eff3e934a0f580ffa942d260be6e4ed10b8083e9fb"
             },
             "category": "politics",
             "horizon_secs": 86400,
@@ -301,8 +301,8 @@ expression: "TopNReportSnapshot::non_empty()"
           "cohort_key": {
             "profile_ref": {
               "id": "pooled_1h_control",
-              "version": 3,
-              "content_hash": "blake3:c14628f49a8aae856f11d644d6c9f550eec749f055e7711dc4e0b7067a1bce84"
+              "version": 4,
+              "content_hash": "blake3:045ed413fb4ee177cbfa78eff3e934a0f580ffa942d260be6e4ed10b8083e9fb"
             },
             "category": "politics",
             "horizon_secs": 86400,

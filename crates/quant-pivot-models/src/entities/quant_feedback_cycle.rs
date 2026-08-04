@@ -5,11 +5,16 @@ use sea_orm::entity::prelude::*;
 
 use super::research_profile_artifact;
 use crate::{
-    domain::{ports::FeedbackCandidateFamily, quant::FeedbackCycleKey},
-    enums::quant::{FeedbackCycleStatus, FeedbackDecision},
+    domain::quant::FeedbackCycleKey,
+    enums::{
+        model::ModelFamily,
+        quant::{FeedbackCycleStatus, FeedbackDecision, FeedbackEvaluationMode},
+    },
+    runtime_config::BuyModelRoute,
     types::{
-        CapabilityRegistryHashes, ContentHash, FeedbackCycleId, ModelVersionId,
-        ResearchProfileArtifactId, ResearchProfileRef, WorkerId,
+        ContentHash, DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId, ModelVersionId,
+        PolicyBundleGeneration, PolicyIdempotencyKey, ResearchProfileArtifactId,
+        ResearchProfileRef, WorkerId,
     },
 };
 
@@ -28,19 +33,27 @@ pub struct Model {
     pub profile_hash: ContentHash,
     pub feedback_policy_hash: ContentHash,
     pub label_cutoff: DateTime<Utc>,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub capability_registry_hashes: CapabilityRegistryHashes,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
+    pub champion_model_spec_id: ModelSpecId,
+    pub champion_model_spec_definition_hash: ContentHash,
+    pub champion_model_family: ModelFamily,
     #[sea_orm(column_type = "JsonBinary")]
-    pub candidate_family: FeedbackCandidateFamily,
-    pub candidate_family_hash: ContentHash,
+    pub route: BuyModelRoute,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub decision_policy_snapshot_hash: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub route_generation: i64,
+    pub evaluation_mode: FeedbackEvaluationMode,
+    pub parent_cycle_id: Option<FeedbackCycleId>,
+    pub forced_idempotency_key: Option<PolicyIdempotencyKey>,
     pub status: FeedbackCycleStatus,
     pub decision: Option<FeedbackDecision>,
     pub terminal_reason_code: Option<String>,
     pub generation: i64,
     pub lease_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,
+    pub stage_resume_after: Option<DateTime<Utc>>,
     pub cancel_requested_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,

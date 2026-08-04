@@ -26,6 +26,18 @@ pub enum InfraError {
     #[error("governed compute execution failed: {detail}")]
     ComputeExecution { detail: String },
 
+    #[error("{subsystem} capacity {limit} reached")]
+    ComputeCapacity {
+        subsystem: &'static str,
+        limit: usize,
+    },
+
+    #[error("{subsystem} exceeded its {deadline_ms} ms deadline")]
+    ComputeDeadline {
+        subsystem: &'static str,
+        deadline_ms: u64,
+    },
+
     #[error("operation audit detail is invalid: {detail}")]
     AuditDetailInvalid { detail: String },
 

@@ -373,6 +373,8 @@ pub enum MaterializationRunKind {
     FeedbackCoverage,
     /// Champion-relative data, concept, and label drift qualification.
     FeedbackDrift,
+    /// Governed challenger recipe planning.
+    FeedbackRecipePlan,
     /// Feedback-owned candidate Dataset sealing.
     FeedbackDatasetSeal,
     /// Feedback-owned candidate model training.
@@ -384,11 +386,13 @@ pub enum MaterializationRunKind {
     /// Canonical truth frontier at the cycle cutoff.
     FeedbackTruthFreeze,
     /// PIT-safe attribution inputs admitted to recipe planning.
-    FeedbackAttributionPlan,
+    FeedbackAttribution,
     /// Sole complete candidate quality-gate universe.
     FeedbackValidation,
     /// Reserved same-window Romano-Wolf candidate-family comparison.
     FeedbackComparison,
+    /// Atomic route-owned shadow binding and runtime convergence.
+    FeedbackShadowBind,
     /// Exact published-generation production-shadow observation gate.
     FeedbackShadow,
     /// Evidence-only feedback terminal decision.
@@ -429,14 +433,16 @@ impl From<ResearchJobKind> for MaterializationRunKind {
             ResearchJobKind::TradePolicyValidation => Self::TradePolicyValidation,
             ResearchJobKind::FeedbackTruthFreeze => Self::FeedbackTruthFreeze,
             ResearchJobKind::FeedbackCoverage => Self::FeedbackCoverage,
-            ResearchJobKind::FeedbackAttributionPlan => Self::FeedbackAttributionPlan,
+            ResearchJobKind::FeedbackAttribution => Self::FeedbackAttribution,
             ResearchJobKind::FeedbackDrift => Self::FeedbackDrift,
+            ResearchJobKind::FeedbackRecipePlan => Self::FeedbackRecipePlan,
             ResearchJobKind::FeedbackDatasetSeal => Self::FeedbackDatasetSeal,
             ResearchJobKind::FeedbackTraining => Self::FeedbackTraining,
             ResearchJobKind::FeedbackCalibration => Self::FeedbackCalibration,
             ResearchJobKind::FeedbackCpcv => Self::FeedbackCpcv,
             ResearchJobKind::FeedbackValidation => Self::FeedbackValidation,
             ResearchJobKind::FeedbackComparison => Self::FeedbackComparison,
+            ResearchJobKind::FeedbackShadowBind => Self::FeedbackShadowBind,
             ResearchJobKind::FeedbackShadow => Self::FeedbackShadow,
             ResearchJobKind::FeedbackDecision => Self::FeedbackDecision,
         }
@@ -446,7 +452,9 @@ impl From<ResearchJobKind> for MaterializationRunKind {
 impl From<ResearchJobStatus> for MaterializationRunStatus {
     fn from(status: ResearchJobStatus) -> Self {
         match status {
-            ResearchJobStatus::Queued => Self::Queued,
+            ResearchJobStatus::Queued
+            | ResearchJobStatus::AwaitingEvidence
+            | ResearchJobStatus::RetryScheduled => Self::Queued,
             ResearchJobStatus::Running => Self::Running,
             ResearchJobStatus::Succeeded => Self::Completed,
             ResearchJobStatus::Failed => Self::Failed,

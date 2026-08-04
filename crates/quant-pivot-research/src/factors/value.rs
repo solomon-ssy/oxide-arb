@@ -147,9 +147,19 @@ impl FactorValue {
         if !exact {
             return Err(ResearchError::Serialization {
                 detail: format!(
-                    "factor value `{}` does not exactly project sealed revision {}",
+                    "factor value `{}` does not exactly project sealed revision {}: identity={}, inputs={}, direction={}, confidence={}, normalized_range={}, raw_domain={}, state_tuple={}, drivers={}",
                     self.name,
-                    revision.factor_definition_id()
+                    revision.factor_definition_id(),
+                    self.definition_id == revision.factor_definition_id()
+                        && self.name == definition.name
+                        && self.family == definition.family,
+                    self.input_feature_refs == definition.input_features,
+                    self.direction == expected_direction,
+                    (Decimal::ZERO..=Decimal::ONE).contains(&confidence),
+                    normalized_in_range,
+                    raw_is_valid,
+                    tuple_is_valid,
+                    drivers_are_canonical,
                 ),
             }
             .into());

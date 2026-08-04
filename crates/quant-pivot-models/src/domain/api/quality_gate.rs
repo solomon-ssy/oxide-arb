@@ -46,7 +46,7 @@ pub struct QualityGatePreviewQuery {
 /// the SPA keys its labels off `gate` and colors off `status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GateOutcomeView {
-    /// Gate identity wire name (e.g. `"sample_count"`, `"shadow_overlap_stability"`).
+    /// Gate identity wire name (e.g. `"sample_count"`, `"shadow_decision_overlap"`).
     pub gate: String,
     /// `"hard"` (blocking) or `"soft"` (advisory).
     pub class: String,

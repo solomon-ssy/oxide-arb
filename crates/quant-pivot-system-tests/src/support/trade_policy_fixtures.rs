@@ -21,8 +21,8 @@ use quant_pivot_models::{
         api::{FitTradePolicyRequest, TradePolicyFitJobParams, TradePolicyFitSelection},
         quant::{
             ModelVersionInfo, NewModelVersion, NewResearchJob, NewTradePolicyArtifact,
-            NewTradePolicyGovernanceAudit, NewTradePolicyTrialAttempt,
-            ResearchReadinessEvidenceInfo, TrainingDatasetInfo,
+            NewTradePolicyGovernanceAudit, NewTradePolicyTrialAttempt, ResearchJobFinalization,
+            ResearchJobResultRef, ResearchReadinessEvidenceInfo, TrainingDatasetInfo,
         },
     },
     enums::{
@@ -31,9 +31,9 @@ use quant_pivot_models::{
         model::ModelFamily,
         quant::{
             DatasetPurpose, ExitSettlementMode, FillRequirement, OutcomeSide, RedeemPolicy,
-            ResearchJobKind, ResearchJobStatus, ResearchReadinessEvidenceKind,
-            TradePolicyGovernanceAction, TradePolicyStatus, TradePolicyTrialScope,
-            TradePolicyTrialStatus,
+            ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
+            ResearchReadinessEvidenceKind, TradePolicyGovernanceAction, TradePolicyStatus,
+            TradePolicyTrialScope, TradePolicyTrialStatus,
         },
     },
     hashing::CanonicalDigest,
@@ -59,7 +59,7 @@ use quant_pivot_models::{
         TradePolicyPitCutoffEvidence, TradePolicyStatisticalSummaryRow, TradePolicyTrialAttemptId,
         TradePolicyTrialMetrics, TradePolicyValidationEvidence, TrainingDatasetId,
         TrainingExampleId, Usd, UserId, VerticalActivationTarget, VerticalGateEvidence,
-        VerticalGateKind, builtin_research_profiles, factor::FactorServingPlane,
+        VerticalGateKind, WorkerId, builtin_research_profiles, factor::FactorServingPlane,
         model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
     },
 };
@@ -202,6 +202,43 @@ impl PublishedTradePolicyFixture {
                 },
             )
             .await?;
+        let jobs = PgResearchJobRepository::new(db.clone());
+        let owner = WorkerId::from_v7();
+        let leased = jobs
+            .lease_next(
+                &[ResearchJobKind::TradePolicyFit],
+                &owner,
+                Utc::now() + Duration::minutes(10),
+            )
+            .await?
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: format!(
+                    "system policy fit job {} was not leaseable for terminal evidence",
+                    sealed.fit_job_id
+                ),
+            })?;
+        if leased.job_id != sealed.fit_job_id {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "leased policy fit job {} instead of fixture job {}",
+                    leased.job_id, sealed.fit_job_id
+                ),
+            }
+            .into());
+        }
+        jobs.finalize(
+            &sealed.fit_job_id,
+            &owner,
+            ResearchJobFinalization::succeeded(
+                Some(ResearchJobResultRef {
+                    kind: ResearchJobResultKind::TradePolicyArtifact,
+                    id: artifact_id.as_uuid(),
+                }),
+                None,
+                None,
+            ),
+        )
+        .await?;
         Ok(Self {
             provenance: TradePolicyCohortProvenance {
                 artifact_id,
@@ -560,6 +597,7 @@ impl PolicyFitDatasetFixture {
 struct SealedPolicyEvidence {
     payload: TradePolicyArtifactPayload,
     evidence_verifier: TradePolicyEvidenceVerifier,
+    fit_job_id: ResearchJobId,
 }
 
 struct PolicyEvidenceFixture;
@@ -654,6 +692,7 @@ impl PolicyEvidenceFixture {
         Ok(SealedPolicyEvidence {
             payload,
             evidence_verifier,
+            fit_job_id,
         })
     }
 

@@ -82,7 +82,10 @@ pub enum AttributionSubject {
         model_version_id: ModelVersionId,
         recommendation_id: RecommendationId,
     },
-    Outcome {
+    ResolutionOutcome {
+        model_version_id: ModelVersionId,
+    },
+    ExecutionOutcome {
         model_version_id: ModelVersionId,
     },
     Execution {
@@ -100,8 +103,9 @@ impl AttributionSubject {
     pub const fn kind(self) -> AttributionArtifactKind {
         match self {
             Self::Prediction { .. } => AttributionArtifactKind::PredictionExplanation,
-            Self::Decision { .. } => AttributionArtifactKind::DecisionCounterfactual,
-            Self::Outcome { .. } => AttributionArtifactKind::OutcomeAssociation,
+            Self::Decision { .. } => AttributionArtifactKind::DecisionInterventionReplay,
+            Self::ResolutionOutcome { .. } => AttributionArtifactKind::ResolutionOutcomeAssociation,
+            Self::ExecutionOutcome { .. } => AttributionArtifactKind::ExecutionOutcomeAssociation,
             Self::Execution { .. } => AttributionArtifactKind::ExecutionTrajectory,
             Self::PolicyCounterfactual { .. } => {
                 AttributionArtifactKind::PolicyCounterfactualOutcome
@@ -125,7 +129,8 @@ impl AttributionSubject {
                 model_version_id,
                 recommendation_id,
             } => (Some(model_version_id), Some(recommendation_id), None),
-            Self::Outcome { model_version_id } => (Some(model_version_id), None, None),
+            Self::ResolutionOutcome { model_version_id }
+            | Self::ExecutionOutcome { model_version_id } => (Some(model_version_id), None, None),
             Self::Execution {
                 recommendation_id,
                 order_intent_id,
@@ -224,10 +229,11 @@ fn validate_identity(
     }
     let bindings_valid = match kind {
         AttributionArtifactKind::PredictionExplanation
-        | AttributionArtifactKind::DecisionCounterfactual => {
+        | AttributionArtifactKind::DecisionInterventionReplay => {
             model_version_id.is_some() && recommendation_id.is_some() && order_intent_id.is_none()
         }
-        AttributionArtifactKind::OutcomeAssociation => {
+        AttributionArtifactKind::ResolutionOutcomeAssociation
+        | AttributionArtifactKind::ExecutionOutcomeAssociation => {
             model_version_id.is_some() && recommendation_id.is_none() && order_intent_id.is_none()
         }
         AttributionArtifactKind::ExecutionTrajectory

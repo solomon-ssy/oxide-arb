@@ -61,7 +61,8 @@ pub use polymarket::{
     OnchainConfig, PolygonRpcEndpoint, PolymarketConfig, RelayerConfig, SettlementDeployConfig,
 };
 pub use quant::{
-    QuantAccountDeployConfig, QuantDeployConfig, QuantWorkersConfig, ResearchJobsConfig,
+    FeatureParityComputeConfig, FeedbackAttributionComputeConfig, QuantAccountDeployConfig,
+    QuantDeployConfig, QuantWorkersConfig, ResearchJobsConfig,
 };
 use quant_pivot_error::{
     QuantResult, config::ConfigError, config_validation::ConfigValidationReport,
@@ -71,7 +72,7 @@ pub use research::{
     ModelServingRegistryConfig, ResearchDeployConfig,
 };
 use serde::Deserialize;
-pub use web::{JwtConfig, WebConfig};
+pub use web::{JwtConfig, PasswordCryptoConfig, WebConfig};
 
 use crate::{config::validation::validate_deploy_mode, enums::quant::QuantRuntimeMode};
 

@@ -61,8 +61,10 @@ impl DomainCatalogClassifier {
             &weather_stations.registry_hash()?,
             weather_vertical_bindings,
         )?;
-        let resolver =
-            LayeredResolver::deterministic(weather_stations.clone(), weather_vertical_bindings);
+        let resolver = LayeredResolver::try_deterministic(
+            weather_stations.clone(),
+            weather_vertical_bindings,
+        )?;
         Ok(Self {
             resolver,
             weather_stations,

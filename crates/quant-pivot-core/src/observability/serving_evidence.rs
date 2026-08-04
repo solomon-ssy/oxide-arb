@@ -12,9 +12,11 @@ use quant_pivot_models::{
         QuantFeatureEventRow, QuantModelInputEventRow, QuantServingEvidenceCompletionRow,
     },
     domain::data_plane::DecisionBoundary,
-    types::{ContentHash, FeatureVectorId, MarketId, ModelRunId},
+    types::{ContentHash, FeatureVectorId, MarketId, ModelRunId, ModelVersionId},
 };
-use quant_pivot_research::hashing::ResearchHasher;
+use quant_pivot_research::{
+    features::FeatureVector, hashing::ResearchHasher, model::ModelInputAuditRow,
+};
 use serde::Serialize;
 pub const SERVING_EVIDENCE_FORMAT_VERSION: u32 = 1;
 
@@ -73,6 +75,138 @@ impl FeatureEvidenceCommitment {
         }
         self.model_vector_markets = model_vector_markets;
         Ok(self)
+    }
+}
+
+/// Exact feature-vector identity needed to project runtime input audit rows
+/// into their durable `ClickHouse` form.
+pub struct ModelInputEvidenceBatch<'a> {
+    vectors: &'a [FeatureVector],
+    vector_ids: &'a [FeatureVectorId],
+}
+
+impl<'a> ModelInputEvidenceBatch<'a> {
+    /// Bind each in-memory vector to its exact persisted identifier.
+    pub fn try_new(
+        vectors: &'a [FeatureVector],
+        vector_ids: &'a [FeatureVectorId],
+    ) -> QuantResult<Self> {
+        if vectors.len() != vector_ids.len() {
+            return Err(determinism(format!(
+                "model-input evidence has {} vectors but {} persisted ids",
+                vectors.len(),
+                vector_ids.len()
+            )));
+        }
+        Ok(Self {
+            vectors,
+            vector_ids,
+        })
+    }
+
+    /// Fingerprint the exact transform inputs consumed by one model run.
+    pub fn project(
+        &self,
+        model_run_id: &ModelRunId,
+        boundary: &DecisionBoundary,
+        audit: &[ModelInputAuditRow],
+        event_time: i64,
+    ) -> QuantResult<Vec<QuantModelInputEventRow>> {
+        #[derive(Serialize)]
+        struct Fingerprint<'a> {
+            format_version: u32,
+            model_run_id: &'a ModelRunId,
+            model_version_id: &'a ModelVersionId,
+            feature_vector_id: &'a FeatureVectorId,
+            market_id: &'a MarketId,
+            model_family: String,
+            boundary: &'a DecisionBoundary,
+            raw_input_name: &'a str,
+            raw_state: &'a str,
+            raw_value: Option<&'a str>,
+            encoded_column: &'a str,
+            encoded_value_bits: Option<u64>,
+            input_contract_hash: &'a ContentHash,
+            transform_hash: &'a ContentHash,
+            training_input_hash: &'a ContentHash,
+        }
+
+        let mut vector_by_market = HashMap::with_capacity(self.vectors.len());
+        for (vector, vector_id) in self.vectors.iter().zip(self.vector_ids) {
+            if vector_by_market
+                .insert(vector.market_id.clone(), *vector_id)
+                .is_some()
+            {
+                return Err(determinism(format!(
+                    "duplicate feature-vector binding for model-input market {}",
+                    vector.market_id
+                )));
+            }
+        }
+
+        audit
+            .iter()
+            .map(|row| {
+                let feature_vector_id = vector_by_market.get(&row.market_id).ok_or_else(|| {
+                    ResearchError::Inference {
+                        detail: format!(
+                            "model-input audit for market {} has no persisted feature-vector binding",
+                            row.market_id
+                        ),
+                    }
+                })?;
+                if row.raw_input_name.is_empty() || row.encoded_column.is_empty() {
+                    return Err(ResearchError::Inference {
+                        detail: format!(
+                            "model-input audit for market {} has an empty input/encoded name",
+                            row.market_id
+                        ),
+                    }
+                    .into());
+                }
+                let model_family = row.model_family.to_string();
+                let raw_state = row.raw_state.as_str();
+                let fingerprint = ResearchHasher::canonical(&Fingerprint {
+                    format_version: SERVING_EVIDENCE_FORMAT_VERSION,
+                    model_run_id,
+                    model_version_id: &row.model_version_id,
+                    feature_vector_id,
+                    market_id: &row.market_id,
+                    model_family: model_family.clone(),
+                    boundary,
+                    raw_input_name: &row.raw_input_name,
+                    raw_state,
+                    raw_value: row.raw_value.as_deref(),
+                    encoded_column: &row.encoded_column,
+                    encoded_value_bits: row.encoded_value_bits,
+                    input_contract_hash: &row.input_contract_hash,
+                    transform_hash: &row.transform_hash,
+                    training_input_hash: &row.training_input_hash,
+                })?;
+                Ok(QuantModelInputEventRow {
+                    event_time,
+                    format_version: SERVING_EVIDENCE_FORMAT_VERSION,
+                    decision_at: boundary.decision_at().timestamp_millis(),
+                    knowledge_cutoff: boundary.knowledge_cutoff().timestamp_millis(),
+                    model_run_id: *model_run_id,
+                    model_version_id: row.model_version_id,
+                    recommendation_report_id: None,
+                    market_id: row.market_id.clone(),
+                    feature_vector_id: *feature_vector_id,
+                    model_family,
+                    raw_input_name: row.raw_input_name.clone(),
+                    raw_state: raw_state.to_owned(),
+                    raw_value: row.raw_value.clone(),
+                    encoded_column: row.encoded_column.clone(),
+                    encoded_value_bits: row.encoded_value_bits,
+                    input_contract_hash: row.input_contract_hash.to_string(),
+                    transform_hash: row.transform_hash.to_string(),
+                    training_input_hash: row.training_input_hash.to_string(),
+                    audit_fingerprint: fingerprint.to_string(),
+                    ingestion_time: event_time,
+                })
+            })
+            .collect()
     }
 }
 
@@ -382,6 +516,12 @@ fn model_input_commitment(
                 "model-input evidence for run {model_run_id} has an inconsistent decision boundary"
             )));
         }
+        if row.format_version != SERVING_EVIDENCE_FORMAT_VERSION {
+            return Err(determinism(format!(
+                "model-input evidence for run {model_run_id} uses unsupported format {}, expected {SERVING_EVIDENCE_FORMAT_VERSION}",
+                row.format_version
+            )));
+        }
         if row.audit_fingerprint.is_empty() {
             return Err(determinism(format!(
                 "model-input evidence for run {model_run_id} has an empty audit fingerprint"
@@ -547,6 +687,7 @@ mod tests {
     ) -> QuantModelInputEventRow {
         QuantModelInputEventRow {
             event_time: decision_at,
+            format_version: SERVING_EVIDENCE_FORMAT_VERSION,
             decision_at,
             knowledge_cutoff: decision_at,
             model_run_id: *run_id,
@@ -662,6 +803,9 @@ mod tests {
         assert_eq!(marker.format_version, SERVING_EVIDENCE_FORMAT_VERSION);
         marker.format_version = SERVING_EVIDENCE_FORMAT_VERSION - 1;
         assert!(verify_completion(&marker, &[first], &input_rows).is_err());
+        let mut legacy_inputs = input_rows;
+        legacy_inputs[0].format_version = SERVING_EVIDENCE_FORMAT_VERSION - 1;
+        assert!(completion_marker(&run_id, &boundary, &features, &legacy_inputs, 100).is_err());
     }
 
     #[test]

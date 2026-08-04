@@ -19,10 +19,10 @@ use crate::{
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub shadow_comparison_id: ShadowComparisonId,
-    pub active_model_version_id: ModelVersionId,
-    pub shadow_model_version_id: ModelVersionId,
-    pub active_serving_contract_hash: ContentHash,
-    pub shadow_serving_contract_hash: ContentHash,
+    pub champion_model_version_id: ModelVersionId,
+    pub candidate_model_version_id: ModelVersionId,
+    pub champion_serving_contract_hash: ContentHash,
+    pub candidate_serving_contract_hash: ContentHash,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
     pub category_scope: Option<MarketCategory>,
@@ -31,7 +31,7 @@ pub struct Model {
     pub policy_bundle_generation: PolicyBundleGeneration,
     pub weight_source: ModelWeightSource,
     pub decision_at: DateTime<Utc>,
-    pub topn_overlap: Probability,
+    pub topn_decision_overlap: Probability,
     #[sea_orm(column_type = "JsonBinary")]
     pub rank_delta_json: ShadowRankDelta,
     #[sea_orm(column_type = "JsonBinary")]
@@ -44,18 +44,18 @@ pub struct Model {
 
     #[sea_orm(
         belongs_to,
-        relation_enum = "ActiveVersion",
-        from = "active_model_version_id",
+        relation_enum = "ChampionVersion",
+        from = "champion_model_version_id",
         to = "model_version_id"
     )]
-    pub active_version: BelongsTo<quant_model_version::Entity>,
+    pub champion_version: BelongsTo<quant_model_version::Entity>,
     #[sea_orm(
         belongs_to,
-        relation_enum = "ShadowVersion",
-        from = "shadow_model_version_id",
+        relation_enum = "CandidateVersion",
+        from = "candidate_model_version_id",
         to = "model_version_id"
     )]
-    pub shadow_version: BelongsTo<quant_model_version::Entity>,
+    pub candidate_version: BelongsTo<quant_model_version::Entity>,
     #[sea_orm(
         belongs_to,
         from = "research_profile_artifact_id",

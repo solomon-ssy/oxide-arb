@@ -3,13 +3,13 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration as StdDuration,
 };
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::{
     app::research_job::ResearchJobEngine,
     observability::{
@@ -18,7 +18,8 @@ use quant_pivot_core::{
     },
     service::feedback_coordinator::{
         FeedbackCoordinator, FeedbackCoordinatorBudget, FeedbackCoordinatorConfig,
-        FeedbackCoordinatorDeps, FeedbackStagePort, FeedbackStageSuccess,
+        FeedbackCoordinatorDeps, FeedbackShadowCancellationPort, FeedbackStagePort,
+        FeedbackStagePreparation, FeedbackStageSuccess,
     },
 };
 use quant_pivot_error::{QuantResult, feedback::FeedbackError};
@@ -58,8 +59,9 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_system_tests::postgres::setup_pg;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait};
 use tokio::{
+    sync::Notify,
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -68,14 +70,28 @@ use tokio_util::sync::CancellationToken;
 use super::feedback_boot_schema::{FeedbackSchemaFixture, content_hash, prepare_fixture};
 
 struct CoordinatorStagePort {
+    defer_once: Mutex<Option<DateTime<Utc>>>,
     prepare_calls: AtomicUsize,
+    cancellation_calls: AtomicUsize,
+    cancellation_failures: AtomicUsize,
+    block_cancellation_retry: AtomicBool,
+    cancellation_retry: Notify,
 }
 
 impl CoordinatorStagePort {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
+            defer_once: Mutex::new(None),
             prepare_calls: AtomicUsize::new(0),
+            cancellation_calls: AtomicUsize::new(0),
+            cancellation_failures: AtomicUsize::new(0),
+            block_cancellation_retry: AtomicBool::new(false),
+            cancellation_retry: Notify::new(),
         }
+    }
+
+    fn defer_once(&self, resume_after: DateTime<Utc>) {
+        *self.defer_once.lock().expect("lock stage deferral") = Some(resume_after);
     }
 
     fn reset_calls(&self) {
@@ -84,6 +100,16 @@ impl CoordinatorStagePort {
 
     fn prepare_calls(&self) -> usize {
         self.prepare_calls.load(Ordering::SeqCst)
+    }
+
+    fn fail_cancellation_once(&self) {
+        self.cancellation_failures.store(1, Ordering::SeqCst);
+        self.block_cancellation_retry.store(true, Ordering::SeqCst);
+    }
+
+    fn release_cancellation_retry(&self) {
+        self.block_cancellation_retry.store(false, Ordering::SeqCst);
+        self.cancellation_retry.notify_one();
     }
 
     fn job(
@@ -132,7 +158,7 @@ impl FeedbackStagePort for CoordinatorStagePort {
         cycle: &FeedbackCycleInfo,
         lease: FeedbackCycleLeaseGuard,
         identity: FeedbackStageJobIdentity,
-    ) -> QuantResult<NewResearchJob> {
+    ) -> QuantResult<FeedbackStagePreparation> {
         self.prepare_calls.fetch_add(1, Ordering::SeqCst);
         if cycle.status != FeedbackCycleStatus::Running
             || lease.feedback_cycle_id != cycle.feedback_cycle_id
@@ -144,7 +170,16 @@ impl FeedbackStagePort for CoordinatorStagePort {
             }
             .into());
         }
-        Self::job(cycle, identity)
+        let deferred = self.defer_once.lock().expect("lock stage deferral").take();
+        if let Some(resume_after) = deferred {
+            return Ok(FeedbackStagePreparation::Deferred {
+                resume_after,
+                reason_code: "test_stage_pending",
+            });
+        }
+        Ok(FeedbackStagePreparation::Ready(Box::new(Self::job(
+            cycle, identity,
+        )?)))
     }
 
     async fn succeeded(
@@ -171,6 +206,27 @@ impl FeedbackStagePort for CoordinatorStagePort {
         } else {
             Ok(FeedbackStageSuccess::advance(uri, content_hash('9')))
         }
+    }
+}
+
+#[async_trait]
+impl FeedbackShadowCancellationPort for CoordinatorStagePort {
+    async fn release_cycle(
+        &self,
+        _cycle: &FeedbackCycleInfo,
+        _reason_code: &str,
+    ) -> QuantResult<()> {
+        self.cancellation_calls.fetch_add(1, Ordering::SeqCst);
+        if self.cancellation_failures.swap(0, Ordering::SeqCst) > 0 {
+            return Err(FeedbackError::ShadowBindingConflict {
+                detail: "injected transient shadow cancellation failure".to_owned(),
+            }
+            .into());
+        }
+        while self.block_cancellation_retry.load(Ordering::SeqCst) {
+            self.cancellation_retry.notified().await;
+        }
+        Ok(())
     }
 }
 
@@ -224,6 +280,8 @@ impl CoordinatorHarness {
             rollups: Arc::clone(&self.rollups) as Arc<dyn RecommendationExecutionRollupRepository>,
             jobs: self.engine.clone(),
             stages: Arc::clone(&self.stages) as Arc<dyn FeedbackStagePort>,
+            shadow_cancellation: Arc::clone(&self.stages)
+                as Arc<dyn FeedbackShadowCancellationPort>,
             metrics: Arc::clone(&self.metrics),
             alerts: Arc::clone(&self.alerts),
             config,
@@ -484,6 +542,28 @@ async fn wait_status(
     }
 }
 
+async fn wait_deferred(
+    harness: &CoordinatorHarness,
+    cycle_id: FeedbackCycleId,
+) -> FeedbackCycleInfo {
+    timeout(StdDuration::from_secs(3), async {
+        loop {
+            let cycle = harness
+                .cycles
+                .find_cycle(&cycle_id)
+                .await
+                .expect("load deferred feedback cycle")
+                .expect("deferred feedback cycle exists");
+            if cycle.stage_resume_after.is_some() {
+                break cycle;
+            }
+            sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("feedback stage must persist its resume boundary")
+}
+
 async fn request_cancel(
     harness: &CoordinatorHarness,
     fixture: &FeedbackSchemaFixture,
@@ -685,6 +765,43 @@ pub async fn terminal_wake_advances() {
     stop_task(shutdown, task).await;
 }
 
+pub async fn cancellation_release_retries() {
+    let (pool, _database) = setup_pg().await;
+    let db = pool.connection().clone();
+    let fixture = Box::pin(prepare_fixture(&db)).await;
+    let harness = CoordinatorHarness::new(db);
+    record_cycle(&harness, &fixture).await;
+    harness.stages.fail_cancellation_once();
+    let (shutdown, task) = harness.start(recovery_config());
+    wait_job(&harness, fixture.cycle_id, FeedbackStage::TruthFreeze).await;
+
+    request_cancel(&harness, &fixture, FeedbackStage::TruthFreeze).await;
+    timeout(StdDuration::from_secs(3), async {
+        loop {
+            if harness.stages.cancellation_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("coordinator attempts shadow release before cancellation finalization");
+    let pending = harness
+        .cycles
+        .find_cycle(&fixture.cycle_id)
+        .await
+        .expect("load cycle after injected release failure")
+        .expect("cycle survives injected release failure");
+    assert_eq!(pending.status, FeedbackCycleStatus::Running);
+    assert!(pending.completed_at.is_none());
+
+    harness.stages.release_cancellation_retry();
+    harness.engine.feedback_wake().wake();
+    wait_status(&harness, fixture.cycle_id, FeedbackCycleStatus::Cancelled).await;
+    assert!(harness.stages.cancellation_calls.load(Ordering::SeqCst) >= 2);
+    stop_task(shutdown, task).await;
+}
+
 pub async fn running_cancel_waits() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
@@ -853,14 +970,16 @@ pub async fn dag_completes() {
     let stages = [
         FeedbackStage::TruthFreeze,
         FeedbackStage::Coverage,
-        FeedbackStage::AttributionPlan,
+        FeedbackStage::Attribution,
         FeedbackStage::Drift,
+        FeedbackStage::RecipePlan,
         FeedbackStage::DatasetSeal,
         FeedbackStage::Training,
         FeedbackStage::Calibration,
         FeedbackStage::Cpcv,
         FeedbackStage::Validation,
         FeedbackStage::Comparison,
+        FeedbackStage::ShadowBind,
         FeedbackStage::Shadow,
         FeedbackStage::Decision,
     ];
@@ -968,6 +1087,302 @@ pub async fn lease_recovery_resumes() {
 
     request_cancel(&recovered, &fixture, FeedbackStage::TruthFreeze).await;
     wait_status(&recovered, fixture.cycle_id, FeedbackCycleStatus::Cancelled).await;
+    stop_task(shutdown, task).await;
+}
+
+pub async fn stage_deferral_resumes() {
+    let (pool, _database) = setup_pg().await;
+    let db = pool.connection().clone();
+    let fixture = Box::pin(prepare_fixture(&db)).await;
+    let harness = CoordinatorHarness::new(db);
+    record_cycle(&harness, &fixture).await;
+    let resume_after = harness
+        .cycles
+        .database_time()
+        .await
+        .expect("read stage deferral database time")
+        + Duration::milliseconds(500);
+    harness.stages.defer_once(resume_after);
+
+    let (shutdown, task) = harness.start(observability_config());
+    let deferred = wait_deferred(&harness, fixture.cycle_id).await;
+    assert_eq!(deferred.stage_resume_after, Some(resume_after));
+    assert!(deferred.lease_owner.is_none());
+    let root_id = FeedbackStageJobIdentity::try_root(fixture.cycle_id, FeedbackStage::TruthFreeze)
+        .expect("freeze deferred root identity")
+        .job_id();
+    assert!(
+        harness
+            .jobs
+            .find_by_id(&root_id)
+            .await
+            .expect("check absent deferred root")
+            .is_none(),
+        "deferred stage must not enqueue before its database-time boundary"
+    );
+
+    let root = wait_job(&harness, fixture.cycle_id, FeedbackStage::TruthFreeze).await;
+    assert_eq!(root.job_id, root_id);
+    assert_eq!(harness.stages.prepare_calls(), 2);
+    let resumed = harness
+        .cycles
+        .find_cycle(&fixture.cycle_id)
+        .await
+        .expect("load resumed cycle")
+        .expect("resumed cycle exists");
+    assert!(resumed.stage_resume_after.is_none());
+    let events = harness
+        .cycles
+        .list_stage_events(&fixture.cycle_id)
+        .await
+        .expect("load resumed cycle events");
+    assert!(
+        events
+            .iter()
+            .all(|event| event.event_kind != FeedbackStageEventKind::LeaseRecovered),
+        "planned stage resumption must not be misreported as lease recovery"
+    );
+
+    request_cancel(&harness, &fixture, FeedbackStage::TruthFreeze).await;
+    wait_status(&harness, fixture.cycle_id, FeedbackCycleStatus::Cancelled).await;
+    stop_task(shutdown, task).await;
+}
+
+pub async fn deferred_cancel_finishes() {
+    let (pool, _database) = setup_pg().await;
+    let db = pool.connection().clone();
+    let fixture = Box::pin(prepare_fixture(&db)).await;
+    let harness = CoordinatorHarness::new(db);
+    record_cycle(&harness, &fixture).await;
+    let resume_after = harness
+        .cycles
+        .database_time()
+        .await
+        .expect("read cancellation deferral time")
+        + Duration::seconds(30);
+    harness.stages.defer_once(resume_after);
+
+    let (shutdown, task) = harness.start(observability_config());
+    let deferred = wait_deferred(&harness, fixture.cycle_id).await;
+    let event = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+        feedback_cycle_id: fixture.cycle_id,
+        event_sequence: 2,
+        stage: FeedbackStage::TruthFreeze,
+        event_kind: FeedbackStageEventKind::CancellationRequested,
+        trigger_family: None,
+        research_job_id: None,
+        actor: Some("operator".to_owned()),
+        reason_code: Some("test_cancelled".to_owned()),
+        evidence_uri: None,
+        evidence_hash: None,
+        occurred_at: harness
+            .cycles
+            .database_time()
+            .await
+            .expect("read deferred cancellation time"),
+    })
+    .expect("seal deferred cancellation");
+    harness
+        .cycles
+        .request_cancel(FeedbackCycleGeneration::from(&deferred), event)
+        .await
+        .expect("cancel deferred cycle");
+    let cancelled = harness
+        .cycles
+        .find_cycle(&fixture.cycle_id)
+        .await
+        .expect("load cancelled deferred cycle")
+        .expect("cancelled deferred cycle exists");
+    assert_eq!(cancelled.status, FeedbackCycleStatus::Cancelled);
+    assert!(cancelled.stage_resume_after.is_none());
+    assert!(cancelled.completed_at.is_some());
+    assert!(
+        harness
+            .jobs
+            .find_by_id(
+                &FeedbackStageJobIdentity::try_root(fixture.cycle_id, FeedbackStage::TruthFreeze,)
+                    .expect("freeze cancelled deferred root")
+                    .job_id(),
+            )
+            .await
+            .expect("check cancelled deferred root")
+            .is_none()
+    );
+    stop_task(shutdown, task).await;
+}
+
+async fn inject_timeline_corruption(db: &DatabaseConnection, cycle_id: FeedbackCycleId) {
+    let transaction = db.begin().await.expect("begin corruption injection");
+    transaction
+        .execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SET LOCAL session_replication_role = 'replica'",
+        ))
+        .await
+        .expect("disable WORM trigger inside disposable transaction");
+    transaction
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE quant_feedback_stage_event
+             SET actor = 'injected-corruption'
+             WHERE feedback_cycle_id = $1 AND event_sequence = 1",
+            [cycle_id.as_uuid().into()],
+        ))
+        .await
+        .expect("inject persisted timeline hash corruption");
+    transaction
+        .commit()
+        .await
+        .expect("commit corruption injection");
+}
+
+async fn assert_quarantine(
+    harness: &CoordinatorHarness,
+    db: &DatabaseConnection,
+    cycle_id: FeedbackCycleId,
+) {
+    wait_status(harness, cycle_id, FeedbackCycleStatus::Quarantined).await;
+    let quarantined = harness
+        .cycles
+        .find_cycle(&cycle_id)
+        .await
+        .expect("load quarantined cycle")
+        .expect("quarantined cycle exists");
+    assert!(quarantined.lease_owner.is_none());
+    assert!(quarantined.lease_expires_at.is_none());
+    assert_eq!(
+        quarantined.terminal_reason_code.as_deref(),
+        Some("invalid_coordinator_state")
+    );
+    let fault = harness
+        .cycles
+        .find_coordinator_fault(&cycle_id)
+        .await
+        .expect("load coordinator fault")
+        .expect("coordinator fault exists");
+    assert_eq!(fault.fault_code, "invalid_coordinator_state");
+    assert_eq!(fault.last_event_sequence, Some(1));
+    assert!(fault.detail.contains("integrity validation"));
+    assert!(
+        harness
+            .recordings
+            .lock()
+            .expect("lock coordinator alerts")
+            .iter()
+            .any(|alert| alert.title.contains("quarantined")),
+        "coordinator corruption must dispatch an operations alert"
+    );
+
+    let generation = quarantined.generation;
+    sleep(StdDuration::from_millis(1_250)).await;
+    let stable = harness
+        .cycles
+        .find_cycle(&cycle_id)
+        .await
+        .expect("reload quarantined cycle")
+        .expect("quarantined cycle remains durable");
+    assert_eq!(stable.generation, generation);
+    assert!(stable.lease_owner.is_none());
+    assert!(
+        db.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE quant_feedback_coordinator_fault
+             SET detail = 'tampered'
+             WHERE feedback_cycle_id = $1",
+            [cycle_id.as_uuid().into()],
+        ))
+        .await
+        .is_err(),
+        "coordinator fault evidence must be WORM"
+    );
+}
+
+async fn run_replacement_cycle(harness: &CoordinatorHarness, fixture: &FeedbackSchemaFixture) {
+    harness
+        .cycles
+        .record_trigger(
+            fixture.second_cycle.clone(),
+            fixture.stage_event(fixture.second_cycle_id, "operator-recovery"),
+        )
+        .await
+        .expect("create replacement cycle after quarantine");
+    harness.engine.feedback_wake().wake();
+    let replacement_job =
+        wait_job(harness, fixture.second_cycle_id, FeedbackStage::TruthFreeze).await;
+    wait_job_link(
+        harness,
+        fixture.second_cycle_id,
+        FeedbackStage::TruthFreeze,
+        replacement_job.job_id,
+    )
+    .await;
+    let replacement = harness
+        .cycles
+        .find_cycle(&fixture.second_cycle_id)
+        .await
+        .expect("load replacement cycle")
+        .expect("replacement cycle exists");
+    let replacement_job_id =
+        FeedbackStageJobIdentity::try_root(fixture.second_cycle_id, FeedbackStage::TruthFreeze)
+            .expect("freeze replacement job identity")
+            .job_id();
+    let replacement_events = harness
+        .cycles
+        .list_stage_events(&fixture.second_cycle_id)
+        .await
+        .expect("load replacement timeline");
+    let cancellation = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+        feedback_cycle_id: fixture.second_cycle_id,
+        event_sequence: i64::try_from(replacement_events.len() + 1)
+            .expect("replacement sequence fits bigint"),
+        stage: FeedbackStage::TruthFreeze,
+        event_kind: FeedbackStageEventKind::CancellationRequested,
+        trigger_family: None,
+        research_job_id: None,
+        actor: Some("operator".to_owned()),
+        reason_code: Some("replacement_test_complete".to_owned()),
+        evidence_uri: None,
+        evidence_hash: None,
+        occurred_at: harness
+            .cycles
+            .database_time()
+            .await
+            .expect("read replacement cancellation time"),
+    })
+    .expect("seal replacement cancellation");
+    harness
+        .cycles
+        .request_cancel(FeedbackCycleGeneration::from(&replacement), cancellation)
+        .await
+        .expect("cancel replacement cycle");
+    assert!(
+        harness
+            .jobs
+            .find_by_id(&replacement_job_id)
+            .await
+            .expect("load replacement job")
+            .is_some()
+    );
+    harness.engine.feedback_wake().wake();
+    wait_status(
+        harness,
+        fixture.second_cycle_id,
+        FeedbackCycleStatus::Cancelled,
+    )
+    .await;
+}
+
+pub async fn corrupt_timeline_quarantines() {
+    let (pool, _database) = setup_pg().await;
+    let db = pool.connection().clone();
+    let fixture = Box::pin(prepare_fixture(&db)).await;
+    let harness = CoordinatorHarness::new(db.clone());
+    record_cycle(&harness, &fixture).await;
+    inject_timeline_corruption(&db, fixture.cycle_id).await;
+
+    let (shutdown, task) = harness.start(recovery_config());
+    assert_quarantine(&harness, &db, fixture.cycle_id).await;
+    run_replacement_cycle(&harness, &fixture).await;
     stop_task(shutdown, task).await;
 }
 

@@ -6,11 +6,11 @@ use quant_pivot_error::{QuantError, QuantResult, feedback::FeedbackError, storag
 use quant_pivot_models::{
     domain::{
         ports::{
-            FeedbackAttributionPlanArtifact, FeedbackComparisonArtifactRef,
+            FeedbackAttributionManifest, FeedbackCandidateFamily, FeedbackComparisonArtifactRef,
             FeedbackDecisionJobInput, FeedbackDecisionJobParams, FeedbackDriftArtifactRef,
             FeedbackLearningStageArtifactRef, FeedbackShadowArtifactRef, FeedbackShadowContract,
             FeedbackShadowSubject, FeedbackTruthFreezeArtifact, FeedbackValidationArtifact,
-            FeedbackValidationTrialOutcome,
+            FeedbackValidationTrialOutcome, ShadowBindingArtifactRef,
         },
         quant::{
             FeedbackCycleInfo, FeedbackStageEventInfo, FeedbackStageJobIdentity, NewResearchJob,
@@ -21,6 +21,7 @@ use quant_pivot_models::{
         FeedbackCycleStatus, FeedbackDecision, FeedbackStage, FeedbackStageEventKind,
         ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
     },
+    hashing::CanonicalDigest,
     types::{
         BacktestPathSetId, ContentHash, FeedbackCycleId, FeedbackDecisionArtifactId,
         FeedbackShadowArtifactId, ModelVersionId, ResearchJobParams, RoleCode,
@@ -47,7 +48,9 @@ use quant_pivot_research::{
     },
 };
 
-use crate::service::feedback_coordinator::FeedbackStageSuccess;
+use crate::service::{
+    feedback_coordinator::FeedbackStageSuccess, feedback_recipe_stage::FeedbackRecipeStageAdapter,
+};
 
 struct VerifiedDrift {
     reference: FeedbackDriftArtifactRef,
@@ -98,6 +101,7 @@ pub struct PromotionDecisionEvidence {
     pub shadow_artifact_id: FeedbackShadowArtifactId,
     pub shadow_artifact_hash: ContentHash,
     pub shadow_object_hash: ContentHash,
+    pub shadow_binding: ShadowBindingArtifactRef,
     pub candidate_recipe_hash: ContentHash,
     pub shadow_contract: FeedbackShadowContract,
     pub comparison_observation_count: u64,
@@ -110,7 +114,7 @@ pub struct PromotionDecisionEvidence {
 #[derive(Debug, Clone)]
 pub struct PromotionDagEvidence {
     pub truth_freeze_hash: ContentHash,
-    pub attribution_plan_hash: ContentHash,
+    pub attribution_manifest_hash: ContentHash,
     pub validation_artifact_hash: ContentHash,
     pub quality_gate_report_hash: ContentHash,
     pub comparison_artifact_hash: ContentHash,
@@ -118,7 +122,7 @@ pub struct PromotionDagEvidence {
     pub decision_artifact_hash: ContentHash,
     pub cpcv_path_set_id: BacktestPathSetId,
     pub cpcv_path_set_hash: ContentHash,
-    pub attribution_plan: FeedbackAttributionPlanArtifact,
+    pub attribution_manifest: FeedbackAttributionManifest,
     pub quality_gate_report: QualityGateReport,
 }
 
@@ -127,6 +131,7 @@ pub struct FeedbackDecisionStageDeps {
     pub cycles: Arc<dyn FeedbackCycleRepository>,
     pub jobs: Arc<dyn ResearchJobRepository>,
     pub artifacts: Arc<dyn ArtifactStore>,
+    pub recipes: Arc<FeedbackRecipeStageAdapter>,
     pub max_recovery_attempts: i32,
 }
 
@@ -135,6 +140,7 @@ pub struct FeedbackDecisionStageAdapter {
     cycles: Arc<dyn FeedbackCycleRepository>,
     jobs: Arc<dyn ResearchJobRepository>,
     artifacts: Arc<dyn ArtifactStore>,
+    recipes: Arc<FeedbackRecipeStageAdapter>,
     max_recovery_attempts: i32,
 }
 
@@ -149,6 +155,7 @@ impl FeedbackDecisionStageAdapter {
             cycles: deps.cycles,
             jobs: deps.jobs,
             artifacts: deps.artifacts,
+            recipes: deps.recipes,
             max_recovery_attempts: deps.max_recovery_attempts,
         })
     }
@@ -162,9 +169,9 @@ impl FeedbackDecisionStageAdapter {
     ) -> QuantResult<NewResearchJob> {
         Self::require_identity(cycle, lease, identity)?;
         cycle.validate()?;
+        let family = self.family(cycle).await?;
         let inputs = self.load_inputs(cycle).await?;
-        let policy_id = cycle
-            .candidate_family
+        let policy_id = family
             .shared_evaluation()
             .source_lineage
             .decision_policy_snapshot_id;
@@ -173,7 +180,7 @@ impl FeedbackDecisionStageAdapter {
             cycle_idempotency_hash: cycle.idempotency_hash,
             profile_ref: cycle.profile_ref.clone(),
             feedback_policy_hash: cycle.feedback_policy_hash,
-            candidate_family_hash: cycle.candidate_family_hash,
+            candidate_family_hash: family.candidate_family_hash(),
             decision_policy_snapshot_id: policy_id,
             champion_model_version_id: cycle.champion_model_version_id,
             champion_serving_contract_hash: cycle.champion_serving_contract_hash,
@@ -220,7 +227,45 @@ impl FeedbackDecisionStageAdapter {
                 "promotion requires one terminal CandidateReady feedback cycle",
             ));
         }
-        let events = self.cycles.list_stage_events(cycle_id).await?;
+        self.load_candidate_evidence(cycle).await
+    }
+
+    /// Re-read the immutable `CandidateReady` evidence retained by a cycle that
+    /// is either still actionable or has already been promoted. This audit
+    /// path never weakens the stricter [`Self::promotion_evidence`] preflight.
+    pub async fn candidate_evidence(
+        &self,
+        cycle_id: &FeedbackCycleId,
+    ) -> QuantResult<PromotionDecisionEvidence> {
+        let cycle = self
+            .cycles
+            .find_cycle(cycle_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found("quant_feedback_cycle", cycle_id))?;
+        cycle.validate()?;
+        if cycle.status != FeedbackCycleStatus::Succeeded
+            || !matches!(
+                cycle.decision,
+                Some(FeedbackDecision::CandidateReady | FeedbackDecision::Promoted)
+            )
+        {
+            return Err(FeedbackError::InvalidCycleState {
+                detail: "candidate evidence requires a terminal CandidateReady or Promoted cycle"
+                    .to_owned(),
+            }
+            .into());
+        }
+        self.load_candidate_evidence(cycle).await
+    }
+
+    async fn load_candidate_evidence(
+        &self,
+        cycle: FeedbackCycleInfo,
+    ) -> QuantResult<PromotionDecisionEvidence> {
+        let events = self
+            .cycles
+            .list_stage_events(&cycle.feedback_cycle_id)
+            .await?;
         let (event, job) = self
             .load_stage_job(&cycle, &events, FeedbackStage::Decision)
             .await?;
@@ -284,6 +329,7 @@ impl FeedbackDecisionStageAdapter {
             shadow_artifact_id: verified.inputs.shadow.artifact.artifact_id(),
             shadow_artifact_hash: verified.inputs.shadow.artifact.artifact_hash(),
             shadow_object_hash: verified.inputs.shadow.reference.artifact.content_hash,
+            shadow_binding: verified.inputs.shadow.reference.binding.clone(),
             candidate_recipe_hash: *candidate_recipe_hash,
             shadow_contract: contract.as_ref().clone(),
             comparison_observation_count,
@@ -367,7 +413,7 @@ impl FeedbackDecisionStageAdapter {
         decision: &VerifiedDecision,
     ) -> QuantResult<PromotionDagEvidence> {
         let (truth_ref, _) = self.load_truth_gate(cycle, events).await?;
-        let (attribution_ref, attribution_plan) = self
+        let (attribution_ref, attribution_manifest) = self
             .load_attribution_gate(cycle, events, &truth_ref)
             .await?;
         let validation = self.load_validation_gate(cycle, events).await?;
@@ -401,7 +447,7 @@ impl FeedbackDecisionStageAdapter {
             .await?;
         Ok(PromotionDagEvidence {
             truth_freeze_hash: truth_ref.content_hash,
-            attribution_plan_hash: attribution_ref.content_hash,
+            attribution_manifest_hash: attribution_ref.content_hash,
             validation_artifact_hash: validation.reference.content_hash,
             quality_gate_report_hash: candidate.quality_gate_report.report_hash,
             comparison_artifact_hash: decision.inputs.comparison.artifact.artifact_hash(),
@@ -409,7 +455,7 @@ impl FeedbackDecisionStageAdapter {
             decision_artifact_hash: decision.artifact.artifact_hash(),
             cpcv_path_set_id,
             cpcv_path_set_hash,
-            attribution_plan,
+            attribution_manifest,
             quality_gate_report: candidate.quality_gate_report.clone(),
         })
     }
@@ -462,13 +508,13 @@ impl FeedbackDecisionStageAdapter {
         cycle: &FeedbackCycleInfo,
         events: &[FeedbackStageEventInfo],
         truth: &ResearchJobArtifactRef,
-    ) -> QuantResult<(ResearchJobArtifactRef, FeedbackAttributionPlanArtifact)> {
+    ) -> QuantResult<(ResearchJobArtifactRef, FeedbackAttributionManifest)> {
         let (event, job) = self
-            .load_stage_job(cycle, events, FeedbackStage::AttributionPlan)
+            .load_stage_job(cycle, events, FeedbackStage::Attribution)
             .await?;
-        let ResearchJobParams::FeedbackAttributionPlan(params) = &job.params_json else {
+        let ResearchJobParams::FeedbackAttribution(params) = &job.params_json else {
             return Err(Self::promotion_invalid(
-                "AttributionPlan predecessor lost its typed parameters",
+                "AttributionManifest predecessor lost its typed parameters",
             ));
         };
         params.validate()?;
@@ -476,18 +522,18 @@ impl FeedbackDecisionStageAdapter {
             &job,
             &event,
             ResearchJobResultRef {
-                kind: ResearchJobResultKind::FeedbackAttributionPlanArtifact,
+                kind: ResearchJobResultKind::FeedbackAttributionManifest,
                 id: params.artifact_id.as_uuid(),
             },
         )?;
         let bytes = self.artifacts.get(&reference.uri).await?;
         if FeedbackGovernanceCodec::bytes_hash(&bytes) != reference.content_hash {
             return Err(Self::promotion_invalid(
-                "AttributionPlan bytes differ from their WORM event hash",
+                "AttributionManifest bytes differ from their WORM event hash",
             ));
         }
         let artifact = FeedbackGovernanceCodec::decode_attribution(&bytes)?;
-        if job.kind != ResearchJobKind::FeedbackAttributionPlan
+        if job.kind != ResearchJobKind::FeedbackAttribution
             || params.truth_artifact != *truth
             || artifact.feedback_cycle_id != cycle.feedback_cycle_id
             || artifact.cycle_idempotency_hash != cycle.idempotency_hash
@@ -496,7 +542,7 @@ impl FeedbackDecisionStageAdapter {
             || artifact.cutoff != cycle.label_cutoff
         {
             return Err(Self::promotion_invalid(
-                "AttributionPlan differs from the promotion cycle or TruthFreeze",
+                "AttributionManifest differs from the promotion cycle or TruthFreeze",
             ));
         }
         Ok((reference, artifact))
@@ -557,7 +603,7 @@ impl FeedbackDecisionStageAdapter {
     ) -> QuantResult<(BacktestPathSetId, ContentHash)> {
         reference.validate_for(cycle.feedback_cycle_id, FeedbackStage::Cpcv)?;
         let bytes = self.artifacts.get(&reference.artifact.uri).await?;
-        if FeedbackLearningStageCodec::bytes_hash(&bytes) != reference.artifact.content_hash {
+        if CanonicalDigest::content_hash_bytes(&bytes) != reference.artifact.content_hash {
             return Err(Self::promotion_invalid(
                 "CPCV bytes differ from the Validation lineage hash",
             ));
@@ -608,8 +654,9 @@ impl FeedbackDecisionStageAdapter {
             .cycles
             .list_stage_events(&cycle.feedback_cycle_id)
             .await?;
+        let family = self.family(cycle).await?;
         let drift = self.load_drift(cycle, &events).await?;
-        let comparison = self.load_comparison(cycle, &events).await?;
+        let comparison = self.load_comparison(cycle, &family, &events).await?;
         let shadow = self
             .load_shadow(cycle, &events, &comparison.reference)
             .await?;
@@ -677,6 +724,7 @@ impl FeedbackDecisionStageAdapter {
     async fn load_comparison(
         &self,
         cycle: &FeedbackCycleInfo,
+        family: &FeedbackCandidateFamily,
         events: &[FeedbackStageEventInfo],
     ) -> QuantResult<VerifiedComparison> {
         let (event, job) = self
@@ -701,8 +749,7 @@ impl FeedbackDecisionStageAdapter {
         }
         let artifact = FeedbackComparisonCodec::decode(&bytes)?;
         artifact.validate_for(params)?;
-        let policy_id = cycle
-            .candidate_family
+        let policy_id = family
             .shared_evaluation()
             .source_lineage
             .decision_policy_snapshot_id;
@@ -711,7 +758,7 @@ impl FeedbackDecisionStageAdapter {
         if !params_cycle_matches
             || !params_hash_matches
             || job.kind != ResearchJobKind::FeedbackComparison
-            || params.candidate_family_hash != cycle.candidate_family_hash
+            || params.candidate_family_hash != family.candidate_family_hash()
             || params.decision_policy_snapshot_id != policy_id
             || params.champion_model_version_id != cycle.champion_model_version_id
             || params.champion_serving_contract_hash != cycle.champion_serving_contract_hash
@@ -769,7 +816,7 @@ impl FeedbackDecisionStageAdapter {
             || job.kind != ResearchJobKind::FeedbackShadow
             || params.profile_ref != cycle.profile_ref
             || params.feedback_policy_hash != cycle.feedback_policy_hash
-            || params.previous != *comparison
+            || params.binding.comparison != *comparison
         {
             return Err(Self::invalid(
                 "Shadow predecessor differs from the cycle and comparison lineage",
@@ -781,7 +828,7 @@ impl FeedbackDecisionStageAdapter {
                 job_id: job.job_id,
                 artifact_id: params.artifact_id,
                 input_hash: params.input_hash()?,
-                previous: comparison.clone(),
+                binding: params.binding.clone(),
                 artifact: artifact_ref,
             },
             artifact,
@@ -855,7 +902,7 @@ impl FeedbackDecisionStageAdapter {
             feedback_stage: None,
             kind: ResearchJobKind::FeedbackDecision,
             status: ResearchJobStatus::Queued,
-            model_spec_id: Some(cycle.candidate_family.shared_evaluation().model_spec_id),
+            model_spec_id: Some(cycle.champion_model_spec_id),
             decision_policy_snapshot_id: Some(params.decision_policy_snapshot_id),
             params_json: ResearchJobParams::FeedbackDecision(Box::new(params)),
             requested_by: None,
@@ -867,6 +914,16 @@ impl FeedbackDecisionStageAdapter {
         .try_bind_feedback(identity)?;
         job.validate_enqueue()?;
         Ok(job)
+    }
+
+    async fn family(&self, cycle: &FeedbackCycleInfo) -> QuantResult<FeedbackCandidateFamily> {
+        self.recipes
+            .load_plan(cycle)
+            .await?
+            .artifact
+            .candidate_family()
+            .cloned()
+            .ok_or_else(|| Self::invalid("Decision cannot follow a RecipePlan NoAction"))
     }
 
     fn require_identity(

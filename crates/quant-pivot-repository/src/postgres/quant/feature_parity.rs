@@ -416,6 +416,10 @@ impl PgFeatureParityRepository {
 
 #[async_trait::async_trait]
 impl FeatureParityRepository for PgFeatureParityRepository {
+    async fn database_time(&self) -> Result<DateTime<Utc>, StorageError> {
+        primitives::statement_timestamp(&self.db).await
+    }
+
     async fn create_run(
         &self,
         run: NewFeatureParityRun,
@@ -801,6 +805,25 @@ impl FeatureParityRepository for PgFeatureParityRepository {
         result: CompleteFeatureParityRun,
     ) -> Result<FeatureParityRunInfo, StorageError> {
         validate_completion(&result)?;
+        let latch = match result.status {
+            FeatureParityRunStatus::Mismatched => Some((
+                FeatureParityStateTransition::DeterministicMismatch,
+                "deterministic online/replay mismatch".to_owned(),
+            )),
+            FeatureParityRunStatus::Failed => Some((
+                FeatureParityStateTransition::IntegrityFailure,
+                result.failure_detail.clone().ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some(QUANT_FEATURE_PARITY_RUN),
+                        "failed parity completion requires a latch reason",
+                    )
+                })?,
+            )),
+            FeatureParityRunStatus::Queued
+            | FeatureParityRunStatus::Running
+            | FeatureParityRunStatus::PendingMaterialization
+            | FeatureParityRunStatus::Passed => None,
+        };
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let finished_at = if result.status.is_terminal() {
             Expr::current_timestamp()
@@ -866,15 +889,9 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             txn.rollback().await.map_err(StorageError::from)?;
             return Err(error);
         }
-        if result.status == FeatureParityRunStatus::Mismatched {
+        if let Some((transition, reason)) = latch {
             Self::acquire_latch_lock(&txn).await?;
-            Self::append_open_state(
-                &txn,
-                run_id,
-                FeatureParityStateTransition::DeterministicMismatch,
-                "deterministic online/replay mismatch",
-            )
-            .await?;
+            Self::append_open_state(&txn, run_id, transition, &reason).await?;
         }
         let completed = require_run_on(&txn, run_id).await?;
         txn.commit().await.map_err(StorageError::from)?;
@@ -922,50 +939,6 @@ impl FeatureParityRepository for PgFeatureParityRepository {
 
     async fn current_state(&self) -> Result<Option<FeatureParityStateInfo>, StorageError> {
         current_state_on(&self.db).await
-    }
-
-    async fn open_latch(
-        &self,
-        cause_run_id: &FeatureParityRunId,
-        transition: FeatureParityStateTransition,
-        reason: String,
-    ) -> Result<FeatureParityStateInfo, StorageError> {
-        if matches!(
-            transition,
-            FeatureParityStateTransition::BootstrapProof
-                | FeatureParityStateTransition::GovernedAcknowledge
-        ) {
-            return Err(StorageError::invariant_violation(
-                Some(QUANT_FEATURE_PARITY_STATE),
-                "opening the latch requires a failure transition",
-            ));
-        }
-        let txn = self.db.begin().await.map_err(StorageError::from)?;
-        Self::acquire_latch_lock(&txn).await?;
-        let cause = require_run_on(&txn, cause_run_id).await?;
-        let expected = match transition {
-            FeatureParityStateTransition::DeterministicMismatch => {
-                FeatureParityRunStatus::Mismatched
-            }
-            FeatureParityStateTransition::IntegrityFailure => FeatureParityRunStatus::Failed,
-            FeatureParityStateTransition::BootstrapProof
-            | FeatureParityStateTransition::GovernedAcknowledge => unreachable!(),
-        };
-        if cause.status != expected {
-            return Err(StorageError::state_conflict(
-                QUANT_FEATURE_PARITY_RUN,
-                Some(cause_run_id),
-                format!(
-                    "latch transition {} requires run status {}, found {}",
-                    transition.as_str(),
-                    expected.as_str(),
-                    cause.status.as_str()
-                ),
-            ));
-        }
-        let state = Self::append_open_state(&txn, cause_run_id, transition, &reason).await?;
-        txn.commit().await.map_err(StorageError::from)?;
-        Ok(state)
     }
 
     async fn record_integrity_failure(
