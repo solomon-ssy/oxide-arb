@@ -390,9 +390,10 @@ impl RawFactor {
 /// A factor value paired with its **transient** scoring eligibility.
 ///
 /// `contributes` / `below_confidence_floor` are scoring decisions derived from
-/// the runtime `min_factor_confidence` floor and `missing_factor_policy`. They
-/// are **not persisted** (the floor can hot-update and weighting is a model-layer
-/// concern): the immutable [`FactorValue`] is the persisted fact.
+/// the runtime `min_factor_confidence` floor. They are **not persisted** (the
+/// floor can hot-update and weighting is a model-layer concern): the immutable
+/// [`FactorValue`] is the persisted fact. Requiredness is sealed by the factor
+/// definition revision and cannot be weakened by runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScoredFactor {
     /// The persisted factor fact.
@@ -410,8 +411,9 @@ pub struct ScoredFactor {
 pub enum FactorEligibility {
     /// The market proceeds; its factors feed the model runtime.
     Eligible,
-    /// A required factor was missing / below floor under `RejectCandidate`; the
-    /// market is excluded from the candidate set (it produces no factor rows).
+    /// A required factor was missing, indeterminate, or below the confidence
+    /// floor; the market is excluded from the candidate set (it produces no
+    /// factor rows).
     RejectCandidate {
         /// Why the market was rejected.
         reason: String,
@@ -419,8 +421,8 @@ pub enum FactorEligibility {
     /// A required factor is structurally not applicable to this market (e.g. a
     /// binary market required to carry a neg-risk full-leg factor). Distinct from
     /// `RejectCandidate` (a data/quality reject): the market is excluded because
-    /// the required signal cannot exist for its structure, not because it is
-    /// low quality.
+    /// the required signal cannot exist for its structure, not because it is low
+    /// quality.
     NotApplicable {
         /// Why the required factor does not apply.
         reason: String,

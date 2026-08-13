@@ -41,8 +41,9 @@ use quant_pivot_models::{
         CatalogSyncBatchId, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
         DomainFeatureSlice, DomainInstrumentKey, DomainSourceId, EventId, EvidenceSourceRef,
         FeatureCell, FeatureStaleness, FeatureValue, MarketId, MarketLinkageId, ModelSpecId, Price,
-        Probability, ResolverVersion, SchemaVersion, Shares, TokenId, TrainingExampleId,
-        TrainingSampleSource, Usd, factor::FactorServingPlane, stable_name::FactorName,
+        Probability, ResolverVersion, SchemaVersion, Shares, TokenId, TradeTapeSourceEvidence,
+        TrainingExampleId, TrainingSampleSource, Usd, factor::FactorServingPlane,
+        stable_name::FactorName,
     },
 };
 use quant_pivot_research::{
@@ -225,11 +226,18 @@ fn domain_test_registry(
         outcome: None,
         neg_risk: false,
         tick_size: TickSize::Hundredth,
-        tokens: vec![TokenInfo {
-            token_id: market.primary_token_id.clone(),
-            outcome: "Yes".to_owned(),
-            neg_risk: false,
-        }],
+        tokens: vec![
+            TokenInfo {
+                token_id: market.primary_token_id.clone(),
+                outcome: "Yes".to_owned(),
+                neg_risk: false,
+            },
+            TokenInfo {
+                token_id: market.secondary_token_id.clone().expect("secondary token"),
+                outcome: "No".to_owned(),
+                neg_risk: false,
+            },
+        ],
         best_bid: Some(dec!(0.49)),
         best_ask: Some(dec!(0.51)),
         depth_usd: Some(Usd::new(dec!(100))),
@@ -279,6 +287,8 @@ fn build_domain_test_vector(
         boundary: &boundary,
         selected: &market,
         book: book.clone(),
+        secondary_book: None,
+        secondary_book_snapshot_ref: None,
         market: market_ctx.clone(),
         registry: Some(&registry),
         catalog: CatalogDecisionRef {
@@ -296,6 +306,7 @@ fn build_domain_test_vector(
             event_timestamp_quality: CatalogTimestampQuality::Source,
         },
         domain,
+        trade_tape_source: &TradeTapeSourceEvidence::not_required(),
         liquidity_cap_usd: Usd::ZERO,
     })?;
     let window = MarketWindowSnapshot::empty(market.primary_token_id.clone(), as_of, cutoff);

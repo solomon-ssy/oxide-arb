@@ -62,8 +62,8 @@ published recommendation
 | 05.5 | Reconciliation | **对账闭环** | [`05.5-reconciliation.md`](05.5-reconciliation.md) |
 | 05.6 | Exit Lifecycle & Monitor | **退出监控闭环** | [`05.6-exit-lifecycle-and-monitor.md`](05.6-exit-lifecycle-and-monitor.md) |
 | 05.7 | Attribution / API / Governance Closeout | **归因 + 可观测 + 治理收尾** | [`05.7-attribution-api-governance-closeout.md`](05.7-attribution-api-governance-closeout.md) |
-| 05.8 | Portfolio Optimization (good_lp) & Correlation Cap | **组合优化升级 + 相关性约束生效** | [`05.8-portfolio-optimization-good-lp.md`](05.8-portfolio-optimization-good-lp.md) |
-| 05.9 | Equity History & Drawdown-Aware Sizing | **回撤感知 sizing 闭环** | [`05.9-equity-history-and-drawdown-aware-sizing.md`](05.9-equity-history-and-drawdown-aware-sizing.md) |
+| 05.8 | Global Portfolio Optimization (direct highs + HiGHS) | **跨 Route 联合场景 MILP + exact verification** | [`05.8-portfolio-optimization-highs.md`](05.8-portfolio-optimization-highs.md) |
+| 05.9 | Equity History & Drawdown Risk Evidence | **真实权益/HWM/drawdown 输入闭环** | [`05.9-equity-history-and-drawdown-aware-sizing.md`](05.9-equity-history-and-drawdown-aware-sizing.md) |
 | 05.10 | AutoRedeem Settlement (CTF On-Chain) | **HoldToResolution 链上赎回尾项** | [`05.10-auto-redeem-settlement.md`](05.10-auto-redeem-settlement.md) |
 
 ## 2. 依赖图
@@ -84,15 +84,15 @@ flowchart TD
     P55 --> P57
     P56 --> P57
     P56 --> P510["05.10 AutoRedeem Settlement"]
-    P50 --> P58["05.8 Portfolio Optimization (good_lp) & Correlation Cap"]
-    P56 --> P59["05.9 Equity History & Drawdown-Aware Sizing"]
+    P50 --> P58["05.8 Global Portfolio Optimization (direct highs + HiGHS)"]
+    P56 --> P59["05.9 Equity History & Drawdown Risk Evidence"]
     P54 --> P59
     P59 --> P58
 ```
 
 > 05.8（组合优化）只依赖 05.0 契约与既有 Phase 4 planner，可与执行链并行推进；05.9（权益历史/回撤）
 > 依赖 05.4 fills + 05.6 realized PnL，落在退出闭环之后，并把真实 `DrawdownState` 回灌 planner，
-> 使 05.8 的 sizing 在真实回撤曲线上运行（故 05.9 → 05.8 的数据回灌边）。
+> 使 05.8 的 drawdown hard constraint 和 exact verifier 使用真实权益曲线（故 05.9 → 05.8 的数据回灌边）。
 
 执行主链（一次 `submit_if_admitted` 内，05.4）：
 
@@ -258,16 +258,16 @@ flowchart LR
 ## 6. 延后项总表
 
 > 原则（已与用户对齐）：**Phase 5 能做的尽量做**；凡可在本期闭环的，纳入本期子phase（已将
-> `good_lp`、相关性约束、真实回撤三项**收回 Phase 5**，分别落 05.8 / 05.9）。**仅**保留真正不属于
+> 全局 MILP、相关性约束、真实回撤三项**收回 Phase 5**，分别落 05.8 / 05.9）。**仅**保留真正不属于
 > 「执行/风险/治理」范畴、或硬性依赖未决的项；每条给出**详细设计位置 + 目标相位 + 为何不在 Phase 5**。
 
 ### 6.1 已收回 Phase 5（不再延后）
 
 | 能力 | 原误判 | 现落地 |
 |---|---|---|
-| `good_lp` LP/MILP 组合优化 | Phase 6+ | **05.8**（08 §9/§16 本就排在 Phase 5；allocator 模块文档已预留 trait seam） |
-| `max_correlated_exposure_usd` 真正生效 | Phase 6 | **05.8**（`CorrelationEstimator` + LP 约束 / greedy 近似；当前仅落快照未约束） |
-| 真实回撤 `DrawdownState` 驱动 Kelly | Phase 6 | **05.9**（`quant_equity_snapshot` 账本由 05.4 fills + 05.6 realized PnL 派生，回灌 planner） |
+| direct `highs` + HiGHS 全局 MILP | Phase 6+ | **05.8**（唯一 production/backtest/replay planner；无第二 solver 或 fallback） |
+| 跨 Route 联合依赖与 stress risk | category/Pearson proxy | **05.8**（只消费 promoted `PortfolioScenarioArtifact`） |
+| 真实回撤 `DrawdownState` 进入 hard constraint | Phase 6 | **05.9**（由 fills + realized PnL 派生权益/HWM，回灌 planner） |
 | ClickHouse 资金/持仓/权益快照 fact | Phase 6（可选） | **05.7**（执行/资金镜像 fact，PG 先 source of truth；权益 fact 05.9 顺带） |
 | 退出侧 `Sell` 平仓执行 | — | **05.6**（exit monitor 按 `ExitPolicySpec` 触发 Sell 平仓单，已完整覆盖执行侧卖出） |
 
@@ -317,9 +317,9 @@ flowchart LR
 | [`05`](../05-execution-risk-and-governance.md) §4.2 #20 / §1.3 | admission `#20` `ExitMonitorReadiness` 真实化（`ExitMonitorHealthHandle` worker 心跳）；mode preflight `exit_monitor_healthy` 由 soft 改 hard | 05.6 |
 | [`06`](../06-config-deploy-and-ops.md) | runtime-config 删除 `execution.kill_switch.enabled` 布尔；新增 kill-switch operational 单例语义 + 执行 metrics 清单 | 05.0/05.1 |
 | [`06`](../06-config-deploy-and-ops.md) | `execution` 段新增 `exit_monitor.{enabled,monitor_secs,signal_recheck_secs,signal_invalidation_ratio}` + `breaker.daily_realized_loss_cap_usd`；metric `quant_exit_triggers_total{reason}` | 05.6 |
-| [`06`](../06-config-deploy-and-ops.md) | `portfolio` 段新增 `optimizer`（LP/MILP）+ `constraints.correlation`；deploy-config `quant.workers.equity_snapshot_secs` | 05.8/05.9 |
-| [`08`](../08-third-party-crates-and-ml-stack.md) §9/§16 | `good_lp` 由"Phase 5 若 greedy 不够"明确为 **Phase 5 已实现的可选升级**（greedy 默认 + fallback，pure-Rust microlp 默认层 + 可选 native HiGHS） | 05.8 |
-| [`04`](../04-topn-report-and-recommendation.md) §9 | sizing `drawdown_scaling` 在 Phase 5 由 `quant_equity_snapshot` 提供真实回撤（不再恒 neutral） | 05.9 |
+| [`06`](../06-config-deploy-and-ops.md) | v2 `portfolio.tail_risk` + `ModelRouting.portfolio_scenario_artifact_binding`；deploy equity snapshot cadence | 05.8/05.9 |
+| [`08`](../08-third-party-crates-and-ml-stack.md) §16 | direct `highs` + HiGHS 是唯一 production/backtest/replay 路径；删除 greedy/microlp/relaxation/backend selector | 05.8 |
+| [`04`](../04-topn-report-and-recommendation.md) | drawdown 作为全局 hard constraint，由 `quant_equity_snapshot` 提供真实证据 | 05.9 |
 
 ## 9. 质量门禁（每个子phase收尾必跑）
 

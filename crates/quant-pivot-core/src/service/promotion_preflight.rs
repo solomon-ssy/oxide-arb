@@ -177,10 +177,6 @@ impl PromotionPreflightService {
             ));
         }
         let candidate_id = evidence.shadow_contract.candidate_model_version_id();
-        let projection = PromotionPolicyProjection::try_new(&bundle, category, candidate_id)?;
-        Self::verify_evidence(&evidence, &bundle, &projection)?;
-        self.verify_generation(&evidence, category, projection.shadow_binding_generation())?;
-
         let champion = self
             .deps
             .route_evidence
@@ -203,6 +199,14 @@ impl PromotionPreflightService {
         let manifest = self
             .require_manifest(&evidence, &candidate, category)
             .await?;
+        let projection = PromotionPolicyProjection::try_new(
+            &bundle,
+            category,
+            candidate_id,
+            manifest.document.portfolio_scenario_model_bindings.clone(),
+        )?;
+        Self::verify_evidence(&evidence, &bundle, &projection)?;
+        self.verify_generation(&evidence, category, projection.shadow_binding_generation())?;
         let constraints = Self::serving_constraints(&candidate, &manifest, category, &parity)?;
         let constraints_hash = constraints.constraints_hash()?;
         let runtime = self
@@ -399,6 +403,8 @@ impl PromotionPreflightService {
             feature_parity_evidence_hash: parity.evidence_hash,
             profile_ref: candidate.profile_ref.clone(),
             category,
+            scenario_model_bindings: manifest.document.portfolio_scenario_model_bindings.clone(),
+            scenario_model_bindings_hash: manifest.document.scenario_model_bindings_hash,
         })
         .map_err(Into::into)
     }

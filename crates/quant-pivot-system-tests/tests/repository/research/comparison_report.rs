@@ -39,6 +39,7 @@ use quant_pivot_system_tests::{
         },
         model_spec_fixtures,
         policy_fixtures::bootstrap_default_policy_bundle,
+        research_fixtures::fully_resolved_backtest_funnel,
     },
 };
 use rust_decimal::Decimal;
@@ -181,6 +182,7 @@ async fn persist_report(db: &DatabaseConnection, seed: BacktestReportSeed) -> Ba
             gross_return: seed.metrics.realized_pnl_usd / dec!(100),
             pnl_curve: Vec::new(),
         },
+        portfolio_funnel: fully_resolved_backtest_funnel(1, 10),
         report_hash: content_hash('0'),
         parquet_uri: None,
     };
@@ -207,7 +209,7 @@ async fn prepare_fixture_inner(db: &DatabaseConnection) -> ComparisonFixture {
             ModelFamily::WeightedFactor,
             model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
-            ModelTrainingContract::settlement_default(),
+            ModelTrainingContract::outcome_default(),
         ))
         .await
         .expect("model spec");

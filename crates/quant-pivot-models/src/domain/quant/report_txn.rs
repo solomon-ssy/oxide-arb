@@ -6,8 +6,9 @@
 use super::{
     NewAccountSnapshot, NewEntryConditionArtifact, NewEntryConditionInstance, NewEquitySnapshot,
     NewFeatureParityRun, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-    NewReportDataQualitySnapshot, NewReportFactDelivery, NewResearchJob, OrderIntentInfo,
-    RecommendationReportInfo, ReportFactDeliveryInfo, ReportRunClaim, ReportRunInfo,
+    NewReportDataQualitySnapshot, NewReportFactDelivery, NewReportRouteRun, NewResearchJob,
+    OrderIntentInfo, RecommendationReportInfo, ReportFactDeliveryInfo, ReportRunClaim,
+    ReportRunInfo,
 };
 use crate::{domain::governance::NewOperationLog, types::FeatureParityStateId};
 
@@ -40,6 +41,8 @@ pub struct NewReportTransaction {
     pub portfolio_plan: NewPortfolioPlan,
     /// The report header.
     pub report: NewRecommendationReport,
+    /// One complete readiness/funnel row for every represented Route.
+    pub route_runs: Vec<NewReportRouteRun>,
     /// The published recommendations.
     pub recommendations: Vec<NewRecommendation>,
     /// Immutable conditional artifacts referenced by this report's recommendations.

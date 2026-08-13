@@ -139,46 +139,11 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_local_observation_evidence(&self, failures: &mut Vec<String>) {
-        for binding in &self.bindings.hko_rainfall {
-            let instrument = DomainInstrumentKey::hko_daily_rainfall(&binding.station_key);
-            let result = match self.hko.as_ref() {
-                Some(source) => self.ingest_hko_daily_rainfall(source, binding).await,
-                None => Err(QuantError::config("HKO adapter is unavailable")),
-            };
-            self.complete_evidence_cycle(
-                DomainSourceId::hko_open_data(),
-                instrument,
-                result,
-                failures,
-            )
-            .await;
-        }
-        for binding in &self.bindings.hko_daily_temperature {
-            let station = match HkoStation::parse(&binding.station) {
-                Ok(station) => station,
-                Err(error) => {
-                    failures.push(format!(
-                        "hko_open_data/{}: invalid station: {error}",
-                        binding.station
-                    ));
-                    continue;
-                }
-            };
-            for statistic in [
-                WeatherTemperatureStatistic::Maximum,
-                WeatherTemperatureStatistic::Minimum,
-            ] {
-                let instrument = DomainInstrumentKey::hko_daily_temperature(&station, statistic);
+        if self.hko_config.enabled {
+            for binding in &self.bindings.hko_rainfall {
+                let instrument = DomainInstrumentKey::hko_daily_rainfall(&binding.station_key);
                 let result = match self.hko.as_ref() {
-                    Some(source) => {
-                        self.ingest_hko_daily_temperature(
-                            source,
-                            &station,
-                            statistic,
-                            &binding.timezone,
-                        )
-                        .await
-                    }
+                    Some(source) => self.ingest_hko_daily_rainfall(source, binding).await,
                     None => Err(QuantError::config("HKO adapter is unavailable")),
                 };
                 self.complete_evidence_cycle(
@@ -189,172 +154,237 @@ impl WeatherPublicIngestWorker {
                 )
                 .await;
             }
-        }
-        for binding in &self.bindings.airnow_pm25_reporting_areas {
-            let area_key = format!("{}:{}", binding.state, binding.area);
-            let instrument = DomainInstrumentKey::airnow_pm25_observation(&area_key);
-            let result = match self.airnow.as_ref() {
-                Some(source) => {
-                    self.ingest_airnow(source, &binding.area, &binding.state, &binding.timezone)
-                        .await
+            for binding in &self.bindings.hko_daily_temperature {
+                let station = match HkoStation::parse(&binding.station) {
+                    Ok(station) => station,
+                    Err(error) => {
+                        failures.push(format!(
+                            "hko_open_data/{}: invalid station: {error}",
+                            binding.station
+                        ));
+                        continue;
+                    }
+                };
+                for statistic in [
+                    WeatherTemperatureStatistic::Maximum,
+                    WeatherTemperatureStatistic::Minimum,
+                ] {
+                    let instrument =
+                        DomainInstrumentKey::hko_daily_temperature(&station, statistic);
+                    let result = match self.hko.as_ref() {
+                        Some(source) => {
+                            self.ingest_hko_daily_temperature(
+                                source,
+                                &station,
+                                statistic,
+                                &binding.timezone,
+                            )
+                            .await
+                        }
+                        None => Err(QuantError::config("HKO adapter is unavailable")),
+                    };
+                    self.complete_evidence_cycle(
+                        DomainSourceId::hko_open_data(),
+                        instrument,
+                        result,
+                        failures,
+                    )
+                    .await;
                 }
-                None => Err(QuantError::config("AirNow adapter is unavailable")),
-            };
-            self.complete_evidence_cycle(DomainSourceId::airnow(), instrument, result, failures)
-                .await;
+            }
         }
-        for binding in &self.bindings.airnow_pm25_sites {
-            let instrument = DomainInstrumentKey::airnow_pm25_site(&binding.aqsid);
-            let result = match self.airnow.as_ref() {
-                Some(source) => self.ingest_airnow_pm25_site(source, binding).await,
-                None => Err(QuantError::config("AirNow adapter is unavailable")),
-            };
-            self.complete_evidence_cycle(DomainSourceId::airnow(), instrument, result, failures)
-                .await;
-        }
-    }
-
-    async fn run_hazard_evidence(&self, failures: &mut Vec<String>) {
-        for binding in &self.bindings.tornado_regions {
-            let spc_instrument = DomainInstrumentKey::spc_tornado(&binding.region_id);
-            let spc_result = match self.tornado.as_ref() {
-                Some(source) => {
-                    self.ingest_spc(source, &binding.region_id, &binding.scope)
-                        .await
-                }
-                None => Err(QuantError::config("SPC adapter is unavailable")),
-            };
-            self.complete_evidence_cycle(
-                DomainSourceId::spc_storm_reports(),
-                spc_instrument,
-                spc_result,
-                failures,
-            )
-            .await;
-
-            if matches!(&binding.scope, TornadoRegionScopeConfig::UnitedStates) {
-                let series_result = match self.tornado.as_ref() {
-                    Some(source) => self.ingest_ncei_series(source, &binding.timezone).await,
-                    None => Err(QuantError::config("NCEI adapter is unavailable")),
+        if self.airnow_config.enabled {
+            for binding in &self.bindings.airnow_pm25_reporting_areas {
+                let area_key = format!("{}:{}", binding.state, binding.area);
+                let instrument = DomainInstrumentKey::airnow_pm25_observation(&area_key);
+                let result = match self.airnow.as_ref() {
+                    Some(source) => {
+                        self.ingest_airnow(source, &binding.area, &binding.state, &binding.timezone)
+                            .await
+                    }
+                    None => Err(QuantError::config("AirNow adapter is unavailable")),
                 };
                 self.complete_evidence_cycle(
-                    DomainSourceId::ncei_tornado_time_series(),
-                    DomainInstrumentKey::ncei_tornado_time_series(),
-                    series_result,
+                    DomainSourceId::airnow(),
+                    instrument,
+                    result,
                     failures,
                 )
                 .await;
-            } else {
-                let ncei_result = match self.tornado.as_ref() {
-                    Some(source) => {
-                        self.ingest_ncei(
-                            source,
-                            &binding.region_id,
-                            &binding.scope,
-                            &binding.timezone,
-                        )
-                        .await
-                    }
-                    None => Err(QuantError::config("NCEI adapter is unavailable")),
+            }
+            for binding in &self.bindings.airnow_pm25_sites {
+                let instrument = DomainInstrumentKey::airnow_pm25_site(&binding.aqsid);
+                let result = match self.airnow.as_ref() {
+                    Some(source) => self.ingest_airnow_pm25_site(source, binding).await,
+                    None => Err(QuantError::config("AirNow adapter is unavailable")),
                 };
                 self.complete_evidence_cycle(
-                    DomainSourceId::ncei_storm_events(),
-                    DomainInstrumentKey::ncei_tornado(&binding.region_id),
-                    ncei_result,
+                    DomainSourceId::airnow(),
+                    instrument,
+                    result,
                     failures,
                 )
                 .await;
             }
         }
-        if let Some(source) = self.nhc.as_ref()
-            && let Err(error) = self.ingest_nhc_advisories(source).await
-        {
-            failures.push(format!("nhc_advisory/dynamic: {error}"));
-        }
-        for binding in &self.bindings.nhc_historical_storms {
-            let instrument = DomainInstrumentKey::nhc_hurdat2(&binding.basin, &binding.storm_id);
-            let result = match self.nhc.as_ref() {
-                Some(source) => {
-                    self.ingest_nhc_best_track(source, &binding.basin, &binding.storm_id)
-                        .await
+    }
+
+    async fn run_hazard_evidence(&self, failures: &mut Vec<String>) {
+        if self.tornado_config.enabled {
+            for binding in &self.bindings.tornado_regions {
+                let spc_instrument = DomainInstrumentKey::spc_tornado(&binding.region_id);
+                let spc_result = match self.tornado.as_ref() {
+                    Some(source) => {
+                        self.ingest_spc(source, &binding.region_id, &binding.scope)
+                            .await
+                    }
+                    None => Err(QuantError::config("SPC adapter is unavailable")),
+                };
+                self.complete_evidence_cycle(
+                    DomainSourceId::spc_storm_reports(),
+                    spc_instrument,
+                    spc_result,
+                    failures,
+                )
+                .await;
+
+                if matches!(&binding.scope, TornadoRegionScopeConfig::UnitedStates) {
+                    let series_result = match self.tornado.as_ref() {
+                        Some(source) => self.ingest_ncei_series(source, &binding.timezone).await,
+                        None => Err(QuantError::config("NCEI adapter is unavailable")),
+                    };
+                    self.complete_evidence_cycle(
+                        DomainSourceId::ncei_tornado_time_series(),
+                        DomainInstrumentKey::ncei_tornado_time_series(),
+                        series_result,
+                        failures,
+                    )
+                    .await;
+                } else {
+                    let ncei_result = match self.tornado.as_ref() {
+                        Some(source) => {
+                            self.ingest_ncei(
+                                source,
+                                &binding.region_id,
+                                &binding.scope,
+                                &binding.timezone,
+                            )
+                            .await
+                        }
+                        None => Err(QuantError::config("NCEI adapter is unavailable")),
+                    };
+                    self.complete_evidence_cycle(
+                        DomainSourceId::ncei_storm_events(),
+                        DomainInstrumentKey::ncei_tornado(&binding.region_id),
+                        ncei_result,
+                        failures,
+                    )
+                    .await;
                 }
-                None => Err(QuantError::config("HURDAT2 adapter is unavailable")),
-            };
-            self.complete_evidence_cycle(
-                DomainSourceId::nhc_hurdat2(),
-                instrument,
-                result,
-                failures,
-            )
-            .await;
+            }
+        }
+        if self.nhc_config.enabled {
+            if let Some(source) = self.nhc.as_ref()
+                && let Err(error) = self.ingest_nhc_advisories(source).await
+            {
+                failures.push(format!("nhc_advisory/dynamic: {error}"));
+            }
+            for binding in &self.bindings.nhc_historical_storms {
+                let instrument =
+                    DomainInstrumentKey::nhc_hurdat2(&binding.basin, &binding.storm_id);
+                let result = match self.nhc.as_ref() {
+                    Some(source) => {
+                        self.ingest_nhc_best_track(source, &binding.basin, &binding.storm_id)
+                            .await
+                    }
+                    None => Err(QuantError::config("HURDAT2 adapter is unavailable")),
+                };
+                self.complete_evidence_cycle(
+                    DomainSourceId::nhc_hurdat2(),
+                    instrument,
+                    result,
+                    failures,
+                )
+                .await;
+            }
+            if self.nhc.is_none() {
+                failures.push("nhc_advisory/dynamic: NHC adapter is unavailable".to_owned());
+            }
         }
     }
 
     async fn run_climate_evidence(&self, failures: &mut Vec<String>) {
-        let gistemp_result = match self.gistemp.as_ref() {
-            Some(source) => self.ingest_gistemp_monthly(source).await,
-            None => Err(QuantError::config("NASA GISTEMP adapter is unavailable")),
-        };
-        self.complete_evidence_cycle(
-            DomainSourceId::nasa_gistemp(),
-            DomainInstrumentKey::nasa_gistemp_loti(),
-            gistemp_result,
-            failures,
-        )
-        .await;
-        let gistemp_annual_result = match self.gistemp.as_ref() {
-            Some(source) => self.ingest_gistemp_annual(source).await,
-            None => Err(QuantError::config("NASA GISTEMP adapter is unavailable")),
-        };
-        self.complete_evidence_cycle(
-            DomainSourceId::nasa_gistemp(),
-            DomainInstrumentKey::nasa_gistemp_loti_annual(),
-            gistemp_annual_result,
-            failures,
-        )
-        .await;
-        for hemisphere in [SeaIceHemisphere::North, SeaIceHemisphere::South] {
-            let daily_instrument = DomainInstrumentKey::nsidc_daily_extent(hemisphere.as_str());
-            let daily_result = match self.nsidc.as_ref() {
-                Some(source) => self.ingest_nsidc_daily(source, hemisphere).await,
-                None => Err(QuantError::config("NSIDC adapter is unavailable")),
+        if self.gistemp_config.enabled {
+            let gistemp_result = match self.gistemp.as_ref() {
+                Some(source) => self.ingest_gistemp_monthly(source).await,
+                None => Err(QuantError::config("NASA GISTEMP adapter is unavailable")),
             };
             self.complete_evidence_cycle(
-                DomainSourceId::nsidc_sea_ice_index(),
-                daily_instrument,
-                daily_result,
+                DomainSourceId::nasa_gistemp(),
+                DomainInstrumentKey::nasa_gistemp_loti(),
+                gistemp_result,
                 failures,
             )
             .await;
-            let monthly_instrument = DomainInstrumentKey::nsidc_monthly_extent(hemisphere.as_str());
-            let monthly_result = match self.nsidc.as_ref() {
-                Some(source) => self.ingest_nsidc_monthly(source, hemisphere).await,
-                None => Err(QuantError::config("NSIDC adapter is unavailable")),
+            let gistemp_annual_result = match self.gistemp.as_ref() {
+                Some(source) => self.ingest_gistemp_annual(source).await,
+                None => Err(QuantError::config("NASA GISTEMP adapter is unavailable")),
             };
             self.complete_evidence_cycle(
-                DomainSourceId::nsidc_sea_ice_index(),
-                monthly_instrument,
-                monthly_result,
+                DomainSourceId::nasa_gistemp(),
+                DomainInstrumentKey::nasa_gistemp_loti_annual(),
+                gistemp_annual_result,
                 failures,
             )
             .await;
         }
-        for binding in &self.bindings.nws_wind_stations {
-            let station = match IcaoStation::parse(&binding.station) {
-                Ok(station) => station,
-                Err(error) => {
-                    failures.push(format!(
-                        "nws_observation/{}: invalid station: {error}",
-                        binding.station
-                    ));
-                    continue;
-                }
-            };
-            let result = match self.nws.as_ref() {
-                Some(source) => self.ingest_nws(source, &station, &binding.timezone).await,
-                None => Err(QuantError::config("NWS adapter is unavailable")),
-            };
-            self.complete_nws_evidence(&station, result, failures).await;
+        if self.nsidc_config.enabled {
+            for hemisphere in [SeaIceHemisphere::North, SeaIceHemisphere::South] {
+                let daily_instrument = DomainInstrumentKey::nsidc_daily_extent(hemisphere.as_str());
+                let daily_result = match self.nsidc.as_ref() {
+                    Some(source) => self.ingest_nsidc_daily(source, hemisphere).await,
+                    None => Err(QuantError::config("NSIDC adapter is unavailable")),
+                };
+                self.complete_evidence_cycle(
+                    DomainSourceId::nsidc_sea_ice_index(),
+                    daily_instrument,
+                    daily_result,
+                    failures,
+                )
+                .await;
+                let monthly_instrument =
+                    DomainInstrumentKey::nsidc_monthly_extent(hemisphere.as_str());
+                let monthly_result = match self.nsidc.as_ref() {
+                    Some(source) => self.ingest_nsidc_monthly(source, hemisphere).await,
+                    None => Err(QuantError::config("NSIDC adapter is unavailable")),
+                };
+                self.complete_evidence_cycle(
+                    DomainSourceId::nsidc_sea_ice_index(),
+                    monthly_instrument,
+                    monthly_result,
+                    failures,
+                )
+                .await;
+            }
+        }
+        if self.nws_config.enabled {
+            for binding in &self.bindings.nws_wind_stations {
+                let station = match IcaoStation::parse(&binding.station) {
+                    Ok(station) => station,
+                    Err(error) => {
+                        failures.push(format!(
+                            "nws_observation/{}: invalid station: {error}",
+                            binding.station
+                        ));
+                        continue;
+                    }
+                };
+                let result = match self.nws.as_ref() {
+                    Some(source) => self.ingest_nws(source, &station, &binding.timezone).await,
+                    None => Err(QuantError::config("NWS adapter is unavailable")),
+                };
+                self.complete_nws_evidence(&station, result, failures).await;
+            }
         }
     }
 
@@ -379,6 +409,9 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_hko_rainfall_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        if !self.hko_config.enabled {
+            return;
+        }
         loop {
             for binding in &self.bindings.hko_rainfall {
                 let instrument = DomainInstrumentKey::hko_daily_rainfall(&binding.station_key);
@@ -401,6 +434,9 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_hko_temperature_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        if !self.hko_config.enabled {
+            return;
+        }
         loop {
             for binding in &self.bindings.hko_daily_temperature {
                 let station = match HkoStation::parse(&binding.station) {
@@ -574,6 +610,9 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_airnow_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        if !self.airnow_config.enabled {
+            return;
+        }
         loop {
             for binding in &self.bindings.airnow_pm25_reporting_areas {
                 let area_key = format!("{}:{}", binding.state, binding.area);
@@ -798,6 +837,9 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_spc_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        if !self.tornado_config.enabled {
+            return;
+        }
         loop {
             for binding in &self.bindings.tornado_regions {
                 let instrument = DomainInstrumentKey::spc_tornado(&binding.region_id);
@@ -859,6 +901,9 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_ncei_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        if !self.tornado_config.enabled {
+            return;
+        }
         loop {
             for binding in &self.bindings.tornado_regions {
                 if !matches!(&binding.scope, TornadoRegionScopeConfig::State { .. }) {
@@ -892,6 +937,9 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_ncei_series_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        if !self.tornado_config.enabled {
+            return;
+        }
         let source_id = DomainSourceId::ncei_tornado_time_series();
         let instrument = DomainInstrumentKey::ncei_tornado_time_series();
         loop {
@@ -1069,6 +1117,9 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_nhc_advisory_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        if !self.nhc_config.enabled {
+            return;
+        }
         loop {
             if let Some(source) = self.nhc.as_ref()
                 && let Err(error) = self.ingest_nhc_advisories(source).await
@@ -1121,6 +1172,9 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_nhc_track_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        if !self.nhc_config.enabled {
+            return;
+        }
         loop {
             for binding in &self.bindings.nhc_historical_storms {
                 let instrument =
@@ -1183,6 +1237,9 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_gistemp_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        if !self.gistemp_config.enabled {
+            return;
+        }
         let source_id = DomainSourceId::nasa_gistemp();
         loop {
             let monthly_result = match self.gistemp.as_ref() {
@@ -1279,6 +1336,9 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_nsidc_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        if !self.nsidc_config.enabled {
+            return;
+        }
         loop {
             for hemisphere in [SeaIceHemisphere::North, SeaIceHemisphere::South] {
                 let daily_instrument = DomainInstrumentKey::nsidc_daily_extent(hemisphere.as_str());
@@ -1398,6 +1458,9 @@ impl WeatherPublicIngestWorker {
     }
 
     async fn run_nws_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        if !self.nws_config.enabled {
+            return;
+        }
         loop {
             for binding in &self.bindings.nws_wind_stations {
                 let station = match IcaoStation::parse(&binding.station) {

@@ -612,7 +612,7 @@ impl EntryConditionWorker {
             let policy = self
                 .runtime_config
                 .current()
-                .operational_control
+                .operations_policy
                 .entry_condition
                 .clone();
             if let Err(error) = self.run_pass(Utc::now(), &policy).await {
@@ -697,7 +697,7 @@ impl EntryConditionWorker {
         let policy = self
             .runtime_config
             .current()
-            .operational_control
+            .operations_policy
             .entry_condition
             .clone();
         let stop_renewal = CancellationToken::new();

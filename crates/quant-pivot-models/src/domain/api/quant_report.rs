@@ -18,10 +18,11 @@ use crate::{
         api::{DecisionBoundaryEvidenceView, ModelRouteEvidenceView},
         pagination::PageRequest,
         quant::{
-            RecommendationChangedField, RecommendationDelta, RecommendationDiffSnapshot,
-            RecommendationReportInfo, ReportCurrentHealthInfo, ReportDiff, ReportFactDeliveryInfo,
-            ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo,
-            ReportScheduleStateInfo,
+            PortfolioDecisionResult, RecommendationChangedField, RecommendationDelta,
+            RecommendationDiffSnapshot, RecommendationEconomics, RecommendationReportInfo,
+            ReportCurrentHealthInfo, ReportDiff, ReportFactDeliveryInfo, ReportRunInfo,
+            ReportScheduleGapInfo, ReportScheduleHealthInfo, ReportScheduleStateInfo,
+            RepresentedRouteSet, RouteCandidateFunnel, RouteModelLineage, RouteRunOutcome,
         },
     },
     enums::quant::{
@@ -29,14 +30,16 @@ use crate::{
         RecommendationReportStatus, ReportFactDeliveryStatus, ReportKind, ReportRunStatus,
         ReportRunTerminalReason, ReportScheduleGapReason, ReportTriggerKind,
     },
+    runtime_config::BuyModelRoute,
     types::{
-        AccountSnapshotId, Bps, ContentHash, CorrelationId, DecisionPolicySnapshotId,
-        DiagnosticCode, EligibilitySummary, EventId, ExecutionEligibility, FeatureVectorId,
-        MarketId, MarketSelectionId, ModelRunId, ModelVersionId, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
-        RecommendationTradePlan, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
-        ReportRunId, ReportScheduleGapId, ReportScheduleId, ReportSummary, ReportTriggerKey,
-        ResearchProfileId, ResearchProfileRef, SignalCandidateId, TokenId, Usd, WorkerId,
+        AccountSnapshotId, ContentHash, CorrelationId, DecisionPolicySnapshotId, DiagnosticCode,
+        EligibilitySummary, EventId, ExecutionEligibility, FeatureVectorId, MarketId,
+        MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId,
+        PortfolioScenarioArtifactId, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationReportId, RecommendationTradePlan, ReportFunnelDiagnostics,
+        ReportFunnelReason, ReportFunnelStage, ReportRouteRunId, ReportRunId, ReportScheduleGapId,
+        ReportScheduleId, ReportSummary, ReportTriggerKey, SignalCandidateId, TokenId, Usd,
+        WorkerId,
     },
 };
 
@@ -44,8 +47,8 @@ use crate::{
 #[derive(Debug, Clone, Serialize)]
 pub struct QuantReportView {
     pub recommendation_report_id: RecommendationReportId,
-    pub profile_id: ResearchProfileId,
-    pub profile_ref: ResearchProfileRef,
+    pub represented_routes: RepresentedRouteSet,
+    pub scenario_artifact_id: Option<PortfolioScenarioArtifactId>,
     pub report_kind: ReportKind,
     pub status: RecommendationReportStatus,
     pub runtime_mode: QuantRuntimeMode,
@@ -71,8 +74,8 @@ impl From<RecommendationReportInfo> for QuantReportView {
     fn from(info: RecommendationReportInfo) -> Self {
         Self {
             recommendation_report_id: info.recommendation_report_id,
-            profile_id: info.profile_id,
-            profile_ref: info.profile_ref,
+            represented_routes: info.represented_routes_json,
+            scenario_artifact_id: info.scenario_artifact_id,
             report_kind: info.report_kind,
             status: info.status,
             runtime_mode: info.runtime_mode,
@@ -101,11 +104,9 @@ impl From<RecommendationReportInfo> for QuantReportView {
 #[derive(Debug, Clone, Serialize)]
 pub struct QuantReportDetailView {
     pub recommendation_report_id: RecommendationReportId,
-    pub profile_id: ResearchProfileId,
-    pub profile_ref: ResearchProfileRef,
+    pub report_run_id: ReportRunId,
     pub report_kind: ReportKind,
     pub decision_at: DateTime<Utc>,
-    pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
     pub top_n: i32,
     pub status: RecommendationReportStatus,
@@ -113,9 +114,12 @@ pub struct QuantReportDetailView {
     pub capital_base_usd: Usd,
     pub account_snapshot_ref: AccountSnapshotId,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    pub model_run_id: Option<ModelRunId>,
-    pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,
+    pub portfolio_plan_id: PortfolioPlanId,
+    pub portfolio_decision: PortfolioDecisionResult,
+    pub represented_routes: RepresentedRouteSet,
+    pub scenario_artifact_id: Option<PortfolioScenarioArtifactId>,
+    pub scenario_artifact_hash: Option<ContentHash>,
     pub summary: ReportSummary,
     pub fact_delivery: Option<ReportFactDeliveryView>,
     pub run: Option<ReportRunView>,
@@ -131,42 +135,6 @@ pub struct QuantReportDetailView {
     pub created_at: DateTime<Utc>,
 }
 
-impl From<RecommendationReportInfo> for QuantReportDetailView {
-    fn from(info: RecommendationReportInfo) -> Self {
-        Self {
-            recommendation_report_id: info.recommendation_report_id,
-            profile_id: info.profile_id,
-            profile_ref: info.profile_ref,
-            report_kind: info.report_kind,
-            decision_at: info.decision_at,
-            horizon_secs: info.horizon_secs,
-            runtime_mode: info.runtime_mode,
-            top_n: info.top_n,
-            status: info.status,
-            account_source: info.account_source,
-            capital_base_usd: info.capital_base_usd,
-            account_snapshot_ref: info.account_snapshot_ref,
-            decision_policy_snapshot_id: info.decision_policy_snapshot_id,
-            model_run_id: info.model_run_id,
-            model_version_id: info.model_version_id,
-            market_selection_id: info.market_selection_id,
-            summary: info.summary_json,
-            fact_delivery: None,
-            run: None,
-            published_at: info.published_at,
-            valid_until: info.valid_until,
-            successor_report_id: info.successor_report_id,
-            predecessor_report_id: None,
-            superseded_at: info.superseded_at,
-            obsoleted_at: info.obsoleted_at,
-            revoked_at: info.revoked_at,
-            expired_at: info.expired_at,
-            status_reason: info.status_reason,
-            created_at: info.created_at,
-        }
-    }
-}
-
 impl QuantReportDetailView {
     #[must_use]
     pub fn from_parts(
@@ -174,12 +142,40 @@ impl QuantReportDetailView {
         delivery: Option<ReportFactDeliveryInfo>,
         run: Option<ReportRunInfo>,
         predecessor_report_id: Option<RecommendationReportId>,
+        portfolio_decision: PortfolioDecisionResult,
     ) -> Self {
-        let mut view = Self::from(info);
-        view.fact_delivery = delivery.map(Into::into);
-        view.run = run.map(Into::into);
-        view.predecessor_report_id = predecessor_report_id;
-        view
+        Self {
+            recommendation_report_id: info.recommendation_report_id,
+            report_run_id: info.report_run_id,
+            report_kind: info.report_kind,
+            decision_at: info.decision_at,
+            runtime_mode: info.runtime_mode,
+            top_n: info.top_n,
+            status: info.status,
+            account_source: info.account_source,
+            capital_base_usd: info.capital_base_usd,
+            account_snapshot_ref: info.account_snapshot_ref,
+            decision_policy_snapshot_id: info.decision_policy_snapshot_id,
+            market_selection_id: info.market_selection_id,
+            portfolio_plan_id: info.portfolio_plan_id,
+            portfolio_decision,
+            represented_routes: info.represented_routes_json,
+            scenario_artifact_id: info.scenario_artifact_id,
+            scenario_artifact_hash: info.scenario_artifact_hash,
+            summary: info.summary_json,
+            fact_delivery: delivery.map(Into::into),
+            run: run.map(Into::into),
+            published_at: info.published_at,
+            valid_until: info.valid_until,
+            successor_report_id: info.successor_report_id,
+            predecessor_report_id,
+            superseded_at: info.superseded_at,
+            obsoleted_at: info.obsoleted_at,
+            revoked_at: info.revoked_at,
+            expired_at: info.expired_at,
+            status_reason: info.status_reason,
+            created_at: info.created_at,
+        }
     }
 }
 
@@ -237,9 +233,10 @@ pub struct QuantReportFunnelView {
 pub struct ReportFunnelMarketView {
     pub recommendation_report_id: RecommendationReportId,
     pub market_selection_id: MarketSelectionId,
-    pub profile_ref: ResearchProfileRef,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    pub model_version_id: ModelVersionId,
+    pub report_route_run_id: Option<ReportRouteRunId>,
+    pub route: Option<BuyModelRoute>,
+    pub model_version_id: Option<ModelVersionId>,
     pub model_run_id: Option<ModelRunId>,
     pub market_id: MarketId,
     pub event_id: EventId,
@@ -262,25 +259,12 @@ pub struct ReportFunnelMarketListQuery {
     pub page: PageRequest,
 }
 
-/// Subject whose durable evidence is projected by report diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReportDiagnosticsSubject {
-    /// A real serving model run; the report stores its exact `model_run_id`.
-    ModelRun,
-    /// A committed report that intentionally stopped before model inference.
-    PreInferenceReport,
-}
-
-/// Durable serving diagnostics through the last stage actually executed.
+/// Durable evidence counts through one exact execution stage.
 #[derive(Debug, Clone, Serialize)]
-pub struct QuantReportDiagnosticsView {
-    pub subject: ReportDiagnosticsSubject,
+pub struct ReportEvidenceDiagnosticsView {
     pub stage_ceiling: FeatureParityStage,
     pub evidence_complete: bool,
-    pub decision_boundary: Option<DecisionBoundaryEvidenceView>,
     pub model_route: Option<ModelRouteEvidenceView>,
-    /// Selection is committed for every report, including an empty selection.
     pub selection_count: u64,
     /// `None` means the feature/capture stage was not executed or its evidence
     /// is unavailable; it is never encoded as a synthetic zero.
@@ -294,13 +278,32 @@ pub struct QuantReportDiagnosticsView {
     pub model_input_count: Option<u64>,
 }
 
+/// Route-owned model lineage and serving evidence inside one global report.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportRouteDiagnosticsView {
+    pub report_route_run_id: ReportRouteRunId,
+    pub route: BuyModelRoute,
+    pub outcome: RouteRunOutcome,
+    pub lineage: Option<RouteModelLineage>,
+    pub funnel: RouteCandidateFunnel,
+    pub evidence: ReportEvidenceDiagnosticsView,
+}
+
+/// Global report evidence plus every Route-owned serving path.
+#[derive(Debug, Clone, Serialize)]
+pub struct QuantReportDiagnosticsView {
+    pub decision_boundary: DecisionBoundaryEvidenceView,
+    pub global: ReportEvidenceDiagnosticsView,
+    pub routes: Vec<ReportRouteDiagnosticsView>,
+}
+
 /// Paginated filter for listing recommendation reports.
 ///
 /// `from` / `to` bound the report `decision_at`; the pagination window is the shared
 /// [`PageRequest`], flattened so the query string stays flat.
 #[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct QuantReportListQuery {
-    pub profile_id: Option<ResearchProfileId>,
+    pub route: Option<BuyModelRoute>,
     pub kind: Option<ReportKind>,
     pub status: Option<RecommendationReportStatus>,
     pub runtime_mode: Option<QuantRuntimeMode>,
@@ -314,7 +317,6 @@ pub struct QuantReportListQuery {
 /// Required scope of the unique current-report authority.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CurrentReportQuery {
-    pub profile_id: ResearchProfileId,
     pub kind: ReportKind,
 }
 
@@ -514,7 +516,6 @@ pub struct ReportScheduleHealthView {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportCurrentHealthView {
     pub recommendation_report_id: RecommendationReportId,
-    pub profile_id: ResearchProfileId,
     pub report_kind: ReportKind,
     pub published_at: Option<DateTime<Utc>>,
     pub valid_until: Option<DateTime<Utc>>,
@@ -524,7 +525,6 @@ impl From<ReportCurrentHealthInfo> for ReportCurrentHealthView {
     fn from(info: ReportCurrentHealthInfo) -> Self {
         Self {
             recommendation_report_id: info.recommendation_report_id,
-            profile_id: info.profile_id,
             report_kind: info.report_kind,
             published_at: info.published_at,
             valid_until: info.valid_until,
@@ -621,11 +621,7 @@ impl From<RecommendationDelta> for RecommendationDeltaView {
 pub struct RecommendationDiffSnapshotView {
     pub recommendation_id: RecommendationId,
     pub rank: i32,
-    pub composite_score: Probability,
-    pub risk_adjusted_score: Probability,
-    pub confidence: Probability,
-    pub expected_return_bps: Bps,
-    pub downside_bps: Bps,
+    pub economics: RecommendationEconomics,
     pub valid_from: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
     pub execution_eligibility: ExecutionEligibility,
@@ -638,11 +634,7 @@ impl From<RecommendationDiffSnapshot> for RecommendationDiffSnapshotView {
         Self {
             recommendation_id: snapshot.recommendation_id,
             rank: snapshot.rank,
-            composite_score: snapshot.composite_score,
-            risk_adjusted_score: snapshot.risk_adjusted_score,
-            confidence: snapshot.confidence,
-            expected_return_bps: snapshot.expected_return_bps,
-            downside_bps: snapshot.downside_bps,
+            economics: snapshot.economics,
             valid_from: snapshot.valid_from,
             valid_until: snapshot.valid_until,
             execution_eligibility: snapshot.execution_eligibility,
@@ -657,15 +649,16 @@ impl From<RecommendationDiffSnapshot> for RecommendationDiffSnapshotView {
 #[serde(rename_all = "snake_case")]
 pub enum RecommendationChangedFieldView {
     Rank,
-    CompositeScore,
-    RiskAdjustedScore,
-    Confidence,
-    ExpectedReturn,
-    Downside,
+    ProfitProbability,
+    NominalExpectedNetUsd,
+    RobustExpectedNetUsd,
+    MaximumLossUsd,
+    CvarContributionUsd,
+    CapitalOccupancyUsdHours,
+    MarginalPortfolioValueUsd,
     Sizing,
     Validity,
     Eligibility,
-    TradePlanAvailability,
     Entry,
     Exit,
     FactorBreakdown,
@@ -675,15 +668,18 @@ impl From<RecommendationChangedField> for RecommendationChangedFieldView {
     fn from(field: RecommendationChangedField) -> Self {
         match field {
             RecommendationChangedField::Rank => Self::Rank,
-            RecommendationChangedField::CompositeScore => Self::CompositeScore,
-            RecommendationChangedField::RiskAdjustedScore => Self::RiskAdjustedScore,
-            RecommendationChangedField::Confidence => Self::Confidence,
-            RecommendationChangedField::ExpectedReturn => Self::ExpectedReturn,
-            RecommendationChangedField::Downside => Self::Downside,
+            RecommendationChangedField::ProfitProbability => Self::ProfitProbability,
+            RecommendationChangedField::NominalExpectedNetUsd => Self::NominalExpectedNetUsd,
+            RecommendationChangedField::RobustExpectedNetUsd => Self::RobustExpectedNetUsd,
+            RecommendationChangedField::MaximumLossUsd => Self::MaximumLossUsd,
+            RecommendationChangedField::CvarContributionUsd => Self::CvarContributionUsd,
+            RecommendationChangedField::CapitalOccupancyUsdHours => Self::CapitalOccupancyUsdHours,
+            RecommendationChangedField::MarginalPortfolioValueUsd => {
+                Self::MarginalPortfolioValueUsd
+            }
             RecommendationChangedField::Sizing => Self::Sizing,
             RecommendationChangedField::Validity => Self::Validity,
             RecommendationChangedField::Eligibility => Self::Eligibility,
-            RecommendationChangedField::TradePlanAvailability => Self::TradePlanAvailability,
             RecommendationChangedField::Entry => Self::Entry,
             RecommendationChangedField::Exit => Self::Exit,
             RecommendationChangedField::FactorBreakdown => Self::FactorBreakdown,

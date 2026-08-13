@@ -1,5 +1,11 @@
 # quant-pivot Boot 基线、Config 治理与控制台 UI/UX 重构计划
 
+> **Historical evidence only — not an implementation contract.** 本文件记录此前 boot/config 重构的决策与
+> 验收历史；所有仍涉及 Runtime resource、Deploy loader/TOML、report partition、portfolio sizing、UI config
+> editor 或截图门禁的规范，均不得从本文实施。唯一当前契约是
+> [`quant-pivot-global-portfolio-runtime-deploy-config-ui-ux-closure-plan.md`](quant-pivot-global-portfolio-runtime-deploy-config-ui-ux-closure-plan.md)
+> 及其链接的 `docs/plans/quant-pivot/` 正式架构文档。
+
 ## 一、目标与当前结论
 
 本次采用破坏式 clean-break 重构，不保留旧配置解析器、版本兼容、字段别名或 re-export。仓库尚未正式生产运行，因此所有系统自有版本、数据库迁移和配置结构直接收敛为首个生产候选基线。

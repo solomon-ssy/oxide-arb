@@ -4,8 +4,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    quant_feedback_cycle, quant_model_version, quant_order_intent, quant_recommendation,
-    quant_recommendation_report,
+    quant_feedback_cycle, quant_model_version, quant_order_intent, quant_report_route_run,
 };
 use crate::types::{
     ContentHash, ResearchProfileArtifactId, ResearchProfileId, ResearchProfileSpec,
@@ -30,10 +29,8 @@ pub struct Model {
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTime<Utc>,
 
-    #[sea_orm(has_many, relation_enum = "RecommendationReport")]
-    pub recommendation_report: HasMany<quant_recommendation_report::Entity>,
-    #[sea_orm(has_many, relation_enum = "Recommendation")]
-    pub recommendation: HasMany<quant_recommendation::Entity>,
+    #[sea_orm(has_many, relation_enum = "ReportRouteRun")]
+    pub report_route_run: HasMany<quant_report_route_run::Entity>,
     #[sea_orm(has_many, relation_enum = "ModelVersion")]
     pub model_version: HasMany<quant_model_version::Entity>,
     #[sea_orm(has_many, relation_enum = "OrderIntent")]

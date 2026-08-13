@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, iter};
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
+use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -16,22 +17,20 @@ use crate::{
     runtime_config::{
         BuyModelRoute,
         wire::{
-            CapitalPolicy, CorrelationConfig, DecimalValue, EntryOrderPolicy,
-            ExecutionBreakerConfig, ExitMonitorPolicy, FeatureFamily, FeatureStalenessPolicy,
-            KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef, NeutralizeDimension,
-            PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy, ReportDeliveryPolicy,
-            ScheduleCadence, SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
+            DecimalValue, FeatureFamily, FeatureStalenessPolicy, ModelVersionRef,
+            NeutralizeDimension, RankLossKind, ReportDeliveryPolicy, ScheduleCadence,
+            SmallCrossSectionPolicy, TrainingOptimizerKind,
         },
     },
     types::{
-        FeedbackCycleId, ModelVersionId, PolicyBundleGeneration, ReportScheduleId, SchemaVersion,
-        Usd,
+        ContentHash, FeedbackCycleId, ModelVersionId, PolicyBundleGeneration,
+        PortfolioScenarioModelArtifactId, ReportScheduleId, SchemaVersion, Usd,
     },
 };
 
 /// Market selection selection policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SelectionConfig {
     /// Category slugs eligible for quant reports.
     pub enabled_categories: Vec<MarketCategory>,
@@ -65,7 +64,7 @@ impl Default for SelectionConfig {
 
 /// Data quality thresholds for PIT features and facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct DataQualityConfig {
     /// Maximum age for a book snapshot before it is stale.
     pub max_book_age_ms: u64,
@@ -591,8 +590,6 @@ pub struct FactorsConfig {
     pub sell_scorer: SellScorerConfig,
     /// Minimum confidence for a factor to contribute to scoring.
     pub min_factor_confidence: DecimalValue,
-    /// Missing factor handling policy.
-    pub missing_factor_policy: MissingFactorPolicy,
     /// Cross-sectional normalization parameters.
     pub normalization: FactorNormalizationConfig,
     /// Small-cross-section / cross-section policy.
@@ -615,7 +612,6 @@ impl Default for FactorsConfig {
             factor_head: FactorHeadConfig::default(),
             sell_scorer: SellScorerConfig::default(),
             min_factor_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
-            missing_factor_policy: MissingFactorPolicy::ZeroWeight,
             normalization: FactorNormalizationConfig::default(),
             cross_section: FactorCrossSectionConfig::default(),
             orthogonalize: FactorOrthogonalizeConfig::default(),
@@ -778,7 +774,7 @@ impl Default for DomainConfig {
 
 /// Active and shadow model references.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ModelCalibrationConfig {
     /// Default calibrator fitting method (`isotonic` or `platt`).
     pub method: CalibrationMethod,
@@ -816,10 +812,15 @@ pub enum ModelBindingSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelBinding {
+    /// Immutable model version selected for this exact Route and serving role.
     pub model_version_id: ModelVersionId,
+    /// Governance provenance that created the binding.
     pub source: ModelBindingSource,
+    /// Database decision time at which the binding became visible.
     pub bound_at: DateTime<Utc>,
+    /// Policy-bundle revision atomically committed with this binding.
     pub config_revision: PolicyBundleGeneration,
+    /// Monotonic Route-serving generation used to reject stale readers.
     pub generation: u64,
 }
 
@@ -846,14 +847,35 @@ impl ModelBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BuyRouteBinding {
+    /// Active champion used for production inference on this Route.
     pub champion: ModelBinding,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional governed challenger evaluated in shadow without serving trades.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub shadow: Option<ModelBinding>,
+}
+
+/// Exact promoted scenario-generation model for one ordered represented Route set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioScenarioModelArtifactBinding {
+    pub portfolio_scenario_model_artifact_id: PortfolioScenarioModelArtifactId,
+    pub ordered_routes: Vec<BuyModelRoute>,
+    pub route_set_digest: ContentHash,
+    pub serving_contract_digest: ContentHash,
+    pub calibration_contract_digest: ContentHash,
+    pub trade_policy_contract_digest: ContentHash,
+    pub scenario_model_schema_version: SchemaVersion,
+    /// Digest of the strictly ordered capital-time boundaries. Per-bucket USD
+    /// caps remain in the frozen `ExecutionRiskPolicy` and do not require a
+    /// statistical scenario-model refit when only their values change.
+    pub capital_time_bucket_contract_digest: ContentHash,
+    pub model_content_hash: ContentHash,
+    pub bound_at: DateTime<Utc>,
 }
 
 /// Route-owned Buy models and independent Sell model reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ModelConfig {
     /// Exact Buy-side bindings. A missing route fails closed and never falls
     /// back to another route.
@@ -862,14 +884,13 @@ pub struct ModelConfig {
     /// opportunistic-Sell exit evaluator loads this; a distinct pointer from
     /// Buy routes so Buy and Sell models are governed separately.
     pub active_exit_model_version_id: Option<ModelVersionRef>,
-    /// Minimum model confidence.
-    pub min_model_confidence: DecimalValue,
-    /// Minimum candidate score to enter portfolio pruning.
-    pub candidate_score_floor: DecimalValue,
     /// Shadow/live diff threshold.
     pub shadow_diff_threshold: DecimalValue,
     /// Model-score probability-calibrator fit policy.
     pub calibration: ModelCalibrationConfig,
+    /// Exact scenario-model bindings. Lookup is by ordered Route-set digest;
+    /// absence or ambiguity fails the entire report.
+    pub portfolio_scenario_model_bindings: Vec<PortfolioScenarioModelArtifactBinding>,
 }
 
 impl Default for ModelConfig {
@@ -877,10 +898,9 @@ impl Default for ModelConfig {
         Self {
             buy_routes: BTreeMap::new(),
             active_exit_model_version_id: None,
-            min_model_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
-            candidate_score_floor: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
             shadow_diff_threshold: DecimalValue::new(rust_decimal_macros::dec!(0.10)),
             calibration: ModelCalibrationConfig::default(),
+            portfolio_scenario_model_bindings: Vec::new(),
         }
     }
 }
@@ -915,7 +935,7 @@ impl Default for SellQualityGateConfig {
             min_sample_count: 200,
             min_label_coverage: DecimalValue::new(rust_decimal_macros::dec!(0.60)),
             rank_ic_min: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
-            max_pbo: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+            max_pbo: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
             min_l2_book_fidelity_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
             max_fallback_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
         }
@@ -1008,7 +1028,7 @@ pub const MAX_REPORT_TOP_N: u32 = 1_000;
 
 /// Report schedules and payload sizing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ReportsConfig {
     /// Deployment-proven upper bound for one complete catalog-visible report.
     /// Exceeding it fails the report; it never truncates market candidates.
@@ -1020,12 +1040,6 @@ pub struct ReportsConfig {
     pub ad_hoc_default_top_n: u32,
     /// Default global knowledge lag frozen for an ad-hoc request without an override.
     pub ad_hoc_default_knowledge_lag_secs: u64,
-    /// Fallback prediction horizon (seconds), used **only** when the model
-    /// provides no per-candidate `suggested_horizon_secs` (classical / non-ML
-    /// runs). The per-recommendation validity is otherwise data-driven from the
-    /// model's frozen horizon capped by the market's time-to-resolution; this is
-    /// never a flat TTL applied uniformly.
-    pub fallback_horizon_secs: u64,
     /// Entry-window ratio in `(0, 1]`: a recommendation's entry-by deadline is
     /// `as_of + effective_horizon * entry_window_ratio`. `0.5` enters only while
     /// at least half the signal's edge remains (the half-life point); the
@@ -1044,7 +1058,6 @@ impl Default for ReportsConfig {
             max_top_n: 100,
             ad_hoc_default_top_n: 20,
             ad_hoc_default_knowledge_lag_secs: 10,
-            fallback_horizon_secs: 86_400,
             entry_window_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
             ad_hoc_report_enabled: false,
             delivery_policy: ReportDeliveryPolicy::StoreAndNotify,
@@ -1054,7 +1067,7 @@ impl Default for ReportsConfig {
 
 /// One report schedule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ReportScheduleConfig {
     /// Stable schedule id.
     pub schedule_id: ReportScheduleId,
@@ -1080,133 +1093,156 @@ impl Default for ReportScheduleConfig {
     }
 }
 
-/// Kelly safety-layer parameters.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct KellySafetyConfig {
-    /// Edge-uncertainty shrink coefficient `k` in `shrink = clamp(1 − k·edge_std, floor, 1)`.
-    pub edge_uncertainty_k: DecimalValue,
-    /// Floor on the edge-uncertainty shrink multiplier.
-    pub edge_uncertainty_floor: DecimalValue,
-    /// Hard cap on total simultaneous portfolio exposure as a fraction of bankroll.
-    pub max_aggregate_exposure_pct: DecimalValue,
-    /// Kelly-stage binding is emitted when the dominant shrink falls below this threshold.
-    pub binding_materiality_threshold: DecimalValue,
-}
-
-impl Default for KellySafetyConfig {
-    fn default() -> Self {
-        Self {
-            edge_uncertainty_k: DecimalValue::new(rust_decimal_macros::dec!(1.0)),
-            edge_uncertainty_floor: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
-            max_aggregate_exposure_pct: DecimalValue::new(rust_decimal_macros::dec!(0.25)),
-            binding_materiality_threshold: DecimalValue::new(rust_decimal_macros::dec!(0.90)),
-        }
-    }
-}
-
-/// Portfolio policy: budget governance, exposure constraints, and sizing model.
+/// Portfolio policy expressed entirely as hard economic constraints.
 ///
 /// Policy limits only — never account state. Real equity and positions come
 /// from the account snapshot, never from this configuration.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult,
+)]
+#[serde(deny_unknown_fields)]
 pub struct PortfolioConfig {
-    /// Capital budget governance caps.
     pub budget: PortfolioBudget,
-    /// Exposure / liquidity constraints.
-    pub constraints: PortfolioConstraints,
-    /// Position-sizing model.
-    pub sizing: SizingModelConfig,
-    /// Kelly safety-layer knobs (edge uncertainty, aggregate cap, binding threshold).
-    pub kelly_safety: KellySafetyConfig,
-    /// Portfolio optimizer (`good_lp` LP/MILP) policy.
-    pub optimizer: PortfolioOptimizerConfig,
+    pub exposure_limits: PortfolioExposureLimits,
+    pub tail_risk: PortfolioTailRisk,
+    pub admission: PortfolioAdmission,
 }
 
 /// Capital budget governance caps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PortfolioBudget {
-    /// Maximum deployable capital (governance cap, all modes).
-    ///
-    /// `equity = min(real net-liquidation value, total_budget_usd)`; this value
-    /// **never** stands in for equity itself.
+    /// Maximum account capital that this strategy may govern.
     pub total_budget_usd: DecimalValue,
-    /// Minimum useful recommendation size in USD.
-    pub min_recommendation_usd: DecimalValue,
-    /// Maximum USD allocated to one recommendation.
-    pub max_single_recommendation_usd: DecimalValue,
+    /// Cash that must remain immediately available in every scenario.
+    pub cash_reserve_usd: DecimalValue,
+    /// Maximum capital that may be locked by all open positions and intents.
+    pub max_open_capital_usd: DecimalValue,
 }
 
 impl Default for PortfolioBudget {
     fn default() -> Self {
         Self {
-            total_budget_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
-            min_recommendation_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
-            max_single_recommendation_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
+            total_budget_usd: DecimalValue::new(rust_decimal_macros::dec!(10000)),
+            cash_reserve_usd: DecimalValue::new(rust_decimal_macros::dec!(1000)),
+            max_open_capital_usd: DecimalValue::new(rust_decimal_macros::dec!(9000)),
         }
     }
 }
 
-/// Exposure and liquidity constraints.
+/// Exposure caps evaluated against existing positions plus selected tiers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct PortfolioConstraints {
+#[serde(deny_unknown_fields)]
+pub struct PortfolioExposureLimits {
+    /// Maximum USD allocated to one recommendation.
+    pub max_single_recommendation_usd: DecimalValue,
     /// Maximum USD exposure per market.
     pub max_market_exposure_usd: DecimalValue,
     /// Maximum USD exposure per event.
     pub max_event_exposure_usd: DecimalValue,
     /// Maximum USD exposure per category.
     pub max_category_exposure_usd: DecimalValue,
-    /// Maximum correlated exposure in USD.
-    pub max_correlated_exposure_usd: DecimalValue,
-    /// Maximum fraction of visible liquidity an allocation may consume.
-    pub liquidity_usage_cap_pct: DecimalValue,
-    /// Correlation-cluster estimation policy gating `max_correlated_exposure_usd`.
-    pub correlation: CorrelationConfig,
+    /// Maximum USD exposure per model Route.
+    pub max_route_exposure_usd: DecimalValue,
+    /// Maximum number of simultaneously open recommendations.
+    pub max_open_recommendations: u32,
 }
 
-impl Default for PortfolioConstraints {
+impl Default for PortfolioExposureLimits {
     fn default() -> Self {
         Self {
-            max_market_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
-            max_event_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
-            max_category_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
-            max_correlated_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
-            liquidity_usage_cap_pct: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
-            correlation: CorrelationConfig::default(),
+            max_single_recommendation_usd: DecimalValue::new(rust_decimal_macros::dec!(1000)),
+            max_market_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(2000)),
+            max_event_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(3000)),
+            max_category_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(5000)),
+            max_route_exposure_usd: DecimalValue::new(rust_decimal_macros::dec!(6000)),
+            max_open_recommendations: 20,
         }
     }
 }
 
-/// Optional execution policy rooted in recommendations.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct ExecutionConfig {
-    /// Semi-auto approval policy.
-    pub semi_auto: SemiAutoConfig,
-    /// Auto-execution policy.
-    pub auto_execution: AutoExecutionConfig,
-    /// Recommendation-owned entry-condition worker policy.
-    pub entry_condition: EntryConditionWorkerConfig,
-    /// Entry order policy document.
-    pub entry_order_policy: EntryOrderPolicy,
-    /// Exit-monitor cadence + signal-degradation policy.
-    pub exit_monitor: ExitMonitorPolicy,
-    /// Kill-switch policy document.
-    pub kill_switch: KillSwitchPolicy,
-    /// Capital policy document.
-    pub capital: CapitalPolicy,
-    /// Reconciliation policy document.
-    pub reconciliation: ReconciliationPolicy,
-    /// Execution-breaker thresholds (venue health + auto kill-switch trip).
-    pub breaker: ExecutionBreakerConfig,
+/// Maximum capital lock permitted through one elapsed-time boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CapitalTimeBucketLimit {
+    /// Exclusive upper duration of the bucket from decision time.
+    pub end_secs: u64,
+    /// Maximum capital locked inside this bucket.
+    pub max_capital_usd: DecimalValue,
+}
+
+/// Scenario loss, `CVaR`, drawdown, and time-weighted capital limits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioTailRisk {
+    /// `CVaR` confidence level in basis points, strictly between 0 and 10,000.
+    pub cvar_confidence_bps: u32,
+    /// Maximum allowed `CVaR` loss in USD.
+    pub max_cvar_usd: DecimalValue,
+    /// Maximum allowed loss in any promoted or stress scenario.
+    pub max_scenario_loss_usd: DecimalValue,
+    /// Maximum strategy drawdown admitted at the decision boundary.
+    pub max_drawdown_usd: DecimalValue,
+    /// Strictly increasing capital-lock buckets; every tier must terminate in a covered bucket.
+    pub capital_time_buckets: Vec<CapitalTimeBucketLimit>,
+}
+
+impl Default for PortfolioTailRisk {
+    fn default() -> Self {
+        Self {
+            cvar_confidence_bps: 9_500,
+            max_cvar_usd: DecimalValue::new(rust_decimal_macros::dec!(1500)),
+            max_scenario_loss_usd: DecimalValue::new(rust_decimal_macros::dec!(2500)),
+            max_drawdown_usd: DecimalValue::new(rust_decimal_macros::dec!(2000)),
+            capital_time_buckets: vec![
+                CapitalTimeBucketLimit {
+                    end_secs: 3_600,
+                    max_capital_usd: DecimalValue::new(rust_decimal_macros::dec!(3000)),
+                },
+                CapitalTimeBucketLimit {
+                    end_secs: 86_400,
+                    max_capital_usd: DecimalValue::new(rust_decimal_macros::dec!(6000)),
+                },
+                CapitalTimeBucketLimit {
+                    end_secs: 604_800,
+                    max_capital_usd: DecimalValue::new(rust_decimal_macros::dec!(9000)),
+                },
+            ],
+        }
+    }
+}
+
+/// Candidate admission floors applied before global optimization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioAdmission {
+    /// Minimum nominal discounted expected net USD required for a tier to enter optimization.
+    pub min_nominal_expected_net_usd: DecimalValue,
+    /// Minimum ambiguity-robust discounted expected net USD required before optimization.
+    pub min_robust_expected_net_usd: DecimalValue,
+    /// Conservative lower bound on the probability of positive net USD, in basis points.
+    pub min_profit_probability_bps: u32,
+    /// Maximum calibrated probability-interval width admitted, in basis points.
+    pub max_probability_interval_width_bps: u32,
+    /// Additional executable-liquidity haircut applied to available depth, in basis points.
+    pub liquidity_buffer_bps: u32,
+}
+
+impl Default for PortfolioAdmission {
+    fn default() -> Self {
+        Self {
+            min_nominal_expected_net_usd: DecimalValue::new(rust_decimal_macros::dec!(1)),
+            min_robust_expected_net_usd: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+            min_profit_probability_bps: 5_200,
+            max_probability_interval_width_bps: 2_000,
+            liquidity_buffer_bps: 1_000,
+        }
+    }
 }
 
 /// Durable condition evaluator cadence, lease, and bounded-pass policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct EntryConditionWorkerConfig {
     /// Millisecond cadence of the safety backstop scan. Source notifications,
     /// book wakes, and clock deadlines remain the primary wake paths.
@@ -1240,7 +1276,7 @@ impl Default for EntryConditionWorkerConfig {
 
 /// Semi-auto approval policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SemiAutoConfig {
     /// Approval time-to-live in seconds.
     pub approval_ttl_secs: u64,
@@ -1256,16 +1292,12 @@ impl Default for SemiAutoConfig {
 
 /// Auto-execution policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct AutoExecutionConfig {
     /// Maximum orders auto-created per report.
     pub max_orders_per_report: u32,
     /// Maximum total USD auto-executed per report.
     pub max_total_usd_per_report: DecimalValue,
-    /// Minimum score for auto-execution.
-    pub min_score: DecimalValue,
-    /// Minimum confidence for auto-execution.
-    pub min_confidence: DecimalValue,
 }
 
 impl Default for AutoExecutionConfig {
@@ -1273,8 +1305,6 @@ impl Default for AutoExecutionConfig {
         Self {
             max_orders_per_report: 0,
             max_total_usd_per_report: DecimalValue::new(rust_decimal_macros::dec!(0)),
-            min_score: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
-            min_confidence: DecimalValue::new(rust_decimal_macros::dec!(1.00)),
         }
     }
 }
@@ -1343,6 +1373,21 @@ pub struct ResearchValidationCpcvConfig {
     pub n_groups: u32,
     /// Number of partitions held out as the test set per combination (`k`).
     pub k_test: u32,
+    /// Share of each outer fold's eligible training groups reserved for an
+    /// inner purge/embargo-isolated calibration and scenario-residual fit.
+    /// Integer basis points avoid a floating split boundary.
+    pub nested_estimator_holdout_bps: u32,
+    /// Initial minimum number of distinct timeline groups reserved for the
+    /// nested estimator holdout. Four is the structural lower bound for two
+    /// downstream populations, but it is not assumed to survive overlapping
+    /// labels: each fold expands the chronological holdout only as far as its
+    /// real label intervals require, evaluates every feasible calibration /
+    /// scenario boundary after purge/embargo, and chooses the most balanced
+    /// post-purge population while preserving the largest model-fit prefix.
+    /// Model, calibration, and scenario fit must each retain at least two
+    /// distinct decision-time groups; a fold with no feasible split fails
+    /// closed without weakening purge, embargo, or population floors.
+    pub nested_estimator_min_groups: u32,
 }
 
 impl Default for ResearchValidationCpcvConfig {
@@ -1350,6 +1395,8 @@ impl Default for ResearchValidationCpcvConfig {
         Self {
             n_groups: 8,
             k_test: 3,
+            nested_estimator_holdout_bps: 2_000,
+            nested_estimator_min_groups: 4,
         }
     }
 }
@@ -1417,9 +1464,14 @@ impl Default for ResearchValidationTrialsConfig {
     fn default() -> Self {
         Self {
             lambda_multipliers: vec![
+                DecimalValue::new(rust_decimal_macros::dec!(0.25)),
                 DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+                DecimalValue::new(rust_decimal_macros::dec!(0.75)),
                 DecimalValue::new(rust_decimal_macros::dec!(1)),
+                DecimalValue::new(rust_decimal_macros::dec!(1.25)),
+                DecimalValue::new(rust_decimal_macros::dec!(1.5)),
                 DecimalValue::new(rust_decimal_macros::dec!(2)),
+                DecimalValue::new(rust_decimal_macros::dec!(3)),
             ],
             rank_loss_kinds: vec![
                 RankLossKind::RankIcWeightedRanknet,
@@ -1445,16 +1497,17 @@ impl Default for ResearchValidationTrialsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchValidationPboConfig {
-    /// Number of equal-length time blocks (`S`, must be even, `>= 4`).
+    /// Number of equal-length time blocks (`S`, must be even and within
+    /// `4..=16`).
     pub block_count: u32,
 }
 
 impl Default for ResearchValidationPboConfig {
     fn default() -> Self {
-        // Match default `cpcv.n_groups` so short research windows fail at
-        // config/orchestration time rather than after an expensive CPCV loop
-        // when T < S.
-        Self { block_count: 8 }
+        // Bailey et al. identify S=16 as a generally reasonable balance: it
+        // yields 12,870 symmetric logits without allowing the evidence surface
+        // to grow without bound.
+        Self { block_count: 16 }
     }
 }
 
@@ -1492,7 +1545,9 @@ impl Default for ResearchValidationGatesConfig {
             min_cpcv_paths: 21,
             rank_ic_min: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
             dsr_significance: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
-            max_pbo: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
+            // The reference CSCV paper describes 0.05 as the customary model
+            // rejection boundary. A 0.5 threshold admits coin-flip selection.
+            max_pbo: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
             max_turnover: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
             min_tail_loss_bps: DecimalValue::new(rust_decimal_macros::dec!(-500)),
         }

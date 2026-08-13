@@ -1,6 +1,7 @@
 //! Deterministic feature-parity execution and fail-closed latch transitions.
 
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::Duration as StdDuration,
@@ -54,9 +55,21 @@ pub enum FeatureParitySubject {
     /// A real persisted live-inference run. This subject has model-input,
     /// factor, and prediction evidence in addition to the earlier stages.
     ModelRun(ModelRunId),
-    /// A committed report that intentionally stopped before model inference.
-    /// Its replay stops at the last stage represented by the report evidence.
-    PreInferenceReport(RecommendationReportId),
+    /// A committed global report decision. The report subject owns global
+    /// selection evidence; Route-local model subjects own feature, factor, and
+    /// prediction evidence without fabricating a singular report model.
+    RecommendationReport(RecommendationReportId),
+}
+
+impl FeatureParitySubject {
+    fn sampling_key(&self) -> String {
+        match self {
+            Self::ModelRun(run_id) => format!("model_run/{run_id}"),
+            Self::RecommendationReport(report_id) => {
+                format!("recommendation_report/{report_id}")
+            }
+        }
+    }
 }
 
 /// Stable serving row that may be replayed from durable evidence.
@@ -71,6 +84,14 @@ pub struct FeatureParityCandidate {
     /// persisted selection is empty; no fake market is introduced.
     pub market_id: Option<MarketId>,
     pub decision_at: DateTime<Utc>,
+}
+
+impl FeatureParityCandidate {
+    fn sampling_cmp(&self, other: &Self) -> Ordering {
+        sampling_digest(&self.sampling_key)
+            .cmp(&sampling_digest(&other.sampling_key))
+            .then_with(|| self.sampling_key.cmp(&other.sampling_key))
+    }
 }
 
 /// One exact side of a stage comparison.
@@ -836,13 +857,52 @@ fn deterministic_sample(
         })?
         .div_ceil(SAMPLE_FRACTION_DENOMINATOR);
     let sample_size = candidates.len().min(fraction.max(SAMPLE_MINIMUM));
-    candidates.sort_by(|left, right| {
-        sampling_digest(&left.sampling_key)
-            .cmp(&sampling_digest(&right.sampling_key))
-            .then_with(|| left.sampling_key.cmp(&right.sampling_key))
-    });
-    candidates.truncate(sample_size);
-    Ok(candidates)
+    let candidate_count = candidates.len();
+    let mut by_subject = BTreeMap::<String, Vec<FeatureParityCandidate>>::new();
+    for candidate in candidates {
+        by_subject
+            .entry(candidate.subject.sampling_key())
+            .or_default()
+            .push(candidate);
+    }
+    if by_subject.len() > sample_size {
+        return Err(ResearchError::Determinism {
+            detail: format!(
+                "feature-parity sample budget {sample_size} cannot cover all {} frozen serving subjects",
+                by_subject.len()
+            ),
+        }
+        .into());
+    }
+
+    // A global hash-only sample can omit every Route-local model subject and
+    // leave only report-selection comparisons. Reserve one deterministic row
+    // per frozen subject first, then fill the unchanged global sample budget.
+    // This preserves the documented 10%/20-row cardinality while guaranteeing
+    // that a Passed serving replay contains model-input/transform evidence for
+    // every represented Route.
+    let mut selected = Vec::with_capacity(sample_size);
+    let mut remainder = Vec::with_capacity(candidate_count.saturating_sub(by_subject.len()));
+    for (_, mut subject_candidates) in by_subject {
+        subject_candidates.sort_by(FeatureParityCandidate::sampling_cmp);
+        let mut subject_candidates = subject_candidates.into_iter();
+        let representative =
+            subject_candidates
+                .next()
+                .ok_or_else(|| ResearchError::Determinism {
+                    detail: "feature-parity subject group is unexpectedly empty".to_owned(),
+                })?;
+        selected.push(representative);
+        remainder.extend(subject_candidates);
+    }
+    remainder.sort_by(FeatureParityCandidate::sampling_cmp);
+    selected.extend(
+        remainder
+            .into_iter()
+            .take(sample_size.saturating_sub(selected.len())),
+    );
+    selected.sort_by(FeatureParityCandidate::sampling_cmp);
+    Ok(selected)
 }
 
 fn sampling_digest(key: &str) -> [u8; 32] {
@@ -918,6 +978,36 @@ impl OutcomeEvidence {
             self.matched += 1;
         } else {
             self.mismatched += 1;
+            let projected_evidence_matched = comparison.online.state == comparison.replay.state
+                && comparison.online.value == comparison.replay.value
+                && comparison.online.effective_at == comparison.replay.effective_at
+                && comparison.online.available_at == comparison.replay.available_at
+                && comparison.online.cutoff == comparison.replay.cutoff;
+            tracing::error!(
+                parity_run_id = %run.run_id,
+                sampling_key = %comparison.sampling_key,
+                stage = comparison.stage.as_str(),
+                report_id = ?comparison.report_id,
+                model_run_id = ?comparison.model_run_id,
+                model_version_id = ?comparison.model_version_id,
+                market_id = ?comparison.market_id,
+                feature_name = ?comparison.feature_name,
+                projected_evidence_matched,
+                online_state = ?comparison.online.state,
+                replay_state = ?comparison.replay.state,
+                online_value = ?comparison.online.value,
+                replay_value = ?comparison.replay.value,
+                online_effective_at = ?comparison.online.effective_at,
+                replay_effective_at = ?comparison.replay.effective_at,
+                online_available_at = ?comparison.online.available_at,
+                replay_available_at = ?comparison.replay.available_at,
+                online_cutoff = ?comparison.online.cutoff,
+                replay_cutoff = ?comparison.replay.cutoff,
+                online_fingerprint = %comparison.online.fingerprint,
+                replay_fingerprint = %comparison.replay.fingerprint,
+                detail = ?comparison.detail,
+                "feature parity detected a deterministic online/replay mismatch",
+            );
             if let Some(report_id) = comparison.report_id.as_ref()
                 && self.mismatched_report_keys.insert(report_id.to_string())
             {
@@ -968,6 +1058,7 @@ impl OutcomeEvidence {
         mut self,
         expected: &BTreeMap<String, DateTime<Utc>>,
         feature_contract_hash: ContentHash,
+        transform_required: bool,
     ) -> QuantResult<BuiltOutcome> {
         if let Some(missing) = expected.keys().find(|key| !self.seen.contains(*key)) {
             return Err(ResearchError::Determinism {
@@ -1008,6 +1099,15 @@ impl OutcomeEvidence {
         } else {
             Some(ResearchHasher::canonical(&self.transform_hashes)?)
         };
+        if status == FeatureParityRunStatus::Passed
+            && transform_required
+            && transform_hash.is_none()
+        {
+            return Err(ResearchError::Determinism {
+                detail: "passed serving parity has no model-input transform evidence".to_owned(),
+            }
+            .into());
+        }
         self.mismatched_report_ids.sort_by_key(ToString::to_string);
         Ok(BuiltOutcome {
             rows: self.rows,
@@ -1042,6 +1142,9 @@ fn build_outcome(
         .iter()
         .map(|candidate| (candidate.sampling_key.clone(), candidate.decision_at))
         .collect();
+    let transform_required = candidates
+        .iter()
+        .any(|candidate| matches!(&candidate.subject, FeatureParitySubject::ModelRun(_)));
     let ingestion_time = Utc::now().timestamp_millis();
     let mut evidence =
         OutcomeEvidence::with_capacity(attempt.comparisons.len() + attempt.pending.len());
@@ -1063,7 +1166,7 @@ fn build_outcome(
             ingestion_time,
         )?;
     }
-    evidence.finish(&expected, feature_contract_hash)
+    evidence.finish(&expected, feature_contract_hash, transform_required)
 }
 
 fn validate_replayed_key(
@@ -1334,11 +1437,15 @@ mod tests {
             },
         },
         enums::quant::FeatureParityStateTransition,
-        types::{FeatureParityRunId, FeatureVectorId, RoleCode},
+        types::{
+            FeatureParityRunId, FeatureVectorId, RoleCode, SelectorHashEvidence,
+            SelectorParityEvidence,
+        },
     };
     use quant_pivot_repository::traits::{
         EnqueueFrozenFeatureParityOutcome, FeatureParityLatchActor,
     };
+    use uuid::Uuid;
 
     use super::*;
 
@@ -1449,6 +1556,15 @@ mod tests {
             _kind: FeatureParityRunKind,
         ) -> Result<Option<FeatureParityRunInfo>, StorageError> {
             Err(unexpected_repo_call("latest_run"))
+        }
+
+        async fn find_unsettled_runtime(
+            &self,
+        ) -> Result<Option<FeatureParityRunInfo>, StorageError> {
+            Ok(lock(&self.state)
+                .run
+                .clone()
+                .filter(|run| run.training_dataset_id.is_none() && !run.status.is_terminal()))
         }
 
         async fn find_full_window(
@@ -1685,7 +1801,7 @@ mod tests {
     fn candidate(index: usize) -> FeatureParityCandidate {
         FeatureParityCandidate {
             sampling_key: format!("report-a/market-{index:03}"),
-            subject: FeatureParitySubject::ModelRun(ModelRunId::from_v7()),
+            subject: FeatureParitySubject::ModelRun(ModelRunId::new(Uuid::from_u128(1))),
             market_id: Some(MarketId::new(format!("market-{index:03}"))),
             decision_at: Utc::now(),
         }
@@ -1835,6 +1951,45 @@ mod tests {
     }
 
     #[test]
+    fn sampling_covers_every_subject() {
+        let model_run_id = ModelRunId::new(Uuid::from_u128(2));
+        let report_id = RecommendationReportId::new(Uuid::from_u128(3));
+        let mut keys = (0..200)
+            .map(|index| format!("candidate-{index:03}"))
+            .collect::<Vec<_>>();
+        keys.sort_by(|left, right| {
+            sampling_digest(left)
+                .cmp(&sampling_digest(right))
+                .then_with(|| left.cmp(right))
+        });
+        let candidates = keys
+            .into_iter()
+            .enumerate()
+            .map(|(index, sampling_key)| FeatureParityCandidate {
+                sampling_key,
+                subject: if index < SAMPLE_MINIMUM {
+                    FeatureParitySubject::RecommendationReport(report_id)
+                } else {
+                    FeatureParitySubject::ModelRun(model_run_id)
+                },
+                market_id: Some(MarketId::new(format!("market-{index:03}"))),
+                decision_at: Utc::now(),
+            })
+            .collect();
+
+        let selected = deterministic_sample(FeatureParityRunKind::Sampled, candidates)
+            .expect("subject-stratified sample");
+
+        assert_eq!(selected.len(), SAMPLE_MINIMUM);
+        assert!(selected.iter().any(|candidate| {
+            matches!(candidate.subject, FeatureParitySubject::ModelRun(id) if id == model_run_id)
+        }));
+        assert!(selected.iter().any(|candidate| {
+            matches!(candidate.subject, FeatureParitySubject::RecommendationReport(id) if id == report_id)
+        }));
+    }
+
+    #[test]
     fn parity_event_identity_sensitive() {
         let now = Utc::now();
         let run = run(now);
@@ -1890,7 +2045,7 @@ mod tests {
         let run = run(now);
         let report_candidate = FeatureParityCandidate {
             sampling_key: "report/empty/selection".to_owned(),
-            subject: FeatureParitySubject::PreInferenceReport(RecommendationReportId::from_v7()),
+            subject: FeatureParitySubject::RecommendationReport(RecommendationReportId::from_v7()),
             market_id: None,
             decision_at: now,
         };
@@ -1917,15 +2072,13 @@ mod tests {
             decision_at: now,
         }];
         let online = evidence("fingerprint-a", now - Duration::seconds(2));
+        let mut exact = FeatureParityComparison::fixture(now, online.clone(), online.clone());
+        exact.transform_hash = run.feature_contract_hash;
         let passed = build_outcome(
             &run,
             &candidates,
             FeatureParityReplayAttempt {
-                comparisons: vec![FeatureParityComparison::fixture(
-                    now,
-                    online.clone(),
-                    online.clone(),
-                )],
+                comparisons: vec![exact],
                 pending: Vec::new(),
             },
         )
@@ -1949,6 +2102,103 @@ mod tests {
             FeatureParityRunStatus::Mismatched
         );
         assert_eq!(mismatched.completion.mismatched_count, 1);
+    }
+
+    #[test]
+    fn model_missing_transform_rejects() {
+        let now = Utc::now();
+        let run = run(now);
+        let candidates = vec![FeatureParityCandidate {
+            sampling_key: "report-a/market-001".to_owned(),
+            subject: FeatureParitySubject::ModelRun(ModelRunId::from_v7()),
+            market_id: Some(MarketId::new("market-001")),
+            decision_at: now,
+        }];
+        let exact = evidence("fingerprint-a", now);
+
+        let result = build_outcome(
+            &run,
+            &candidates,
+            FeatureParityReplayAttempt {
+                comparisons: vec![FeatureParityComparison::fixture(now, exact.clone(), exact)],
+                pending: Vec::new(),
+            },
+        );
+        let Err(error) = result else {
+            panic!("selection-only evidence cannot pass serving parity");
+        };
+
+        assert!(error.to_string().contains("no model-input transform"));
+    }
+
+    #[test]
+    fn report_passes_without_transform() {
+        let now = Utc::now();
+        let run = run(now);
+        let report_id = RecommendationReportId::from_v7();
+        let candidates = vec![FeatureParityCandidate {
+            sampling_key: "report-a/market-001".to_owned(),
+            subject: FeatureParitySubject::RecommendationReport(report_id),
+            market_id: Some(MarketId::new("market-001")),
+            decision_at: now,
+        }];
+        let exact = evidence("selection-fingerprint", now);
+        let selector_hash = run.feature_contract_hash.expect("feature contract hash");
+        let selector_evidence = SelectorHashEvidence {
+            selector_hash,
+            contract_hash: ContentHash::from_bytes([1; 32]),
+            boundary_hash: ContentHash::from_bytes([2; 32]),
+            selection_policy_hash: ContentHash::from_bytes([3; 32]),
+            data_quality_policy_hash: ContentHash::from_bytes([4; 32]),
+            feature_schema_hash: ContentHash::from_bytes([5; 32]),
+            model_requirements_hash: ContentHash::from_bytes([6; 32]),
+            candidates_hash: ContentHash::from_bytes([7; 32]),
+            candidate_catalog_hash: ContentHash::from_bytes([8; 32]),
+            candidate_book_hash: ContentHash::from_bytes([9; 32]),
+            candidate_domain_hash: ContentHash::from_bytes([10; 32]),
+            candidate_decision_hash: ContentHash::from_bytes([11; 32]),
+            included_hash: ContentHash::from_bytes([12; 32]),
+            excluded_hash: ContentHash::from_bytes([13; 32]),
+            exclusion_summary_hash: ContentHash::from_bytes([14; 32]),
+        };
+        let comparison = FeatureParityComparison {
+            sampling_key: "report-a/market-001".to_owned(),
+            decision_at: now,
+            stage: FeatureParityStage::Selection,
+            report_id: Some(report_id),
+            model_run_id: None,
+            model_version_id: None,
+            training_dataset_id: None,
+            market_id: Some(MarketId::new("market-001")),
+            feature_name: None,
+            reason: None,
+            online: exact.clone(),
+            replay: exact,
+            transform_hash: None,
+            detail: FeatureParityDetailSource::Selection {
+                online_count: 1,
+                replay_count: 1,
+                selector_evidence: Box::new(SelectorParityEvidence {
+                    online: selector_evidence,
+                    replay: selector_evidence,
+                }),
+                replay_excluded_count: 0,
+            },
+        };
+
+        let outcome = build_outcome(
+            &run,
+            &candidates,
+            FeatureParityReplayAttempt {
+                comparisons: vec![comparison],
+                pending: Vec::new(),
+            },
+        )
+        .expect("a report that stopped before inference has no transform to fabricate");
+
+        assert_eq!(outcome.completion.status, FeatureParityRunStatus::Passed);
+        assert_eq!(outcome.completion.matched_count, 1);
+        assert_eq!(outcome.completion.transform_hash, None);
     }
 
     #[test]
@@ -2010,7 +2260,7 @@ mod tests {
             report_id: None,
             model_run_id: match &candidate.subject {
                 FeatureParitySubject::ModelRun(run_id) => Some(*run_id),
-                FeatureParitySubject::PreInferenceReport(_) => None,
+                FeatureParitySubject::RecommendationReport(_) => None,
             },
             model_version_id: None,
             training_dataset_id: None,
@@ -2074,7 +2324,7 @@ mod tests {
         mismatch.report_id = Some(report_id);
         mismatch.model_run_id = match &candidate.subject {
             FeatureParitySubject::ModelRun(run_id) => Some(*run_id),
-            FeatureParitySubject::PreInferenceReport(_) => None,
+            FeatureParitySubject::RecommendationReport(_) => None,
         };
         mismatch.market_id.clone_from(&candidate.market_id);
 
@@ -2137,7 +2387,7 @@ mod tests {
         };
         let candidate_run_id = match &candidate.subject {
             FeatureParitySubject::ModelRun(run_id) => *run_id,
-            FeatureParitySubject::PreInferenceReport(_) => unreachable!("test model subject"),
+            FeatureParitySubject::RecommendationReport(_) => unreachable!("test model subject"),
         };
         let pending = PendingFeatureParityComparison {
             sampling_key: candidate.sampling_key.clone(),

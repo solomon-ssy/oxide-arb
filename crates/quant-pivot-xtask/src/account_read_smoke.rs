@@ -1,7 +1,5 @@
 //! Credential-gated venue account reads with no money-moving capability.
 
-use std::path::Path;
-
 use anyhow::{Context, Result};
 use quant_pivot_api::{
     clob::ClobClient,
@@ -9,13 +7,10 @@ use quant_pivot_api::{
     keystore::Keystore,
     wallet::{WalletOwnershipClient, WalletTopology},
 };
-use quant_pivot_models::config::DeployConfig;
+use quant_pivot_models::config::{DeployConfig, DeployConfigLoadRequest};
 
-pub async fn run(config_dir: &Path) -> Result<()> {
-    let config_dir = config_dir
-        .to_str()
-        .context("account-read config directory is not valid UTF-8")?;
-    let deploy = DeployConfig::load(config_dir).context("load account-read deploy config")?;
+pub async fn run(request: &DeployConfigLoadRequest) -> Result<()> {
+    let deploy = DeployConfig::load(request).context("load account-read deploy config")?;
     let keystore =
         Keystore::from_config(&deploy.keys).context("load configured signing identity")?;
     let funder = deploy

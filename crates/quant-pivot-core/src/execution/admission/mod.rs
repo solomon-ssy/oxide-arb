@@ -174,11 +174,11 @@ pub struct AdmissionInput {
     /// Number of currently open (non-terminal) order intents holding capital,
     /// counted at build time. Consumed by `#21` (`MaxOpenIntentsCheck`).
     pub open_intent_count: u64,
-    /// Governed cap on concurrently open intents
-    /// (`execution.capital.max_open_intents`; `0` disables). Distilled at build.
+    /// Governed cap on concurrently open intents, shared with the global
+    /// portfolio's open-recommendation cap. Distilled at build.
     pub max_open_intents: u32,
-    /// Governed cap on total reserved capital
-    /// (`execution.capital.max_reserved_usd`; `0` disables). Distilled at build.
+    /// Governed cap on total reserved capital, sourced from
+    /// `portfolio.budget.max_open_capital_usd`. Distilled at build.
     pub max_reserved_usd: Usd,
     /// Model publication + calibration flags distilled from the registry.
     pub model_state: AdmissionModelState,

@@ -27,35 +27,37 @@ use quant_pivot_models::{
             DecisionBoundaryEvidenceView, FeatureCellEvidenceView, ModelInputEvidenceView,
             ModelRouteEvidenceView, OperationLogQuery, QuantEvidenceView, QuantRecommendationView,
             QuantReportDiagnosticsView, QuantReportFunnelView, QuantReportListQuery,
-            RecommendationViewContext, ReportDiagnosticsSubject, ReportFunnelMarketListQuery,
-            ReportFunnelMarketView, ReportFunnelStageView, ReportRunListQuery,
-            ReportScheduleGapListQuery, ReportTimelineQuery,
+            RecommendationViewContext, ReportEvidenceDiagnosticsView, ReportFunnelMarketListQuery,
+            ReportFunnelMarketView, ReportFunnelStageView, ReportRouteDiagnosticsView,
+            ReportRunListQuery, ReportScheduleGapListQuery, ReportTimelineQuery,
         },
         data_plane::DecisionBoundary,
         governance::OperationLogInfo,
         pagination::{PageWindow, Paginated},
         ports::{AdHocReportCommand, QuantReportPort},
         quant::{
-            EnqueueReportRunOutcome, FeatureVectorInfo, RecommendationInfo,
+            EnqueueReportRunOutcome, FeatureVectorInfo, PortfolioPlanInfo, RecommendationInfo,
             RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportDiff,
-            ReportFactDeliveryInfo, ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo,
+            ReportFactDeliveryInfo, ReportRouteRunInfo, ReportRunInfo, ReportScheduleGapInfo,
+            ReportScheduleHealthInfo,
         },
     },
     enums::{
         operation_log::OperationCategory,
-        quant::{EmptyReportReason, FeatureParityStage, RecommendationReportStatus, ReportKind},
+        quant::{FeatureParityStage, RecommendationReportStatus, ReportKind},
         rbac::ResourceType,
     },
+    runtime_config::BuyModelRoute,
     types::{
-        ContentHash, FeatureVectorId, ModelRunId, OrderIntentId, RecommendationId,
+        ContentHash, FeatureVectorId, ModelRunId, OrderIntentId, PortfolioPlanId, RecommendationId,
         RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
-        ReportRunId, ResearchProfileId, ResearchProfileRef, TokenDataQualityRecord,
+        ReportRouteRunId, ReportRunId, TokenDataQualityRecord,
     },
 };
 use quant_pivot_repository::traits::{
     FeatureRepository, OperationLogRepository, OrderIntentRepository, PolicyRepository,
-    QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
-    ReportRunRepository, ServingEvidenceRepository,
+    PortfolioPlanRepository, QuantFactReadRepository, RecommendationReportRepository,
+    RecommendationRepository, ReportRunRepository, ServingEvidenceRepository,
 };
 
 use crate::{
@@ -68,6 +70,7 @@ use crate::{
 pub struct CoreQuantReportPort {
     report_repo: Arc<dyn RecommendationReportRepository>,
     report_run_repo: Arc<dyn ReportRunRepository>,
+    portfolio_plan_repo: Arc<dyn PortfolioPlanRepository>,
     recommendation_repo: Arc<dyn RecommendationRepository>,
     order_intent_repo: Arc<dyn OrderIntentRepository>,
     lifecycle: Arc<ReportLifecycleService>,
@@ -85,6 +88,7 @@ pub struct CoreQuantReportPort {
 pub struct CoreQuantReportPortDeps {
     pub report_repo: Arc<dyn RecommendationReportRepository>,
     pub report_run_repo: Arc<dyn ReportRunRepository>,
+    pub portfolio_plan_repo: Arc<dyn PortfolioPlanRepository>,
     pub recommendation_repo: Arc<dyn RecommendationRepository>,
     pub order_intent_repo: Arc<dyn OrderIntentRepository>,
     pub lifecycle: Arc<ReportLifecycleService>,
@@ -102,6 +106,7 @@ impl CoreQuantReportPort {
         Self {
             report_repo: deps.report_repo,
             report_run_repo: deps.report_run_repo,
+            portfolio_plan_repo: deps.portfolio_plan_repo,
             recommendation_repo: deps.recommendation_repo,
             order_intent_repo: deps.order_intent_repo,
             lifecycle: deps.lifecycle,
@@ -371,6 +376,16 @@ impl QuantReportPort for CoreQuantReportPort {
         Ok(self.report_repo.find_predecessor_id(report_id).await?)
     }
 
+    async fn find_portfolio_plan(
+        &self,
+        portfolio_plan_id: &PortfolioPlanId,
+    ) -> QuantResult<Option<PortfolioPlanInfo>> {
+        Ok(self
+            .portfolio_plan_repo
+            .find_by_id(portfolio_plan_id)
+            .await?)
+    }
+
     async fn find_report_fact_delivery(
         &self,
         report_id: &RecommendationReportId,
@@ -465,73 +480,76 @@ impl QuantReportPort for CoreQuantReportPort {
         };
         let boundary = self.load_report_boundary(&report).await?;
         let data_quality = self.load_report_data_quality(&report).await?;
-        let (_, stage_ceiling) = report_diagnostics_execution(
-            report.model_run_id.as_ref(),
-            report.summary_json.empty_reason,
-        )?;
         let selection_count = u64::from(report.summary_json.market_selection_count);
-        let Some(model_run_id) = report.model_run_id.as_ref() else {
-            return Ok(Some(match stage_ceiling {
-                FeatureParityStage::Selection => {
-                    if !data_quality.tokens_json.0.is_empty() {
-                        return Err(ResearchError::Determinism {
-                            detail: format!(
-                                "selection-only report {} unexpectedly contains feature-stage data-quality rows",
-                                report.recommendation_report_id
-                            ),
-                        }
-                        .into());
-                    }
-                    pre_inference_selection_diagnostics(&boundary, selection_count)
-                }
-                FeatureParityStage::DataQuality => {
-                    if data_quality.tokens_json.0.is_empty() {
-                        return Err(ResearchError::Determinism {
-                            detail: format!(
-                                "data-quality report {} has no bound feature vectors",
-                                report.recommendation_report_id
-                            ),
-                        }
-                        .into());
-                    }
-                    let evidence = self
-                        .load_pre_inference_features(&report, &data_quality, &boundary)
-                        .await?;
-                    pre_inference_diagnostics(&boundary, selection_count, evidence)?
-                }
-                other => {
-                    return Err(ResearchError::Determinism {
-                        detail: format!(
-                            "pre-inference report {} has invalid stage ceiling {other:?}",
-                            report.recommendation_report_id
-                        ),
-                    }
-                    .into());
-                }
-            }));
+        let global = if data_quality.tokens_json.0.is_empty() {
+            pre_inference_selection_diagnostics(selection_count)
+        } else {
+            let evidence = self
+                .load_pre_inference_features(&report, &data_quality, &boundary)
+                .await?;
+            pre_inference_diagnostics(selection_count, evidence)?
         };
-        let evidence = self.load_serving_evidence(model_run_id).await?;
-        if evidence.model_inputs.iter().any(|row| {
-            row.recommendation_report_id.as_ref() != Some(report_id)
-                || &row.model_run_id != model_run_id
-                || row.model_version_id != report.model_version_id
-        }) {
+        let route_runs = self.report_repo.list_route_runs(report_id).await?;
+        let route_order = route_runs.iter().map(|run| run.route).collect::<Vec<_>>();
+        if route_order != report.represented_routes_json.routes {
             return Err(ResearchError::Determinism {
                 detail: format!(
-                    "serving evidence route does not match report {}",
+                    "Route diagnostics do not cover report {} represented Route set",
                     report.recommendation_report_id
                 ),
             }
             .into());
         }
-        let inputs = evidence.model_inputs;
-        Ok(Some(model_run_diagnostics(
-            evidence.complete,
-            &inputs,
-            &evidence.feature_cells,
-            &boundary,
-            selection_count,
-        )?))
+        let mut routes = Vec::with_capacity(route_runs.len());
+        for route_run in route_runs {
+            let evidence = if let Some(model_run_id) = route_run.model_run_id {
+                let model_version_id =
+                    route_run
+                        .model_version_id
+                        .ok_or_else(|| ResearchError::Determinism {
+                            detail: format!(
+                                "Route run {} has a model run without a model version",
+                                route_run.report_route_run_id
+                            ),
+                        })?;
+                let serving = self.load_serving_evidence(&model_run_id).await?;
+                if serving.model_inputs.iter().any(|row| {
+                    row.model_run_id != model_run_id || row.model_version_id != model_version_id
+                }) {
+                    return Err(ResearchError::Determinism {
+                        detail: format!(
+                            "serving evidence does not match report Route run {}",
+                            route_run.report_route_run_id
+                        ),
+                    }
+                    .into());
+                }
+                model_run_diagnostics(
+                    serving.complete,
+                    &serving.model_inputs,
+                    &serving.feature_cells,
+                    &boundary,
+                    u64::from(route_run.funnel_json.eligible_markets),
+                )?
+            } else {
+                let mut route_evidence = global.clone();
+                route_evidence.selection_count = u64::from(route_run.funnel_json.eligible_markets);
+                route_evidence
+            };
+            routes.push(ReportRouteDiagnosticsView {
+                report_route_run_id: route_run.report_route_run_id,
+                route: route_run.route,
+                outcome: route_run.outcome,
+                lineage: route_run.lineage_json,
+                funnel: route_run.funnel_json,
+                evidence,
+            });
+        }
+        Ok(Some(QuantReportDiagnosticsView {
+            decision_boundary: DecisionBoundaryEvidenceView::from(&boundary),
+            global,
+            routes,
+        }))
     }
 
     async fn find_report_funnel(
@@ -573,19 +591,25 @@ impl QuantReportPort for CoreQuantReportPort {
                 window.size(),
             )
             .await?;
+        let route_runs = self
+            .report_repo
+            .list_route_runs(report_id)
+            .await?
+            .into_iter()
+            .map(|run| (run.report_route_run_id, run))
+            .collect::<HashMap<_, _>>();
         let items = rows
             .into_iter()
-            .map(|row| funnel_market_view(&report, row))
+            .map(|row| funnel_market_view(&report, &route_runs, row))
             .collect::<QuantResult<Vec<_>>>()?;
         Ok(Some(Paginated::from_window(items, total, window)))
     }
 
     async fn current_report(
         &self,
-        profile_id: &ResearchProfileId,
         kind: ReportKind,
     ) -> QuantResult<Option<RecommendationReportInfo>> {
-        Ok(self.report_repo.current(profile_id, kind).await?)
+        Ok(self.report_repo.current(kind).await?)
     }
 
     async fn find_recommendations(
@@ -658,7 +682,40 @@ impl QuantReportPort for CoreQuantReportPort {
         else {
             return Ok(None);
         };
+        let report = self
+            .report_repo
+            .find_by_id(&recommendation.recommendation_report_id)
+            .await?
+            .ok_or_else(|| ResearchError::Determinism {
+                detail: format!(
+                    "recommendation {} references missing report {}",
+                    recommendation.recommendation_id, recommendation.recommendation_report_id
+                ),
+            })?;
+        let route_run = self
+            .report_repo
+            .find_route_run(&recommendation.report_route_run_id)
+            .await?
+            .ok_or_else(|| ResearchError::Determinism {
+                detail: format!(
+                    "recommendation {} references missing Route run {}",
+                    recommendation.recommendation_id, recommendation.report_route_run_id
+                ),
+            })?;
         let evidence_refs = recommendation.evidence_refs.clone();
+        if route_run.report_run_id != report.report_run_id
+            || route_run.route != recommendation.route
+            || route_run.model_run_id != Some(evidence_refs.model_run_id)
+            || route_run.model_version_id != Some(evidence_refs.model_version_id)
+        {
+            return Err(ResearchError::Determinism {
+                detail: format!(
+                    "recommendation {} evidence does not match its report Route run",
+                    recommendation.recommendation_id
+                ),
+            }
+            .into());
+        }
         let evidence = self
             .load_serving_evidence(&evidence_refs.model_run_id)
             .await?;
@@ -666,9 +723,7 @@ impl QuantReportPort for CoreQuantReportPort {
             .model_inputs
             .into_iter()
             .filter(|row| {
-                row.recommendation_report_id.as_ref()
-                    == Some(&recommendation.recommendation_report_id)
-                    && row.market_id == recommendation.market_id
+                row.market_id == recommendation.market_id
                     && row.feature_vector_id == evidence_refs.feature_vector_id
                     && row.model_version_id == evidence_refs.model_version_id
             })
@@ -717,11 +772,14 @@ impl QuantReportPort for CoreQuantReportPort {
         ) else {
             return Ok(None);
         };
-        if base.profile_id != compare.profile_id || base.report_kind != compare.report_kind {
+        if base.report_kind != compare.report_kind {
             return Err(ReportError::IncomparableReports {
                 detail: format!(
-                    "{}:{} cannot be compared with {}:{}",
-                    base.profile_id, base.report_kind, compare.profile_id, compare.report_kind,
+                    "global report {} ({}) cannot be compared with {} ({})",
+                    base.recommendation_report_id,
+                    base.report_kind,
+                    compare.recommendation_report_id,
+                    compare.report_kind,
                 ),
             }
             .into());
@@ -843,24 +901,12 @@ fn funnel_summary(
 
 fn funnel_market_view(
     report: &RecommendationReportInfo,
+    route_runs: &HashMap<ReportRouteRunId, ReportRouteRunInfo>,
     row: ReportMarketFunnelRow,
 ) -> QuantResult<ReportFunnelMarketView> {
-    let profile_content_hash =
-        row.profile_content_hash
-            .parse::<ContentHash>()
-            .map_err(|error| ResearchError::Determinism {
-                detail: format!("invalid funnel profile hash: {error}"),
-            })?;
-    let profile_ref = ResearchProfileRef {
-        id: ResearchProfileId::new(row.profile_id),
-        version: row.profile_version,
-        content_hash: profile_content_hash,
-    };
     if row.recommendation_report_id != report.recommendation_report_id
         || row.market_selection_id != report.market_selection_id
         || row.decision_policy_snapshot_id != report.decision_policy_snapshot_id
-        || row.model_version_id != report.model_version_id
-        || profile_ref != report.profile_ref
     {
         return Err(ResearchError::Determinism {
             detail: format!(
@@ -869,6 +915,46 @@ fn funnel_market_view(
             ),
         }
         .into());
+    }
+    let route = row.route.as_deref().map(parse_funnel_route).transpose()?;
+    match (row.report_route_run_id, route) {
+        (None, None) => {
+            if row.model_version_id.is_some() || row.model_run_id.is_some() {
+                return Err(ResearchError::Determinism {
+                    detail: "model lineage cannot exist without a report Route run".to_owned(),
+                }
+                .into());
+            }
+        }
+        (Some(route_run_id), Some(route)) => {
+            let route_run =
+                route_runs
+                    .get(&route_run_id)
+                    .ok_or_else(|| ResearchError::Determinism {
+                        detail: format!(
+                            "funnel Route run {route_run_id} does not belong to report"
+                        ),
+                    })?;
+            if route_run.report_run_id != report.report_run_id
+                || route_run.route != route
+                || route_run.model_version_id != row.model_version_id
+                || route_run.model_run_id != row.model_run_id
+            {
+                return Err(ResearchError::Determinism {
+                    detail: format!(
+                        "report {} funnel Route lineage does not match its Route run",
+                        report.recommendation_report_id
+                    ),
+                }
+                .into());
+            }
+        }
+        _ => {
+            return Err(ResearchError::Determinism {
+                detail: "funnel Route id and Route label must be present together".to_owned(),
+            }
+            .into());
+        }
     }
     let terminal_stage =
         row.terminal_stage
@@ -902,8 +988,9 @@ fn funnel_market_view(
     Ok(ReportFunnelMarketView {
         recommendation_report_id: row.recommendation_report_id,
         market_selection_id: row.market_selection_id,
-        profile_ref,
         decision_policy_snapshot_id: row.decision_policy_snapshot_id,
+        report_route_run_id: row.report_route_run_id,
+        route,
         model_version_id: row.model_version_id,
         model_run_id: row.model_run_id,
         market_id: row.market_id,
@@ -917,6 +1004,18 @@ fn funnel_market_view(
         recommendation_id: row.recommendation_id,
         row_hash,
     })
+}
+
+fn parse_funnel_route(value: &str) -> QuantResult<BuyModelRoute> {
+    match value {
+        "pooled" => Ok(BuyModelRoute::Pooled),
+        "crypto" => Ok(BuyModelRoute::Crypto),
+        "weather" => Ok(BuyModelRoute::Weather),
+        _ => Err(ResearchError::Determinism {
+            detail: format!("unknown funnel Route `{value}`"),
+        }
+        .into()),
+    }
 }
 
 struct RunServingEvidence {
@@ -965,48 +1064,12 @@ fn completion_vector_ids(
     })
 }
 
-fn report_diagnostics_execution(
-    model_run_id: Option<&ModelRunId>,
-    empty_reason: Option<EmptyReportReason>,
-) -> QuantResult<(ReportDiagnosticsSubject, FeatureParityStage)> {
-    if model_run_id.is_some() {
-        return Ok((
-            ReportDiagnosticsSubject::ModelRun,
-            FeatureParityStage::Prediction,
-        ));
-    }
-    match empty_reason {
-        Some(EmptyReportReason::EmptySelection | EmptyReportReason::SystemDegraded) => Ok((
-            ReportDiagnosticsSubject::PreInferenceReport,
-            FeatureParityStage::Selection,
-        )),
-        Some(EmptyReportReason::InsufficientDataQuality) => Ok((
-            ReportDiagnosticsSubject::PreInferenceReport,
-            FeatureParityStage::DataQuality,
-        )),
-        Some(reason) => Err(ResearchError::Determinism {
-            detail: format!(
-                "report without model_run_id cannot have post-inference empty reason {reason:?}"
-            ),
-        }
-        .into()),
-        None => Err(ResearchError::Determinism {
-            detail: "report without model_run_id must declare a pre-inference empty reason"
-                .to_owned(),
-        }
-        .into()),
-    }
-}
-
-fn pre_inference_selection_diagnostics(
-    boundary: &DecisionBoundary,
+const fn pre_inference_selection_diagnostics(
     selection_count: u64,
-) -> QuantReportDiagnosticsView {
-    QuantReportDiagnosticsView {
-        subject: ReportDiagnosticsSubject::PreInferenceReport,
+) -> ReportEvidenceDiagnosticsView {
+    ReportEvidenceDiagnosticsView {
         stage_ceiling: FeatureParityStage::Selection,
         evidence_complete: true,
-        decision_boundary: Some(DecisionBoundaryEvidenceView::from(boundary)),
         model_route: None,
         selection_count,
         decision_capture_count: None,
@@ -1019,19 +1082,16 @@ fn pre_inference_selection_diagnostics(
 }
 
 fn pre_inference_diagnostics(
-    boundary: &DecisionBoundary,
     selection_count: u64,
     evidence: PreInferenceFeatureEvidence,
-) -> QuantResult<QuantReportDiagnosticsView> {
+) -> QuantResult<ReportEvidenceDiagnosticsView> {
     let feature_rows = evidence.cells;
     let feature_state_counts = (!feature_rows.is_empty())
         .then(|| counts_by(feature_rows.iter().map(|row| row.cell_state.as_wire())));
     let feature_cell_count = non_empty_count(&feature_rows, "feature cell")?;
-    Ok(QuantReportDiagnosticsView {
-        subject: ReportDiagnosticsSubject::PreInferenceReport,
+    Ok(ReportEvidenceDiagnosticsView {
         stage_ceiling: FeatureParityStage::DataQuality,
         evidence_complete: evidence.complete,
-        decision_boundary: Some(DecisionBoundaryEvidenceView::from(boundary)),
         model_route: None,
         selection_count,
         decision_capture_count: Some(evidence.capture_count),
@@ -1049,7 +1109,7 @@ fn model_run_diagnostics(
     features: &[QuantFeatureEventRow],
     boundary: &DecisionBoundary,
     selection_count: u64,
-) -> QuantResult<QuantReportDiagnosticsView> {
+) -> QuantResult<ReportEvidenceDiagnosticsView> {
     let feature_rows = latest_feature_cells(features.to_vec());
     let input_rows = latest_model_inputs(inputs.to_vec());
     let observed_boundary = decision_boundary(&feature_rows)?;
@@ -1071,11 +1131,9 @@ fn model_run_diagnostics(
     let model_route = consistent_model_route(&input_rows)?;
     let (feature_vector_count, decision_capture_count) =
         serving_feature_evidence_counts(&feature_rows)?;
-    Ok(QuantReportDiagnosticsView {
-        subject: ReportDiagnosticsSubject::ModelRun,
+    Ok(ReportEvidenceDiagnosticsView {
         stage_ceiling: FeatureParityStage::Prediction,
         evidence_complete,
-        decision_boundary: Some(expected_boundary),
         model_route,
         selection_count,
         decision_capture_count,
@@ -1418,13 +1476,10 @@ mod diagnostics_tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         domain::data_plane::{DecisionBoundary, DecisionClock},
-        enums::quant::{EmptyReportReason, FeatureParityStage},
-        types::ModelRunId,
+        enums::quant::FeatureParityStage,
     };
 
-    use super::{
-        model_run_diagnostics, pre_inference_selection_diagnostics, report_diagnostics_execution,
-    };
+    use super::{model_run_diagnostics, pre_inference_selection_diagnostics};
 
     fn boundary() -> DecisionBoundary {
         DecisionClock::new(30)
@@ -1438,11 +1493,10 @@ mod diagnostics_tests {
 
     #[test]
     fn pre_inference_never_fabricates() {
-        let view = pre_inference_selection_diagnostics(&boundary(), 0);
+        let view = pre_inference_selection_diagnostics(0);
 
         assert!(view.evidence_complete);
         assert_eq!(view.stage_ceiling, FeatureParityStage::Selection);
-        assert!(view.decision_boundary.is_some());
         assert_eq!(view.selection_count, 0);
         assert_eq!(view.decision_capture_count, None);
         assert_eq!(view.feature_vector_count, None);
@@ -1461,26 +1515,5 @@ mod diagnostics_tests {
         assert_eq!(view.feature_cell_count, None);
         assert_eq!(view.model_input_state_counts, None);
         assert_eq!(view.model_input_count, None);
-    }
-
-    #[test]
-    fn report_subject_rejects_reason() {
-        let model_run_id = ModelRunId::from_v7();
-        assert_eq!(
-            report_diagnostics_execution(Some(&model_run_id), None)
-                .expect("model-run subject")
-                .1,
-            FeatureParityStage::Prediction
-        );
-        assert_eq!(
-            report_diagnostics_execution(None, Some(EmptyReportReason::InsufficientDataQuality))
-                .expect("data-quality subject")
-                .1,
-            FeatureParityStage::DataQuality
-        );
-        assert!(
-            report_diagnostics_execution(None, Some(EmptyReportReason::NoPositiveSignal)).is_err()
-        );
-        assert!(report_diagnostics_execution(None, None).is_err());
     }
 }

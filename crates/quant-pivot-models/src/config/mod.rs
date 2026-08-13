@@ -7,36 +7,45 @@
 //! [`DecisionPolicySnapshot`](crate::runtime_config::DecisionPolicySnapshot) instead and are
 //! managed through the governed Config API — never by editing TOML.
 //!
-//! # Loading precedence (high → low)
-//!
-//! The `config` crate merges sources in registration order; **later wins**:
-//!
-//! 1. Optional gitignored machine-local TOML override
-//! 2. `config/quant-pivot.toml`
-//! 3. Hard-coded defaults (`serde` `default` on each struct field)
-//!
-//! Every section rejects unknown keys (`deny_unknown_fields`): a typo or a
-//! leftover runtime section in the TOML aborts startup instead of being
-//! silently ignored.
+//! Loading accepts exactly one explicit absolute TOML file. There is no default
+//! path, directory discovery, environment source, overlay, or default fill.
 
 mod cache;
 mod db;
 mod deployment;
+mod descriptor;
 mod domain_sources;
 mod keys;
 mod market_data;
 mod observability;
 mod polymarket;
+mod projection;
 mod quant;
 mod research;
 pub mod secret;
 pub mod validation;
+mod validation_contract;
 mod web;
 
 pub use cache::{CacheConfig, DomainCacheConfig, MokaConfig, RedisConfig};
-use config_rs::{Config, ConfigError as ConfigConfigError, File};
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Take},
+    path::PathBuf,
+};
+
+#[cfg(all(test, unix))]
+use std::fs::Permissions;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
 pub use db::{ClickHouseConfig, DatabaseConfig, PostgresConfig};
 pub use deployment::DeploymentConfig;
+pub use descriptor::{
+    DEPLOY_CONFIG_EXPECTED_LEAF_COUNT, DEPLOY_SECRET_PATHS, DeployApplyEffect,
+    DeployConfigDescriptor, DeployConfigFieldDescriptor, DeployFieldBounds, DeployFieldUnit,
+    DeploySensitivity, DeployValueKind,
+};
 pub use domain_sources::{
     AirNowPm25ReportingAreaBindingConfig, AirNowPm25SiteBindingConfig, AirNowSourceConfig,
     AviationWeatherSourceConfig, BinanceSourceConfig, ChainlinkDataStreamFeedConfig,
@@ -54,15 +63,20 @@ pub use market_data::{
     DataApiConfig, GammaConfig, MAX_TRADE_TAPE_RECONCILIATION_ROWS, MarketDataDeployConfig,
     TradeTapeOnChainConfig, WebSocketConfig,
 };
+#[cfg(unix)]
+use nix::{fcntl::OFlag, unistd::Uid};
 pub use observability::{
     NotificationChannelsConfig, ObservabilityConfig, TelegramChannelConfig, WebhookChannelConfig,
 };
 pub use polymarket::{
     OnchainConfig, PolygonRpcEndpoint, PolymarketConfig, RelayerConfig, SettlementDeployConfig,
 };
+pub use projection::{
+    DeployConfigFieldProjection, DeployProjectedValue, DeployProjectionError, DeployProtectedStatus,
+};
 pub use quant::{
-    FeatureParityComputeConfig, FeedbackAttributionComputeConfig, QuantAccountDeployConfig,
-    QuantDeployConfig, QuantWorkersConfig, ResearchJobsConfig,
+    FeatureParityComputeConfig, FeedbackAttributionComputeConfig, PortfolioSolverDeployConfig,
+    QuantAccountDeployConfig, QuantDeployConfig, QuantWorkersConfig, ResearchJobsConfig,
 };
 use quant_pivot_error::{
     QuantResult, config::ConfigError, config_validation::ConfigValidationReport,
@@ -71,17 +85,47 @@ pub use research::{
     ArtifactStoreDeployConfig, ArtifactStoreKind, EvidenceAttestationConfig,
     ModelServingRegistryConfig, ResearchDeployConfig,
 };
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
+use toml::{Value as TomlValue, de::Error as TomlDeError};
+pub use validation_contract::DeployValidationRuleDescriptor;
 pub use web::{JwtConfig, PasswordCryptoConfig, WebConfig};
 
-use crate::{config::validation::validate_deploy_mode, enums::quant::QuantRuntimeMode};
+use crate::{
+    config::validation::validate_deploy_mode, enums::quant::QuantRuntimeMode,
+    types::DeploymentEnvironment,
+};
+
+const MAX_CONFIG_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Explicit, immutable request for one Deploy Config file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeployConfigLoadRequest {
+    pub config_file: PathBuf,
+    pub expected_environment: DeploymentEnvironment,
+}
+
+impl DeployConfigLoadRequest {
+    #[must_use]
+    pub const fn new(config_file: PathBuf, expected_environment: DeploymentEnvironment) -> Self {
+        Self {
+            config_file,
+            expected_environment,
+        }
+    }
+}
+
+struct OpenedDeployConfig {
+    raw: String,
+    mode: u32,
+}
 
 /// Deserialized deploy-configuration root.
 ///
 /// Each section maps 1:1 to a `[section]` in `quant-pivot.toml`. Wrap in an
 /// `Arc` for sharing across async tasks — the struct itself is plain data.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeployConfig {
     /// Environment identity used for environment-specific operational safety.
     pub deployment: DeploymentConfig,
@@ -109,42 +153,249 @@ pub struct DeployConfig {
     pub research: ResearchDeployConfig,
 }
 
+/// Explicit serialization capability for generated, redacted templates only.
+///
+/// `DeployConfig` deliberately does not implement `Serialize`, preventing an
+/// API or log boundary from serializing the runtime object by accident. This
+/// adapter retains the existing per-secret empty-value serializers and is
+/// consumed only by the descriptor-owned template generator.
+pub struct DeployConfigTemplate<'a> {
+    config: &'a DeployConfig,
+}
+
+impl<'a> From<&'a DeployConfig> for DeployConfigTemplate<'a> {
+    fn from(config: &'a DeployConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl Serialize for DeployConfigTemplate<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut root = serializer.serialize_struct("DeployConfigTemplate", 12)?;
+        root.serialize_field("deployment", &self.config.deployment)?;
+        root.serialize_field("polymarket", &self.config.polymarket)?;
+        root.serialize_field("market_data", &self.config.market_data)?;
+        root.serialize_field("domain_sources", &self.config.domain_sources)?;
+        root.serialize_field("observability", &self.config.observability)?;
+        root.serialize_field("notifications", &self.config.notifications)?;
+        root.serialize_field("db", &self.config.db)?;
+        root.serialize_field("cache", &self.config.cache)?;
+        root.serialize_field("keys", &self.config.keys)?;
+        root.serialize_field("web", &self.config.web)?;
+        root.serialize_field("quant", &self.config.quant)?;
+        root.serialize_field("research", &self.config.research)?;
+        root.end()
+    }
+}
+
 impl DeployConfig {
-    /// Load configuration from the given directory.
-    ///
-    /// Loads `{dir}/quant-pivot.toml` and an optional immutable environment
-    /// override, then runs mode-agnostic semantic validation.
-    pub fn load(config_dir: &str) -> QuantResult<Self> {
-        Self::load_internal(config_dir)
+    /// Load one explicit Deploy Config file through a no-follow file descriptor.
+    pub fn load(request: &DeployConfigLoadRequest) -> QuantResult<Self> {
+        Self::load_internal(request)
     }
 
-    /// Load the same deploy configuration for explicit schema commands.
-    pub fn load_for_migration(config_dir: &str) -> QuantResult<Self> {
-        Self::load_internal(config_dir)
-    }
-
-    fn load_internal(config_dir: &str) -> QuantResult<Self> {
-        let mut deploy: Self = build_config(config_dir)
-            .map_err(ConfigError::Load)?
-            .try_deserialize()
-            .map_err(ConfigError::Load)?;
+    fn load_internal(request: &DeployConfigLoadRequest) -> QuantResult<Self> {
+        let opened = OpenedDeployConfig::read(request)?;
+        let parsed: TomlValue =
+            toml::from_str(&opened.raw).map_err(|error| ConfigError::Parse {
+                path: request.config_file.clone(),
+                reason: error.message().to_owned(),
+            })?;
+        if Self::contains_placeholder(&parsed) {
+            return Err(ConfigError::Placeholder {
+                path: request.config_file.clone(),
+            }
+            .into());
+        }
+        let mut deploy: Self =
+            parsed
+                .try_into()
+                .map_err(|error: TomlDeError| ConfigError::Parse {
+                    path: request.config_file.clone(),
+                    reason: error.message().to_owned(),
+                })?;
         deploy.keys.normalize();
         deploy.polymarket.relayer.normalize();
         deploy
             .domain_sources
             .chainlink_data_streams
             .normalize_credentials();
+        if deploy.deployment.environment != request.expected_environment {
+            return Err(ConfigError::EnvironmentMismatch {
+                expected: request.expected_environment.as_str().to_owned(),
+                actual: deploy.deployment.environment.as_str().to_owned(),
+            }
+            .into());
+        }
+        OpenedDeployConfig::validate_mode(request, opened.mode, &deploy)?;
         deploy.ensure_valid_common()?;
         Ok(deploy)
     }
+
+    fn contains_placeholder(value: &TomlValue) -> bool {
+        match value {
+            TomlValue::String(value) => value.contains("REPLACE_WITH_"),
+            TomlValue::Array(values) => values.iter().any(Self::contains_placeholder),
+            TomlValue::Table(values) => values.values().any(Self::contains_placeholder),
+            _ => false,
+        }
+    }
+
+    fn has_configured_secrets(&self) -> bool {
+        let protected_rpc = matches!(
+            &self.polymarket.onchain.rpc_endpoint,
+            PolygonRpcEndpoint::Protected { url } if !url.is_empty()
+        );
+        protected_rpc
+            || self
+                .polymarket
+                .relayer
+                .api_key
+                .as_ref()
+                .is_some_and(|secret| !secret.is_empty())
+            || self
+                .domain_sources
+                .chainlink_data_streams
+                .api_key
+                .as_ref()
+                .is_some_and(|secret| !secret.is_empty())
+            || self
+                .domain_sources
+                .chainlink_data_streams
+                .api_secret
+                .as_ref()
+                .is_some_and(|secret| !secret.is_empty())
+            || !self.notifications.telegram.bot_token.is_empty()
+            || !self.notifications.webhook.url.is_empty()
+            || !self.notifications.webhook.authorization.is_empty()
+            || !self.db.postgres.password.is_empty()
+            || !self.db.clickhouse.password.is_empty()
+            || !self.cache.redis.password.is_empty()
+            || self
+                .keys
+                .private_key
+                .as_ref()
+                .is_some_and(|secret| !secret.is_empty())
+            || !self.web.jwt.signing_key.is_empty()
+            || !self.research.evidence_attestation.signing_key.is_empty()
+            || self
+                .research
+                .evidence_attestation
+                .previous_signing_keys
+                .iter()
+                .any(|secret| !secret.is_empty())
+    }
 }
 
-/// Shared config-crate builder: base file → immutable environment overlay.
-fn build_config(config_dir: &str) -> Result<Config, ConfigConfigError> {
-    Config::builder()
-        .add_source(File::with_name(&format!("{config_dir}/quant-pivot")).required(false))
-        .add_source(File::with_name(&format!("{config_dir}/quant-pivot.local")).required(false))
-        .build()
+impl OpenedDeployConfig {
+    fn read(request: &DeployConfigLoadRequest) -> QuantResult<Self> {
+        if !request.config_file.is_absolute() {
+            return Err(ConfigError::UnsafeFile {
+                path: request.config_file.clone(),
+                reason: "config_file must be an absolute path".to_owned(),
+            }
+            .into());
+        }
+        Self::read_platform(request)
+    }
+
+    #[cfg(unix)]
+    fn read_platform(request: &DeployConfigLoadRequest) -> QuantResult<Self> {
+        let flags = (OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(flags)
+            .open(&request.config_file)
+            .map_err(|source| ConfigError::FileIo {
+                path: request.config_file.clone(),
+                source,
+            })?;
+        let metadata = file.metadata().map_err(|source| ConfigError::FileIo {
+            path: request.config_file.clone(),
+            source,
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(ConfigError::UnsafeFile {
+                path: request.config_file.clone(),
+                reason: "config_file must be a regular file".to_owned(),
+            }
+            .into());
+        }
+        if metadata.uid() != Uid::effective().as_raw() {
+            return Err(ConfigError::UnsafeFile {
+                path: request.config_file.clone(),
+                reason: "config_file must be owned by the runtime user".to_owned(),
+            }
+            .into());
+        }
+        if metadata.len() > MAX_CONFIG_FILE_BYTES {
+            return Err(ConfigError::UnsafeFile {
+                path: request.config_file.clone(),
+                reason: format!("config_file exceeds {MAX_CONFIG_FILE_BYTES} bytes"),
+            }
+            .into());
+        }
+        let mode = metadata.mode() & 0o777;
+        let mut raw = String::new();
+        let mut bounded: Take<&mut File> = file.by_ref().take(MAX_CONFIG_FILE_BYTES + 1);
+        bounded
+            .read_to_string(&mut raw)
+            .map_err(|source| ConfigError::FileIo {
+                path: request.config_file.clone(),
+                source,
+            })?;
+        Ok(Self { raw, mode })
+    }
+
+    #[cfg(not(unix))]
+    fn read_platform(request: &DeployConfigLoadRequest) -> QuantResult<Self> {
+        let _ = OpenOptions::new();
+        Err(ConfigError::UnsafeFile {
+            path: request.config_file.clone(),
+            reason: "secure Deploy Config loading requires a Unix file descriptor".to_owned(),
+        }
+        .into())
+    }
+
+    fn validate_mode(
+        request: &DeployConfigLoadRequest,
+        mode: u32,
+        deploy: &DeployConfig,
+    ) -> QuantResult<()> {
+        let production = request.expected_environment.as_str() == "production";
+        let private_mode = matches!(mode, 0o400 | 0o600);
+        if production && !private_mode {
+            return Err(ConfigError::UnsafeFile {
+                path: request.config_file.clone(),
+                reason: format!(
+                    "production config_file mode must be 0400 or 0600, found {mode:04o}"
+                ),
+            }
+            .into());
+        }
+        if !production && deploy.has_configured_secrets() && !private_mode {
+            return Err(ConfigError::UnsafeFile {
+                path: request.config_file.clone(),
+                reason: format!(
+                    "a config_file containing secrets must be 0400 or 0600, found {mode:04o}"
+                ),
+            }
+            .into());
+        }
+        if !production && !private_mode && mode != 0o644 {
+            return Err(ConfigError::UnsafeFile {
+                path: request.config_file.clone(),
+                reason: format!(
+                    "non-secret development config_file mode must be 0400, 0600, or 0644, found {mode:04o}"
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
 }
 
 impl DeployConfig {
@@ -188,20 +439,36 @@ impl DeployConfig {
 #[cfg(test)]
 mod tests {
     use std::{
-        env::{self, var},
+        env::var,
         fs,
         path::{Path, PathBuf},
-        process,
     };
 
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
     use secret::SecretText;
+    use tempfile::tempdir;
 
     use super::*;
 
     #[test]
-    fn default_config_loads_absent() {
-        let deploy = DeployConfig::load("nonexistent_dir_for_test");
-        assert!(deploy.is_ok(), "defaults should load: {deploy:?}");
+    fn missing_explicit_file_fails() {
+        let request = DeployConfigLoadRequest::new(
+            PathBuf::from("/definitely/missing/quant-pivot.toml"),
+            DeploymentEnvironment::local_development(),
+        );
+        assert!(DeployConfig::load(&request).is_err());
+    }
+
+    #[test]
+    fn relative_file_is_rejected() {
+        let request = DeployConfigLoadRequest::new(
+            PathBuf::from("config/quant-pivot.toml"),
+            DeploymentEnvironment::local_development(),
+        );
+        let error = DeployConfig::load(&request).expect_err("relative path must fail closed");
+        assert!(error.to_string().contains("absolute path"));
     }
 
     #[test]
@@ -304,6 +571,24 @@ mod tests {
     }
 
     #[test]
+    fn missing_leaf_is_rejected() {
+        let raw = fs::read_to_string(tracked_config_root().join("quant-pivot.toml"))
+            .expect("read shipped TOML");
+        let mut value: TomlValue = toml::from_str(&raw).expect("parse shipped TOML value");
+        value
+            .get_mut("deployment")
+            .and_then(TomlValue::as_table_mut)
+            .expect("deployment table")
+            .remove("environment");
+        let missing_leaf = toml::to_string(&value).expect("serialize missing-leaf fixture");
+        let result: Result<DeployConfig, _> = toml::from_str(&missing_leaf);
+        assert!(
+            result.is_err(),
+            "every static Deploy Config leaf must be explicitly present"
+        );
+    }
+
+    #[test]
     fn runtime_sections_rejected_toml() {
         for section in [
             "detection",
@@ -320,7 +605,7 @@ mod tests {
     }
 
     /// Resolve the workspace `config/` directory from the crate manifest.
-    fn workspace_config_dir() -> PathBuf {
+    fn tracked_config_root() -> PathBuf {
         let crate_dir = var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
         Path::new(&crate_dir)
             .ancestors()
@@ -331,8 +616,8 @@ mod tests {
 
     #[test]
     fn shipped_toml_template_deserializes() {
-        let config_dir = workspace_config_dir();
-        let template = config_dir.join("quant-pivot.toml");
+        let config_root = tracked_config_root();
+        let template = config_root.join("quant-pivot.toml");
         if !template.exists() {
             eprintln!("skipping shipped_toml_template_deserializes: template missing");
             return;
@@ -344,87 +629,80 @@ mod tests {
             .expect("shipped TOML must validate structurally");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn secret_text_deserializes_redacted() {
-        let plaintext: DeployConfig =
-            toml::from_str("[keys]\nprivate_key = \"0xplaintext\"\n").expect("plaintext secret");
-        assert_eq!(plaintext.keys.private_key(), Some("0xplaintext"));
-        assert!(!format!("{plaintext:?}").contains("0xplaintext"));
+    fn explicit_regular_file_loads() {
+        let directory = tempdir().expect("temp config directory");
+        let target = directory.path().join("runtime.toml");
+        fs::copy(tracked_config_root().join("quant-pivot.toml"), &target)
+            .expect("copy tracked config");
+        fs::set_permissions(&target, Permissions::from_mode(0o644))
+            .expect("set public template mode");
+        let request =
+            DeployConfigLoadRequest::new(target, DeploymentEnvironment::local_development());
+        DeployConfig::load(&request).expect("explicit development template loads");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn local_toml_overrides_values() {
-        let dir = env::temp_dir().join(format!("quant_pivot_local_cfg_test_{}", process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("temp config dir");
-
-        fs::write(
-            dir.join("quant-pivot.toml"),
-            "[db.postgres]\nhost = \"base.internal\"\n",
-        )
-        .expect("write base");
-        fs::write(
-            dir.join("quant-pivot.local.toml"),
-            "[db.postgres]\nhost = \"staging.internal\"\n",
-        )
-        .expect("write machine-local override");
-
-        let deploy = DeployConfig::load(dir.to_str().expect("utf-8")).expect("load");
-        assert_eq!(deploy.db.postgres.host, "staging.internal");
-
-        let _ = fs::remove_dir_all(&dir);
+    fn symlink_is_rejected() {
+        let directory = tempdir().expect("temp config directory");
+        let target = directory.path().join("target.toml");
+        fs::copy(tracked_config_root().join("quant-pivot.toml"), &target)
+            .expect("copy tracked config");
+        let link = directory.path().join("linked.toml");
+        symlink(&target, &link).expect("create symlink");
+        let request =
+            DeployConfigLoadRequest::new(link, DeploymentEnvironment::local_development());
+        assert!(DeployConfig::load(&request).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn local_plaintext_overlay_redacted() {
-        let dir = env::temp_dir().join(format!("quant_pivot_local_secret_{}", process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("temp config dir");
-        fs::write(dir.join("quant-pivot.toml"), "").expect("write base config");
-        fs::write(
-            dir.join("quant-pivot.local.toml"),
-            "[db.postgres]\npassword = \"local-postgres-password\"\n",
-        )
-        .expect("write local secret override");
+    fn dangerous_mode_is_rejected() {
+        let directory = tempdir().expect("temp config directory");
+        let target = directory.path().join("runtime.toml");
+        fs::copy(tracked_config_root().join("quant-pivot.toml"), &target)
+            .expect("copy tracked config");
+        fs::set_permissions(&target, Permissions::from_mode(0o666)).expect("set dangerous mode");
+        let request =
+            DeployConfigLoadRequest::new(target, DeploymentEnvironment::local_development());
+        let error = DeployConfig::load(&request).expect_err("dangerous mode must fail closed");
+        assert!(error.to_string().contains("mode must be"));
+    }
 
-        let deploy = DeployConfig::load(dir.to_str().expect("utf-8"))
-            .expect("load exact local-development plaintext");
-        let url = deploy
-            .db
-            .postgres
-            .try_connection_url()
-            .expect("build PostgreSQL adapter URL");
-        assert_eq!(
-            url::Url::parse(&url)
-                .expect("parse PostgreSQL URL")
-                .password(),
-            Some("local-postgres-password")
+    #[cfg(unix)]
+    #[test]
+    fn environment_mismatch_is_rejected() {
+        let directory = tempdir().expect("temp config directory");
+        let target = directory.path().join("runtime.toml");
+        fs::copy(tracked_config_root().join("quant-pivot.toml"), &target)
+            .expect("copy tracked config");
+        fs::set_permissions(&target, Permissions::from_mode(0o600)).expect("set private mode");
+        let request = DeployConfigLoadRequest::new(
+            target,
+            DeploymentEnvironment::parse("production").expect("production environment"),
         );
-        assert!(!format!("{deploy:?}").contains("local-postgres-password"));
-
-        let _ = fs::remove_dir_all(&dir);
+        let error = DeployConfig::load(&request).expect_err("environment mismatch must fail");
+        assert!(error.to_string().contains("environment mismatch"));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn placeholders_fail_validation() {
-        let template = workspace_config_dir().join("quant-pivot.production.example.toml");
-        if !template.exists() {
-            eprintln!("skipping production_example_toml_deserializes: {template:?} missing");
-            return;
-        }
-        let raw = fs::read_to_string(&template).expect("read production example");
-        let parsed: DeployConfig =
-            toml::from_str(&raw).expect("production example must deserialize");
-        assert!(matches!(
-            &parsed.polymarket.onchain.rpc_endpoint,
-            PolygonRpcEndpoint::Protected { url }
-                if url.expose_secret().contains("REPLACE_WITH_")
-        ));
-        assert!(
-            parsed
-                .ensure_mode_valid(QuantRuntimeMode::ReportOnly)
-                .is_err(),
-            "production placeholders must be replaced before startup"
+    fn placeholders_are_rejected() {
+        let directory = tempdir().expect("temp config directory");
+        let target = directory.path().join("runtime.toml");
+        fs::copy(
+            tracked_config_root().join("quant-pivot.production.example.toml"),
+            &target,
+        )
+        .expect("copy production template");
+        fs::set_permissions(&target, Permissions::from_mode(0o600)).expect("set private mode");
+        let request = DeployConfigLoadRequest::new(
+            target,
+            DeploymentEnvironment::parse("production").expect("production environment"),
         );
+        let error = DeployConfig::load(&request).expect_err("placeholder must fail closed");
+        assert!(error.to_string().contains("unreplaced placeholder"));
     }
 }

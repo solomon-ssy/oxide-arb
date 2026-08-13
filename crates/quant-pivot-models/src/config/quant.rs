@@ -1,12 +1,13 @@
 //! Quant pivot deploy configuration (`[quant]`, restart to apply).
 
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::enums::quant::{ExecutionWalletKind, ResearchJobKind};
 
 /// Quant-specific structural parameters.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QuantDeployConfig {
     /// Background worker topology.
     pub workers: QuantWorkersConfig,
@@ -14,6 +15,44 @@ pub struct QuantDeployConfig {
     pub account: QuantAccountDeployConfig,
     /// Async research-job engine tunables (concurrency, lease, recovery, guards).
     pub research_jobs: ResearchJobsConfig,
+    /// Fixed `HiGHS` global-portfolio compute envelope.
+    pub portfolio_solver: PortfolioSolverDeployConfig,
+}
+
+/// Restart-bound resource envelope for the unique `HiGHS` MILP path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioSolverDeployConfig {
+    /// Hard wall-clock limit for one global planner invocation, in seconds.
+    /// Includes exact preparation, lexicographic optimization, uniqueness proof,
+    /// and publishable leave-one-out reoptimization; excludes upstream scenario
+    /// and executable-tier materialization.
+    #[schemars(range(min = 1, max = 600))]
+    pub deadline_secs: u64,
+    /// Deterministic `HiGHS` worker thread count.
+    #[schemars(range(min = 1, max = 1))]
+    pub threads: u32,
+    /// Maximum discrete tiers accepted by one report run.
+    #[schemars(range(min = 1, max = 50_000))]
+    pub max_tiers: u32,
+    /// Maximum promoted joint scenarios accepted by one report run.
+    #[schemars(range(min = 3, max = 10_000))]
+    pub max_scenarios: u32,
+    /// Maximum selected recommendations accepted by one publishable solve.
+    #[schemars(range(min = 1, max = 1_000))]
+    pub max_top_n: u32,
+}
+
+impl Default for PortfolioSolverDeployConfig {
+    fn default() -> Self {
+        Self {
+            deadline_secs: 180,
+            threads: 1,
+            max_tiers: 10_000,
+            max_scenarios: 400,
+            max_top_n: 20,
+        }
+    }
 }
 
 /// Async research-job engine tunables (`[quant.research_jobs]`, restart to apply).
@@ -22,8 +61,8 @@ pub struct QuantDeployConfig {
 /// cadence, crash-recovery cap, dry-run/plan sampling, build resource guard) —
 /// distinct from the frozen, per-dataset **runtime** config that governs
 /// modeling semantics and is captured in the `dataset_hash`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResearchJobsConfig {
     /// Maximum jobs executing concurrently across all kinds.
     pub global_concurrency: usize,
@@ -45,7 +84,6 @@ pub struct ResearchJobsConfig {
     pub feature_parity_concurrency: usize,
     /// Mandatory page, concurrency, memory, and deadline envelope for durable
     /// feature-parity replay.
-    #[serde(default = "FeatureParityComputeConfig::missing")]
     pub feature_parity_compute: FeatureParityComputeConfig,
     /// Per-kind cap for frozen feedback coverage scans.
     pub feedback_coverage_concurrency: usize,
@@ -55,7 +93,6 @@ pub struct ResearchJobsConfig {
     pub feedback_learning_concurrency: usize,
     /// Mandatory CPU/memory/deadline envelope for attribution and decision
     /// intervention replay.
-    #[serde(default = "FeedbackAttributionComputeConfig::missing")]
     pub feedback_attribution_compute: FeedbackAttributionComputeConfig,
     /// Maximum feedback cycles concurrently owned by one resident coordinator.
     pub feedback_cycle_concurrency: usize,
@@ -139,7 +176,7 @@ impl Default for ResearchJobsConfig {
 }
 
 /// Mandatory deploy-time compute envelope for durable feature-parity replay.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FeatureParityComputeConfig {
     /// Maximum frozen serving subjects replayed in one bounded page.
@@ -163,19 +200,8 @@ impl Default for FeatureParityComputeConfig {
     }
 }
 
-impl FeatureParityComputeConfig {
-    const fn missing() -> Self {
-        Self {
-            page_size: 0,
-            max_concurrency: 0,
-            max_working_set_bytes: 0,
-            deadline_secs: 0,
-        }
-    }
-}
-
 /// Mandatory deploy-time compute envelope for attribution materialization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackAttributionComputeConfig {
     /// Maximum model-learning cohort rows loaded into one materialization page.
@@ -196,17 +222,6 @@ impl Default for FeedbackAttributionComputeConfig {
             max_concurrency: 4,
             max_working_set_bytes: 512 * 1024 * 1024,
             deadline_secs: 1_800,
-        }
-    }
-}
-
-impl FeedbackAttributionComputeConfig {
-    const fn missing() -> Self {
-        Self {
-            page_size: 0,
-            max_concurrency: 0,
-            max_working_set_bytes: 0,
-            deadline_secs: 0,
         }
     }
 }
@@ -259,8 +274,8 @@ impl ResearchJobsConfig {
 }
 
 /// Quant background worker structural parameters.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QuantWorkersConfig {
     /// `PostgreSQL` report schedule reconciliation cadence (seconds).
     pub report_schedule_poll_secs: u64,
@@ -335,8 +350,8 @@ impl Default for QuantWorkersConfig {
 /// reports fail closed without it. auto-redeem is EOA-only, so
 /// money-moving settlement redemption additionally requires this address to
 /// equal the signer EOA. The private key is configured under `[keys]`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QuantAccountDeployConfig {
     /// Polymarket proxy/funder address used as `user=<funder>` for Data API
     /// position reads. Required to generate reports (all modes).
@@ -371,16 +386,8 @@ mod tests {
 
     #[test]
     fn missing_compute_budgets_invalid() {
-        let config: ResearchJobsConfig =
-            toml::from_str("").expect("deserialize omitted attribution budget");
-        assert_eq!(config.feature_parity_compute.page_size, 0);
-        assert_eq!(config.feature_parity_compute.max_concurrency, 0);
-        assert_eq!(config.feature_parity_compute.max_working_set_bytes, 0);
-        assert_eq!(config.feature_parity_compute.deadline_secs, 0);
-        assert_eq!(config.feedback_attribution_compute.page_size, 0);
-        assert_eq!(config.feedback_attribution_compute.max_concurrency, 0);
-        assert_eq!(config.feedback_attribution_compute.max_working_set_bytes, 0);
-        assert_eq!(config.feedback_attribution_compute.deadline_secs, 0);
+        let result: Result<ResearchJobsConfig, _> = toml::from_str("");
+        assert!(result.is_err(), "omitted compute budgets must fail parsing");
     }
 
     #[test]

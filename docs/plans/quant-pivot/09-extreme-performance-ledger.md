@@ -509,8 +509,10 @@
 
 ### PERF-21
 
-- [x] report gate 改为 2K full-compute funnel：完整 feature/model lineage、planner rejection、
-  optimizer/TopN recommendation；禁止 early-terminal。CPCV gate 明确重命名为
+- [x] 旧 `report_compute_gate` 破坏式正名为 `report_funnel_gate`：2K 输入只验证已冻结
+  feature/model/tier/recommendation lineage 的 funnel materialization，不再虚称执行 inference、
+  optimizer 或 TopN。新增 `portfolio_compute_gate` 覆盖 promoted scenario→L2 ladder→Decimal
+  economics→HiGHS→exact verifier→leave-one-out 的真实 finance path。CPCV gate 明确命名为
   `cpcv_orchestration_gate`。
 - [x] matrix fixture 覆盖 observed/substituted/missing/not-applicable 的真实 Decimal cell；新增
   feature-gated `model_train_replay_gate`，执行 1M-row Ridge train、冻结 transform replay 与
@@ -522,8 +524,9 @@
   原始 bucket JSON 与 SHA-256 随 `PerformanceEvidenceV1` 保存。证据包含 fixture/seed hash、
   环境、ClickHouse/RTT、事件与 correctness counters、CPU、encoded bytes、jemalloc net
   allocated、RSS。warm-up 必须经过 durable barrier 后才能打开测量窗口。
-- [x] `cargo xtask performance run --profile full` 统一执行短 kernel 十次、真实 model gate
-  一次与完整在线负载三次；跨 run variation 超过 3% 非零退出。`smoke` 不签收 SLO。
+- [x] `cargo xtask performance run --profile full` 统一执行短 kernel 十次、10k tiers / 400
+  scenarios / Top20 global-portfolio gate 十次、真实 model gate 一次与完整在线负载三次；跨 run
+  variation 超过 3% 非零退出。`smoke` 不签收 SLO。
 - [x] 新增独立 `performance.yml`：固定 self-hosted runner；main relevant-path 为 full，nightly
   为 2h soak，manual 可选 profile；artifact v4 保存 evidence 和 SHA-256 manifest。
 - [x] kernel binary 在 Linux 直接采集 `VmHWM`；matrix 8GiB、CPCV/model 10GiB ceiling
@@ -555,6 +558,12 @@
 - [x] 最终再次执行不跳项 `cargo test --workspace` 单次 exit 0：reset/recovery
   236.27s、repository contracts 22.95s、production web boundary 159.76s；Web 43/43、
   xtask 24/24、全部 workspace unit/integration/doc tests 均通过。
+- [x] 2026-08-10 portfolio 容量与证据 clean-break：实际 promoted template 保留 400 scenarios，
+  deploy workload tuple 明确为 10,000 tiers / 400 scenarios / Top20 / 180s，不再用三个独立上限
+  暗示未测笛卡尔积。publishable solve 由 lexicographic 到全部 marginal re-optimization 只构建一个
+  HiGHS model；solver evidence 固定 additional marginal builds=0、reuse=TopN。macOS 已构建 binary
+  两次为 77.910s / 78.350s，同 plan hash，外部 RSS 约 2.17GiB；仅签收本机确定性/容量，不能
+  替代下述 fixed-Linux 分布证据。
 - [ ] fixed Linux runner 生成 full/soak CI artifact。未取得 artifact 前 PERF-21 保持
   `in_progress`，不得伪称 SLO 已通过。
 

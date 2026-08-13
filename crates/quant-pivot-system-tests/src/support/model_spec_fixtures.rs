@@ -57,6 +57,20 @@ pub fn pooled_profile_ref() -> ResearchProfileRef {
         .profile_ref
 }
 
+/// Exact built-in Weather `ResearchProfile` reference.
+#[must_use]
+pub fn weather_profile_ref() -> ResearchProfileRef {
+    builtin_research_profiles()
+        .expect("built-in ResearchProfiles")
+        .into_iter()
+        .find(|profile| {
+            profile.spec.category == Some(MarketCategory::Weather)
+                && profile.spec.target_horizon_secs == WEATHER_FORECAST_24H_HORIZON_SECS
+        })
+        .expect("Weather ResearchProfile")
+        .profile_ref
+}
+
 /// Build valid typed spec lineage for tests that only need an enriched
 /// `ModelVersionInfo` projection rather than a persisted spec row.
 #[must_use]
@@ -67,7 +81,7 @@ pub fn model_spec_lineage_fixture(name: &str) -> (ModelSpecThesis, ContentHash) 
         ModelFamily::WeightedFactor,
         pooled_horizon_secs(),
         ModelInputContract::single_required("book.mid"),
-        ModelTrainingContract::settlement_default(),
+        ModelTrainingContract::outcome_default(),
     );
     (spec.thesis, spec.definition_hash)
 }

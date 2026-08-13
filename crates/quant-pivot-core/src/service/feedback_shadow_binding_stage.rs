@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, feedback::FeedbackError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
@@ -11,11 +12,14 @@ use quant_pivot_models::{
             ShadowBindingJobInput, ShadowBindingJobParams,
         },
         quant::{
-            CandidateExplanationValidation, FeedbackCycleInfo, FeedbackStageJobIdentity,
-            ModelCandidateManifestDocument, ModelCandidateManifestInfo,
-            ModelCandidateManifestInput, ModelVersionInfo, NewModelCandidateManifest,
-            NewResearchJob, PromotionGateArtifact, PromotionGateArtifactInput,
-            ResearchJobArtifactRef, ResearchJobInfo, ResearchJobResultRef,
+            BacktestPathSetInfo, CalibrationArtifactInfo, CandidateExplanationValidation,
+            FeedbackCycleInfo, FeedbackStageJobIdentity, ModelCandidateManifestDocument,
+            ModelCandidateManifestInfo, ModelCandidateManifestInput, ModelVersionInfo,
+            NewModelCandidateManifest, NewResearchJob, PortfolioScenarioModelArtifact,
+            PortfolioScenarioRouteModelLineage, PortfolioScenarioVisibility, PromotionGateArtifact,
+            PromotionGateArtifactInput, RepresentedRouteSet, ResearchJobArtifactRef,
+            ResearchJobInfo, ResearchJobResultRef, RouteCompatibilityDigests, RouteContractHash,
+            scenario_model_bindings_hash,
         },
     },
     enums::quant::{
@@ -23,17 +27,19 @@ use quant_pivot_models::{
         ResearchJobStatus,
     },
     hashing::CanonicalDigest,
+    runtime_config::{ActivePolicyBundle, BuyModelRoute, PortfolioScenarioModelArtifactBinding},
     types::{
         BacktestPathSetId, ContentHash, ModelVersionId, ResearchJobId, ResearchJobParams, RoleCode,
+        model_lineage::ModelVersionDerivation,
     },
 };
 use quant_pivot_repository::traits::{
-    FeedbackCycleLeaseGuard, FeedbackCycleRepository, ModelCandidateManifestRepository,
-    ModelCandidateManifestWriteOutcome, ModelRegistryRepository, PolicyRepository,
-    ResearchJobRepository,
+    BacktestPathSetRepository, CalibrationArtifactRepository, FeedbackCycleLeaseGuard,
+    FeedbackCycleRepository, ModelCandidateManifestRepository, ModelCandidateManifestWriteOutcome,
+    ModelRegistryRepository, PolicyRepository, ResearchJobRepository,
 };
 use quant_pivot_research::{
-    artifact::ArtifactStore,
+    artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     feedback_comparison::{FeedbackComparisonArtifact, FeedbackComparisonCodec},
     feedback_governance::FeedbackGovernanceCodec,
     feedback_learning::{
@@ -41,11 +47,16 @@ use quant_pivot_research::{
         FeedbackLearningStageResults,
     },
     feedback_shadow_binding::ShadowBindingCodec,
+    portfolio::{
+        PortfolioScenarioGenerator, PortfolioScenarioMethodology, PortfolioScenarioModelFitInput,
+        PortfolioScenarioModelFitter, PortfolioScenarioRouteFitInput,
+    },
 };
 use uuid::Uuid;
 
 use crate::service::{
     feedback_coordinator::FeedbackStageSuccess, feedback_recipe_stage::FeedbackRecipeStageAdapter,
+    portfolio_context::PromotedRouteContract,
 };
 
 struct VerifiedComparison {
@@ -68,6 +79,30 @@ struct CandidateManifestEvidence {
     validation_artifact_hash: ContentHash,
     quality_gate_report_hash: ContentHash,
     comparison_artifact_hash: ContentHash,
+    portfolio_scenario_model_bindings: Vec<PortfolioScenarioModelArtifactBinding>,
+    scenario_model_bindings_hash: ContentHash,
+}
+
+struct ScenarioContractSet {
+    current: Vec<PromotedRouteContract>,
+    prospective: Vec<PromotedRouteContract>,
+    prospective_models: Vec<ModelVersionInfo>,
+}
+
+struct ScenarioEvidence {
+    path_sets: Vec<BacktestPathSetInfo>,
+    calibrations: Vec<CalibrationArtifactInfo>,
+    model_lineages: Vec<PortfolioScenarioRouteModelLineage>,
+}
+
+#[derive(Clone, Copy)]
+struct ScenarioRefitInput<'a> {
+    cycle: &'a FeedbackCycleInfo,
+    bundle: &'a ActivePolicyBundle,
+    candidate: &'a ModelVersionInfo,
+    candidate_path_set: &'a BacktestPathSetInfo,
+    active_binding: &'a PortfolioScenarioModelArtifactBinding,
+    bound_at: DateTime<Utc>,
 }
 
 pub(crate) struct VerifiedShadowBinding {
@@ -81,6 +116,8 @@ pub struct FeedbackShadowBindingStageDeps {
     pub cycles: Arc<dyn FeedbackCycleRepository>,
     pub jobs: Arc<dyn ResearchJobRepository>,
     pub models: Arc<dyn ModelRegistryRepository>,
+    pub path_sets: Arc<dyn BacktestPathSetRepository>,
+    pub calibrations: Arc<dyn CalibrationArtifactRepository>,
     pub policies: Arc<dyn PolicyRepository>,
     pub manifests: Arc<dyn ModelCandidateManifestRepository>,
     pub artifacts: Arc<dyn ArtifactStore>,
@@ -93,6 +130,8 @@ pub struct FeedbackShadowBindingStageAdapter {
     cycles: Arc<dyn FeedbackCycleRepository>,
     jobs: Arc<dyn ResearchJobRepository>,
     models: Arc<dyn ModelRegistryRepository>,
+    path_sets: Arc<dyn BacktestPathSetRepository>,
+    calibrations: Arc<dyn CalibrationArtifactRepository>,
     policies: Arc<dyn PolicyRepository>,
     manifests: Arc<dyn ModelCandidateManifestRepository>,
     artifacts: Arc<dyn ArtifactStore>,
@@ -112,6 +151,8 @@ impl FeedbackShadowBindingStageAdapter {
             cycles: deps.cycles,
             jobs: deps.jobs,
             models: deps.models,
+            path_sets: deps.path_sets,
+            calibrations: deps.calibrations,
             policies: deps.policies,
             manifests: deps.manifests,
             artifacts: deps.artifacts,
@@ -198,6 +239,26 @@ impl FeedbackShadowBindingStageAdapter {
         let attribution_hash = self
             .load_governance_hash(cycle, FeedbackStage::Attribution)
             .await?;
+        let bundle = self
+            .policies
+            .load_current_bundle()
+            .await?
+            .ok_or_else(|| Self::invalid("ShadowBind has no active policy bundle"))?;
+        let expected_route_generation = Self::expected_route_generation(cycle, &bundle)?;
+        let prepared_at = self.cycles.database_time().await?;
+        let portfolio_scenario_model_bindings = self
+            .fit_scenario_models(
+                cycle,
+                &bundle,
+                &candidate,
+                path_set_id,
+                path_set_hash,
+                prepared_at,
+            )
+            .await?;
+        let scenario_model_bindings_hash =
+            scenario_model_bindings_hash(&portfolio_scenario_model_bindings)
+                .map_err(|error| Self::invalid(error.to_string()))?;
         let manifest = self
             .ensure_manifest(
                 cycle,
@@ -211,34 +272,11 @@ impl FeedbackShadowBindingStageAdapter {
                     validation_artifact_hash: validation.reference.content_hash,
                     quality_gate_report_hash: candidate_gate.quality_gate_report.report_hash,
                     comparison_artifact_hash: comparison.artifact.artifact_hash(),
+                    portfolio_scenario_model_bindings,
+                    scenario_model_bindings_hash,
                 },
             )
             .await?;
-        let bundle = self
-            .policies
-            .load_current_bundle()
-            .await?
-            .ok_or_else(|| Self::invalid("ShadowBind has no active policy bundle"))?;
-        let route = bundle
-            .snapshot
-            .model_routing
-            .model
-            .route_binding(cycle.route)
-            .map_err(|error| Self::invalid(error.to_string()))?;
-        let expected_route_generation = u64::try_from(cycle.route_generation)
-            .map_err(|error| Self::invalid(format!("route generation overflow: {error}")))?;
-        let policy_generation_exact = bundle.generation == cycle.policy_bundle_generation;
-        if !policy_generation_exact
-            || bundle.decision_policy_snapshot_id != cycle.decision_policy_snapshot_id
-            || bundle.snapshot_hash != cycle.decision_policy_snapshot_hash
-            || route.champion.model_version_id != cycle.champion_model_version_id
-            || route.champion.generation != expected_route_generation
-            || route.shadow.is_some()
-        {
-            return Err(Self::invalid(
-                "ShadowBind policy, champion, generation, or route slot is stale",
-            ));
-        }
         let model_routing_revision_id = bundle
             .revision_vector
             .model_routing
@@ -249,7 +287,7 @@ impl FeedbackShadowBindingStageAdapter {
         let params = ShadowBindingJobParams::try_new(ShadowBindingJobInput {
             feedback_cycle_id: cycle.feedback_cycle_id,
             cycle_idempotency_hash: cycle.idempotency_hash,
-            prepared_at: self.cycles.database_time().await?,
+            prepared_at,
             profile_ref: cycle.profile_ref.clone(),
             route: cycle.route,
             comparison: comparison.reference,
@@ -271,6 +309,40 @@ impl FeedbackShadowBindingStageAdapter {
             total_shadow_model_budget_bytes: self.total_shadow_model_budget_bytes,
         })?;
         self.bind_job(cycle, identity, params)
+    }
+
+    fn expected_route_generation(
+        cycle: &FeedbackCycleInfo,
+        bundle: &ActivePolicyBundle,
+    ) -> QuantResult<u64> {
+        let route = bundle
+            .snapshot
+            .model_routing
+            .model
+            .route_binding(cycle.route)
+            .map_err(|error| Self::invalid(error.to_string()))?;
+        let expected = u64::try_from(cycle.route_generation)
+            .map_err(|error| Self::invalid(format!("route generation overflow: {error}")))?;
+        let active_policy_generation = bundle.generation;
+        let expected_policy_generation = cycle.policy_bundle_generation;
+        let active_snapshot_id = bundle.decision_policy_snapshot_id;
+        let expected_snapshot_id = cycle.decision_policy_snapshot_id;
+        let active_snapshot_hash = bundle.snapshot_hash;
+        let expected_snapshot_hash = cycle.decision_policy_snapshot_hash;
+        let active_champion_id = route.champion.model_version_id;
+        let expected_champion_id = cycle.champion_model_version_id;
+        if active_policy_generation != expected_policy_generation
+            || active_snapshot_id != expected_snapshot_id
+            || active_snapshot_hash != expected_snapshot_hash
+            || active_champion_id != expected_champion_id
+            || route.champion.generation != expected
+            || route.shadow.is_some()
+        {
+            return Err(Self::invalid(
+                "ShadowBind policy, champion, generation, or route slot is stale",
+            ));
+        }
+        Ok(expected)
     }
 
     pub async fn succeeded(
@@ -549,6 +621,495 @@ impl FeedbackShadowBindingStageAdapter {
         Ok(reference.content_hash)
     }
 
+    async fn fit_scenario_models(
+        &self,
+        cycle: &FeedbackCycleInfo,
+        bundle: &ActivePolicyBundle,
+        candidate: &ModelVersionInfo,
+        candidate_path_set_id: BacktestPathSetId,
+        candidate_path_set_hash: ContentHash,
+        bound_at: DateTime<Utc>,
+    ) -> QuantResult<Vec<PortfolioScenarioModelArtifactBinding>> {
+        if cycle.route.category().is_none() {
+            return Err(Self::invalid(
+                "ResearchOnly pooled Route cannot enter governed champion promotion",
+            ));
+        }
+        let candidate_path_set = self
+            .path_sets
+            .find_by_id(&candidate_path_set_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found("quant_backtest_path_set", candidate_path_set_id)
+            })?;
+        Self::verify_path_set(
+            &candidate_path_set,
+            candidate,
+            candidate_path_set_hash,
+            cycle.label_cutoff,
+        )?;
+        let mut affected = bundle
+            .snapshot
+            .model_routing
+            .model
+            .portfolio_scenario_model_bindings
+            .iter()
+            .filter(|binding| binding.ordered_routes.contains(&cycle.route))
+            .cloned()
+            .collect::<Vec<_>>();
+        affected.sort_by_key(|binding| {
+            (
+                binding.route_set_digest,
+                binding.model_content_hash,
+                binding.portfolio_scenario_model_artifact_id.as_uuid(),
+            )
+        });
+        if affected.is_empty() {
+            return Err(Self::invalid(
+                "promotion Route has no active scenario-model binding to refit",
+            ));
+        }
+        let mut fitted_bindings = Vec::with_capacity(affected.len());
+        for active_binding in affected {
+            fitted_bindings.push(
+                self.refit_scenario_binding(ScenarioRefitInput {
+                    cycle,
+                    bundle,
+                    candidate,
+                    candidate_path_set: &candidate_path_set,
+                    active_binding: &active_binding,
+                    bound_at,
+                })
+                .await?,
+            );
+        }
+        fitted_bindings.sort_by_key(|binding| {
+            (
+                binding.route_set_digest,
+                binding.model_content_hash,
+                binding.portfolio_scenario_model_artifact_id.as_uuid(),
+            )
+        });
+        Ok(fitted_bindings)
+    }
+
+    async fn refit_scenario_binding(
+        &self,
+        input: ScenarioRefitInput<'_>,
+    ) -> QuantResult<PortfolioScenarioModelArtifactBinding> {
+        let represented =
+            RepresentedRouteSet::from_routes(input.active_binding.ordered_routes.clone())
+                .map_err(|error| Self::invalid(error.to_string()))?;
+        if represented.routes != input.active_binding.ordered_routes
+            || represented.digest != input.active_binding.route_set_digest
+        {
+            return Err(Self::invalid(
+                "active scenario-model binding has a non-canonical Route set",
+            ));
+        }
+        let promoted_template = self
+            .load_scenario_template(
+                input.active_binding,
+                &represented,
+                input.cycle.label_cutoff,
+                input.cycle.created_at,
+            )
+            .await?;
+        let contracts = self.scenario_contracts(input, &represented).await?;
+        let current_compatibility = Self::compatibility(&represented, &contracts.current)?;
+        if input.active_binding.serving_contract_digest
+            != current_compatibility.serving_contract_digest
+            || input.active_binding.calibration_contract_digest
+                != current_compatibility.calibration_contract_digest
+            || input.active_binding.trade_policy_contract_digest
+                != current_compatibility.trade_policy_contract_digest
+            || promoted_template.serving_contract_digest
+                != current_compatibility.serving_contract_digest
+            || promoted_template.calibration_contract_digest
+                != current_compatibility.calibration_contract_digest
+            || promoted_template.trade_policy_contract_digest
+                != current_compatibility.trade_policy_contract_digest
+        {
+            return Err(Self::invalid(
+                "active scenario model differs from current Route serving contracts",
+            ));
+        }
+        let methodology = PortfolioScenarioMethodology::from_promoted(&promoted_template)?;
+        let compatibility = Self::compatibility(&represented, &contracts.prospective)?;
+        let evidence = self
+            .scenario_evidence(input, &represented, &contracts)
+            .await?;
+        let route_inputs = contracts
+            .prospective
+            .iter()
+            .zip(&evidence.path_sets)
+            .zip(&evidence.calibrations)
+            .zip(&evidence.model_lineages)
+            .map(|(((contract, path_set), calibration), model_lineage)| {
+                Ok(PortfolioScenarioRouteFitInput {
+                    route: contract.route,
+                    model_lineage: *model_lineage,
+                    calibration_artifact_id: contract.calibration_artifact_id,
+                    calibration_artifact_hash: contract.calibration_contract_hash,
+                    trade_policy_contract_hash: contract.trade_policy_contract_hash,
+                    prediction_horizon_secs: u64::try_from(contract.prediction_horizon_secs)
+                        .map_err(|error| {
+                            Self::invalid(format!(
+                                "Route prediction horizon does not fit u64: {error}"
+                            ))
+                        })?,
+                    path_set,
+                    calibration,
+                })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        let fitted = PortfolioScenarioModelFitter::fit(&PortfolioScenarioModelFitInput {
+            methodology: &methodology,
+            represented_routes: &represented,
+            compatibility,
+            routes: route_inputs,
+            bound_at: input.bound_at,
+        })?;
+        if fitted.binding.model_content_hash == input.active_binding.model_content_hash
+            || fitted.binding.portfolio_scenario_model_artifact_id
+                == input.active_binding.portfolio_scenario_model_artifact_id
+        {
+            return Err(Self::invalid(
+                "scenario refit did not produce a new content-addressed artifact",
+            ));
+        }
+        self.persist_scenario_model(&fitted.artifact).await?;
+        Ok(fitted.binding)
+    }
+
+    async fn scenario_contracts(
+        &self,
+        input: ScenarioRefitInput<'_>,
+        represented: &RepresentedRouteSet,
+    ) -> QuantResult<ScenarioContractSet> {
+        let mut current = Vec::with_capacity(represented.routes.len());
+        let mut prospective = Vec::with_capacity(represented.routes.len());
+        let mut prospective_models = Vec::with_capacity(represented.routes.len());
+        for route in &represented.routes {
+            let current_model_id = input
+                .bundle
+                .snapshot
+                .model_routing
+                .model
+                .route_binding(*route)
+                .map_err(|error| Self::invalid(error.to_string()))?
+                .champion
+                .model_version_id;
+            let current_model = self
+                .models
+                .find_model_version(&current_model_id)
+                .await?
+                .ok_or_else(|| StorageError::not_found("quant_model_version", current_model_id))?;
+            current.push(PromotedRouteContract::from_version(*route, &current_model)?);
+            let model = if *route == input.cycle.route {
+                input.candidate.clone()
+            } else {
+                current_model
+            };
+            prospective.push(PromotedRouteContract::from_version(*route, &model)?);
+            prospective_models.push(model);
+        }
+        Ok(ScenarioContractSet {
+            current,
+            prospective,
+            prospective_models,
+        })
+    }
+
+    async fn scenario_evidence(
+        &self,
+        input: ScenarioRefitInput<'_>,
+        represented: &RepresentedRouteSet,
+        contracts: &ScenarioContractSet,
+    ) -> QuantResult<ScenarioEvidence> {
+        let mut path_sets = Vec::with_capacity(represented.routes.len());
+        let mut calibrations = Vec::with_capacity(represented.routes.len());
+        let mut model_lineages = Vec::with_capacity(represented.routes.len());
+        for ((route, model), contract) in represented
+            .routes
+            .iter()
+            .zip(&contracts.prospective_models)
+            .zip(&contracts.prospective)
+        {
+            let path_set = if *route == input.cycle.route {
+                input.candidate_path_set.clone()
+            } else {
+                self.select_route_path_set(model, input.cycle.label_cutoff)
+                    .await?
+            };
+            Self::verify_path_set(
+                &path_set,
+                model,
+                path_set.path_set_hash,
+                input.cycle.label_cutoff,
+            )?;
+            let calibration = self
+                .calibrations
+                .find_by_id(&contract.calibration_artifact_id)
+                .await?
+                .ok_or_else(|| {
+                    StorageError::not_found(
+                        "quant_calibration_artifact",
+                        contract.calibration_artifact_id,
+                    )
+                })?;
+            if calibration.content_hash != contract.calibration_contract_hash {
+                return Err(Self::invalid(
+                    "scenario Route calibration bytes differ from serving lineage",
+                ));
+            }
+            let calibration_source = self
+                .models
+                .find_model_version(&contract.calibration_source_model_version_id)
+                .await?
+                .ok_or_else(|| {
+                    StorageError::not_found(
+                        "quant_model_version",
+                        contract.calibration_source_model_version_id,
+                    )
+                })?;
+            let model_lineage = Self::verify_calibration_edge(
+                *route,
+                model,
+                &calibration_source,
+                contract,
+                &calibration,
+            )?;
+            path_sets.push(path_set);
+            calibrations.push(calibration);
+            model_lineages.push(model_lineage);
+        }
+        Ok(ScenarioEvidence {
+            path_sets,
+            calibrations,
+            model_lineages,
+        })
+    }
+
+    async fn load_scenario_template(
+        &self,
+        binding: &PortfolioScenarioModelArtifactBinding,
+        represented: &RepresentedRouteSet,
+        decision_at: DateTime<Utc>,
+        governance_frozen_at: DateTime<Utc>,
+    ) -> QuantResult<PortfolioScenarioModelArtifact> {
+        let key = ArtifactKey::new(
+            ArtifactNamespace::PortfolioScenarioModel,
+            binding.portfolio_scenario_model_artifact_id.to_string(),
+            "json",
+        )?;
+        let bytes = self.artifacts.get_by_key(&key).await?;
+        let model = serde_json::from_slice::<PortfolioScenarioModelArtifact>(&bytes)
+            .map_err(|error| Self::invalid(format!("decode scenario model template: {error}")))?;
+        PortfolioScenarioGenerator::verify_model(
+            binding,
+            &model,
+            represented,
+            decision_at,
+            PortfolioScenarioVisibility::HistoricalReplay {
+                governance_frozen_at,
+            },
+        )?;
+        Ok(model)
+    }
+
+    async fn select_route_path_set(
+        &self,
+        model: &ModelVersionInfo,
+        visible_at: DateTime<Utc>,
+    ) -> QuantResult<BacktestPathSetInfo> {
+        let mut path_sets = self
+            .path_sets
+            .list_by_model_version(&model.model_version_id)
+            .await?
+            .into_iter()
+            .filter(|path_set| path_set.window_end <= visible_at)
+            .collect::<Vec<_>>();
+        path_sets.sort_by_key(|path_set| {
+            (
+                path_set.window_end,
+                path_set.created_at,
+                path_set.path_set_id.as_uuid(),
+            )
+        });
+        path_sets.pop().ok_or_else(|| {
+            Self::invalid(format!(
+                "Route champion {} has no PIT-visible CPCV path set",
+                model.model_version_id
+            ))
+        })
+    }
+
+    fn verify_path_set(
+        path_set: &BacktestPathSetInfo,
+        model: &ModelVersionInfo,
+        expected_hash: ContentHash,
+        visible_at: DateTime<Utc>,
+    ) -> QuantResult<()> {
+        path_set
+            .verify_hash()
+            .map_err(|error| Self::invalid(error.to_string()))?;
+        if path_set.model_version_id != model.model_version_id
+            || path_set.path_set_hash != expected_hash
+            || path_set.window_end > visible_at
+            || path_set.subject.model_artifact_hash != model.artifact_hash
+            || path_set.subject.serving_contract_hash != model.serving_contract_hash
+            || model.training_dataset_id != Some(path_set.training_dataset_id)
+        {
+            return Err(Self::invalid(
+                "CPCV path set differs from exact model, Dataset, or PIT cutoff",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_calibration_edge(
+        route: BuyModelRoute,
+        evaluated: &ModelVersionInfo,
+        source: &ModelVersionInfo,
+        contract: &PromotedRouteContract,
+        calibration: &CalibrationArtifactInfo,
+    ) -> QuantResult<PortfolioScenarioRouteModelLineage> {
+        let evaluated_serving = evaluated
+            .verified_serving_contract()
+            .map_err(|error| Self::invalid(error.to_string()))?;
+        let source_serving = source
+            .verified_serving_contract()
+            .map_err(|error| Self::invalid(error.to_string()))?;
+        let evaluated_bindings = evaluated_serving.bindings();
+        let source_bindings = source_serving.bindings();
+        let fit = &calibration
+            .verify_model_score()
+            .map_err(Self::invalid)?
+            .fit_contract
+            .model;
+        let source_derivation = source
+            .verified_derivation()
+            .map_err(|error| Self::invalid(error.to_string()))?;
+        if contract.route != route
+            || contract.model_version_id != evaluated.model_version_id
+            || contract.serving_contract_hash != evaluated.serving_contract_hash
+            || contract.calibration_source_model_version_id != source.model_version_id
+            || source_derivation != ModelVersionDerivation::Training
+            || evaluated.model_version_id == source.model_version_id
+            || evaluated.artifact_hash == source.artifact_hash
+            || evaluated.serving_contract_hash == source.serving_contract_hash
+            || fit.model_version_id != source.model_version_id
+            || fit.artifact_hash != source.artifact_hash
+            || fit.serving_contract_hash != source.serving_contract_hash
+            || fit.model_spec_id != source.model_spec_id
+            || fit.model_spec_definition_hash != source.model_spec_definition_hash
+            || fit.model_family != source.model_family
+            || fit.profile_ref != source.profile_ref
+            || fit.category_scope != source.category_scope
+            || i64::try_from(fit.prediction_horizon_secs).ok()
+                != Some(source.model_spec_prediction_horizon_secs)
+            || Some(fit.training_dataset_id) != source.training_dataset_id
+            || fit.training_dataset_hash != source_bindings.transform.training_dataset_hash
+            || evaluated.model_spec_id != source.model_spec_id
+            || evaluated.model_family != source.model_family
+            || evaluated.category_scope != source.category_scope
+            || evaluated.profile_ref != source.profile_ref
+            || evaluated.model_spec_prediction_horizon_secs
+                != source.model_spec_prediction_horizon_secs
+            || evaluated.training_dataset_id != source.training_dataset_id
+            || evaluated_bindings.transform.training_input_hash
+                != source_bindings.transform.training_input_hash
+            || evaluated_bindings.transform.training_dataset_hash
+                != source_bindings.transform.training_dataset_hash
+            || source_bindings.model.calibration.is_some()
+            || evaluated_bindings
+                .model
+                .calibration
+                .as_ref()
+                .is_none_or(|binding| {
+                    binding.artifact_id != calibration.artifact_id
+                        || binding.content_hash != calibration.content_hash
+                })
+            || evaluated_bindings.trade_policy != source_bindings.trade_policy
+        {
+            return Err(Self::invalid(
+                "scenario calibration source, calibrated serving model, or derivation edge differs from its immutable contract",
+            ));
+        }
+        Ok(PortfolioScenarioRouteModelLineage {
+            evaluated_model_version_id: evaluated.model_version_id,
+            evaluated_model_artifact_hash: evaluated.artifact_hash,
+            evaluated_serving_contract_hash: evaluated.serving_contract_hash,
+            calibration_source_model_version_id: source.model_version_id,
+            calibration_source_model_artifact_hash: source.artifact_hash,
+            calibration_source_serving_contract_hash: source.serving_contract_hash,
+        })
+    }
+
+    fn compatibility(
+        represented: &RepresentedRouteSet,
+        contracts: &[PromotedRouteContract],
+    ) -> QuantResult<RouteCompatibilityDigests> {
+        RouteCompatibilityDigests::try_new(
+            represented,
+            &contracts
+                .iter()
+                .map(|contract| RouteContractHash {
+                    route: contract.route,
+                    content_hash: contract.serving_contract_hash,
+                })
+                .collect::<Vec<_>>(),
+            &contracts
+                .iter()
+                .map(|contract| RouteContractHash {
+                    route: contract.route,
+                    content_hash: contract.calibration_contract_hash,
+                })
+                .collect::<Vec<_>>(),
+            &contracts
+                .iter()
+                .map(|contract| RouteContractHash {
+                    route: contract.route,
+                    content_hash: contract.trade_policy_contract_hash,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| Self::invalid(error.to_string()))
+    }
+
+    async fn persist_scenario_model(
+        &self,
+        artifact: &PortfolioScenarioModelArtifact,
+    ) -> QuantResult<()> {
+        let key = ArtifactKey::new(
+            ArtifactNamespace::PortfolioScenarioModel,
+            artifact.portfolio_scenario_model_artifact_id.to_string(),
+            "json",
+        )?;
+        let bytes = serde_json::to_vec(artifact)
+            .map_err(|error| Self::invalid(format!("encode scenario model: {error}")))?;
+        if self.artifacts.exists_by_key(&key).await? {
+            let stored = self.artifacts.get_by_key(&key).await?;
+            if stored != bytes {
+                return Err(Self::invalid(
+                    "content-addressed scenario-model key contains different bytes",
+                ));
+            }
+        } else {
+            self.artifacts.put(key.clone(), &bytes).await?;
+        }
+        let stored = self.artifacts.get_by_key(&key).await?;
+        let decoded = serde_json::from_slice::<PortfolioScenarioModelArtifact>(&stored)
+            .map_err(|error| Self::invalid(format!("re-read scenario model: {error}")))?;
+        if decoded != *artifact || decoded.recomputed_hash()? != artifact.content_hash {
+            return Err(Self::invalid(
+                "persisted scenario model failed exact content verification",
+            ));
+        }
+        Ok(())
+    }
+
     async fn ensure_manifest(
         &self,
         cycle: &FeedbackCycleInfo,
@@ -586,6 +1147,7 @@ impl FeedbackShadowBindingStageAdapter {
             cpcv_path_set_id: evidence.cpcv_path_set_id,
             cpcv_path_set_hash: evidence.cpcv_path_set_hash,
             explanation_validation_hash: explanation.report_hash,
+            scenario_model_bindings_hash: evidence.scenario_model_bindings_hash,
         })
         .map_err(|error| Self::invalid(error.to_string()))?;
         let document = ModelCandidateManifestDocument::try_new(ModelCandidateManifestInput {
@@ -607,6 +1169,8 @@ impl FeedbackShadowBindingStageAdapter {
             cpcv_path_set_hash: evidence.cpcv_path_set_hash,
             profile_ref: candidate.profile_ref.clone(),
             category,
+            portfolio_scenario_model_bindings: evidence.portfolio_scenario_model_bindings,
+            scenario_model_bindings_hash: evidence.scenario_model_bindings_hash,
             feedback_policy_hash: cycle.feedback_policy_hash,
             decision_policy_snapshot_hash: cycle.decision_policy_snapshot_hash,
             explanation_validation: explanation,

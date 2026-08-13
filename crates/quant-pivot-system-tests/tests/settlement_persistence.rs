@@ -894,7 +894,7 @@ async fn governed_canary_consumption_scenario() {
 async fn settlement_confirmation_scenario() {
     let (pool, mismatch_database) = setup_pg().await;
     let db = pool.connection().clone();
-    let fixture = prepare_confirmation_fixture(&db).await;
+    let fixture = Box::pin(prepare_confirmation_fixture(&db)).await;
     let confirmed_at = db.statement_time().await;
     let settlement = PgSettlementRedeemRepository::new(db.clone());
     let confirmation_worker = WorkerId::from_v7();
@@ -946,7 +946,7 @@ async fn settlement_confirmation_scenario() {
 
     let (pool, _confirmation_container) = setup_pg().await;
     let db = pool.connection().clone();
-    let fixture = prepare_confirmation_fixture(&db).await;
+    let fixture = Box::pin(prepare_confirmation_fixture(&db)).await;
     let confirmed_at = db.statement_time().await;
     let position_repository = PgPositionRepository::new(db.clone());
     let settlement = PgSettlementRedeemRepository::new(db.clone());
@@ -1014,7 +1014,7 @@ async fn settlement_confirmation_scenario() {
 async fn partial_exchange_resolution_scenario() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let fixture = prepare_partial_exchange_fixture(&db).await;
+    let fixture = Box::pin(prepare_partial_exchange_fixture(&db)).await;
     let confirmed_at = db.statement_time().await;
     let settlement = PgSettlementRedeemRepository::new(db.clone());
     let confirmation_worker = WorkerId::from_v7();
@@ -1068,14 +1068,21 @@ struct SettlementConfirmationFixture {
 }
 
 async fn prepare_confirmation_fixture(db: &DatabaseConnection) -> SettlementConfirmationFixture {
-    prepare_confirmation_fixture_shape(db, ConfirmationFixtureShape::ResolutionOnly).await
+    Box::pin(prepare_confirmation_fixture_shape(
+        db,
+        ConfirmationFixtureShape::ResolutionOnly,
+    ))
+    .await
 }
 
 async fn prepare_partial_exchange_fixture(
     db: &DatabaseConnection,
 ) -> SettlementConfirmationFixture {
-    prepare_confirmation_fixture_shape(db, ConfirmationFixtureShape::PartialExchangeThenResolution)
-        .await
+    Box::pin(prepare_confirmation_fixture_shape(
+        db,
+        ConfirmationFixtureShape::PartialExchangeThenResolution,
+    ))
+    .await
 }
 
 #[derive(Clone, Copy)]

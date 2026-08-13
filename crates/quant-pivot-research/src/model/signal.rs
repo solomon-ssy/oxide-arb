@@ -14,9 +14,10 @@ use quant_pivot_models::{
         factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
         quant::{FactorDirection, OutcomeSide},
     },
+    hashing::CanonicalDigest,
     types::{
         Bps, ContentHash, FactorDefinitionId, MarketId, ModelRunId, Price, Probability,
-        SignalCandidateId, TokenId,
+        SignalCandidateId, TokenId, calibration::CalibratedPayoutDistribution,
     },
 };
 use rust_decimal::Decimal;
@@ -106,21 +107,18 @@ pub struct SignalCandidate {
     pub composite_score: Probability,
     /// Model confidence in `[0, 1]`.
     pub confidence: Probability,
-    /// Expected (probability-weighted **mean**) return in basis points — `E[r]`,
-    /// not a conditional take-profit target. Audit-only once `win_probability`
-    /// is `Some`: Kelly sizing uses `win_probability`
-    /// directly, never re-derives it from `E[r]`.
+    /// Expected terminal-payout return in basis points — `E[r]`, not a
+    /// conditional take-profit target. The executable economic tier and joint
+    /// scenario artifact supersede this scalar at portfolio construction.
     pub expected_return_bps: Decimal,
-    /// Estimated downside (stop-loss magnitude) in basis points — `l`. Feeds
-    /// the exit plan's stop-loss price; no longer part
-    /// of the Kelly win-probability derivation.
+    /// Estimated downside from frozen out-of-sample MAE evidence, in basis
+    /// points. This remains Route-local diagnostic evidence and is not a
+    /// cross-Route objective weight.
     pub downside_bps: Decimal,
-    /// The calibrated `P(win)` Kelly sizing consumes directly as `q`
-    /// (`f* = (q - p) / (1 - p)`, `p` = `entry_price_ref`). `Some` only when
-    /// the emitting model's return model is `Calibrated`; `None` for the
-    /// `Heuristic` bootstrap path, whose sizing is fenced off from production
-    /// by fail-closed publish and admission gates; see `crate::portfolio::sizing`.
-    pub win_probability: Option<Probability>,
+    /// Calibrated terminal payout distribution over loss, split, and win.
+    /// `Some` only for a verified calibrated serving path. Heuristic bootstrap
+    /// models carry `None` and are rejected by report publication.
+    pub payout_distribution: Option<CalibratedPayoutDistribution>,
     /// Reference entry price.
     pub entry_price_ref: Price,
     /// Suggested holding horizon, in seconds.
@@ -132,7 +130,9 @@ pub struct SignalCandidate {
     /// Non-fatal warnings.
     pub rejection_warnings: Vec<SignalWarning>,
     /// Rank among candidates before portfolio pruning.
-    pub rank_before_portfolio: u32,
+    /// Rank inside the candidate's own governed model Route. This value is
+    /// never used to compare candidates across Routes.
+    pub route_rank: u32,
     /// Governed liquidity-context score in `[0, 1]`, projected directly from
     /// the same decision snapshot the runtime scored.
     pub liquidity_score: Probability,
@@ -142,6 +142,24 @@ pub struct SignalCandidate {
     pub model_score_percentile: Probability,
     /// Frozen decision time that produced this prediction.
     pub decision_at: DateTime<Utc>,
+}
+
+impl SignalCandidate {
+    /// Derive the idempotent identity of one model-run decision and business leg.
+    pub fn id_for(
+        model_run_id: ModelRunId,
+        decision_at: DateTime<Utc>,
+        market_id: &MarketId,
+        token_id: &TokenId,
+        outcome_side: OutcomeSide,
+    ) -> QuantResult<SignalCandidateId> {
+        let content_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/signal-candidate-identity",
+            1,
+            &(model_run_id, decision_at, market_id, token_id, outcome_side),
+        )?;
+        Ok(SignalCandidateId::from_content_hash(&content_hash))
+    }
 }
 
 /// Stable, identity-free projection of one model prediction.
@@ -200,6 +218,43 @@ struct CanonicalModelExplanation<'a> {
     top_negative: Vec<CanonicalFactorContribution<'a>>,
 }
 
+#[derive(Serialize)]
+struct CanonicalPayoutDistribution {
+    winner_take_all_win_probability: String,
+    split_probability: String,
+    split_probability_interval: (String, String),
+    split_payout_ratio: String,
+}
+
+impl From<CalibratedPayoutDistribution> for CanonicalPayoutDistribution {
+    fn from(distribution: CalibratedPayoutDistribution) -> Self {
+        Self {
+            winner_take_all_win_probability: distribution
+                .winner_take_all_win_probability
+                .normalized()
+                .to_string(),
+            split_probability: distribution.split_probability.normalized().to_string(),
+            split_probability_interval: (
+                distribution
+                    .split_probability_interval
+                    .0
+                    .normalized()
+                    .to_string(),
+                distribution
+                    .split_probability_interval
+                    .1
+                    .normalized()
+                    .to_string(),
+            ),
+            split_payout_ratio: distribution
+                .split_payout_ratio
+                .inner()
+                .normalize()
+                .to_string(),
+        }
+    }
+}
+
 impl<'a> From<&'a ModelExplanation> for CanonicalModelExplanation<'a> {
     fn from(explanation: &'a ModelExplanation) -> Self {
         Self {
@@ -227,13 +282,13 @@ struct CanonicalBusinessPrediction<'a> {
     confidence: String,
     expected_return_bps: String,
     downside_bps: String,
-    win_probability: Option<String>,
+    payout_distribution: Option<CanonicalPayoutDistribution>,
     entry_price_ref: String,
     suggested_horizon_secs: u64,
     factor_breakdown: Vec<CanonicalFactorContribution<'a>>,
     model_explanation: CanonicalModelExplanation<'a>,
     rejection_warnings: &'a [SignalWarning],
-    rank_before_portfolio: u32,
+    route_rank: u32,
     liquidity_score: String,
     data_quality_score: String,
     model_score_percentile: String,
@@ -250,9 +305,9 @@ impl<'a> From<&'a SignalCandidate> for CanonicalBusinessPrediction<'a> {
             confidence: candidate.confidence.normalized().to_string(),
             expected_return_bps: candidate.expected_return_bps.normalize().to_string(),
             downside_bps: candidate.downside_bps.normalize().to_string(),
-            win_probability: candidate
-                .win_probability
-                .map(|value| value.normalized().to_string()),
+            payout_distribution: candidate
+                .payout_distribution
+                .map(CanonicalPayoutDistribution::from),
             entry_price_ref: candidate.entry_price_ref.normalized().to_string(),
             suggested_horizon_secs: candidate.suggested_horizon_secs,
             factor_breakdown: candidate
@@ -262,7 +317,7 @@ impl<'a> From<&'a SignalCandidate> for CanonicalBusinessPrediction<'a> {
                 .collect(),
             model_explanation: CanonicalModelExplanation::from(&candidate.model_explanation),
             rejection_warnings: &candidate.rejection_warnings,
-            rank_before_portfolio: candidate.rank_before_portfolio,
+            route_rank: candidate.route_rank,
             liquidity_score: candidate.liquidity_score.normalized().to_string(),
             data_quality_score: candidate.data_quality_score.normalized().to_string(),
             model_score_percentile: candidate.model_score_percentile.normalized().to_string(),
@@ -314,7 +369,8 @@ pub fn canonical_business_prediction_hash(
 /// Used to project the CH-fact diagnostic prices: `positive = true` yields the
 /// **expected exit price** (`entry · (1 + E[r])`) and `positive = false` the
 /// **downside floor** (`entry · (1 − l)`). These are audit projections of the
-/// mean / downside estimates, not a tradeable take-profit / stop pair — Kelly
+/// mean / downside estimates, not a tradeable take-profit / stop pair — global
+/// portfolio construction consumes executable scenario cashflows instead
 /// sizing derives its own target from a configured reward multiple and never
 /// reuses these prices.
 fn apply_bps(entry: Price, bps: Decimal, positive: bool) -> Price {
@@ -360,7 +416,7 @@ pub fn signal_candidate_event(
             candidate.downside_bps,
             false,
         )),
-        rank_before_portfolio: candidate.rank_before_portfolio,
+        route_rank: candidate.route_rank,
         rejection_reason: rejection_reason.to_owned(),
     }
 }
@@ -381,15 +437,15 @@ pub fn signal_candidate_events(
 mod tests {
     use std::slice;
 
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         enums::{
             factor::{FactorFamily, FactorValueState, NormalizationSource},
             quant::FactorDirection,
         },
         types::{
-            FactorDefinitionId, MarketId, ModelRunId, Price, Probability, SignalCandidateId,
-            TokenId,
+            FactorDefinitionId, MarketId, ModelRunId, PayoutRatio, Price, Probability,
+            SignalCandidateId, TokenId, calibration::CalibratedPayoutDistribution,
         },
     };
     use rust_decimal::Decimal;
@@ -400,6 +456,18 @@ mod tests {
         signal_candidate_events,
     };
 
+    fn payout_distribution(win: Decimal) -> CalibratedPayoutDistribution {
+        CalibratedPayoutDistribution {
+            winner_take_all_win_probability: Probability::new(win),
+            split_probability: Probability::new(Decimal::new(2, 2)),
+            split_probability_interval: (
+                Probability::new(Decimal::new(1, 2)),
+                Probability::new(Decimal::new(4, 2)),
+            ),
+            split_payout_ratio: PayoutRatio::try_new(Decimal::new(5, 1))
+                .expect("canonical split payout"),
+        }
+    }
     /// Construct a strongly-typed candidate.
     #[test]
     fn typed_signal_candidate_newtypes() {
@@ -413,7 +481,7 @@ mod tests {
             confidence: Probability::new(Decimal::new(60, 2)),
             expected_return_bps: Decimal::new(150, 0),
             downside_bps: Decimal::new(40, 0),
-            win_probability: Some(Probability::new(Decimal::new(55, 2))),
+            payout_distribution: Some(payout_distribution(Decimal::new(55, 2))),
             entry_price_ref: Price::new(Decimal::new(65, 2)),
             suggested_horizon_secs: 3_600,
             factor_breakdown: Vec::new(),
@@ -423,7 +491,7 @@ mod tests {
                 top_negative: Vec::new(),
             },
             rejection_warnings: Vec::new(),
-            rank_before_portfolio: 1,
+            route_rank: 1,
             liquidity_score: Probability::ZERO,
             data_quality_score: Probability::ZERO,
             model_score_percentile: Probability::ZERO,
@@ -436,6 +504,44 @@ mod tests {
         let json = serde_json::to_string(&candidate).expect("serialize");
         let back: SignalCandidate = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, candidate);
+    }
+
+    #[test]
+    fn candidate_id_is_idempotent() {
+        let model_run_id = ModelRunId::from_v7();
+        let decision_at = Utc
+            .with_ymd_and_hms(2026, 3, 9, 17, 27, 16)
+            .single()
+            .expect("fixed decision time");
+        let market_id = MarketId::new("0xmarket");
+        let token_id = TokenId::new("123456");
+        let first = SignalCandidate::id_for(
+            model_run_id,
+            decision_at,
+            &market_id,
+            &token_id,
+            OutcomeSide::Yes,
+        )
+        .expect("first candidate id");
+        let repeated = SignalCandidate::id_for(
+            model_run_id,
+            decision_at,
+            &market_id,
+            &token_id,
+            OutcomeSide::Yes,
+        )
+        .expect("repeated candidate id");
+        let other_side = SignalCandidate::id_for(
+            model_run_id,
+            decision_at,
+            &market_id,
+            &token_id,
+            OutcomeSide::No,
+        )
+        .expect("other-side candidate id");
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, other_side);
     }
 
     impl SignalCandidate {
@@ -451,7 +557,7 @@ mod tests {
                 // +200 bps target, -500 bps stop on a 0.40 entry.
                 expected_return_bps: Decimal::from(200),
                 downside_bps: Decimal::from(500),
-                win_probability: Some(Probability::new(Decimal::new(52, 2))),
+                payout_distribution: Some(payout_distribution(Decimal::new(52, 2))),
                 entry_price_ref: Price::new(Decimal::new(40, 2)),
                 suggested_horizon_secs: 3_600,
                 factor_breakdown: Vec::new(),
@@ -461,7 +567,7 @@ mod tests {
                     top_negative: Vec::new(),
                 },
                 rejection_warnings: Vec::new(),
-                rank_before_portfolio: 3,
+                route_rank: 3,
                 liquidity_score: Probability::ZERO,
                 data_quality_score: Probability::ZERO,
                 model_score_percentile: Probability::ZERO,
@@ -510,7 +616,7 @@ mod tests {
         scaled.confidence = Probability::new(Decimal::new(6000, 4));
         scaled.expected_return_bps = Decimal::new(20_000, 2);
         scaled.downside_bps = Decimal::new(50_000, 2);
-        scaled.win_probability = Some(Probability::new(Decimal::new(5200, 4)));
+        scaled.payout_distribution = Some(payout_distribution(Decimal::new(5200, 4)));
         scaled.entry_price_ref = Price::new(Decimal::new(4000, 4));
         for factor in scaled
             .factor_breakdown
@@ -578,7 +684,7 @@ mod tests {
             row.rejection_warnings.push(SignalWarning::LowConfidence);
         });
         assert_business_change!("rank", |row: &mut SignalCandidate| {
-            row.rank_before_portfolio += 1;
+            row.route_rank += 1;
         });
         assert_business_change!("liquidity", |row: &mut SignalCandidate| {
             row.liquidity_score = Probability::new(Decimal::new(1, 1));
@@ -609,7 +715,7 @@ mod tests {
         assert_eq!(row.market_id, candidate.market_id);
         assert_eq!(row.token_id, candidate.token_id);
         assert_eq!(row.side, OutcomeSide::No.into());
-        assert_eq!(row.rank_before_portfolio, 3);
+        assert_eq!(row.route_rank, 3);
         assert_eq!(row.rejection_reason, "score_below_floor");
         // target = 0.40 × (1 + 0.02) = 0.408; stop = 0.40 × (1 − 0.05) = 0.38.
         assert_eq!(

@@ -419,10 +419,13 @@ impl ConfiguredFeatureBuilder {
             boundary,
             selected: market,
             book: capture_book,
+            secondary_book: secondary_book.clone(),
+            secondary_book_snapshot_ref: secondary_book_snapshot_ref.clone(),
             market: capture_market,
             registry: Some(registry.as_ref()),
             catalog,
             domain: windows.domain,
+            trade_tape_source: &windows.trade_tape.source_evidence,
             liquidity_cap_usd,
         })?;
         let book = if self.source_needs.book() {

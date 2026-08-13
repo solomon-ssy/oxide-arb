@@ -70,7 +70,7 @@
           "$ref": "#/$defs/ModelSpecThesis"
         },
         "training_contract": {
-          "description": "Frozen target label/horizon and CV folds. Training cannot override it.",
+          "description": "Frozen typed target, evaluation-policy binding, and CV folds.\nTraining cannot override these semantics.",
           "$ref": "#/$defs/ModelTrainingContract"
         }
       },
@@ -356,23 +356,17 @@
       "description": "Frozen supervised-target and cross-validation policy owned by a model spec.\nTraining requests cannot override these fields.",
       "type": "object",
       "properties": {
-        "target_label_horizon_secs": {
-          "description": "Target horizon (`0` for horizon-independent labels).",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "target_label_name": {
-          "description": "Governed label name materialized in the frozen dataset.",
-          "type": "string"
-        },
-        "trade_policy_artifact_id": {
-          "description": "Required for executable policy-derived targets; absent for unrelated labels.",
+        "evaluation_trade_policy_artifact_id": {
+          "description": "Published policy used only for OOS executable evaluation and Route\nreadiness. It does not generate or redefine the supervised target.",
           "type": [
             "string",
             "null"
           ],
           "format": "uuid"
+        },
+        "target": {
+          "description": "Closed task whose exact label name and horizon are derived, never typed\nas an arbitrary string by an operator.",
+          "$ref": "#/$defs/ModelTrainingTarget"
         },
         "validation_folds": {
           "description": "Rolling validation fold count. Every fold fits its own transform.",
@@ -383,9 +377,62 @@
       },
       "additionalProperties": false,
       "required": [
-        "target_label_name",
-        "target_label_horizon_secs",
+        "target",
         "validation_folds"
+      ]
+    },
+    "ModelTrainingTarget": {
+      "description": "Closed supervised-task taxonomy for production model specifications.\n\nA Buy model forecasts the selected token's terminal redemption fraction.\nExecutable prices, fills, fees, exits, and capital costs belong to the\nindependently frozen Trade Policy evaluation and global portfolio layers;\nthey are never folded into this forecasting target. The sell-side scorer\nowns the only other supported task.",
+      "oneOf": [
+        {
+          "description": "Calibrated expected terminal payout in `[0, 1]` for a canonical token.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "outcome_payout"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Research-only forward mark-return regression target. It is valid for\noffline model comparison but cannot become a promoted Buy Route because\nit does not provide a calibrated payout distribution.",
+          "type": "object",
+          "properties": {
+            "horizon_secs": {
+              "description": "Exact forward-label horizon in seconds.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "forward_return"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "horizon_secs"
+          ]
+        },
+        {
+          "description": "Executable advantage, in bps, of exiting a held lot instead of holding.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "hold_vs_exit_alpha"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
       ]
     },
     "QuantModelSpecView": {

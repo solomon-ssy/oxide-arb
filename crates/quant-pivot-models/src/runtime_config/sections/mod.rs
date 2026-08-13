@@ -3,14 +3,15 @@
 mod config;
 
 pub use config::{
-    AutoExecutionConfig, BuyRouteBinding, CryptoCrossCheckConfig, CryptoDomainConfig,
-    DataQualityConfig, DomainConfig, EntryConditionWorkerConfig, ExecutionConfig,
+    AutoExecutionConfig, BuyRouteBinding, CapitalTimeBucketLimit, CryptoCrossCheckConfig,
+    CryptoDomainConfig, DataQualityConfig, DomainConfig, EntryConditionWorkerConfig,
     FactorCrossSectionConfig, FactorHeadConfig, FactorNormalizationConfig,
     FactorOrthogonalizeConfig, FactorsConfig, FavoriteLongshotConfig, FeaturesConfig,
-    KellySafetyConfig, MAX_REPORT_TOP_N, ModelBinding, ModelBindingSource, ModelCalibrationConfig,
-    ModelConfig, MomentumFeaturesConfig, NegRiskStructuralConfig, ParticipantConcentrationConfig,
-    PerFactorNormalization, PolicyValidationConfig, PortfolioBudget, PortfolioConfig,
-    PortfolioConstraints, QualityGateConfig, ReportScheduleConfig, ReportsConfig, ResearchConfig,
+    MAX_REPORT_TOP_N, ModelBinding, ModelBindingSource, ModelCalibrationConfig, ModelConfig,
+    MomentumFeaturesConfig, NegRiskStructuralConfig, ParticipantConcentrationConfig,
+    PerFactorNormalization, PolicyValidationConfig, PortfolioAdmission, PortfolioBudget,
+    PortfolioConfig, PortfolioExposureLimits, PortfolioScenarioModelArtifactBinding,
+    PortfolioTailRisk, QualityGateConfig, ReportScheduleConfig, ReportsConfig, ResearchConfig,
     ResearchTrainingConfig, ResearchValidationConfig, ResearchValidationCpcvConfig,
     ResearchValidationGatesConfig, ResearchValidationPboConfig, ResearchValidationPurgeConfig,
     ResearchValidationTrialsConfig, ReversalAfterShockConfig, SelectionConfig,

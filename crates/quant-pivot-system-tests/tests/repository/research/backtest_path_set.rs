@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
-    domain::quant::{NewBacktestPathSet, NewBacktestPathSetInput, NewModelRun},
+    domain::quant::{ModelVersionInfo, NewBacktestPathSet, NewBacktestPathSetInput, NewModelRun},
     enums::{
         model::ModelFamily,
         quant::{ModelRunKind, ModelRunStatus},
@@ -13,7 +13,7 @@ use quant_pivot_models::{
         backtest::{
             BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
             CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
-            SharpeDistribution,
+            CpcvTrialPathBinding, SharpeDistribution,
         },
     },
 };
@@ -29,6 +29,7 @@ use quant_pivot_system_tests::{
         model_serving_fixtures::{ModelVersionFixture, ModelVersionFixtureSeed},
         model_spec_fixtures,
         policy_fixtures::bootstrap_default_policy_bundle,
+        research_fixtures::cscv_selection_fixture,
     },
 };
 use rust_decimal_macros::dec;
@@ -61,7 +62,7 @@ async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
             ModelFamily::WeightedFactor,
             model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
-            ModelTrainingContract::settlement_default(),
+            ModelTrainingContract::outcome_default(),
         ))
         .await
         .expect("model spec");
@@ -191,8 +192,8 @@ impl PathSetContract<'_> {
         assert_eq!(replayed.path_set_id, created.path_set_id);
         assert_eq!(replayed.path_set_hash, created.path_set_hash);
         assert_eq!(created.path_set_id, self.path_set_id);
-        assert_eq!(created.trial_count, 1);
-        assert_eq!(created.trial_grid_count, 1);
+        assert_eq!(created.dsr_conservative_independent_trial_count, 1);
+        assert_eq!(created.trial_grid_count, 2);
         assert_eq!(created.coord_search_effective_n, 2);
         assert_eq!(created.median_rank_ic, dec!(0.12));
         let terminal = PgModelRunRepository::new(self.db.clone())
@@ -210,7 +211,7 @@ impl PathSetContract<'_> {
             .expect("find")
             .expect("row");
         assert_eq!(found.deflated_sharpe, dec!(0.96));
-        assert_eq!(found.pbo, dec!(0.25));
+        assert_eq!(found.pbo, dec!(0));
         assert_eq!(found.path_count, 1);
         assert_eq!(found.combination_count, 1);
 
@@ -260,6 +261,185 @@ impl PathSetContract<'_> {
     }
 }
 
+struct PathSetFixture<'a> {
+    path_set_id: BacktestPathSetId,
+    model_version_id: ModelVersionId,
+    model_run_id: ModelRunId,
+    training_dataset_id: TrainingDatasetId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    window_start: DateTime<Utc>,
+    model: &'a ModelVersionInfo,
+}
+
+impl PathSetFixture<'_> {
+    fn seal(self) -> NewBacktestPathSet {
+        let bindings = self
+            .model
+            .verified_serving_contract()
+            .expect("verify CPCV serving contract")
+            .bindings();
+        let decision_times = [10, 20, 30, 40]
+            .into_iter()
+            .map(|minutes| self.window_start + ChronoDuration::minutes(minutes))
+            .collect::<Vec<_>>();
+        let group_returns = vec![dec!(0.01), dec!(-0.005), dec!(0.012), dec!(-0.004)];
+        let challenger_returns = group_returns
+            .iter()
+            .map(|value| *value - dec!(0.001))
+            .collect::<Vec<_>>();
+        let (trial_grid, cscv_selection_evidence) = cscv_selection_fixture(
+            "path-set-repository",
+            &decision_times,
+            &[group_returns.clone(), challenger_returns],
+            4,
+        );
+        let dsr_conservative_independent_trial_count = i64::from(
+            cscv_selection_evidence
+                .trial_dependence
+                .conservative_independent_trial_count(),
+        );
+        NewBacktestPathSet::try_seal(NewBacktestPathSetInput {
+            path_set_id: self.path_set_id,
+            model_version_id: self.model_version_id,
+            model_run_id: self.model_run_id,
+            training_dataset_id: self.training_dataset_id,
+            decision_policy_snapshot_id: self.decision_policy_snapshot_id,
+            window_start: self.window_start,
+            window_end: self.window_start + ChronoDuration::hours(1),
+            subject: CpcvPathSetSubject::new(
+                self.model.artifact_hash,
+                self.model.serving_contract_hash,
+                bindings.transform.training_dataset_hash,
+                bindings.dataset.manifest_hash,
+                bindings.dataset.artifact_bytes_hash,
+                bindings.policy_snapshot.snapshot_hash,
+            ),
+            methodology: CpcvMethodologyBinding::new(
+                content_hash('7'),
+                content_hash('8'),
+                content_hash('9'),
+                CpcvFoldCalibrationPolicy::SubjectHeuristic {
+                    return_model_hash: content_hash('a'),
+                },
+                CpcvTrialPathBinding::try_new(0, vec![0]).expect("trial path"),
+                trial_grid,
+            ),
+            fold_artifacts: fold_artifacts_fixture(),
+            path_count: 1,
+            combination_count: 1,
+            median_rank_ic: dec!(0.12),
+            sharpe_distribution: SharpeDistribution {
+                min: dec!(0.1),
+                p25: dec!(0.4),
+                median: dec!(0.8),
+                p75: dec!(1.1),
+                max: dec!(1.5),
+                median_max_drawdown: None,
+                median_tail_loss: None,
+                median_turnover: None,
+                baseline_uplift: None,
+            },
+            paths: vec![BacktestPath {
+                path_index: 0,
+                decision_times,
+                scenario_residuals: group_returns.iter().copied().map(Some).collect(),
+                group_returns,
+                sharpe: dec!(0.8),
+                rank_ic: dec!(0.12),
+                max_drawdown: dec!(0.005),
+                tail_loss: dec!(-0.005),
+                turnover: None,
+            }]
+            .into(),
+            deflated_sharpe: dec!(0.96),
+            dsr_benchmark_sharpe: dec!(0.4),
+            pbo: cscv_selection_evidence.pbo,
+            cscv_selection_evidence,
+            min_track_record_length_secs: Some(86_400),
+            dsr_conservative_independent_trial_count,
+            trial_grid_count: 2,
+            coord_search_effective_n: 2,
+        })
+        .expect("seal path set")
+    }
+}
+
+fn fold_artifacts_fixture() -> CpcvFoldArtifacts {
+    CpcvFoldArtifacts::try_new(vec![
+        CpcvFoldArtifact {
+            identity: CpcvEstimatorIdentity::Validation {
+                combination_index: 0,
+                test_partitions_hash: content_hash('b'),
+                test_partition_count: 1,
+                test_groups_hash: content_hash('c'),
+                test_group_count: 1,
+            },
+            training_groups_hash: content_hash('b'),
+            training_group_count: 2,
+            calibration_fit_groups_hash: content_hash('4'),
+            calibration_fit_group_count: 1,
+            scenario_fit_groups_hash: content_hash('0'),
+            scenario_fit_group_count: 1,
+            model_artifact_hash: content_hash('c'),
+            serving_contract_hash: content_hash('d'),
+            model_payload_hash: content_hash('e'),
+            calibration_function_hash: content_hash('7'),
+            scenario_economic_function_hash: content_hash('8'),
+            calibration_artifact_hash: content_hash('5'),
+            scenario_model_hash: content_hash('6'),
+        },
+        CpcvFoldArtifact {
+            identity: CpcvEstimatorIdentity::TrialPathValidation {
+                trial_id: 0,
+                path_index: 0,
+                combination_index: 0,
+                test_partitions_hash: content_hash('b'),
+                test_partition_count: 1,
+                test_groups_hash: content_hash('c'),
+                test_group_count: 1,
+            },
+            training_groups_hash: content_hash('f'),
+            training_group_count: 3,
+            calibration_fit_groups_hash: content_hash('4'),
+            calibration_fit_group_count: 1,
+            scenario_fit_groups_hash: content_hash('0'),
+            scenario_fit_group_count: 1,
+            model_artifact_hash: content_hash('1'),
+            serving_contract_hash: content_hash('2'),
+            model_payload_hash: content_hash('3'),
+            calibration_function_hash: content_hash('7'),
+            scenario_economic_function_hash: content_hash('8'),
+            calibration_artifact_hash: content_hash('5'),
+            scenario_model_hash: content_hash('6'),
+        },
+        CpcvFoldArtifact {
+            identity: CpcvEstimatorIdentity::TrialPathValidation {
+                trial_id: 1,
+                path_index: 0,
+                combination_index: 0,
+                test_partitions_hash: content_hash('b'),
+                test_partition_count: 1,
+                test_groups_hash: content_hash('c'),
+                test_group_count: 1,
+            },
+            training_groups_hash: content_hash('e'),
+            training_group_count: 3,
+            calibration_fit_groups_hash: content_hash('4'),
+            calibration_fit_group_count: 1,
+            scenario_fit_groups_hash: content_hash('0'),
+            scenario_fit_group_count: 1,
+            model_artifact_hash: content_hash('2'),
+            serving_contract_hash: content_hash('3'),
+            model_payload_hash: content_hash('4'),
+            calibration_function_hash: content_hash('9'),
+            scenario_economic_function_hash: content_hash('a'),
+            calibration_artifact_hash: content_hash('5'),
+            scenario_model_hash: content_hash('6'),
+        },
+    ])
+    .expect("fold artifacts")
+}
+
 pub async fn quant_backtest_set_crud() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -278,94 +458,17 @@ pub async fn quant_backtest_set_crud() {
         .await
         .expect("find CPCV model")
         .expect("CPCV model");
-    let bindings = model
-        .verified_serving_contract()
-        .expect("verify CPCV serving contract")
-        .bindings();
     let window_start = run.window_start;
-
-    let new_path_set = NewBacktestPathSet::try_seal(NewBacktestPathSetInput {
+    let new_path_set = PathSetFixture {
         path_set_id,
         model_version_id,
         model_run_id,
         training_dataset_id,
         decision_policy_snapshot_id: rc_id,
         window_start,
-        window_end: window_start + ChronoDuration::hours(1),
-        subject: CpcvPathSetSubject::new(
-            model.artifact_hash,
-            model.serving_contract_hash,
-            bindings.transform.training_dataset_hash,
-            bindings.dataset.manifest_hash,
-            bindings.dataset.artifact_bytes_hash,
-            bindings.policy_snapshot.snapshot_hash,
-        ),
-        methodology: CpcvMethodologyBinding::new(
-            content_hash('7'),
-            content_hash('8'),
-            content_hash('9'),
-            CpcvFoldCalibrationPolicy::SubjectHeuristic {
-                return_model_hash: content_hash('a'),
-            },
-        ),
-        fold_artifacts: CpcvFoldArtifacts::try_new(vec![
-            CpcvFoldArtifact {
-                identity: CpcvEstimatorIdentity::Validation {
-                    combination_index: 0,
-                    test_partitions_hash: content_hash('b'),
-                    test_partition_count: 1,
-                    test_groups_hash: content_hash('c'),
-                    test_group_count: 1,
-                },
-                training_groups_hash: content_hash('b'),
-                training_group_count: 2,
-                model_artifact_hash: content_hash('c'),
-                serving_contract_hash: content_hash('d'),
-                model_payload_hash: content_hash('e'),
-            },
-            CpcvFoldArtifact {
-                identity: CpcvEstimatorIdentity::Trial { trial_id: 0 },
-                training_groups_hash: content_hash('f'),
-                training_group_count: 3,
-                model_artifact_hash: content_hash('1'),
-                serving_contract_hash: content_hash('2'),
-                model_payload_hash: content_hash('3'),
-            },
-        ])
-        .expect("fold artifacts"),
-        path_count: 1,
-        combination_count: 1,
-        median_rank_ic: dec!(0.12),
-        sharpe_distribution: SharpeDistribution {
-            min: dec!(0.1),
-            p25: dec!(0.4),
-            median: dec!(0.8),
-            p75: dec!(1.1),
-            max: dec!(1.5),
-            median_max_drawdown: None,
-            median_tail_loss: None,
-            median_turnover: None,
-            baseline_uplift: None,
-        },
-        paths: vec![BacktestPath {
-            path_index: 0,
-            group_returns: vec![dec!(0.01), dec!(-0.005)],
-            sharpe: dec!(0.8),
-            rank_ic: dec!(0.12),
-            max_drawdown: dec!(0.005),
-            tail_loss: dec!(-0.005),
-            turnover: None,
-        }]
-        .into(),
-        deflated_sharpe: dec!(0.96),
-        dsr_benchmark_sharpe: dec!(0.4),
-        pbo: dec!(0.25),
-        min_track_record_length_secs: Some(86_400),
-        trial_count: 1,
-        trial_grid_count: 1,
-        coord_search_effective_n: 2,
-    })
-    .expect("seal path set");
+        model: &model,
+    }
+    .seal();
     let contract = PathSetContract {
         db: &db,
         repo: &repo,

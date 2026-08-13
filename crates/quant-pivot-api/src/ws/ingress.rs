@@ -72,10 +72,21 @@ pub fn estimated_event_bytes(event: &PipelineEvent) -> usize {
                 .saturating_add(token.as_str().len())
         }),
         PipelineEvent::StreamSessionClosed {
-            received_sequences, ..
-        } => received_sequences
-            .len()
-            .saturating_mul(size_of::<(TokenKey, u64)>()),
+            subscription_tokens,
+            received_sequences,
+            ..
+        } => subscription_tokens
+            .iter()
+            .fold(0_usize, |bytes, token| {
+                bytes
+                    .saturating_add(size_of::<TokenId>())
+                    .saturating_add(token.as_str().len())
+            })
+            .saturating_add(
+                received_sequences
+                    .len()
+                    .saturating_mul(size_of::<(TokenKey, u64)>()),
+            ),
         PipelineEvent::TickSizeChange { .. }
         | PipelineEvent::ShardStatus { .. }
         | PipelineEvent::StreamGap { .. } => 0,

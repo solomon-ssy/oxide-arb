@@ -6,8 +6,10 @@
 //! **independent, disjoint + embargoed** `purpose = Calibration` dataset —
 //! never the model's own training spine — then fits a
 //! [`ProbabilityCalibrator`] and persists the unified `CalibrationArtifact`
-//! (`kind = ModelScore`). The current calibrators are Bernoulli estimators, so
-//! fractional split-payout samples are explicitly excluded rather than coerced.
+//! (`kind = ModelScore`). The score mapping estimates
+//! `P(win | winner_take_all)` on the binary subset while the same immutable
+//! split records independently estimate `P(split)`. Runtime combines both as
+//! a three-state payout distribution; a 0.5 payout is never coerced or erased.
 
 use std::sync::Arc;
 
@@ -33,10 +35,10 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
-        PayoutRatio, TrainingDatasetId,
+        PayoutRatio, Probability, TrainingDatasetId,
         calibration::{
             MODEL_SCORE_CALIBRATION_FORMAT_VERSION, ModelScoreCalibrationFitContract,
-            ModelScoreCalibrationPayload,
+            ModelScoreCalibrationPayload, SplitPayoutRateEvidence,
         },
         model_serving::ModelServingPolicySnapshotBinding,
     },
@@ -51,6 +53,8 @@ use quant_pivot_research::{
         IsotonicCalibrator, PlattCalibrator, ProbabilityCalibrator, ReliabilitySample,
         compute_reliability,
     },
+    precision::RESEARCH_DECIMAL_SCALE,
+    stats::{count_f64, wilson_interval, wilson_z},
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -95,6 +99,7 @@ struct InsufficientCalibrationCommitment<'a> {
 
 struct CalibrationFitSamples<'a> {
     binary: Vec<&'a ModelCalibrationOutcome>,
+    split_sample_count: u64,
     split_hash: ContentHash,
     sample_count: u64,
     total_sample_count: u64,
@@ -107,6 +112,24 @@ impl<'a> CalibrationFitSamples<'a> {
         policy: &CalibrationFitPolicy,
         evidence: &'a CalibrationReplayEvidence,
     ) -> QuantResult<Self> {
+        let split_payout = PayoutRatio::try_new(Decimal::new(5, 1)).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("canonical split payout is invalid: {error}"),
+            }
+        })?;
+        if let Some(sample) = evidence.samples.iter().find(|sample| {
+            sample.token_payout_ratio != PayoutRatio::ZERO
+                && sample.token_payout_ratio != PayoutRatio::ONE
+                && sample.token_payout_ratio != split_payout
+        }) {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "model-score calibration only accepts canonical payout ratios 0, 0.5, or 1; got {}",
+                    sample.token_payout_ratio
+                ),
+            }
+            .into());
+        }
         let binary = evidence
             .samples
             .iter()
@@ -127,13 +150,18 @@ impl<'a> CalibrationFitSamples<'a> {
             u64::try_from(evidence.samples.len()).map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("total calibration sample count exceeds u64: {error}"),
             })?;
+        let split_sample_count = total_sample_count
+            .checked_sub(sample_count)
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "binary calibration population exceeds the total population".to_owned(),
+            })?;
         let minimum_sample_count =
             u64::try_from(minimum).map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("calibration sample floor exceeds u64: {error}"),
             })?;
         let split_hash = calibration_split_hash(
             &evidence.fit_window,
-            binary.iter().map(|sample| {
+            evidence.samples.iter().map(|sample| {
                 CalibrationSampleKey::for_instrument(
                     sample.market_id.clone(),
                     sample.token_id.clone(),
@@ -143,6 +171,7 @@ impl<'a> CalibrationFitSamples<'a> {
         )?;
         Ok(Self {
             binary,
+            split_sample_count,
             split_hash,
             sample_count,
             total_sample_count,
@@ -240,11 +269,13 @@ impl<'a> CalibrationFitSamples<'a> {
             .collect::<Vec<_>>();
         let reliability =
             compute_reliability(&mapping, &reliability_samples, policy.ci_confidence)?;
+        let split_payout_rate = self.split_payout_rate(policy.ci_confidence)?;
         let payload = ModelScoreCalibrationPayload {
             format_version: MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
             fit_contract: fit_contract.clone(),
             mapping,
             reliability,
+            split_payout_rate,
         };
         payload.validate(self.sample_count).map_err(|detail| {
             ResearchError::InvalidModelArtifact {
@@ -252,6 +283,38 @@ impl<'a> CalibrationFitSamples<'a> {
             }
         })?;
         Ok(payload)
+    }
+
+    fn split_payout_rate(&self, confidence: Decimal) -> QuantResult<SplitPayoutRateEvidence> {
+        let split_payout_ratio = PayoutRatio::try_new(Decimal::new(5, 1)).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("canonical split payout is invalid: {error}"),
+            }
+        })?;
+        let total = count_f64(self.total_sample_count)?;
+        let splits = count_f64(self.split_sample_count)?;
+        let empirical = splits / total;
+        let z = wilson_z(confidence)?;
+        let interval = wilson_interval(
+            empirical,
+            self.total_sample_count,
+            z,
+            RESEARCH_DECIMAL_SCALE,
+        )?;
+        Ok(SplitPayoutRateEvidence {
+            total_sample_count: self.total_sample_count,
+            split_sample_count: self.split_sample_count,
+            empirical_probability: Probability::new(
+                Decimal::from(self.split_sample_count)
+                    .checked_div(Decimal::from(self.total_sample_count))
+                    .ok_or_else(|| ResearchError::ValidationMethodology {
+                        detail: "calibration population cannot be zero".to_owned(),
+                    })?
+                    .round_dp(18),
+            ),
+            wilson_ci: (Probability::new(interval.0), Probability::new(interval.1)),
+            split_payout_ratio,
+        })
     }
 }
 

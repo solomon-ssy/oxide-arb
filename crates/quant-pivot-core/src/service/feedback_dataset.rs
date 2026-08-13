@@ -22,6 +22,7 @@ use quant_pivot_models::{
             FeedbackCohortDecision, FeedbackCohortEvidence, FeedbackCohortPageQuery,
             FeedbackCohortSnapshot, FeedbackCohortWindow, FeedbackRecommendationContext,
             FeedbackResolutionEvidence, JobProgressSink, RecommendationReportInfo,
+            ReportRouteRunInfo,
         },
     },
     enums::{
@@ -35,8 +36,8 @@ use quant_pivot_models::{
         DatasetCohortManifest, DatasetCoverage, FactorDefinitionId, FeatureSourceRefs,
         FeatureVectorId, MODEL_SCORE_COHORT_FORMAT_VERSION, ModelLearningCohortRow, ModelRunId,
         ModelScoreCohortArtifact, ModelScoreCohortRow, ModelVersionId, NewModelLearningCohortRow,
-        NewModelScoreCohortRow, RecommendationReportId, ReportFunnelStage, ResearchJobProgress,
-        SchemaVersion, TokenId, TrainingSampleSource, TrainingSampleSources,
+        NewModelScoreCohortRow, RecommendationReportId, ReportFunnelStage, ReportRouteRunId,
+        ResearchJobProgress, SchemaVersion, TokenId, TrainingSampleSource, TrainingSampleSources,
         factor::{FactorDefinitionRef, FactorServingPlane},
     },
 };
@@ -130,9 +131,15 @@ struct ModelScoreCohortMaterializer {
 #[derive(Clone)]
 struct ScoreFunnelBinding {
     report: RecommendationReportInfo,
+    route_run: ReportRouteRunInfo,
     funnel: ReportMarketFunnelRow,
     feature_vector_id: FeatureVectorId,
     model_run_id: ModelRunId,
+}
+
+struct ScoreReportBinding {
+    report: RecommendationReportInfo,
+    route_runs: HashMap<ReportRouteRunId, ReportRouteRunInfo>,
 }
 
 struct ScoreInputBinding {
@@ -328,21 +335,34 @@ impl ModelScoreCohortMaterializer {
         &self,
         window: &FeedbackCohortWindow,
         truth_cutoff: DateTime<Utc>,
-    ) -> QuantResult<HashMap<RecommendationReportId, RecommendationReportInfo>> {
+    ) -> QuantResult<HashMap<RecommendationReportId, ScoreReportBinding>> {
         let mut by_id = HashMap::new();
         for report in self
             .reports
             .list_committed_between(window.window_start(), window.cutoff())
             .await?
         {
-            if report.profile_ref != *window.profile_ref()
-                || report.created_at > truth_cutoff
-                || report.model_run_id.is_none()
-            {
+            if report.created_at > truth_cutoff {
                 continue;
             }
+            let route_runs = self
+                .reports
+                .list_route_runs(&report.recommendation_report_id)
+                .await?
+                .into_iter()
+                .filter(|route_run| {
+                    route_run.lineage_json.as_ref().is_some_and(|lineage| {
+                        lineage.research_profile_ref == *window.profile_ref()
+                    })
+                })
+                .map(|route_run| (route_run.report_route_run_id, route_run))
+                .collect::<HashMap<_, _>>();
+            if route_runs.is_empty() {
+                continue;
+            }
+            let report_id = report.recommendation_report_id;
             if by_id
-                .insert(report.recommendation_report_id, report)
+                .insert(report_id, ScoreReportBinding { report, route_runs })
                 .is_some()
             {
                 return Err(ResearchError::DatasetBuild {
@@ -359,20 +379,19 @@ impl ModelScoreCohortMaterializer {
         &self,
         window: &FeedbackCohortWindow,
         truth_cutoff: DateTime<Utc>,
-        reports: &HashMap<RecommendationReportId, RecommendationReportInfo>,
+        reports: &HashMap<RecommendationReportId, ScoreReportBinding>,
     ) -> QuantResult<Vec<ScoreFunnelBinding>> {
         let mut bindings = Vec::new();
         let mut identities = HashSet::new();
         for funnel in self
             .facts
             .report_funnel_between(
-                window.profile_ref(),
                 window.window_start().timestamp_millis(),
                 window.cutoff().timestamp_millis(),
             )
             .await?
         {
-            let Some(report) = reports.get(&funnel.recommendation_report_id) else {
+            let Some(report_binding) = reports.get(&funnel.recommendation_report_id) else {
                 continue;
             };
             if funnel.ingestion_time > truth_cutoff.timestamp_millis() {
@@ -383,7 +402,24 @@ impl ModelScoreCohortMaterializer {
                     detail: format!("decode conserved report-funnel stage: {error}"),
                 }
             })?;
-            Self::validate_funnel(report, &funnel)?;
+            let route_run_id =
+                funnel
+                    .report_route_run_id
+                    .ok_or_else(|| ResearchError::DatasetBuild {
+                        detail: format!(
+                            "scored funnel row {}/{} has no Route-run identity",
+                            funnel.recommendation_report_id, funnel.market_id
+                        ),
+                    })?;
+            let route_run = report_binding
+                .route_runs
+                .get(&route_run_id)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "funnel Route run {route_run_id} is outside the requested profile cohort"
+                    ),
+                })?;
+            Self::validate_funnel(&report_binding.report, route_run, &funnel)?;
             if stage < ReportFunnelStage::ModelScored {
                 continue;
             }
@@ -413,7 +449,8 @@ impl ModelScoreCohortMaterializer {
                 .into());
             }
             bindings.push(ScoreFunnelBinding {
-                report: report.clone(),
+                report: report_binding.report.clone(),
+                route_run: route_run.clone(),
                 funnel,
                 feature_vector_id,
                 model_run_id,
@@ -430,14 +467,14 @@ impl ModelScoreCohortMaterializer {
 
     fn validate_funnel(
         report: &RecommendationReportInfo,
+        route_run: &ReportRouteRunInfo,
         funnel: &ReportMarketFunnelRow,
     ) -> QuantResult<()> {
-        let valid = funnel.profile_id == report.profile_ref.id.as_str()
-            && funnel.profile_version == report.profile_ref.version
-            && funnel.profile_content_hash == report.profile_ref.content_hash.to_string()
-            && funnel.decision_policy_snapshot_id == report.decision_policy_snapshot_id
-            && funnel.model_version_id == report.model_version_id
-            && funnel.model_run_id == report.model_run_id
+        let valid = funnel.decision_policy_snapshot_id == report.decision_policy_snapshot_id
+            && funnel.report_route_run_id == Some(route_run.report_route_run_id)
+            && funnel.route.as_deref() == Some(route_run.route.as_str())
+            && funnel.model_version_id == route_run.model_version_id
+            && funnel.model_run_id == route_run.model_run_id
             && funnel.market_selection_id == report.market_selection_id
             && funnel.event_time == report.decision_at.timestamp_millis();
         if !valid {
@@ -611,13 +648,10 @@ impl ModelScoreCohortMaterializer {
         })?;
         let valid = rows.iter().all(|row| {
             row.model_run_id == binding.model_run_id
-                && row.model_version_id == binding.report.model_version_id
+                && Some(row.model_version_id) == binding.route_run.model_version_id
                 && row.market_id == binding.funnel.market_id
                 && row.feature_vector_id == binding.feature_vector_id
                 && row.decision_at == binding.report.decision_at.timestamp_millis()
-                && row
-                    .recommendation_report_id
-                    .is_none_or(|report_id| report_id == binding.report.recommendation_report_id)
                 && row.model_family == first.model_family
                 && row.input_contract_hash == first.input_contract_hash
                 && row.transform_hash == first.transform_hash
@@ -939,7 +973,11 @@ impl ModelScoreCohortMaterializer {
                 market_selection_id: seed.binding.report.market_selection_id,
                 feature_vector_id: seed.binding.feature_vector_id,
                 model_run_id: seed.binding.model_run_id,
-                model_version_id: seed.binding.report.model_version_id,
+                model_version_id: seed.binding.route_run.model_version_id.ok_or_else(|| {
+                    ResearchError::DatasetBuild {
+                        detail: "scored Route run has no model version".to_owned(),
+                    }
+                })?,
                 model_family: seed.input.model_family,
                 factor_definition_versions: {
                     let mut ids = factor_serving_plane

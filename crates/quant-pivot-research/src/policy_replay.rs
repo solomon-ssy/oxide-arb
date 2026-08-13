@@ -54,7 +54,7 @@ pub struct PolicyReplaySignal {
     pub outcome_side: OutcomeSide,
     pub composite_score: Decimal,
     pub expected_return_bps: Decimal,
-    pub execution_eligible: bool,
+    pub route_gate_eligible: bool,
     pub opportunistic_confidence: Option<Decimal>,
     pub opportunistic_expected_alpha_bps: Option<Decimal>,
     pub opportunistic_p_exit_better: Option<Decimal>,
@@ -1017,7 +1017,7 @@ fn signal_exit_reason(
     current: &PolicyReplaySignal,
 ) -> Option<ExitReason> {
     if current.outcome_side != token_side
-        || candidate.exit.require_execution_eligibility && !current.execution_eligible
+        || candidate.exit.require_route_gate_eligibility && !current.route_gate_eligible
         || current.expected_return_bps < candidate.exit.min_expected_return_bps.inner()
         || initial.is_some_and(|initial| {
             current.composite_score < initial.composite_score * candidate.exit.min_score_retention
@@ -1290,7 +1290,7 @@ mod tests {
                 outcome_side: OutcomeSide::Yes,
                 composite_score: dec!(0.8),
                 expected_return_bps: dec!(200),
-                execution_eligible: true,
+                route_gate_eligible: true,
                 opportunistic_confidence: None,
                 opportunistic_expected_alpha_bps: None,
                 opportunistic_p_exit_better: None,
@@ -1322,7 +1322,7 @@ mod tests {
                 trailing_stop: None,
                 min_score_retention: dec!(0.5),
                 min_expected_return_bps: Bps::ZERO,
-                require_execution_eligibility: true,
+                require_route_gate_eligibility: true,
                 opportunistic_exit: OpportunisticExitPolicy {
                     min_confidence: Probability::ONE,
                     min_expected_alpha_bps: Bps::new(dec!(1000)),
@@ -1473,7 +1473,7 @@ mod tests {
             .signal
             .as_mut()
             .expect("signal")
-            .execution_eligible = false;
+            .route_gate_eligible = false;
         let outcome = replay_policy_candidate(
             &candidate(FillRequirement::AllowPartial),
             OutcomeSide::Yes,

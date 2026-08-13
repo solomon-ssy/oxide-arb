@@ -6,19 +6,18 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
+    config::DeployConfigFieldProjection,
     domain::governance::{
         ConfigActivityInfo, DecisionPolicySnapshotOptionInfo, PolicyActivationInfo,
         PolicyActivationOutcome, PolicyApprovalInfo, PolicyRevisionInfo,
     },
     enums::runtime_config::{
-        ConfigResourceKind, CredentialHealthStatus, CredentialKind, DecisionPolicySnapshotSource,
-        DeploymentEndpointKind, PolicyActivationKind, PolicyActorKind, PolicyApplyBoundary,
-        PolicyApprovalDecision, PolicyConsumer, PolicyRevisionStatus, ResourceBudgetKind,
-        ResourceBudgetMetric, ResourceBudgetUnit,
+        ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActivationKind, PolicyActorKind,
+        PolicyApplyBoundary, PolicyApprovalDecision, PolicyConsumer, PolicyRevisionStatus,
     },
     runtime_config::{
         PolicyDocument, PolicyRevisionBundle, PolicyValidationEvidence, PolicyValidationSubject,
-        ScheduleCadence,
+        RuntimeFieldDescriptor, ScheduleCadence,
     },
     types::{
         AuditEventId, ContentHash, DecisionPolicySnapshotId, DeploymentEnvironment,
@@ -52,7 +51,8 @@ pub struct PolicyResourceSchemaView {
     pub kind: ConfigResourceKind,
     pub schema_version: SchemaVersion,
     #[schemars(with = "serde_json::Value")]
-    pub json_schema: Schema,
+    pub document_schema: Schema,
+    pub fields: Vec<RuntimeFieldDescriptor>,
     pub effective_boundary: PolicyApplyBoundary,
     pub consumers: Vec<PolicyConsumer>,
 }
@@ -291,47 +291,7 @@ impl From<ConfigActivityInfo> for ConfigActivityView {
 pub struct DeploymentConfigView {
     pub environment: DeploymentEnvironment,
     pub restart_required: bool,
-    pub snapshot: DeploymentConfigSnapshotView,
-    pub credential_health: Vec<CredentialHealthView>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct CredentialHealthView {
-    pub credential: CredentialKind,
-    pub status: CredentialHealthStatus,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct DeploymentConfigSnapshotView {
-    pub endpoints: Vec<DeploymentEndpointView>,
-    pub identity: DeploymentIdentityView,
-    pub resource_budgets: Vec<DeploymentResourceBudgetView>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct DeploymentEndpointView {
-    pub kind: DeploymentEndpointKind,
-    /// Redacted or non-secret endpoint suitable for operator display.
-    pub address: String,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct DeploymentIdentityView {
-    pub deployment_id: String,
-    pub instance_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct DeploymentResourceBudgetView {
-    pub kind: ResourceBudgetKind,
-    pub limits: Vec<DeploymentResourceLimitView>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct DeploymentResourceLimitView {
-    pub metric: ResourceBudgetMetric,
-    pub value: u64,
-    pub unit: ResourceBudgetUnit,
+    pub fields: Vec<DeployConfigFieldProjection>,
 }
 
 #[derive(Debug, Deserialize, Validate, JsonSchema)]
@@ -383,8 +343,8 @@ impl From<DecisionPolicySnapshotOptionInfo> for DecisionPolicySnapshotOptionView
                 execution_risk_policy: Some(info.execution_risk_policy_revision_id),
                 model_routing: Some(info.model_routing_revision_id),
                 report_schedule: Some(info.report_schedule_revision_id),
-                operational_control: Some(info.operational_control_revision_id),
-                execution_authorization: Some(info.execution_authorization_revision_id),
+                operations_policy: Some(info.operations_policy_revision_id),
+                execution_automation_policy: Some(info.execution_automation_policy_revision_id),
             },
             source: info.source,
             created_at: info.created_at,

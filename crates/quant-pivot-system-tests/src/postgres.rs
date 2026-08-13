@@ -6,6 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    thread::Builder as ThreadBuilder,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -16,11 +17,15 @@ use quant_pivot_storage::postgres::{PostgresPool, migration::finalize_schema_dep
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
-use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
+use tokio::{
+    runtime::Builder as RuntimeBuilder,
+    sync::{Mutex, OwnedMutexGuard, Semaphore, oneshot},
+};
 
 use crate::stack::BOOTSTRAP_ADMIN_PASSWORD;
 
 const MAINTENANCE_DATABASE: &str = "postgres";
+const LARGE_SCENARIO_STACK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PARALLEL_POSTGRES_SUITES: usize = 4;
 const TEMPLATE_DATABASE: &str = "quant_pivot_repository_template";
 const POSTGRES_IMAGE_TAG: &str = "16";
@@ -178,6 +183,37 @@ where
         )),
         Err(error) => Err(error).context("join isolated repository scenario task"),
     }
+}
+
+/// Run one exceptionally deep repository scenario on a bounded large-stack thread.
+///
+/// Complete governance fixtures compose several production async state machines.
+/// Keeping their poll root on a dedicated thread avoids depending on the process-wide
+/// `RUST_MIN_STACK` setting while preserving the active suite task-local.
+pub async fn run_suite_large_stack<F>(future: F) -> Result<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let suite = ACTIVE_SUITE
+        .try_with(Arc::clone)
+        .context("large-stack repository scenario requires an active PostgreSQL suite")?;
+    let (sender, receiver) = oneshot::channel();
+    ThreadBuilder::new()
+        .name("quant-pivot-repository-large-stack".to_owned())
+        .stack_size(LARGE_SCENARIO_STACK_BYTES)
+        .spawn(move || {
+            let output = RuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("build large-stack repository scenario runtime")
+                .map(|runtime| runtime.block_on(ACTIVE_SUITE.scope(suite, future)));
+            let _ = sender.send(output);
+        })
+        .context("spawn large-stack repository scenario thread")?;
+    receiver
+        .await
+        .context("large-stack repository scenario thread panicked")?
 }
 
 /// Reset and connect the database for one sequential repository scenario.

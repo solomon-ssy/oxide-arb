@@ -29,8 +29,9 @@ use quant_pivot_models::{
     runtime_config::{FactorCrossSectionConfig, SellScorerConfig, SmallCrossSectionPolicy},
     types::{
         ArtifactUri, CalibrationArtifactId, ContentHash, ModelInputContract,
-        ModelInputRequiredness, ModelSpecId, ModelVersionId, Price, Probability,
-        ResearchProfileRef, TradePolicyArtifactId,
+        ModelInputRequiredness, ModelSpecId, ModelVersionId, Price, ResearchProfileRef,
+        TradePolicyArtifactId,
+        calibration::CalibratedPayoutDistribution,
         factor::{FactorDefinitionRef, FactorServingPlane},
         model_serving::{
             ModelServingContract, ModelServingEstimatorBinding, ModelServingEstimatorInput,
@@ -509,21 +510,18 @@ pub struct ReturnEstimate {
     pub downside_bps: Decimal,
     /// Whether the estimate came from a calibrated model (else heuristic).
     pub calibrated: bool,
-    /// The calibrated `P(win)` (`Some` only for `Calibrated`; Kelly sizing
-    /// consumes this directly as its win probability
-    /// — never re-derived from `expected_return_bps`/`downside_bps`, which
-    /// would reintroduce the resolution-vs-TP/SL bet-structure mismatch this
-    /// field exists to remove). `None` for `Heuristic`, whose sizing path is
-    /// fenced off from production by fail-closed publish/admission gates.
-    pub win_probability: Option<Probability>,
+    /// Calibrated loss/split/win payout distribution. `None` for an
+    /// unpublishable heuristic bootstrap model.
+    pub payout_distribution: Option<CalibratedPayoutDistribution>,
 }
 
 impl ReturnModelSpec {
     /// Estimate the expected return / downside (bps) for one candidate.
     ///
-    /// `market_price` is the executable YES-leg reference price (required by
-    /// the `Calibrated` formula `E[r] = P(win)·(1-p)/p − (1−P(win))`; ignored
-    /// by `Heuristic`). `calibration` must be `Some` whenever `self` is
+    /// `market_price` is the executable outcome-token reference price. The
+    /// calibrated path computes `E[r] = E[terminal payout] / price - 1`, where
+    /// terminal payout retains loss, split, and win mass. It is ignored by
+    /// `Heuristic`. `calibration` must be `Some` whenever `self` is
     /// `Calibrated` — the verified serving preimage resolves it once before
     /// runtime construction and fails the load closed otherwise. A missing
     /// binding is rejected here as well; it never becomes a zero-valued
@@ -552,7 +550,7 @@ impl ReturnModelSpec {
                     expected_return_bps,
                     downside_bps,
                     calibrated: false,
-                    win_probability: None,
+                    payout_distribution: None,
                 })
             }
             Self::Calibrated(_) => {
@@ -2005,8 +2003,11 @@ mod tests {
         runtime_config::{DecimalValue, SellScorerConfig},
         types::{
             CalibrationArtifactId, ContentHash, ModelInputContract, ModelInputRequiredness,
-            ModelInputSpec, Price, Probability,
-            calibration::{IsotonicKnot, MonotoneMapping, ReliabilityBin, ReliabilityReport},
+            ModelInputSpec, PayoutRatio, Price, Probability,
+            calibration::{
+                IsotonicKnot, MonotoneMapping, ReliabilityBin, ReliabilityReport,
+                SplitPayoutRateEvidence,
+            },
             model_metrics::ModelVersionMetrics,
             model_spec::ModelSpecThesis,
             model_training::ModelTrainingObjective,
@@ -2432,8 +2433,8 @@ mod tests {
         assert_eq!(est.downside_bps, dec!(0));
         assert!(!est.calibrated);
         assert!(
-            est.win_probability.is_none(),
-            "heuristic path never carries a calibrated win probability"
+            est.payout_distribution.is_none(),
+            "heuristic path never carries a calibrated payout distribution"
         );
 
         let calibrated = ReturnModelSpec::Calibrated(CalibratedReturnModel {
@@ -2469,6 +2470,17 @@ mod tests {
                 ece: dec!(0.05),
                 n_samples: 100,
             },
+            split_payout_rate: SplitPayoutRateEvidence {
+                total_sample_count: 100,
+                split_sample_count: 0,
+                empirical_probability: Probability::ZERO,
+                wilson_ci: (
+                    Probability::ZERO,
+                    Probability::new(dec!(0.03699349820698568)),
+                ),
+                split_payout_ratio: PayoutRatio::try_new(dec!(0.5))
+                    .expect("canonical split payout"),
+            },
         };
         // score=0.5 sits exactly halfway between the score=0 (p=0.2) and
         // score=1 (p=0.8) knots -> linear interpolation yields p_win=0.5.
@@ -2480,9 +2492,10 @@ mod tests {
         assert_eq!(mid.downside_bps, dec!(300));
         assert_eq!(mid.expected_return_bps, dec!(2500));
         assert_eq!(
-            mid.win_probability,
+            mid.payout_distribution
+                .map(|distribution| distribution.winner_take_all_win_probability),
             Some(Probability::new(dec!(0.5))),
-            "Kelly must receive the calibrated P(win) directly, not a value re-derived from E[r]"
+            "the payout distribution must preserve the calibrated conditional win probability"
         );
 
         // Missing resolved calibration never fabricates a value.

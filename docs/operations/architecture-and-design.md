@@ -1,8 +1,8 @@
 # quant-pivot 架构与详细设计
 
-> Last reviewed: 2026-07-19.
+> Last reviewed: 2026-08-08.
 >
-> This document describes the current quant-pivot architecture implemented in this repository. The project has not entered production and will be deployed from a fresh boot-v1 database. Historical phase increments are audit context only and have no implementation authority. There is no production seal or compatibility bridge: post-deployment evolution uses normal forward migrations, rollback, and data verification.
+> This document describes the current quant-pivot architecture implemented in this repository. The project has not entered production and is installed only from the current clean boot-v1 PostgreSQL/ClickHouse schema. Historical phase increments are audit context only and have no implementation authority. There is no compatibility bridge, legacy parser, dual read/write, or upgrade migration from an earlier quant-pivot contract.
 
 ## 1. 系统目标
 
@@ -12,8 +12,8 @@ quant-pivot 是 Polymarket-only 的量化系统。它的闭环目标不是直接
 
 1. 买什么：哪个 market、token、outcome；
 2. 什么时候买：entry window、book freshness、depth、limit/slippage；
-3. 买多少：真实 venue 账户资金、Kelly sizing、组合约束、流动性和 correlation；
-4. 为什么买：features、factors、model、expected return、confidence、evidence；
+3. 买多少：真实 venue 账户资金、逐档 L2 可成交现金流、资本占用、联合场景与全局 MILP 约束；
+4. 为什么买：Route 内概率校准与不确定性、贴现净 USD、tail risk、全局边际组合价值和完整 lineage；
 5. 什么时候卖：take profit、stop loss、time exit、signal invalidation、hold-to-resolution；
 6. 卖多少：position lot、exit plan、partial/full exit policy；
 7. 如何闭环：execution、reconciliation、settlement redeem、attribution、training feedback。
@@ -40,7 +40,8 @@ flowchart TD
     EV --> PAR["Sampled/full deterministic parity"]
     PAR -->|"mismatch"| LATCH["Revoke + intent cascade + parity latch"]
     F --> K["AccountSnapshot"]
-    J --> L["Portfolio planner"]
+    J --> TIER["ExecutableEconomicTier: L2 + fees + scenario cashflow"]
+    TIER --> L["Global portfolio MILP + exact verifier"]
     K --> L
     SNAP --> L
     L --> M["RecommendationReport"]
@@ -157,14 +158,15 @@ Deploy config 只管理进程启动时才能决定的部署身份与基础设施
 - Web listen/CORS/JWT；
 - observability。
 
-加载顺序收敛为编译默认值、tracked 基础 TOML 与 gitignored/deployment-local TOML。环境变量只用于选择配置目录和部署身份，不允许覆盖业务策略或直接承载 secret：
+进程只接受一个显式、完整、权限受控的 Deploy Config 文件。binary 和 deploy/reset/schema xtask 都必须同时接收 absolute `--config-file` 与 `--expected-environment`；不进行目录发现、compiled-default merge、local overlay、环境变量 leaf override 或缺字段补值：
 
 ```mermaid
 flowchart LR
-    Defaults["compiled defaults"] --> Base["tracked base TOML"]
-    Base --> Local["gitignored or permission-restricted deploy TOML"]
-    Local --> Effective["typed DeployConfig + SecretText"]
-    Effective --> Validation["startup validation + credential preflight"]
+    File["one absolute TOML path"] --> FD["O_NOFOLLOW open + fd metadata"]
+    FD --> Parse["deny_unknown_fields + all required leaves"]
+    Parse --> Env["expected environment equality"]
+    Env --> Secrets["placeholder / secret / cross-field validation"]
+    Secrets --> Effective["typed DeployConfig + SecretText"]
 ```
 
 Deploy config 拒绝 unknown fields。所有 mode 都要求 private key 和 funder；可执行 mode 下 proxy/safe 还要求 relayer secret。PostgreSQL 与 ClickHouse 各自只有一组配置身份，runtime、schema CLI 与 Fresh Boot 复用该身份；权限隔离由环境边界、生命周期租约和受控 CLI 承担，不维护平行 credential。
@@ -190,11 +192,11 @@ flowchart TD
 | Resource | 职责 | 生效边界 |
 |----------|------|----------|
 | `recommendation_policy` | selection、data quality、Top-N 与报告有效期 | 新 claim 的 report run |
-| `execution_risk_policy` | sizing、exposure、entry/exit 与 breaker | 新 order intent / admission |
-| `model_routing` | category active/shadow/exit artifact 指针 | 新 model evaluation claim |
+| `execution_risk_policy` | budget、exposure、tail risk、economic admission、entry/exit 与 breaker | 新 report claim / order intent / admission |
+| `model_routing` | Route champion/shadow/exit artifact 与 scenario-model binding | 新 model evaluation / report claim |
 | `report_schedule` | timezone、cadence、enabled、future run reconcile | 尚未 claim 的 future run |
-| `operational_control` | report pause、execution halt、notification routing、worker admission | operational admission gate |
-| `execution_authorization` | `ReportOnly` / `SemiAuto` / `AutoExecution` 授权约束 | mode preflight 后的新 admission |
+| `operations_policy` | execution halt、notification routing、worker 与 outcome-reconciliation admission | operational admission gate |
+| `execution_automation_policy` | `SemiAuto` approval TTL 与 `AutoExecution` report-level authorization caps | mode preflight 后的新 admission |
 
 每个 resource 固定 `schema_version = 1`，但没有统一大文档版本。修改必须依次完成 Draft、Validate/Preflight、Approve、Activate；activation body 绑定 `approval_id`、`expected_active_revision_id`、`preflight_token` 和 `idempotency_key`。任一 prepare 或 CAS 失败都保持旧 snapshot；不存在自动回滚，回滚也是一次显式、可审计 activation。
 
@@ -370,68 +372,69 @@ Parity latch open/uninitialized、关键 PIT snapshot 缺失、category route �
 
 ### 8.2 Recommendation payload
 
-推荐由这些 contract 组成：
+推荐由这些 contract 组成。Route 内 raw score/confidence 只作为模型 lineage 与校准输入，不能参与跨 Route 排序或 execution admission：
 
 | Payload block | 内容 | 使用者 |
 |---------------|------|--------|
 | Identity | market/token/outcome/rank/report refs | UI、operator、intent create |
-| Signal | model score、confidence、expected return、factor contribution | quant、approver |
+| RouteLineage | Route、route run、model/calibration/trade-policy/profile generations 与 hashes | quant、approver、audit |
 | EntryPlan | trigger、limit/immediate、slippage、book age、valid window | admission、operator |
-| SizingPlan | suggested USD/shares、Kelly、caps、binding constraints | portfolio、approver |
+| RecommendationEconomics | nominal/robust expected net USD、profit-probability lower bound、max loss、CVaR contribution、capital USD-hours、marginal portfolio value | portfolio、approver |
+| GlobalPortfolioPlan | selected executable tier、shares、capital buckets、scenario artifact、lexicographic objective 与 exact constraint evidence | admission、audit |
 | ExitPlan | TP/SL/time/signal/hold/redeem | exit monitor、operator |
-| RiskEnvelope | exposure、liquidity、downside、correlation | admission、risk |
+| RiskEnvelope | market/event/category/Route exposure、liquidity、scenario loss、CVaR、drawdown | admission、risk |
 | Evidence | feature snapshot、data quality、model/factor refs | audit、debug |
 | ExecutionEligibility | eligible modes、auto reasons、approval required | UI、dispatcher |
 
 ## 9. Portfolio 与 sizing 设计
 
-### 9.1 Sizing
+### 9.1 统一经济尺度
 
-生产 sizing 使用 **校准 P(win) 直接 Kelly**（Phase 11.3 方向 A）：
+每个 represented Route 独立生成概率校准、不确定性与 Trade Policy，再把真实 L2 可成交层级转换成统一的贴现净 USD 场景现金流：
 
 ```mermaid
 flowchart TD
-    A["calibrated P(win) q"] --> B["f* = (q − p) / (1 − p)"]
-    C["entry_price_ref p"] --> B
-    B --> E["full Kelly f*"]
-    F["kelly_fraction"] --> G["fractional Kelly"]
-    E --> G
-    H["confidence"] --> I["confidence weighting"]
+    A["Route-specific calibrated probability + interval"] --> D["joint PIT/stress scenarios"]
+    B["L2 walk + fee + slippage + tick/lot"] --> E["ExecutableEconomicTier"]
+    C["Trade Policy exit/settlement cashflow"] --> E
+    D --> E
+    E --> F["discounted nominal + robust net USD"]
+    E --> G["capital occupancy by time bucket"]
+    E --> H["profit probability lower bound + loss/CVaR inputs"]
+    F --> I["global discrete MILP"]
     G --> I
-    J["drawdown"] --> K["drawdown scaling"]
-    I --> K
-    K --> L["edge-uncertainty + correlation shrink"]
-    M["max_position_pct"] --> N["position cap"]
-    L --> N
-    N --> O["raw suggested USD/shares"]
-    P["LP aggregate exposure cap"] --> Q["planner convergence"]
-    O --> Q
+    H --> I
+    I --> J["Decimal/newtype exact post-solve verifier"]
 ```
 
-`HeuristicReturnModel {300,500}` 仅冷启动 `ReportOnly` 可达；`target_reward_multiple` 用于止盈定价，
-不再反解 Kelly 胜率。四处 `resolve_return_model_calibration` 深校验关闭 publish/report/admission/intent TOCTOU。
+raw model score、confidence、category rank 或任意无量纲加权和都不得进入全局目标。缺少兼容 Route champion、calibration、Trade Policy、Research Profile 或 `PortfolioScenarioArtifact` 时整份 report run 失败；不会发布部分报告或以独立假设补洞。
 
 ### 9.2 Optimizer constraints
 
-Portfolio planner 把 raw sizing 放进约束优化：
+唯一 production solver path 使用离散 tier one-hot MILP，并按确定性 lexicographic 顺序求解：先最大化允许分布/压力分布下的最小贴现预期净 USD，再最大化 nominal expected net USD，再最小化 CVaR 与资本 USD-hours，最后用稳定 Route/market/tier ID 消除多解不确定性。硬约束包括：
 
 - total budget；
 - available cash；
+- cash reserve 与各时间桶资本占用；
 - min/max recommendation USD；
 - max market exposure；
 - max event exposure；
 - max category exposure；
-- max correlated exposure；
+- max Route exposure；
+- 同 market/outcome、同 event 等结构互斥；
 - liquidity usage cap；
-- Kelly cap；
-- drawdown scaling；
-- correlation policy。
+- existing positions/open capital；
+- max scenario loss、CVaR 与 drawdown；
+- TopN。
 
 输出可能是：
 
-- accepted recommendation with binding constraints；
-- rejected candidate with explicit reason；
-- empty report if all candidates rejected。
+- accepted recommendation with exact tier、economic metrics 与 binding constraints；
+- rejected candidate with stable funnel reason；
+- complete Route 无候选时的 zero-candidate evidence；
+- 全部完整 Route 均无候选时的 audited empty report。
+
+solver timeout、non-optimal、infeasible contract、数值异常或 exact post-check mismatch 都令 report run 失败。不存在 LP relaxation、greedy/per-candidate fallback 或空 plan fallback。
 
 ## 10. 执行治理设计
 
@@ -783,7 +786,7 @@ Redis 不存储不可恢复的交易真相。
 | Catalog coverage/watermark missing | PIT resolver / integrity summary | block replay, dataset build, report | preserve ingest, repair Gamma ledger; never backdate |
 | Serving writer misses deadline | evidence completion / parity pending timeout | fail run, alert, open latch when terminal | repair writer/watermark, run covering full parity |
 | Deterministic parity mismatch | sampled/full replay | revoke report, cascade intent, open latch; block report/publish/entry | safe mode, fix forward, covering full parity, governed ack |
-| Legacy/corrupt dataset or model artifact | format/hash/deep loader validation | reject training/load/publish | rebuild boot v1 artifact; never activate an unknown pointer |
+| Unknown/corrupt dataset or model artifact | format/hash/deep loader validation | reject training/load/publish | rebuild the canonical artifact; never activate an unknown pointer |
 | Model degraded | quality gate/report | no positive signal/empty | rollback model/factor |
 | Breaker daily loss | breaker | trip kill switch | incident review |
 | Bridge deposit stuck | account mismatch | funds unavailable | check bridge status/support |
@@ -791,20 +794,20 @@ Redis 不存储不可恢复的交易真相。
 
 ## 19. Deployment lifecycle
 
-部署只有一套 boot-v1 起点，没有 `pre_production_resettable / production_frozen` 运行时状态，也没有不可逆
-production seal。首次部署前可在精确授权下使用独立 CLI 清空未投产基础设施；应用和 Web API 从不自动删除
-数据。首次部署后所有 schema、数据与内部 format 演进直接使用正常 forward migration、回滚与数据验证。
+部署只有一套 canonical clean-install 起点，没有 `pre_production_resettable / production_frozen` 运行时状态，
+也没有不可逆 production seal。当前项目从未生产运行，本设计不建立升级、降级、历史转换或并存版本路径。
+仅可在精确授权下使用独立 CLI 清空 disposable 未投产基础设施；应用和 Web API 从不自动删除数据。
 
 首次上线顺序：
 
 ```mermaid
 flowchart TD
     A["Full CI + fresh-install evidence"] --> B["Verify exact environment and backups"]
-    B --> C["Apply one PostgreSQL boot migration"]
-    C --> D["Apply one ClickHouse version-1 bootstrap"]
+    B --> C["Apply the canonical PostgreSQL bootstrap"]
+    C --> D["Apply the canonical ClickHouse bootstrap"]
     D --> E["Verify schema fingerprints and empty unknown history"]
     E --> F["Verify seeded safe boot policy resources"]
-    F --> G["Build version-1 dataset/model artifacts"]
+    F --> G["Build canonical dataset/model artifacts"]
     G --> H["Subject-bound full parity passed"]
     H --> I["Publish model and run ad-hoc canary"]
     I --> J["Enable schedule with conservative execution controls"]
@@ -844,4 +847,4 @@ Activation failures retain the prior `DecisionPolicySnapshot`; they do not trigg
 - reconciliation before final attribution；
 - no `f64` money in production paths；
 - no untyped internal error bucket in production paths；
-- no private key or secret value in tracked defaults、environment、process arguments、logs、docs examples、tests or commits；local-development 的明文 secret 只写入 gitignored `quant-pivot.local.toml`，部署环境的明文 secret 只写入权限 `0600`、不进入版本控制的 deploy TOML。
+- no private key or secret value in tracked defaults、environment、process arguments、logs、docs examples、tests or commits；任何环境的明文 secret 只写入由 `--config-file` 显式选择、owner 为运行用户、mode 为 `0400/0600` 且不进入版本控制的完整 deploy TOML。

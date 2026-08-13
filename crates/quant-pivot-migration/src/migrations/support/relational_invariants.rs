@@ -350,6 +350,59 @@ const PROMOTION_PERMIT_CHECK: &str = r"CHECK (
         )
     )
 )";
+const MARKET_SELECTION_EVIDENCE_CHECK: &str = r"CHECK (
+    selector_hash ~ '^blake3:[0-9a-f]{64}$'
+    AND jsonb_typeof(selector_evidence) = 'object'
+    AND selector_evidence ?& ARRAY[
+        'selector_hash',
+        'contract_hash',
+        'boundary_hash',
+        'selection_policy_hash',
+        'data_quality_policy_hash',
+        'feature_schema_hash',
+        'model_requirements_hash',
+        'candidates_hash',
+        'candidate_catalog_hash',
+        'candidate_book_hash',
+        'candidate_domain_hash',
+        'candidate_decision_hash',
+        'included_hash',
+        'excluded_hash',
+        'exclusion_summary_hash'
+    ]
+    AND selector_evidence - ARRAY[
+        'selector_hash',
+        'contract_hash',
+        'boundary_hash',
+        'selection_policy_hash',
+        'data_quality_policy_hash',
+        'feature_schema_hash',
+        'model_requirements_hash',
+        'candidates_hash',
+        'candidate_catalog_hash',
+        'candidate_book_hash',
+        'candidate_domain_hash',
+        'candidate_decision_hash',
+        'included_hash',
+        'excluded_hash',
+        'exclusion_summary_hash'
+    ] = '{}'::jsonb
+    AND selector_evidence ->> 'selector_hash' = selector_hash
+    AND selector_evidence ->> 'contract_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'boundary_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'selection_policy_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'data_quality_policy_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'feature_schema_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'model_requirements_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'candidates_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'candidate_catalog_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'candidate_book_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'candidate_domain_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'candidate_decision_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'included_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'excluded_hash' ~ '^blake3:[0-9a-f]{64}$'
+    AND selector_evidence ->> 'exclusion_summary_hash' ~ '^blake3:[0-9a-f]{64}$'
+)";
 const CONSTRAINTS: &[ConstraintSpec] = &[
     ConstraintSpec {
         name: "catalog_event_object_schema_version_check",
@@ -386,6 +439,12 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         table: "market",
         kind: ConstraintKind::Check,
         definition: "CHECK (((status <> 'filtered'::qp_market_status) OR (cardinality(filter_reasons) > 0)))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_market_selection_evidence",
+        table: "quant_market_selection",
+        kind: ConstraintKind::Check,
+        definition: MARKET_SELECTION_EVIDENCE_CHECK,
     },
     ConstraintSpec {
         name: "quant_factor_definition_definition_hash_check",
@@ -723,7 +782,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
             "AND jsonb_typeof(template -> 'cpcv_spec') = 'object'::text AND (template -> 'cpcv_spec') ?& ARRAY['spec_hash'::text, 'validation'::text, 'target_horizon_secs'::text, 'purge_embargo_secs'::text] AND ((template -> 'cpcv_spec') - ARRAY['spec_hash'::text, 'validation'::text, 'target_horizon_secs'::text, 'purge_embargo_secs'::text]) = '{}'::jsonb AND template -> 'cpcv_spec' ->> 'spec_hash' ~ '^blake3:[0-9a-f]{64}$'::text AND (template -> 'cpcv_spec' ->> 'target_horizon_secs')::numeric > 0 AND (template -> 'cpcv_spec' ->> 'purge_embargo_secs')::numeric > 0 ",
             "AND jsonb_typeof(template -> 'cpcv_spec' -> 'validation') = 'object'::text AND (template -> 'cpcv_spec' -> 'validation') ?& ARRAY['purge'::text, 'cpcv'::text, 'trials'::text, 'pbo'::text, 'gates'::text] AND ((template -> 'cpcv_spec' -> 'validation') - ARRAY['purge'::text, 'cpcv'::text, 'trials'::text, 'pbo'::text, 'gates'::text]) = '{}'::jsonb ",
             "AND jsonb_typeof(template -> 'cpcv_spec' -> 'validation' -> 'purge') = 'object'::text AND (template -> 'cpcv_spec' -> 'validation' -> 'purge') ?& ARRAY['embargo_pct'::text] AND ((template -> 'cpcv_spec' -> 'validation' -> 'purge') - ARRAY['embargo_pct'::text]) = '{}'::jsonb AND (template -> 'cpcv_spec' -> 'validation' -> 'purge' ->> 'embargo_pct')::numeric >= 0 AND (template -> 'cpcv_spec' -> 'validation' -> 'purge' ->> 'embargo_pct')::numeric < 1 ",
-            "AND jsonb_typeof(template -> 'cpcv_spec' -> 'validation' -> 'cpcv') = 'object'::text AND (template -> 'cpcv_spec' -> 'validation' -> 'cpcv') ?& ARRAY['n_groups'::text, 'k_test'::text] AND ((template -> 'cpcv_spec' -> 'validation' -> 'cpcv') - ARRAY['n_groups'::text, 'k_test'::text]) = '{}'::jsonb AND (template -> 'cpcv_spec' -> 'validation' -> 'cpcv' ->> 'n_groups')::integer > 1 AND (template -> 'cpcv_spec' -> 'validation' -> 'cpcv' ->> 'k_test')::integer > 0 AND (template -> 'cpcv_spec' -> 'validation' -> 'cpcv' ->> 'k_test')::integer < (template -> 'cpcv_spec' -> 'validation' -> 'cpcv' ->> 'n_groups')::integer ",
+            "AND jsonb_typeof(template -> 'cpcv_spec' -> 'validation' -> 'cpcv') = 'object'::text AND (template -> 'cpcv_spec' -> 'validation' -> 'cpcv') ?& ARRAY['n_groups'::text, 'k_test'::text, 'nested_estimator_holdout_bps'::text, 'nested_estimator_min_groups'::text] AND ((template -> 'cpcv_spec' -> 'validation' -> 'cpcv') - ARRAY['n_groups'::text, 'k_test'::text, 'nested_estimator_holdout_bps'::text, 'nested_estimator_min_groups'::text]) = '{}'::jsonb AND (template -> 'cpcv_spec' -> 'validation' -> 'cpcv' ->> 'n_groups')::integer > 1 AND (template -> 'cpcv_spec' -> 'validation' -> 'cpcv' ->> 'k_test')::integer > 0 AND (template -> 'cpcv_spec' -> 'validation' -> 'cpcv' ->> 'k_test')::integer < (template -> 'cpcv_spec' -> 'validation' -> 'cpcv' ->> 'n_groups')::integer AND (template -> 'cpcv_spec' -> 'validation' -> 'cpcv' ->> 'nested_estimator_holdout_bps')::integer > 0 AND (template -> 'cpcv_spec' -> 'validation' -> 'cpcv' ->> 'nested_estimator_holdout_bps')::integer < 10000 AND (template -> 'cpcv_spec' -> 'validation' -> 'cpcv' ->> 'nested_estimator_min_groups')::integer >= 4 ",
             "AND jsonb_typeof(template -> 'cpcv_spec' -> 'validation' -> 'trials') = 'object'::text AND (template -> 'cpcv_spec' -> 'validation' -> 'trials') ?& ARRAY['lambda_multipliers'::text, 'rank_loss_kinds'::text, 'forest_n_trees_multipliers'::text, 'linear_alpha_multipliers'::text, 'max_trials'::text] AND ((template -> 'cpcv_spec' -> 'validation' -> 'trials') - ARRAY['lambda_multipliers'::text, 'rank_loss_kinds'::text, 'forest_n_trees_multipliers'::text, 'linear_alpha_multipliers'::text, 'max_trials'::text]) = '{}'::jsonb AND jsonb_array_length(template -> 'cpcv_spec' -> 'validation' -> 'trials' -> 'lambda_multipliers') > 0 AND jsonb_array_length(template -> 'cpcv_spec' -> 'validation' -> 'trials' -> 'rank_loss_kinds') > 0 AND jsonb_array_length(template -> 'cpcv_spec' -> 'validation' -> 'trials' -> 'forest_n_trees_multipliers') > 0 AND jsonb_array_length(template -> 'cpcv_spec' -> 'validation' -> 'trials' -> 'linear_alpha_multipliers') > 0 AND (template -> 'cpcv_spec' -> 'validation' -> 'trials' ->> 'max_trials')::integer > 0 ",
             "AND jsonb_typeof(template -> 'cpcv_spec' -> 'validation' -> 'pbo') = 'object'::text AND (template -> 'cpcv_spec' -> 'validation' -> 'pbo') ?& ARRAY['block_count'::text] AND ((template -> 'cpcv_spec' -> 'validation' -> 'pbo') - ARRAY['block_count'::text]) = '{}'::jsonb AND (template -> 'cpcv_spec' -> 'validation' -> 'pbo' ->> 'block_count')::integer >= 4 AND mod((template -> 'cpcv_spec' -> 'validation' -> 'pbo' ->> 'block_count')::integer, 2) = 0 ",
             "AND jsonb_typeof(template -> 'cpcv_spec' -> 'validation' -> 'gates') = 'object'::text AND (template -> 'cpcv_spec' -> 'validation' -> 'gates') ?& ARRAY['min_cpcv_paths'::text, 'rank_ic_min'::text, 'dsr_significance'::text, 'max_pbo'::text, 'max_turnover'::text, 'min_tail_loss_bps'::text] AND ((template -> 'cpcv_spec' -> 'validation' -> 'gates') - ARRAY['min_cpcv_paths'::text, 'rank_ic_min'::text, 'dsr_significance'::text, 'max_pbo'::text, 'max_turnover'::text, 'min_tail_loss_bps'::text]) = '{}'::jsonb AND (template -> 'cpcv_spec' -> 'validation' -> 'gates' ->> 'min_cpcv_paths')::integer >= 21 ",
@@ -1113,7 +1172,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "quant_model_spec_check",
         table: "quant_model_spec",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof((input_contract -> 'inputs'::text)) = 'array'::text) AND (jsonb_array_length((input_contract -> 'inputs'::text)) > 0) AND (jsonb_typeof(training_contract) = 'object'::text) AND (jsonb_typeof((training_contract -> 'target_label_name'::text)) = 'string'::text) AND ((length((training_contract ->> 'target_label_name'::text)) >= 1) AND (length((training_contract ->> 'target_label_name'::text)) <= 128)) AND ((((training_contract ->> 'validation_folds'::text))::integer >= 2) AND (((training_contract ->> 'validation_folds'::text))::integer <= 20)) AND (definition_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+        definition: "CHECK (((jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof((input_contract -> 'inputs'::text)) = 'array'::text) AND (jsonb_array_length((input_contract -> 'inputs'::text)) > 0) AND (jsonb_typeof(training_contract) = 'object'::text) AND (training_contract ?& ARRAY['target'::text, 'validation_folds'::text, 'evaluation_trade_policy_artifact_id'::text]) AND ((training_contract - ARRAY['target'::text, 'validation_folds'::text, 'evaluation_trade_policy_artifact_id'::text]) = '{}'::jsonb) AND (jsonb_typeof((training_contract -> 'target'::text)) = 'object'::text) AND ((((training_contract #>> '{target,kind}'::text[]) = 'outcome_payout'::text) AND (((training_contract -> 'target'::text) - 'kind'::text) = '{}'::jsonb) AND (model_family = ANY (ARRAY['weighted_factor'::qp_model_family, 'classical_logistic_regression'::qp_model_family]))) OR (((training_contract #>> '{target,kind}'::text[]) = 'forward_return'::text) AND ((training_contract -> 'target'::text) ?& ARRAY['kind'::text, 'horizon_secs'::text]) AND (((training_contract -> 'target'::text) - ARRAY['kind'::text, 'horizon_secs'::text]) = '{}'::jsonb) AND (jsonb_typeof((training_contract #> '{target,horizon_secs}'::text[])) = 'number'::text) AND (((training_contract #>> '{target,horizon_secs}'::text[]))::bigint > 0) AND (model_family = ANY (ARRAY['classical_gradient_boosted_trees'::qp_model_family, 'classical_random_forest'::qp_model_family, 'classical_extra_trees'::qp_model_family, 'classical_ridge'::qp_model_family, 'classical_lasso'::qp_model_family, 'classical_elastic_net'::qp_model_family]))) OR (((training_contract #>> '{target,kind}'::text[]) = 'hold_vs_exit_alpha'::text) AND (((training_contract -> 'target'::text) - 'kind'::text) = '{}'::jsonb) AND (model_family = 'hold_vs_exit_weighted'::qp_model_family))) AND ((((training_contract ->> 'validation_folds'::text))::integer >= 2) AND (((training_contract ->> 'validation_folds'::text))::integer <= 20)) AND (((training_contract -> 'evaluation_trade_policy_artifact_id'::text) = 'null'::jsonb) OR ((jsonb_typeof((training_contract -> 'evaluation_trade_policy_artifact_id'::text)) = 'string'::text) AND (((training_contract ->> 'evaluation_trade_policy_artifact_id'::text))::uuid IS NOT NULL))) AND (definition_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
     },
     ConstraintSpec {
         name: "ck_quant_model_spec_thesis",
@@ -1158,10 +1217,34 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "UNIQUE (recommendation_id, market_id, token_id)",
     },
     ConstraintSpec {
+        name: "uq_quant_recommendation_report_tier",
+        table: "quant_recommendation",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (recommendation_report_id, economic_tier_id)",
+    },
+    ConstraintSpec {
         name: "ck_quant_recommendation_status_timeline",
         table: "quant_recommendation",
         kind: ConstraintKind::Check,
         definition: "CHECK ((created_at <= status_changed_at) AND (valid_from <= valid_until))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_portfolio_plan_scenario_binding",
+        table: "quant_portfolio_plan",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((scenario_artifact_id IS NULL) AND (scenario_artifact_hash IS NULL) AND (scenario_artifact_json IS NULL)) OR ((scenario_artifact_id IS NOT NULL) AND (scenario_artifact_hash IS NOT NULL) AND (scenario_artifact_json IS NOT NULL) AND (scenario_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
+    },
+    ConstraintSpec {
+        name: "uq_quant_report_route_run_route",
+        table: "quant_report_route_run",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (report_run_id, route)",
+    },
+    ConstraintSpec {
+        name: "ck_quant_report_route_run_timeline",
+        table: "quant_report_route_run",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((finished_at <= created_at) AND ((diagnostic_code IS NULL) OR (char_length(btrim(diagnostic_code)) BETWEEN 1 AND 128)))",
     },
     ConstraintSpec {
         name: "uq_quant_order_intent_execution_outcome_lineage",
@@ -1362,6 +1445,12 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK ((capital_base_usd >= (0)::numeric))",
     },
     ConstraintSpec {
+        name: "ck_quant_recommendation_report_scenario_binding",
+        table: "quant_recommendation_report",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((scenario_artifact_id IS NULL) AND (scenario_artifact_hash IS NULL)) OR ((scenario_artifact_id IS NOT NULL) AND (scenario_artifact_hash IS NOT NULL) AND (scenario_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
+    },
+    ConstraintSpec {
         name: "quant_recommendation_report_check1",
         table: "quant_recommendation_report",
         kind: ConstraintKind::Check,
@@ -1444,12 +1533,6 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         table: "quant_recommendation_report",
         kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'expired'::qp_recommendation_report_status) AND (published_at IS NOT NULL) AND (successor_report_id IS NULL) AND (superseded_at IS NULL) AND (obsoleted_at IS NULL) AND (revoked_at IS NULL) AND (expired_at IS NOT NULL)) OR (status <> 'expired'::qp_recommendation_report_status)))",
-    },
-    ConstraintSpec {
-        name: "quant_recommendation_report_horizon_secs_check",
-        table: "quant_recommendation_report",
-        kind: ConstraintKind::Check,
-        definition: "CHECK ((horizon_secs > 0))",
     },
     ConstraintSpec {
         name: "quant_recommendation_report_status_reason_check",
@@ -1606,6 +1689,12 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         table: "quant_report_run",
         kind: ConstraintKind::Check,
         definition: "CHECK ((((status = 'succeeded'::qp_report_run_status) AND (output_report_id IS NOT NULL)) OR ((status <> 'succeeded'::qp_report_run_status) AND (output_report_id IS NULL))))",
+    },
+    ConstraintSpec {
+        name: "fk_quant_report_run_output_report",
+        table: "quant_report_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (output_report_id) REFERENCES quant_recommendation_report(recommendation_report_id) ON UPDATE RESTRICT ON DELETE RESTRICT",
     },
     ConstraintSpec {
         name: "quant_report_run_check6",
@@ -2063,7 +2152,54 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "ck_quant_backtest_report_evaluation",
         table: "quant_backtest_report",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((window_start < window_end) AND (coverage >= 0::numeric) AND (coverage <= 1::numeric) AND (sample_count >= 0) AND (missing_feature_count >= 0) AND (hit_rate >= 0::numeric) AND (hit_rate <= 1::numeric) AND (liquidity_feasibility >= 0::numeric) AND (liquidity_feasibility <= 1::numeric) AND (jsonb_typeof(expected_vs_realized) = 'object'::text) AND (jsonb_typeof(category_breakdown) = 'array'::text) AND (jsonb_typeof(report_pnl_simulation) = 'object'::text) AND (report_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+        definition: concat!(
+            "CHECK (window_start < window_end ",
+            "AND coverage >= 0::numeric AND coverage <= 1::numeric ",
+            "AND sample_count >= 0 AND missing_feature_count >= 0 ",
+            "AND hit_rate >= 0::numeric AND hit_rate <= 1::numeric ",
+            "AND liquidity_feasibility >= 0::numeric ",
+            "AND liquidity_feasibility <= 1::numeric ",
+            "AND jsonb_typeof(expected_vs_realized) = 'object'::text ",
+            "AND jsonb_typeof(category_breakdown) = 'array'::text ",
+            "AND jsonb_typeof(report_pnl_simulation) = 'object'::text ",
+            "AND jsonb_typeof(portfolio_funnel) = 'object'::text ",
+            "AND portfolio_funnel ?& ARRAY[",
+            "'schema_version'::text, 'decision_tick_count'::text, ",
+            "'emitted_candidate_count'::text, ",
+            "'candidate_without_executable_tier_count'::text, ",
+            "'executable_tier_count'::text, 'admission_rejected_tier_count'::text, ",
+            "'admitted_tier_count'::text, 'selected_tier_count'::text, ",
+            "'executed_entry_count'::text, 'resolved_allocation_count'::text, ",
+            "'no_candidate_tick_count'::text, 'no_executable_tier_tick_count'::text, ",
+            "'no_selection_tick_count'::text, 'selected_tick_count'::text, ",
+            "'tier_exclusion_reasons'::text] ",
+            "AND portfolio_funnel - ARRAY[",
+            "'schema_version'::text, 'decision_tick_count'::text, ",
+            "'emitted_candidate_count'::text, ",
+            "'candidate_without_executable_tier_count'::text, ",
+            "'executable_tier_count'::text, 'admission_rejected_tier_count'::text, ",
+            "'admitted_tier_count'::text, 'selected_tier_count'::text, ",
+            "'executed_entry_count'::text, 'resolved_allocation_count'::text, ",
+            "'no_candidate_tick_count'::text, 'no_executable_tier_tick_count'::text, ",
+            "'no_selection_tick_count'::text, 'selected_tick_count'::text, ",
+            "'tier_exclusion_reasons'::text] = '{}'::jsonb ",
+            "AND (portfolio_funnel ->> 'schema_version')::integer = 1 ",
+            "AND (portfolio_funnel ->> 'executable_tier_count')::bigint = ",
+            "(portfolio_funnel ->> 'admission_rejected_tier_count')::bigint + ",
+            "(portfolio_funnel ->> 'admitted_tier_count')::bigint ",
+            "AND (portfolio_funnel ->> 'selected_tier_count')::bigint = ",
+            "(portfolio_funnel ->> 'executed_entry_count')::bigint ",
+            "AND (portfolio_funnel ->> 'resolved_allocation_count')::bigint <= ",
+            "(portfolio_funnel ->> 'executed_entry_count')::bigint ",
+            "AND (portfolio_funnel ->> 'resolved_allocation_count')::bigint = sample_count ",
+            "AND (portfolio_funnel ->> 'decision_tick_count')::bigint = ",
+            "(portfolio_funnel ->> 'no_candidate_tick_count')::bigint + ",
+            "(portfolio_funnel ->> 'no_executable_tier_tick_count')::bigint + ",
+            "(portfolio_funnel ->> 'no_selection_tick_count')::bigint + ",
+            "(portfolio_funnel ->> 'selected_tick_count')::bigint ",
+            "AND jsonb_typeof(portfolio_funnel -> 'tier_exclusion_reasons') = 'array'::text ",
+            "AND report_hash ~ '^blake3:[0-9a-f]{64}$'::text)"
+        ),
     },
     ConstraintSpec {
         name: "fk_quant_training_dataset_profile",
@@ -2575,6 +2711,10 @@ mod tests {
             "'purge_embargo_secs'",
             "'validation') - ARRAY",
             "'cpcv') - ARRAY",
+            "'nested_estimator_holdout_bps'",
+            "'nested_estimator_min_groups'",
+            "'nested_estimator_holdout_bps')::integer < 10000",
+            "'nested_estimator_min_groups')::integer >= 4",
             "'trials') - ARRAY",
             "'pbo') - ARRAY",
             "'gates') - ARRAY",

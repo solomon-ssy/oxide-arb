@@ -37,6 +37,11 @@ pub enum MarketError {
     #[error("market {market_id} references event {event_id} without a catalog object")]
     MissingEventVersion { market_id: String, event_id: String },
 
+    /// A catalog event version exists but does not freeze the market that
+    /// references it, so PIT reconstruction would be ambiguous.
+    #[error("event {event_id} catalog membership does not contain market {market_id}")]
+    MissingEventMembership { market_id: String, event_id: String },
+
     #[error("duplicate {entity} `{id}` in one Gamma catalog batch")]
     DuplicateCatalogEntity { entity: &'static str, id: String },
 

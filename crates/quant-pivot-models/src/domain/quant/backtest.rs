@@ -10,7 +10,10 @@ use crate::{
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
         Probability, TrainingDatasetId,
-        backtest::{BacktestReportHashInput, CategoryMetrics, ExpectedVsRealized, PnlSimulation},
+        backtest::{
+            BacktestPortfolioFunnel, BacktestReportHashInput, CategoryMetrics, ExpectedVsRealized,
+            PnlSimulation,
+        },
     },
 };
 
@@ -38,6 +41,7 @@ pub struct BacktestReportInfo {
     pub category_breakdown: CategoryMetrics,
     pub tail_loss: Decimal,
     pub report_pnl_simulation: PnlSimulation,
+    pub portfolio_funnel: BacktestPortfolioFunnel,
     pub report_hash: ContentHash,
     pub parquet_uri: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -67,6 +71,7 @@ info_from_model!(
         category_breakdown,
         tail_loss,
         report_pnl_simulation,
+        portfolio_funnel,
         report_hash,
         parquet_uri,
         created_at,
@@ -77,6 +82,7 @@ impl BacktestReportInfo {
     /// Recompute the canonical compute-artifact hash from the persisted
     /// semantic payload.
     pub fn recomputed_hash(&self) -> Result<ContentHash, String> {
+        self.portfolio_funnel.validate()?;
         BacktestReportHashInput::try_from(self)?
             .content_hash()
             .map_err(|error| format!("backtest report hash failed: {error}"))
@@ -122,6 +128,7 @@ pub struct NewBacktestReport {
     pub category_breakdown: CategoryMetrics,
     pub tail_loss: Decimal,
     pub report_pnl_simulation: PnlSimulation,
+    pub portfolio_funnel: BacktestPortfolioFunnel,
     pub report_hash: ContentHash,
     pub parquet_uri: Option<String>,
 }
@@ -129,6 +136,7 @@ pub struct NewBacktestReport {
 impl NewBacktestReport {
     /// Recompute the canonical compute-artifact hash before insertion.
     pub fn recomputed_hash(&self) -> Result<ContentHash, String> {
+        self.portfolio_funnel.validate()?;
         BacktestReportHashInput::try_from(self)?
             .content_hash()
             .map_err(|error| format!("backtest report hash failed: {error}"))
@@ -176,6 +184,7 @@ impl<'a> TryFrom<&'a BacktestReportInfo> for BacktestReportHashInput<'a> {
             category_breakdown: &report.category_breakdown,
             tail_loss: report.tail_loss,
             report_pnl_simulation: &report.report_pnl_simulation,
+            portfolio_funnel: &report.portfolio_funnel,
         })
     }
 }
@@ -207,6 +216,7 @@ impl<'a> TryFrom<&'a NewBacktestReport> for BacktestReportHashInput<'a> {
             category_breakdown: &report.category_breakdown,
             tail_loss: report.tail_loss,
             report_pnl_simulation: &report.report_pnl_simulation,
+            portfolio_funnel: &report.portfolio_funnel,
         })
     }
 }

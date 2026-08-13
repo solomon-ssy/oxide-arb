@@ -1,21 +1,20 @@
 //! Shared serialization lock for report publication and entry submission.
 
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::{enums::quant::ReportKind, types::ResearchProfileId};
+use quant_pivot_models::enums::quant::ReportKind;
 use sea_orm::ConnectionTrait;
 
 use crate::postgres::primitives;
 
 /// Stable identity for the serialization scope shared by report publication
 /// and entry submission.
-pub(super) struct ReportScope<'a> {
-    profile_id: &'a ResearchProfileId,
+pub(super) struct ReportScope {
     kind: ReportKind,
 }
 
-impl<'a> ReportScope<'a> {
-    pub(super) const fn new(profile_id: &'a ResearchProfileId, kind: ReportKind) -> Self {
-        Self { profile_id, kind }
+impl ReportScope {
+    pub(super) const fn new(kind: ReportKind) -> Self {
+        Self { kind }
     }
 
     /// Serialize every authority-changing mutation for this report scope.
@@ -25,7 +24,7 @@ impl<'a> ReportScope<'a> {
     /// probe may precede it only to discover the scope and must be revalidated
     /// afterward.
     pub(super) async fn acquire(self, db: &impl ConnectionTrait) -> Result<(), StorageError> {
-        let scope = format!("{}:{}", self.profile_id, self.kind.as_str());
+        let scope = format!("global:{}", self.kind.as_str());
         primitives::advisory_text_xact_lock(db, &scope, 0).await
     }
 }

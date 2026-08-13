@@ -6,6 +6,7 @@ use alloy::primitives::Address;
 use chrono::Utc;
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::{
+    config::PolymarketConfig,
     enums::{
         common::{OrderType, TickSize},
         execution::{VenueOrderStatus, VenueTradeStatus},
@@ -20,10 +21,14 @@ use wiremock::{
 };
 
 use super::support::{
-    clob_client_order_timeout, deposit_wallet_clob_client, mount_clob_requirements,
-    mount_derive_api_key, mount_post_order, test_clob_client, test_order_request, test_token_id,
+    clob_client_order_timeout, deposit_wallet_clob_client, mount_clob_balance_requirements,
+    mount_clob_requirements, mount_derive_api_key, mount_post_order, test_clob_client,
+    test_order_request, test_signer, test_token_id,
 };
-use crate::clob::OrderSubmissionStage;
+use crate::{
+    clob::{ClobClient, OrderSubmissionStage},
+    wallet::WalletTopology,
+};
 
 const CONDITION_ID: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
 const TRANSACTION_HASH_1: &str =
@@ -101,6 +106,46 @@ fn order_payload(order_id: &str, status: &str, trade_ids: &[&str]) -> Value {
         "expiration": "1705322396",
         "order_type": "FAK"
     })
+}
+
+#[tokio::test]
+async fn connect_rejects_v1_protocol() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "version": 1
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let signer = test_signer();
+    let topology = WalletTopology::eoa(signer.address());
+    let config = PolymarketConfig {
+        clob_base_url: server.uri(),
+        ..PolymarketConfig::default()
+    };
+
+    let Err(error) = ClobClient::connect(signer, &config, &topology).await else {
+        panic!("CLOB V1 must be rejected before authentication");
+    };
+
+    assert!(matches!(
+        error,
+        ApiError::Clob {
+            code,
+            retryable: false,
+            ..
+        } if code == "unsupported_protocol_version"
+    ));
+    let requests = server.received_requests().await.expect("request ledger");
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.url.path())
+            .collect::<Vec<_>>(),
+        vec!["/version"]
+    );
 }
 
 #[tokio::test]
@@ -195,9 +240,51 @@ async fn fak_uses_never_retried() {
     let body = requests
         .iter()
         .find(|request| request.url.path() == "/order")
-        .map(|request| String::from_utf8_lossy(&request.body))
+        .map(|request| serde_json::from_slice::<Value>(&request.body).expect("V2 order JSON"))
         .expect("order request");
-    assert!(body.contains("\"orderType\":\"FAK\""));
+    assert_eq!(body["orderType"].as_str(), Some("FAK"));
+    let order = body["order"].as_object().expect("V2 signed order object");
+    for field in ["timestamp", "metadata", "builder"] {
+        assert!(order.contains_key(field), "V2 order must contain {field}");
+    }
+    for field in ["nonce", "feeRateBps", "taker"] {
+        assert!(
+            !order.contains_key(field),
+            "V2 order must not contain V1 field {field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn buy_rechecks_pusd_requirement() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_balance_requirements(&server, &token_id, "100").await;
+    let client = test_clob_client(&server).await;
+
+    let error = client
+        .place_order(&test_order_request(OrderType::Fak))
+        .await
+        .expect_err("principal plus fee exceeds live pUSD collateral");
+
+    assert_eq!(error.stage, OrderSubmissionStage::Prepare);
+    assert!(matches!(
+        error.source,
+        ApiError::Clob {
+            code,
+            retryable: false,
+            ..
+        } if code == "insufficient_pusd_balance"
+    ));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("request ledger")
+            .iter()
+            .all(|request| request.url.path() != "/order")
+    );
 }
 
 #[tokio::test]

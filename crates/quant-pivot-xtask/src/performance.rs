@@ -102,6 +102,11 @@ fn kernel_gates(profile: PerformanceProfile) -> Vec<KernelGate> {
     } else {
         "1000000"
     };
+    let portfolio_args = if profile == PerformanceProfile::Smoke {
+        ["1000", "100", "20", "30"]
+    } else {
+        ["10000", "400", "20", "180"]
+    };
     vec![
         KernelGate {
             name: "training_matrix_gate",
@@ -116,8 +121,14 @@ fn kernel_gates(profile: PerformanceProfile) -> Vec<KernelGate> {
             repetitions,
         },
         KernelGate {
-            name: "report_compute_gate",
-            cargo_args: release_bench_args("report_compute_gate", None, false),
+            name: "portfolio_compute_gate",
+            cargo_args: release_bench_args("portfolio_compute_gate", None, true),
+            program_args: portfolio_args.map(str::to_owned).to_vec(),
+            repetitions,
+        },
+        KernelGate {
+            name: "report_funnel_gate",
+            cargo_args: release_bench_args("report_funnel_gate", None, false),
             program_args: Vec::new(),
             repetitions,
         },

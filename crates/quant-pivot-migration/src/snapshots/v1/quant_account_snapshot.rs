@@ -33,6 +33,8 @@ pub struct Model {
     #[sea_orm(has_many)]
     pub quant_equity_snapshots: HasMany<super::quant_equity_snapshot::Entity>,
     #[sea_orm(has_many)]
+    pub quant_portfolio_plans: HasMany<super::quant_portfolio_plan::Entity>,
+    #[sea_orm(has_many)]
     pub quant_recommendation_reports: HasMany<super::quant_recommendation_report::Entity>,
 }
 

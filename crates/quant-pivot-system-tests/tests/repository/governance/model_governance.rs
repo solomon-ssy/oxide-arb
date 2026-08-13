@@ -129,7 +129,7 @@ async fn seed_two_versions(db: &DatabaseConnection) -> ShadowFixture {
             ModelFamily::WeightedFactor,
             model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
-            ModelTrainingContract::settlement_default(),
+            ModelTrainingContract::outcome_default(),
         ))
         .await
         .expect("model spec");

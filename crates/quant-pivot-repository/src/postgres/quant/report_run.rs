@@ -34,9 +34,6 @@ use quant_pivot_models::{
             ActiveModel as QuantReportScheduleStateActiveModel,
             Column as QuantReportScheduleStateColumn, Entity as QuantReportScheduleStateEntity,
         },
-        research_profile_artifact::{
-            Column as ResearchProfileArtifactColumn, Entity as ResearchProfileArtifactEntity,
-        },
     },
     enums::quant::{
         RecommendationReportStatus, ReportRunStatus, ReportRunTerminalReason,
@@ -75,6 +72,15 @@ impl PgReportRunRepository {
     #[must_use]
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
+    }
+
+    fn canonical_decision_at(now: DateTime<Utc>) -> Result<DateTime<Utc>, StorageError> {
+        DateTime::from_timestamp_millis(now.timestamp_millis()).ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(QUANT_REPORT_RUN),
+                "database report decision time is outside the epoch-millisecond domain",
+            )
+        })
     }
 }
 
@@ -632,12 +638,10 @@ impl ReportRunRepository for PgReportRunRepository {
             .await
             .map_err(StorageError::from)?;
         let current_reports = QuantRecommendationReportEntity::find()
-            .inner_join(ResearchProfileArtifactEntity)
             .filter(
                 QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Published),
             )
             .order_by_desc(QuantRecommendationReportColumn::PublishedAt)
-            .order_by_asc(ResearchProfileArtifactColumn::ResearchProfileId)
             .order_by_asc(QuantRecommendationReportColumn::ReportKind)
             .all(&txn)
             .await
@@ -855,10 +859,11 @@ impl ReportRunRepository for PgReportRunRepository {
                 (schedule.top_n, schedule.knowledge_lag_secs)
             }
         };
+        let decision_at = Self::canonical_decision_at(now)?;
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(ReportRunStatus::Running);
-        active.started_at = ActiveValue::Set(Some(now));
-        active.decision_at = ActiveValue::Set(Some(now));
+        active.started_at = ActiveValue::Set(Some(decision_at));
+        active.decision_at = ActiveValue::Set(Some(decision_at));
         active.heartbeat_at = ActiveValue::Set(Some(now));
         active.lease_expires_at = ActiveValue::Set(Some(now + lease));
         active.lease_owner = ActiveValue::Set(Some(worker_id));
@@ -1027,5 +1032,27 @@ impl ReportRunRepository for PgReportRunRepository {
         let updated = active.update(&txn).await.map_err(StorageError::from)?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(updated.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, SecondsFormat, Utc};
+
+    use super::PgReportRunRepository;
+
+    #[test]
+    fn decision_at_is_millis() {
+        let input = DateTime::parse_from_rfc3339("2026-08-11T17:52:13.123456Z")
+            .expect("valid timestamp")
+            .with_timezone(&Utc);
+
+        let observed = PgReportRunRepository::canonical_decision_at(input)
+            .expect("timestamp is representable as epoch milliseconds");
+
+        assert_eq!(
+            observed.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "2026-08-11T17:52:13.123Z"
+        );
     }
 }

@@ -2829,7 +2829,7 @@
       "sorting_key": "model_run_id, feature_vector_id, market_id, encoded_column, decision_at, ingestion_time",
       "primary_key": "model_run_id, feature_vector_id, market_id, encoded_column, decision_at, ingestion_time",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_model_input_event (`event_time` DateTime64(3, 'UTC'), `format_version` UInt32, `decision_at` DateTime64(3, 'UTC'), `knowledge_cutoff` DateTime64(3, 'UTC'), `model_run_id` String, `model_version_id` String, `recommendation_report_id` Nullable(String), `market_id` String, `feature_vector_id` String, `model_family` LowCardinality(String), `raw_input_name` LowCardinality(String), `raw_state` LowCardinality(String), `raw_value` Nullable(String), `encoded_column` LowCardinality(String), `encoded_value_bits` Nullable(UInt64), `input_contract_hash` String, `transform_hash` String, `training_input_hash` String, `audit_fingerprint` String, `ingestion_time` DateTime64(3, 'UTC')) ENGINE = MergeTree ORDER BY (model_run_id, feature_vector_id, market_id, encoded_column, decision_at, ingestion_time) SETTINGS index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_model_input_event (`event_time` DateTime64(3, 'UTC'), `format_version` UInt32, `decision_at` DateTime64(3, 'UTC'), `knowledge_cutoff` DateTime64(3, 'UTC'), `model_run_id` String, `model_version_id` String, `market_id` String, `feature_vector_id` String, `model_family` LowCardinality(String), `raw_input_name` LowCardinality(String), `raw_state` LowCardinality(String), `raw_value` Nullable(String), `encoded_column` LowCardinality(String), `encoded_value_bits` Nullable(UInt64), `input_contract_hash` String, `transform_hash` String, `training_input_hash` String, `audit_fingerprint` String, `ingestion_time` DateTime64(3, 'UTC')) ENGINE = MergeTree ORDER BY (model_run_id, feature_vector_id, market_id, encoded_column, decision_at, ingestion_time) SETTINGS index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -2881,14 +2881,6 @@
         },
         {
           "position": 7,
-          "name": "recommendation_report_id",
-          "column_type": "Nullable(String)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 8,
           "name": "market_id",
           "column_type": "String",
           "default_kind": "",
@@ -2896,7 +2888,7 @@
           "compression_codec": ""
         },
         {
-          "position": 9,
+          "position": 8,
           "name": "feature_vector_id",
           "column_type": "String",
           "default_kind": "",
@@ -2904,7 +2896,7 @@
           "compression_codec": ""
         },
         {
-          "position": 10,
+          "position": 9,
           "name": "model_family",
           "column_type": "LowCardinality(String)",
           "default_kind": "",
@@ -2912,7 +2904,7 @@
           "compression_codec": ""
         },
         {
-          "position": 11,
+          "position": 10,
           "name": "raw_input_name",
           "column_type": "LowCardinality(String)",
           "default_kind": "",
@@ -2920,7 +2912,7 @@
           "compression_codec": ""
         },
         {
-          "position": 12,
+          "position": 11,
           "name": "raw_state",
           "column_type": "LowCardinality(String)",
           "default_kind": "",
@@ -2928,7 +2920,7 @@
           "compression_codec": ""
         },
         {
-          "position": 13,
+          "position": 12,
           "name": "raw_value",
           "column_type": "Nullable(String)",
           "default_kind": "",
@@ -2936,7 +2928,7 @@
           "compression_codec": ""
         },
         {
-          "position": 14,
+          "position": 13,
           "name": "encoded_column",
           "column_type": "LowCardinality(String)",
           "default_kind": "",
@@ -2944,7 +2936,7 @@
           "compression_codec": ""
         },
         {
-          "position": 15,
+          "position": 14,
           "name": "encoded_value_bits",
           "column_type": "Nullable(UInt64)",
           "default_kind": "",
@@ -2952,7 +2944,7 @@
           "compression_codec": ""
         },
         {
-          "position": 16,
+          "position": 15,
           "name": "input_contract_hash",
           "column_type": "String",
           "default_kind": "",
@@ -2960,7 +2952,7 @@
           "compression_codec": ""
         },
         {
-          "position": 17,
+          "position": 16,
           "name": "transform_hash",
           "column_type": "String",
           "default_kind": "",
@@ -2968,7 +2960,7 @@
           "compression_codec": ""
         },
         {
-          "position": 18,
+          "position": 17,
           "name": "training_input_hash",
           "column_type": "String",
           "default_kind": "",
@@ -2976,7 +2968,7 @@
           "compression_codec": ""
         },
         {
-          "position": 19,
+          "position": 18,
           "name": "audit_fingerprint",
           "column_type": "String",
           "default_kind": "",
@@ -2984,7 +2976,7 @@
           "compression_codec": ""
         },
         {
-          "position": 20,
+          "position": 19,
           "name": "ingestion_time",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -3117,7 +3109,7 @@
       "sorting_key": "recommendation_report_id, market_id",
       "primary_key": "recommendation_report_id, market_id",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_report_market_funnel (`event_time` DateTime64(3, 'UTC'), `recommendation_report_id` String, `market_selection_id` String, `profile_id` LowCardinality(String), `profile_version` UInt32, `profile_content_hash` String, `decision_policy_snapshot_id` String, `model_version_id` String, `model_run_id` Nullable(String), `market_id` String, `event_id` String, `primary_token_id` String, `terminal_stage` LowCardinality(String), `primary_reason` LowCardinality(String), `secondary_diagnostics_json` String, `feature_vector_id` Nullable(String), `signal_candidate_id` Nullable(String), `recommendation_id` Nullable(String), `row_hash` String, `ingestion_time` DateTime64(3, 'UTC')) ENGINE = ReplacingMergeTree(ingestion_time) PARTITION BY toYYYYMM(event_time) ORDER BY (recommendation_report_id, market_id) SETTINGS index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_report_market_funnel (`event_time` DateTime64(3, 'UTC'), `recommendation_report_id` String, `market_selection_id` String, `decision_policy_snapshot_id` String, `report_route_run_id` Nullable(String), `route` LowCardinality(Nullable(String)), `model_version_id` Nullable(String), `model_run_id` Nullable(String), `market_id` String, `event_id` String, `primary_token_id` String, `terminal_stage` LowCardinality(String), `primary_reason` LowCardinality(String), `secondary_diagnostics_json` String, `feature_vector_id` Nullable(String), `signal_candidate_id` Nullable(String), `recommendation_id` Nullable(String), `row_hash` String, `ingestion_time` DateTime64(3, 'UTC')) ENGINE = ReplacingMergeTree(ingestion_time) PARTITION BY toYYYYMM(event_time) ORDER BY (recommendation_report_id, market_id) SETTINGS index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -3145,30 +3137,6 @@
         },
         {
           "position": 4,
-          "name": "profile_id",
-          "column_type": "LowCardinality(String)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 5,
-          "name": "profile_version",
-          "column_type": "UInt32",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 6,
-          "name": "profile_content_hash",
-          "column_type": "String",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 7,
           "name": "decision_policy_snapshot_id",
           "column_type": "String",
           "default_kind": "",
@@ -3176,15 +3144,31 @@
           "compression_codec": ""
         },
         {
-          "position": 8,
-          "name": "model_version_id",
-          "column_type": "String",
+          "position": 5,
+          "name": "report_route_run_id",
+          "column_type": "Nullable(String)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
-          "position": 9,
+          "position": 6,
+          "name": "route",
+          "column_type": "LowCardinality(Nullable(String))",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 7,
+          "name": "model_version_id",
+          "column_type": "Nullable(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 8,
           "name": "model_run_id",
           "column_type": "Nullable(String)",
           "default_kind": "",
@@ -3192,7 +3176,7 @@
           "compression_codec": ""
         },
         {
-          "position": 10,
+          "position": 9,
           "name": "market_id",
           "column_type": "String",
           "default_kind": "",
@@ -3200,7 +3184,7 @@
           "compression_codec": ""
         },
         {
-          "position": 11,
+          "position": 10,
           "name": "event_id",
           "column_type": "String",
           "default_kind": "",
@@ -3208,7 +3192,7 @@
           "compression_codec": ""
         },
         {
-          "position": 12,
+          "position": 11,
           "name": "primary_token_id",
           "column_type": "String",
           "default_kind": "",
@@ -3216,7 +3200,7 @@
           "compression_codec": ""
         },
         {
-          "position": 13,
+          "position": 12,
           "name": "terminal_stage",
           "column_type": "LowCardinality(String)",
           "default_kind": "",
@@ -3224,7 +3208,7 @@
           "compression_codec": ""
         },
         {
-          "position": 14,
+          "position": 13,
           "name": "primary_reason",
           "column_type": "LowCardinality(String)",
           "default_kind": "",
@@ -3232,7 +3216,7 @@
           "compression_codec": ""
         },
         {
-          "position": 15,
+          "position": 14,
           "name": "secondary_diagnostics_json",
           "column_type": "String",
           "default_kind": "",
@@ -3240,7 +3224,7 @@
           "compression_codec": ""
         },
         {
-          "position": 16,
+          "position": 15,
           "name": "feature_vector_id",
           "column_type": "Nullable(String)",
           "default_kind": "",
@@ -3248,7 +3232,7 @@
           "compression_codec": ""
         },
         {
-          "position": 17,
+          "position": 16,
           "name": "signal_candidate_id",
           "column_type": "Nullable(String)",
           "default_kind": "",
@@ -3256,7 +3240,7 @@
           "compression_codec": ""
         },
         {
-          "position": 18,
+          "position": 17,
           "name": "recommendation_id",
           "column_type": "Nullable(String)",
           "default_kind": "",
@@ -3264,7 +3248,7 @@
           "compression_codec": ""
         },
         {
-          "position": 19,
+          "position": 18,
           "name": "row_hash",
           "column_type": "String",
           "default_kind": "",
@@ -3272,7 +3256,7 @@
           "compression_codec": ""
         },
         {
-          "position": 20,
+          "position": 19,
           "name": "ingestion_time",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -3289,7 +3273,7 @@
       "sorting_key": "recommendation_report_id, recommendation_id",
       "primary_key": "recommendation_report_id, recommendation_id",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_report_recommendation_fact (`event_time` DateTime64(3, 'UTC'), `recommendation_report_id` String, `recommendation_id` String, `rank` UInt32, `market_id` String, `token_id` String, `side` Enum8('yes' = 1, 'no' = 2), `score` Decimal(18, 8), `risk_adjusted_score` Decimal(18, 8), `trade_plan_available` Bool, `suggested_usd` Nullable(Decimal(38, 18)), `valid_until` DateTime64(3, 'UTC')) ENGINE = ReplacingMergeTree(event_time) ORDER BY (recommendation_report_id, recommendation_id) SETTINGS index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_report_recommendation_fact (`event_time` DateTime64(3, 'UTC'), `recommendation_report_id` String, `recommendation_id` String, `report_route_run_id` String, `economic_tier_id` String, `route` LowCardinality(String), `rank` UInt32, `market_id` String, `token_id` String, `side` Enum8('yes' = 1, 'no' = 2), `profit_probability_bps` Int64, `nominal_expected_net_usd` Decimal(38, 18), `robust_expected_net_usd` Decimal(38, 18), `max_loss_usd` Decimal(38, 18), `cvar_contribution_usd` Decimal(38, 18), `capital_occupancy_usd_hours` Decimal(38, 18), `marginal_portfolio_value_usd` Decimal(38, 18), `suggested_usd` Decimal(38, 18), `valid_until` DateTime64(3, 'UTC')) ENGINE = ReplacingMergeTree(event_time) ORDER BY (recommendation_report_id, recommendation_id) SETTINGS index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -3317,15 +3301,15 @@
         },
         {
           "position": 4,
-          "name": "rank",
-          "column_type": "UInt32",
+          "name": "report_route_run_id",
+          "column_type": "String",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
           "position": 5,
-          "name": "market_id",
+          "name": "economic_tier_id",
           "column_type": "String",
           "default_kind": "",
           "default_expression": "",
@@ -3333,6 +3317,30 @@
         },
         {
           "position": 6,
+          "name": "route",
+          "column_type": "LowCardinality(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 7,
+          "name": "rank",
+          "column_type": "UInt32",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 8,
+          "name": "market_id",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 9,
           "name": "token_id",
           "column_type": "String",
           "default_kind": "",
@@ -3340,7 +3348,7 @@
           "compression_codec": ""
         },
         {
-          "position": 7,
+          "position": 10,
           "name": "side",
           "column_type": "Enum8('yes' = 1, 'no' = 2)",
           "default_kind": "",
@@ -3348,39 +3356,71 @@
           "compression_codec": ""
         },
         {
-          "position": 8,
-          "name": "score",
-          "column_type": "Decimal(18, 8)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 9,
-          "name": "risk_adjusted_score",
-          "column_type": "Decimal(18, 8)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 10,
-          "name": "trade_plan_available",
-          "column_type": "Bool",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
           "position": 11,
-          "name": "suggested_usd",
-          "column_type": "Nullable(Decimal(38, 18))",
+          "name": "profit_probability_bps",
+          "column_type": "Int64",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
           "position": 12,
+          "name": "nominal_expected_net_usd",
+          "column_type": "Decimal(38, 18)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 13,
+          "name": "robust_expected_net_usd",
+          "column_type": "Decimal(38, 18)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 14,
+          "name": "max_loss_usd",
+          "column_type": "Decimal(38, 18)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 15,
+          "name": "cvar_contribution_usd",
+          "column_type": "Decimal(38, 18)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 16,
+          "name": "capital_occupancy_usd_hours",
+          "column_type": "Decimal(38, 18)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 17,
+          "name": "marginal_portfolio_value_usd",
+          "column_type": "Decimal(38, 18)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 18,
+          "name": "suggested_usd",
+          "column_type": "Decimal(38, 18)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 19,
           "name": "valid_until",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -3500,12 +3540,12 @@
     {
       "name": "quant_signal_candidate_event",
       "engine": "MergeTree",
-      "engine_full": "MergeTree ORDER BY (model_run_id, rank_before_portfolio, market_id) SETTINGS index_granularity = 8192",
+      "engine_full": "MergeTree ORDER BY (model_run_id, route_rank, market_id) SETTINGS index_granularity = 8192",
       "partition_key": "",
-      "sorting_key": "model_run_id, rank_before_portfolio, market_id",
-      "primary_key": "model_run_id, rank_before_portfolio, market_id",
+      "sorting_key": "model_run_id, route_rank, market_id",
+      "primary_key": "model_run_id, route_rank, market_id",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_signal_candidate_event (`event_time` DateTime64(3, 'UTC'), `signal_candidate_id` String, `model_run_id` String, `market_id` String, `token_id` String, `side` Enum8('yes' = 1, 'no' = 2), `score` Decimal(18, 8), `confidence` Decimal(18, 8), `entry_price` Decimal(18, 8), `target_price` Decimal(18, 8), `stop_price` Decimal(18, 8), `rank_before_portfolio` UInt32, `rejection_reason` LowCardinality(String)) ENGINE = MergeTree ORDER BY (model_run_id, rank_before_portfolio, market_id) SETTINGS index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_signal_candidate_event (`event_time` DateTime64(3, 'UTC'), `signal_candidate_id` String, `model_run_id` String, `market_id` String, `token_id` String, `side` Enum8('yes' = 1, 'no' = 2), `score` Decimal(18, 8), `confidence` Decimal(18, 8), `entry_price` Decimal(18, 8), `target_price` Decimal(18, 8), `stop_price` Decimal(18, 8), `route_rank` UInt32, `rejection_reason` LowCardinality(String)) ENGINE = MergeTree ORDER BY (model_run_id, route_rank, market_id) SETTINGS index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -3597,7 +3637,7 @@
         },
         {
           "position": 12,
-          "name": "rank_before_portfolio",
+          "name": "route_rank",
           "column_type": "UInt32",
           "default_kind": "",
           "default_expression": "",

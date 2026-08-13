@@ -143,13 +143,9 @@ pub(crate) async fn exit_monitor_observation(
         .quant_reports
         .find_recommendation(&intent.recommendation_id)
         .await?
-        .and_then(|recommendation| {
-            recommendation
-                .trade_plan
-                .frozen()
-                .map(|(_, entry, _, _, _)| entry.max_book_age_ms)
-        })
-        .unwrap_or(0);
+        .map_or(0, |recommendation| {
+            recommendation.trade_plan.entry.max_book_age_ms
+        });
     let snapshot = state
         .market_data
         .book_for_token(&intent.entry_order.token_id);

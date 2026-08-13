@@ -46,7 +46,7 @@ impl Default for CurrentEnvironmentVerdict {
     fn default() -> Self {
         Self {
             status: "blocked",
-            preflight_command: "cargo xtask postgres-schema verify --config-dir config",
+            preflight_command: "cargo xtask postgres-schema verify --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
             preflight_access: PreflightAccess::ReadOnly,
             blocker_code: "postgres_schema_identity_mismatch",
             backfill_status: BackfillExecutionStatus::NotExecuted,
@@ -54,9 +54,9 @@ impl Default for CurrentEnvironmentVerdict {
             real_outcome_counts: None,
             real_label_count: None,
             recovery_commands: [
-                "cargo xtask postgres-schema plan --config-dir config",
-                "cargo xtask postgres-schema apply --config-dir config",
-                "cargo xtask postgres-schema verify --config-dir config",
+                "cargo xtask postgres-schema plan --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
+                "cargo xtask postgres-schema apply --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
+                "cargo xtask postgres-schema verify --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
             ],
         }
     }

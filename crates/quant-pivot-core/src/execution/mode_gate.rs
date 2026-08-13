@@ -79,11 +79,7 @@ impl RuntimeModeGate for DefaultRuntimeModeGate {
         }
 
         // 3. The risk envelope must be usable (positive caps).
-        let Some((_, _, _, _, envelope)) = recommendation.trade_plan.frozen() else {
-            return Ok(IntentPolicyDecision::Denied {
-                reason: ModeDenialReason::RecommendationIneligible,
-            });
-        };
+        let envelope = &recommendation.trade_plan.risk_envelope;
         if envelope.max_position_usd <= Usd::ZERO || envelope.max_loss_usd <= Usd::ZERO {
             return Ok(IntentPolicyDecision::Denied {
                 reason: ModeDenialReason::RiskEnvelopeInvalid,
@@ -96,7 +92,10 @@ impl RuntimeModeGate for DefaultRuntimeModeGate {
                 let config = self.config.current();
                 Ok(IntentPolicyDecision::RequiresApproval {
                     approval_ttl: Duration::from_secs(
-                        config.execution_authorization.semi_auto.approval_ttl_secs,
+                        config
+                            .execution_automation_policy
+                            .semi_auto
+                            .approval_ttl_secs,
                     ),
                 })
             }
@@ -143,7 +142,7 @@ mod tests {
         runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
         types::{
             DecisionPolicySnapshotId, PolicyBundleGeneration, RecommendationId,
-            RecommendationReportId, RecommendationTradePlan, RiskEnvelope, Usd,
+            RecommendationReportId, RiskEnvelope, Usd,
         },
     };
     use rust_decimal_macros::dec;
@@ -181,10 +180,7 @@ mod tests {
     }
 
     fn risk_envelope(rec: &mut RecommendationInfo) -> &mut RiskEnvelope {
-        match &mut rec.trade_plan {
-            RecommendationTradePlan::Frozen { risk_envelope, .. } => risk_envelope,
-            RecommendationTradePlan::Unavailable { .. } => panic!("fixture must be frozen"),
-        }
+        &mut rec.trade_plan.risk_envelope
     }
 
     #[tokio::test]

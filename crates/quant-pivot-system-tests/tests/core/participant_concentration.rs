@@ -490,7 +490,6 @@ impl WhaleTapeConcHarness {
             window_provider: FeatureWindowProvider::new(Arc::clone(&self.fact_read)),
             feature_repo: Arc::clone(&feature_repo),
             event_writer: noop_feature_writer(),
-            market_registry: Arc::clone(&self.registry),
             block_cursor_repo: live_tape_cursor_repo(),
             linkage_repo: Arc::new(EmptyLinkageRepo),
             basis_alert_repo: Arc::new(EmptyBasisAlertRepo),

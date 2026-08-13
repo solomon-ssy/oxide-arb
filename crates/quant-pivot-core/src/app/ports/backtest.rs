@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
+    config::PortfolioSolverDeployConfig,
     domain::{
         api::{BacktestReportView, RunBacktestRequest},
         governance::DecisionPolicySnapshotInfo,
@@ -40,6 +41,7 @@ use crate::{
 /// Repository/store wiring for [`CoreBacktestPort`] tests and non-bundle use.
 pub struct CoreBacktestPortDeps {
     pub compute: Arc<ComputeExecutor>,
+    pub portfolio_solver: PortfolioSolverDeployConfig,
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
     pub artifact_store: Arc<dyn ArtifactStore>,
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
@@ -70,6 +72,7 @@ impl CoreBacktestPort {
     ) -> Self {
         Self::new(CoreBacktestPortDeps {
             compute: Arc::clone(&research.compute),
+            portfolio_solver: research.portfolio_solver,
             dataset_repo: Arc::clone(&research.training_dataset_repo),
             artifact_store: Arc::clone(&research.artifact_store),
             model_registry_repo: Arc::clone(&research.model_registry_repo),
@@ -102,6 +105,7 @@ impl CoreBacktestPort {
                 backtest_report_repo: Arc::clone(&self.deps.backtest_report_repo),
                 comparison_report_repo: Arc::clone(&self.deps.comparison_report_repo),
                 serving_preimages: Arc::clone(&self.deps.serving_preimages),
+                portfolio_solver: self.deps.portfolio_solver,
             },
             &policy,
         )
@@ -123,7 +127,7 @@ impl CoreBacktestPort {
         Ok(version)
     }
 
-    async fn cached_report(
+    async fn load_report_rows(
         &self,
         backtest_report_id: &BacktestReportId,
     ) -> QuantResult<Option<(BacktestReportInfo, Option<ModelComparisonReportInfo>)>> {
@@ -149,19 +153,30 @@ impl CoreBacktestPort {
             .comparison_report_repo
             .find_by_backtest_report(backtest_report_id)
             .await?;
-        if let Some(comparison) = &comparison {
-            if comparison.candidate_report_id != info.backtest_report_id
-                && comparison.baseline_report_id != info.backtest_report_id
-            {
-                return Err(ResearchError::InvalidModelArtifact {
-                    detail: format!(
-                        "comparison {} does not contain requested backtest report {}",
-                        comparison.comparison_report_id, info.backtest_report_id
-                    ),
-                }
-                .into());
+        if let Some(comparison) = &comparison
+            && comparison.candidate_report_id != info.backtest_report_id
+            && comparison.baseline_report_id != info.backtest_report_id
+        {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "comparison {} does not contain requested backtest report {}",
+                    comparison.comparison_report_id, info.backtest_report_id
+                ),
             }
-            Box::pin(self.verify_comparison_rows(comparison)).await?;
+            .into());
+        }
+        Ok(Some((info, comparison)))
+    }
+
+    async fn cached_report(
+        &self,
+        backtest_report_id: &BacktestReportId,
+    ) -> QuantResult<Option<(BacktestReportInfo, Option<ModelComparisonReportInfo>)>> {
+        let Some((info, comparison)) = self.load_report_rows(backtest_report_id).await? else {
+            return Ok(None);
+        };
+        if let Some(comparison) = &comparison {
+            Box::pin(self.verify_comparison_replay(comparison)).await?;
         } else {
             let service = self
                 .backtest_service_for(&info.decision_policy_snapshot_id)
@@ -174,15 +189,15 @@ impl CoreBacktestPort {
                     backtest_report_id: Some(info.backtest_report_id),
                 })
                 .await?;
+            self.verify_report_row(&info).await?;
         }
-        self.verify_report_row(&info).await?;
         Ok(Some((info, comparison)))
     }
 
-    async fn verify_comparison_rows(
+    async fn load_comparison_rows(
         &self,
         comparison: &ModelComparisonReportInfo,
-    ) -> QuantResult<()> {
+    ) -> QuantResult<(BacktestReportInfo, BacktestReportInfo)> {
         let baseline = self
             .deps
             .backtest_report_repo
@@ -201,6 +216,34 @@ impl CoreBacktestPort {
                 entity: "backtest_report",
                 id: comparison.candidate_report_id.to_string(),
             })?;
+        Ok((baseline, candidate))
+    }
+
+    async fn verify_comparison_ledger(
+        &self,
+        comparison: &ModelComparisonReportInfo,
+        baseline: &BacktestReportInfo,
+        candidate: &BacktestReportInfo,
+    ) -> QuantResult<()> {
+        self.verify_report_row(baseline).await?;
+        self.verify_report_row(candidate).await?;
+        verify_comparison_row(comparison, baseline, candidate)
+    }
+
+    async fn verify_comparison_rows(
+        &self,
+        comparison: &ModelComparisonReportInfo,
+    ) -> QuantResult<()> {
+        let (baseline, candidate) = self.load_comparison_rows(comparison).await?;
+        self.verify_comparison_ledger(comparison, &baseline, &candidate)
+            .await
+    }
+
+    async fn verify_comparison_replay(
+        &self,
+        comparison: &ModelComparisonReportInfo,
+    ) -> QuantResult<()> {
+        let (baseline, candidate) = self.load_comparison_rows(comparison).await?;
         let service = self
             .backtest_service_for(&candidate.decision_policy_snapshot_id)
             .await?;
@@ -215,9 +258,8 @@ impl CoreBacktestPort {
                 baseline.model_version_id,
             )
             .await?;
-        self.verify_report_row(&baseline).await?;
-        self.verify_report_row(&candidate).await?;
-        verify_comparison_row(comparison, &baseline, &candidate)
+        self.verify_comparison_ledger(comparison, &baseline, &candidate)
+            .await
     }
 
     async fn verify_report_row(&self, info: &BacktestReportInfo) -> QuantResult<()> {
@@ -249,6 +291,7 @@ impl CoreBacktestPort {
             category_breakdown: info.category_breakdown.iter().cloned().collect(),
             tail_loss: info.tail_loss,
             report_pnl_simulation: info.report_pnl_simulation.clone(),
+            portfolio_funnel: info.portfolio_funnel.clone(),
             report_hash: info.report_hash,
         }
         .verify_hash()?;
@@ -428,9 +471,16 @@ impl BacktestPort for CoreBacktestPort {
         &self,
         backtest_report_id: &BacktestReportId,
     ) -> QuantResult<Option<BacktestReportView>> {
-        let Some((info, comparison)) = self.cached_report(backtest_report_id).await? else {
+        let Some((info, comparison)) = self.load_report_rows(backtest_report_id).await? else {
             return Ok(None);
         };
+        if let Some(comparison) = &comparison {
+            let (baseline, candidate) = self.load_comparison_rows(comparison).await?;
+            self.verify_comparison_ledger(comparison, &baseline, &candidate)
+                .await?;
+        } else {
+            self.verify_report_row(&info).await?;
+        }
         Ok(Some(BacktestReportView::from_info(
             info,
             comparison.map(|row| row.comparison_report_id),

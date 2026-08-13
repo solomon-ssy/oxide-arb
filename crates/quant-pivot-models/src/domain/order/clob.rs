@@ -9,7 +9,7 @@ use crate::{
         execution::VenueOrderStatus,
     },
     types::{
-        EvmTransactionHash, MarketId, OrderId, Price, Shares, TokenId, VenueOrderAmount,
+        EvmTransactionHash, MarketId, OrderId, Price, Shares, TokenId, Usd, VenueOrderAmount,
         VenueTradeId,
     },
 };
@@ -21,6 +21,8 @@ pub struct OrderRequest {
     pub token_id: TokenId,
     pub side: Side,
     pub amount: VenueOrderAmount,
+    /// Exact fee frozen by final execution admission for this venue order.
+    pub expected_fee: Usd,
     pub price: Price,
     pub order_type: OrderType,
     /// Maker-only admission at the venue; valid only for GTC/GTD limit orders.

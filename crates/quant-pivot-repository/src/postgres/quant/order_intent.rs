@@ -33,6 +33,7 @@ use quant_pivot_models::{
         quant_order_intent::{Column, Entity as QuantOrderIntentEntity, Model, Relation},
         quant_recommendation::{Column as QuantRecommendationColumn, Entity},
         quant_recommendation_report::Entity as QuantRecommendationReportEntity,
+        quant_report_route_run::Entity as QuantReportRouteRunEntity,
     },
     enums::{
         execution::{ApprovalInvalidation, CapitalAllocationState},
@@ -105,10 +106,19 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             .ok_or_else(|| {
                 StorageError::not_found(QUANT_RECOMMENDATION, intent.recommendation_id)
             })?;
-        if rec_row.research_profile_artifact_id != intent.research_profile_artifact_id {
+        let route_run = QuantReportRouteRunEntity::find_by_id(rec_row.report_route_run_id)
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::not_found("quant_report_route_run", rec_row.report_route_run_id)
+            })?;
+        if route_run.research_profile_artifact_id.as_ref()
+            != Some(&intent.research_profile_artifact_id)
+        {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_ORDER_INTENT),
-                "order intent profile must equal its recommendation profile artifact",
+                "order intent profile must equal its recommendation Route-run profile artifact",
             ));
         }
         if !rec_row.status.allows_new_intent() {

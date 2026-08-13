@@ -34,7 +34,8 @@ use quant_pivot_models::{
         backtest::{
             BacktestPath, CategoryMetrics, CpcvEstimatorIdentity, CpcvFoldArtifact,
             CpcvFoldArtifacts, CpcvFoldCalibrationPolicy, CpcvMethodologyBinding,
-            CpcvPathSetSubject, ExpectedVsRealized, PnlSimulation, SharpeDistribution,
+            CpcvPathSetSubject, CpcvTrialPathBinding, ExpectedVsRealized, PnlSimulation,
+            SharpeDistribution,
         },
         model_lineage::ModelVersionDerivation,
         model_quality::{
@@ -62,6 +63,7 @@ use quant_pivot_system_tests::{
     support::{
         execution_pg_seed::seed_demo_with_store,
         model_serving_fixtures::{ModelDatasetLedgerFixture, ModelDatasetLedgerSeed},
+        research_fixtures::{cscv_selection_fixture, fully_resolved_backtest_funnel},
     },
 };
 use rust_decimal_macros::dec;
@@ -130,6 +132,82 @@ struct ValidationEvidence {
     backtest_report_hash: ContentHash,
 }
 
+fn bootstrap_fold_artifacts() -> CpcvFoldArtifacts {
+    CpcvFoldArtifacts::try_new(vec![
+        CpcvFoldArtifact {
+            identity: CpcvEstimatorIdentity::Validation {
+                combination_index: 0,
+                test_partitions_hash: hash('5'),
+                test_partition_count: 1,
+                test_groups_hash: hash('6'),
+                test_group_count: 1,
+            },
+            training_groups_hash: hash('5'),
+            training_group_count: 24,
+            calibration_fit_groups_hash: hash('d'),
+            calibration_fit_group_count: 2,
+            scenario_fit_groups_hash: hash('0'),
+            scenario_fit_group_count: 2,
+            model_artifact_hash: hash('6'),
+            serving_contract_hash: hash('7'),
+            model_payload_hash: hash('8'),
+            calibration_function_hash: hash('1'),
+            scenario_economic_function_hash: hash('2'),
+            calibration_artifact_hash: hash('e'),
+            scenario_model_hash: hash('f'),
+        },
+        CpcvFoldArtifact {
+            identity: CpcvEstimatorIdentity::TrialPathValidation {
+                trial_id: 0,
+                path_index: 0,
+                combination_index: 0,
+                test_partitions_hash: hash('5'),
+                test_partition_count: 1,
+                test_groups_hash: hash('6'),
+                test_group_count: 1,
+            },
+            training_groups_hash: hash('9'),
+            training_group_count: 24,
+            calibration_fit_groups_hash: hash('d'),
+            calibration_fit_group_count: 2,
+            scenario_fit_groups_hash: hash('0'),
+            scenario_fit_group_count: 2,
+            model_artifact_hash: hash('a'),
+            serving_contract_hash: hash('b'),
+            model_payload_hash: hash('c'),
+            calibration_function_hash: hash('1'),
+            scenario_economic_function_hash: hash('2'),
+            calibration_artifact_hash: hash('e'),
+            scenario_model_hash: hash('f'),
+        },
+        CpcvFoldArtifact {
+            identity: CpcvEstimatorIdentity::TrialPathValidation {
+                trial_id: 1,
+                path_index: 0,
+                combination_index: 0,
+                test_partitions_hash: hash('5'),
+                test_partition_count: 1,
+                test_groups_hash: hash('6'),
+                test_group_count: 1,
+            },
+            training_groups_hash: hash('8'),
+            training_group_count: 24,
+            calibration_fit_groups_hash: hash('d'),
+            calibration_fit_group_count: 2,
+            scenario_fit_groups_hash: hash('0'),
+            scenario_fit_group_count: 2,
+            model_artifact_hash: hash('9'),
+            serving_contract_hash: hash('a'),
+            model_payload_hash: hash('b'),
+            calibration_function_hash: hash('3'),
+            scenario_economic_function_hash: hash('4'),
+            calibration_artifact_hash: hash('e'),
+            scenario_model_hash: hash('f'),
+        },
+    ])
+    .expect("bootstrap CPCV fold artifacts")
+}
+
 async fn seed_path_set(
     db: &DatabaseConnection,
     model_id: ModelVersionId,
@@ -186,6 +264,26 @@ async fn seed_path_set(
         })
         .await
         .expect("start bootstrap CPCV run");
+    let decision_times = [4, 8, 12, 18]
+        .into_iter()
+        .map(|hours| window_start + Duration::hours(hours))
+        .collect::<Vec<_>>();
+    let group_returns = vec![dec!(0.02), dec!(-0.005), dec!(0.03), dec!(0.01)];
+    let challenger_returns = group_returns
+        .iter()
+        .map(|value| *value - dec!(0.002))
+        .collect::<Vec<_>>();
+    let (trial_grid, cscv_selection_evidence) = cscv_selection_fixture(
+        "model-route-bootstrap",
+        &decision_times,
+        &[group_returns.clone(), challenger_returns],
+        4,
+    );
+    let dsr_conservative_independent_trial_count = i64::from(
+        cscv_selection_evidence
+            .trial_dependence
+            .conservative_independent_trial_count(),
+    );
     let path_set = NewBacktestPathSet::try_seal(NewBacktestPathSetInput {
         path_set_id,
         model_version_id: model_id,
@@ -214,32 +312,10 @@ async fn seed_path_set(
                 parent_serving_contract_hash: parent.serving_contract_hash,
                 parent_return_model_hash: hash('4'),
             },
+            CpcvTrialPathBinding::try_new(0, vec![0]).expect("trial path"),
+            trial_grid,
         ),
-        fold_artifacts: CpcvFoldArtifacts::try_new(vec![
-            CpcvFoldArtifact {
-                identity: CpcvEstimatorIdentity::Validation {
-                    combination_index: 0,
-                    test_partitions_hash: hash('5'),
-                    test_partition_count: 1,
-                    test_groups_hash: hash('6'),
-                    test_group_count: 1,
-                },
-                training_groups_hash: hash('5'),
-                training_group_count: 24,
-                model_artifact_hash: hash('6'),
-                serving_contract_hash: hash('7'),
-                model_payload_hash: hash('8'),
-            },
-            CpcvFoldArtifact {
-                identity: CpcvEstimatorIdentity::Trial { trial_id: 0 },
-                training_groups_hash: hash('9'),
-                training_group_count: 24,
-                model_artifact_hash: hash('a'),
-                serving_contract_hash: hash('b'),
-                model_payload_hash: hash('c'),
-            },
-        ])
-        .expect("bootstrap CPCV fold artifacts"),
+        fold_artifacts: bootstrap_fold_artifacts(),
         path_count: 1,
         combination_count: 1,
         median_rank_ic: dec!(0.25),
@@ -256,7 +332,9 @@ async fn seed_path_set(
         },
         paths: vec![BacktestPath {
             path_index: 0,
-            group_returns: vec![dec!(0.02), dec!(-0.005), dec!(0.03)],
+            decision_times,
+            scenario_residuals: group_returns.iter().copied().map(Some).collect(),
+            group_returns,
             sharpe: dec!(1.1),
             rank_ic: dec!(0.25),
             max_drawdown: dec!(0.05),
@@ -266,10 +344,11 @@ async fn seed_path_set(
         .into(),
         deflated_sharpe: dec!(0.95),
         dsr_benchmark_sharpe: dec!(0.4),
-        pbo: dec!(0.1),
+        pbo: cscv_selection_evidence.pbo,
+        cscv_selection_evidence,
         min_track_record_length_secs: Some(86_400),
-        trial_count: 1,
-        trial_grid_count: 1,
+        dsr_conservative_independent_trial_count,
+        trial_grid_count: 2,
         coord_search_effective_n: 1,
     })
     .expect("seal bootstrap CPCV path set");
@@ -385,6 +464,7 @@ async fn seed_backtest(
             gross_return: dec!(0.1),
             pnl_curve: Vec::new(),
         },
+        portfolio_funnel: fully_resolved_backtest_funnel(1, 32),
         report_hash: hash('d'),
         parquet_uri: None,
     };

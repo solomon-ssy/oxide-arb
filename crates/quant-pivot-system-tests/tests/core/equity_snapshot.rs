@@ -13,7 +13,7 @@ use quant_pivot_repository::{
     postgres::{PgEquitySnapshotRepository, PgPositionRepository},
     traits::EquitySnapshotRepository,
 };
-use quant_pivot_research::portfolio::{AccountSnapshot, DrawdownState};
+use quant_pivot_research::portfolio::{AccountDrawdown, AccountSnapshot};
 use quant_pivot_system_tests::{
     postgres::setup_pg, support::execution_pg_seed::ensure_fixture_execution_account,
 };
@@ -65,11 +65,11 @@ pub async fn account_no_history_drawdown() {
     let account = account_snapshot(Usd::new(dec!(10000)), as_of);
 
     let resolution = service
-        .resolve_drawdown_for_sizing(&account, DrawdownState::neutral())
+        .resolve_drawdown_for_sizing(&account, AccountDrawdown::neutral())
         .await
         .expect("resolve drawdown");
 
-    assert_eq!(resolution.drawdown_state.current_drawdown, dec!(0));
+    assert_eq!(resolution.drawdown.current_ratio, dec!(0));
     assert_eq!(resolution.high_water_mark_usd, Usd::new(dec!(10000)));
 }
 
@@ -88,19 +88,19 @@ pub async fn resolve_drawdown_concurrent_history() {
     let as_of = Utc::now();
     let account = account_snapshot(Usd::new(dec!(8000)), as_of);
     let first = service
-        .resolve_drawdown_for_sizing(&account, DrawdownState::neutral())
+        .resolve_drawdown_for_sizing(&account, AccountDrawdown::neutral())
         .await
         .expect("first resolve");
-    assert_eq!(first.drawdown_state.current_drawdown, dec!(0));
+    assert_eq!(first.drawdown.current_ratio, dec!(0));
 
     // Another report commits equity history while this build is still running.
     seed_peak(&db, Usd::new(dec!(10000)), as_of - ChronoDuration::hours(1)).await;
 
     let second = service
-        .resolve_drawdown_for_sizing(&account, first.drawdown_state)
+        .resolve_drawdown_for_sizing(&account, first.drawdown)
         .await
         .expect("second resolve");
-    assert_eq!(second.drawdown_state.current_drawdown, dec!(0.2));
+    assert_eq!(second.drawdown.current_ratio, dec!(0.2));
 }
 
 pub async fn equity_snapshot_real_pnl() {

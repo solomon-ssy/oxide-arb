@@ -3,11 +3,12 @@
 //! [`AsyncWriter`] is the single buffering primitive for **telemetry-class**
 //! writes across the platform — high-volume, append-only streams that may be
 //! dropped under extreme backpressure rather than block a hot path (`ClickHouse`
-//! book/quant facts, the `Postgres` operation-log audit). Durable business state
+//! telemetry facts, the `Postgres` operation-log audit). Durable business state
 //! (reports, order intents, execution orders) must **not** use this writer; it
 //! is written synchronously through repositories so it can never be lost.
-//! Training-serving evidence and its run-completion marker are also durability
-//! barriers and must use an acknowledged sink directly.
+//! Training-serving inputs (including microstructure windows), evidence, and
+//! run-completion markers are also durability barriers and must use an
+//! acknowledged sink directly.
 //!
 //! The sink is backend-agnostic: `ClickHouse` facts flush through
 //! `ChWriteManager::write_batch`, `Postgres` audit rows through a repository.
@@ -180,7 +181,7 @@ pub enum DurableWriteError {
 }
 
 struct DurableQueued<T> {
-    item: T,
+    items: Vec<T>,
     enqueued: Instant,
     acknowledgement: Sender<bool>,
 }
@@ -227,7 +228,7 @@ impl<T: Send + 'static> DurableWriter<T> {
     pub fn write_timeout(&self, item: T, timeout: Duration) -> Result<(), DurableWriteError> {
         let (acknowledgement, ack_rx) = flume::bounded(1);
         let queued = DurableQueued {
-            item,
+            items: vec![item],
             enqueued: Instant::now(),
             acknowledgement,
         };
@@ -259,9 +260,26 @@ impl<T: Send + 'static> DurableWriter<T> {
         item: T,
         timeout_duration: Duration,
     ) -> Result<(), DurableWriteError> {
+        self.write_batch_async_timeout(vec![item], timeout_duration)
+            .await
+    }
+
+    /// Enqueue one canonical batch and asynchronously wait for persistence.
+    ///
+    /// The batch receives one acknowledgement after every row in it is
+    /// durably flushed. This lets a partition publish a single bounded batch
+    /// barrier instead of awaiting one insert acknowledgement per token.
+    pub async fn write_batch_async_timeout(
+        &self,
+        items: Vec<T>,
+        timeout_duration: Duration,
+    ) -> Result<(), DurableWriteError> {
+        if items.is_empty() {
+            return Ok(());
+        }
         let (acknowledgement, ack_rx) = flume::bounded(1);
         let queued = DurableQueued {
-            item,
+            items,
             enqueued: Instant::now(),
             acknowledgement,
         };
@@ -311,6 +329,7 @@ impl<T: Send + 'static> DurableWriterWorker<T> {
             observability,
         } = self;
         let mut buffer = Vec::with_capacity(max_batch_size);
+        let mut buffered_items = 0_usize;
         loop {
             let first = tokio::select! {
                 biased;
@@ -322,6 +341,7 @@ impl<T: Send + 'static> DurableWriterWorker<T> {
                         &observability,
                         max_batch_size,
                         &mut buffer,
+                        &mut buffered_items,
                     ).await;
                     return;
                 }
@@ -333,12 +353,13 @@ impl<T: Send + 'static> DurableWriterWorker<T> {
                     item
                 }
             };
+            buffered_items = buffered_items.saturating_add(first.items.len());
             buffer.push(first);
 
             let deadline = tokio::time::sleep(max_batch_delay);
             tokio::pin!(deadline);
             let mut disconnected = false;
-            while buffer.len() < max_batch_size {
+            while buffered_items < max_batch_size {
                 tokio::select! {
                     biased;
                     () = shutdown.cancelled() => {
@@ -349,10 +370,12 @@ impl<T: Send + 'static> DurableWriterWorker<T> {
                             &observability,
                             max_batch_size,
                             &mut buffer,
+                            &mut buffered_items,
                         ).await;
                         return;
                     }
                     item = rx.recv_async() => if let Ok(item) = item {
+                        buffered_items = buffered_items.saturating_add(item.items.len());
                         buffer.push(item);
                     } else {
                         disconnected = true;
@@ -362,6 +385,7 @@ impl<T: Send + 'static> DurableWriterWorker<T> {
                 }
             }
             Self::flush_batch(&flush, name, &observability, &mut buffer).await;
+            buffered_items = 0;
             if let Some(gauge) = &observability.queue_depth {
                 gauge.set(i64::try_from(rx.len()).unwrap_or(i64::MAX));
             }
@@ -378,14 +402,18 @@ impl<T: Send + 'static> DurableWriterWorker<T> {
         observability: &AsyncWriterObservability,
         max_batch_size: usize,
         buffer: &mut Vec<DurableQueued<T>>,
+        buffered_items: &mut usize,
     ) {
         while let Ok(item) = rx.try_recv() {
+            *buffered_items = buffered_items.saturating_add(item.items.len());
             buffer.push(item);
-            if buffer.len() >= max_batch_size {
+            if *buffered_items >= max_batch_size {
                 Self::flush_batch(flush, name, observability, buffer).await;
+                *buffered_items = 0;
             }
         }
         Self::flush_batch(flush, name, observability, buffer).await;
+        *buffered_items = 0;
         if let Some(gauge) = &observability.queue_depth {
             gauge.set(i64::try_from(rx.len()).unwrap_or(i64::MAX));
         }
@@ -402,10 +430,12 @@ impl<T: Send + 'static> DurableWriterWorker<T> {
         }
         let queued = mem::take(buffer);
         let oldest_enqueued = queued.iter().map(|item| item.enqueued).min();
-        let (batch, acknowledgements): (Vec<T>, Vec<Sender<bool>>) = queued
-            .into_iter()
-            .map(|item| (item.item, item.acknowledgement))
-            .unzip();
+        let mut batch = Vec::new();
+        let mut acknowledgements = Vec::with_capacity(queued.len());
+        for item in queued {
+            batch.extend(item.items);
+            acknowledgements.push(item.acknowledgement);
+        }
         let persisted = match flush(batch).await {
             Ok(()) => {
                 if let (Some(report), Some(oldest)) = (&observability.flush_lag_ms, oldest_enqueued)
@@ -705,6 +735,38 @@ mod tests {
         let mut values = persisted.lock().clone();
         values.sort_unstable();
         assert_eq!(values, (0..8).collect::<Vec<_>>());
+        shutdown.cancel();
+        worker_task.await.expect("durable worker shutdown");
+    }
+
+    #[tokio::test]
+    async fn durable_batch_persists_rows() {
+        let persisted = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let observed = Arc::clone(&persisted);
+        let (writer, worker) = DurableWriter::new(
+            DurableWriterConfig::new("durable-batch-test")
+                .capacity(2)
+                .max_batch_size(8)
+                .max_batch_delay(Duration::from_millis(10)),
+            move |rows| {
+                let observed = Arc::clone(&observed);
+                Box::pin(async move {
+                    observed.lock().extend(rows);
+                    Ok(())
+                })
+            },
+            AsyncWriterObservability::default(),
+        );
+        let shutdown = CancellationToken::new();
+        let worker_task = tokio::spawn(worker.run(shutdown.clone()));
+
+        assert_eq!(
+            writer
+                .write_batch_async_timeout(vec![1, 2, 3], Duration::from_millis(250))
+                .await,
+            Ok(())
+        );
+        assert_eq!(*persisted.lock(), vec![1, 2, 3]);
         shutdown.cancel();
         worker_task.await.expect("durable worker shutdown");
     }

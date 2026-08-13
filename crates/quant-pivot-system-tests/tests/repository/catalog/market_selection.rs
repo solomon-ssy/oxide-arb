@@ -20,7 +20,10 @@ use quant_pivot_repository::{
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
-    support::catalog_fixtures::{make_event, make_market},
+    support::{
+        SelectorFixture,
+        catalog_fixtures::{make_event, make_market},
+    },
 };
 use rust_decimal::Decimal;
 
@@ -57,12 +60,14 @@ pub async fn create_snapshot_find_members() {
         .expect("seed market");
 
     let selection_id = MarketSelectionId::from_v7();
+    let selector_hash =
+        ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("valid content hash");
     let snapshot = NewMarketSelection {
         market_selection_id: selection_id,
         decision_at: Utc::now(),
         decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-        selector_hash: ContentHash::parse(&format!("blake3:{}", "a".repeat(64)))
-            .expect("valid content hash"),
+        selector_hash,
+        selector_evidence: SelectorFixture::evidence(selector_hash),
         market_count: 1,
         exclusion_summary: SelectionExclusionSummary {
             stale_book_count: 1,
@@ -98,6 +103,8 @@ pub async fn create_snapshot_find_members() {
         .expect("snapshot present");
     assert_eq!(found.market_selection_id, selection_id);
     assert_eq!(found.selector_hash, info.selector_hash);
+    assert_eq!(found.selector_evidence, info.selector_evidence);
+    assert_eq!(found.selector_evidence.selector_hash, found.selector_hash);
 
     let members = selection_repo
         .list_members(&selection_id)
@@ -117,4 +124,25 @@ pub async fn create_snapshot_find_members() {
         .await
         .expect("find missing");
     assert!(missing.is_none());
+
+    let invalid_hash = ContentHash::from_bytes([0xff; 32]);
+    let invalid = NewMarketSelection {
+        market_selection_id: MarketSelectionId::from_v7(),
+        decision_at: Utc::now(),
+        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+        selector_hash: invalid_hash,
+        selector_evidence: SelectorFixture::evidence(selector_hash),
+        market_count: 0,
+        exclusion_summary: SelectionExclusionSummary::default(),
+    };
+    let error = selection_repo
+        .create_snapshot(invalid, Vec::new())
+        .await
+        .expect_err("selector evidence with a different root must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("ck_quant_market_selection_evidence"),
+        "unexpected selector evidence constraint error: {error}"
+    );
 }

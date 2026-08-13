@@ -14,7 +14,9 @@
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    runtime_config::RankLossKind, types::model_training::TrainingObjectiveSpec,
+    hashing::CanonicalDigest,
+    runtime_config::RankLossKind,
+    types::{backtest::CscvTrialDescriptor, model_training::TrainingObjectiveSpec},
 };
 use rust_decimal::Decimal;
 #[cfg(feature = "ml-classical")]
@@ -37,6 +39,70 @@ pub struct Trial {
     /// The full classical-ML hyperparameter override for a classical trial.
     #[cfg(feature = "ml-classical")]
     pub classical_params: Option<ClassicalParams>,
+}
+
+impl Trial {
+    /// Build the canonical persisted identity of this complete trial
+    /// configuration. Display labels never participate in the hash.
+    pub fn descriptor(&self) -> QuantResult<CscvTrialDescriptor> {
+        let config_hash = if let Some(objective) = &self.weighted_factor_objective {
+            CanonicalDigest::content_hash_typed(
+                "quant-pivot/cscv-trial-config",
+                1,
+                &("weighted_factor", objective),
+            )
+            .map_err(|error| methodology(format!("hash weighted-factor trial: {error}")))?
+        } else {
+            #[cfg(feature = "ml-classical")]
+            {
+                let params = self.classical_params.ok_or_else(|| {
+                    methodology(format!(
+                        "trial {} has neither a weighted nor classical configuration",
+                        self.trial_id
+                    ))
+                })?;
+                let n_trees = u64::try_from(params.forest.n_trees).map_err(|error| {
+                    methodology(format!("classical n_trees does not fit u64: {error}"))
+                })?;
+                let min_samples_leaf =
+                    u64::try_from(params.forest.min_samples_leaf).map_err(|error| {
+                        methodology(format!(
+                            "classical min_samples_leaf does not fit u64: {error}"
+                        ))
+                    })?;
+                let max_iter = u64::try_from(params.linear.max_iter).map_err(|error| {
+                    methodology(format!("classical max_iter does not fit u64: {error}"))
+                })?;
+                CanonicalDigest::content_hash_typed(
+                    "quant-pivot/cscv-trial-config",
+                    1,
+                    &(
+                        "classical",
+                        params.forest.seed,
+                        n_trees,
+                        params.forest.max_depth,
+                        min_samples_leaf,
+                        params.linear.alpha.to_bits(),
+                        params.linear.l1_ratio.to_bits(),
+                        max_iter,
+                    ),
+                )
+                .map_err(|error| methodology(format!("hash classical trial: {error}")))?
+            }
+            #[cfg(not(feature = "ml-classical"))]
+            {
+                return Err(methodology(format!(
+                    "trial {} has no weighted-factor configuration and classical ML is disabled",
+                    self.trial_id
+                )));
+            }
+        };
+        Ok(CscvTrialDescriptor {
+            trial_id: self.trial_id,
+            label: self.label.clone(),
+            config_hash,
+        })
+    }
 }
 
 /// Buy-side `WeightedFactor` trial grid: a Cartesian sweep of lambda

@@ -2,19 +2,9 @@
 
 use std::sync::Arc;
 
-use quant_pivot_error::QuantResult;
-use quant_pivot_models::{config::QuantWorkersConfig, domain::runtime::CoreEventPublisher};
-use quant_pivot_repository::{
-    clickhouse::ChNativeReadRepository,
-    traits::{
-        EquitySnapshotRepository, FeatureParityRepository, PolicyRepository, PositionRepository,
-        RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
-    },
-};
-use quant_pivot_research::portfolio::HistoricalCorrelationEstimator;
-
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
 use crate::{
+    ingest::data_pipeline::MicrostructureCommitBarrier,
     report::{
         DefaultRecommendationComposer, DefaultReportBuilder, DefaultReportReadinessGate,
         ReportBuilderDeps, ReportCoordinator, ReportCoordinatorConfig, ReportFactDeliveryDeps,
@@ -24,6 +14,15 @@ use crate::{
     service::{
         equity::EquitySnapshotService,
         feature_integrity::{FeatureParityRunCoordinator, RepositoryFeatureParityGate},
+    },
+};
+use quant_pivot_error::QuantResult;
+use quant_pivot_models::{config::QuantWorkersConfig, domain::runtime::CoreEventPublisher};
+use quant_pivot_repository::{
+    clickhouse::ChNativeReadRepository,
+    traits::{
+        EquitySnapshotRepository, FeatureParityRepository, PolicyRepository, PositionRepository,
+        RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
     },
 };
 
@@ -86,13 +85,14 @@ impl ReportBundle {
                 deps.account.execution_account.execution_account_id,
             )),
             composer,
-            quant_fact_read_repo: Arc::clone(&deps.infra.quant_fact_read),
-            correlation_estimator: Arc::new(HistoricalCorrelationEstimator::new()),
+            portfolio_solver: deps.research.portfolio_solver,
             runtime_controls: deps.governance.runtime_controls.clone(),
             readiness_gate: Arc::new(DefaultReportReadinessGate::new(
                 Arc::clone(&deps.data.catalog),
                 Arc::clone(&deps.data.ws_manager),
             )),
+            microstructure_commit: Arc::clone(&deps.data.data_pipeline)
+                as Arc<dyn MicrostructureCommitBarrier>,
         }));
         let publisher = Arc::new(ReportPublisher::new(ReportPublisherDeps {
             events: deps.events,

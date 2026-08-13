@@ -47,7 +47,7 @@ use quant_pivot_models::{
     types::{
         CapitalAllocationId, ContentHash, EntryConditionInstanceId, EntryOrderPolicy,
         EntryOrderSpec, ExecutionAccountId, ExitPolicySpec, ModelVersionId,
-        OperationDetailDocument, OperationLogId, OrderAmount, OrderIntentId, Price,
+        OperationDetailDocument, OperationLogId, OrderAmount, OrderIntentId, Price, Probability,
         RecommendationId, RecommendationReportId, ResearchProfileRef, Usd,
     },
 };
@@ -235,7 +235,7 @@ impl CoreOrderIntentService {
         };
         let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
         let entry = project_entry_order_spec(&rec, now)?;
-        let exit = project_exit_policy_spec(&rec, entry.limit_price)?;
+        let exit = project_exit_policy_spec(&rec, entry.limit_price);
         if requires_automatic_settlement_recovery(&exit) {
             let route = if rec.market_context.neg_risk {
                 SettlementRoute::NegRiskV2
@@ -274,7 +274,7 @@ impl CoreOrderIntentService {
             exit,
             condition_instance_id: condition.condition_instance_id,
             execution_account_id: account_snapshot.execution_account_id,
-        })?;
+        });
 
         let intent = self
             .intents
@@ -327,9 +327,14 @@ impl CoreOrderIntentService {
             }
             .into());
         }
-        if rec.profile_ref != report.profile_ref {
+        if rec.portfolio_plan_id != report.portfolio_plan_id
+            || rec.economic_tier_json.report_route_run_id != rec.report_route_run_id
+            || rec.economic_tier_json.route != rec.route
+            || !report.represented_routes_json.contains(rec.route)
+        {
             return Err(ExecutionError::IntentDenied {
-                reason: "recommendation research profile does not match its report".to_owned(),
+                reason: "recommendation global-plan and Route lineage do not match its report"
+                    .to_owned(),
             }
             .into());
         }
@@ -651,7 +656,7 @@ struct ComposeCreateRowsInput<'a> {
 
 fn compose_create_rows(
     input: ComposeCreateRowsInput<'_>,
-) -> Result<(NewOrderIntent, NewCapitalAllocation), ExecutionError> {
+) -> (NewOrderIntent, NewCapitalAllocation) {
     let ComposeCreateRowsInput {
         recommendation: rec,
         report,
@@ -664,12 +669,7 @@ fn compose_create_rows(
         execution_account_id,
     } = input;
     let intent_id = OrderIntentId::from_v7();
-    let (_, _, _, _, risk_envelope) =
-        rec.trade_plan
-            .frozen()
-            .ok_or_else(|| ExecutionError::IntentDenied {
-                reason: "recommendation trade plan is unavailable".to_owned(),
-            })?;
+    let risk_envelope = &rec.trade_plan.risk_envelope;
     let planned_usd = entry.notional();
     let intent = NewOrderIntent {
         order_intent_id: intent_id,
@@ -677,7 +677,7 @@ fn compose_create_rows(
         execution_account_id,
         runtime_mode: mode,
         decision_policy_snapshot_id: report.decision_policy_snapshot_id,
-        model_version_id: report.model_version_id,
+        model_version_id: rec.evidence_refs.model_version_id,
         research_profile_artifact_id: profile_ref.artifact_id(),
         intent_kind: OrderIntentKind::Buy,
         status: resolved.status,
@@ -707,7 +707,7 @@ fn compose_create_rows(
         released_usd: Usd::ZERO,
         reason: "intent created".to_owned(),
     };
-    Ok((intent, allocation))
+    (intent, allocation)
 }
 
 /// Map a mode-gate decision to the frozen intent fields, or the closing error.
@@ -791,11 +791,8 @@ fn project_entry_order_spec(
 ) -> Result<EntryOrderSpec, ExecutionError> {
     const GTD_MIN_EFFECTIVE_LIFETIME_SECS: i64 = 120;
     const GTD_SECURITY_BUFFER_SECS: i64 = 60;
-    let Some((_, entry_plan, sizing, _, _)) = rec.trade_plan.frozen() else {
-        return Err(ExecutionError::IntentDenied {
-            reason: "recommendation trade plan is unavailable".to_owned(),
-        });
-    };
+    let entry_plan = &rec.trade_plan.entry;
+    let sizing = &rec.trade_plan.sizing;
     let (limit_price, order_type, amount, post_only) = match entry_plan.order_policy {
         EntryOrderPolicy::Aggressive {
             worst_price,
@@ -872,13 +869,9 @@ fn project_entry_order_spec(
 fn project_exit_policy_spec(
     rec: &RecommendationInfo,
     entry_reference_price: Price,
-) -> Result<ExitPolicySpec, ExecutionError> {
-    let Some((_, _, _, exit, _)) = rec.trade_plan.frozen() else {
-        return Err(ExecutionError::IntentDenied {
-            reason: "recommendation trade plan is unavailable".to_owned(),
-        });
-    };
-    Ok(ExitPolicySpec {
+) -> ExitPolicySpec {
+    let exit = &rec.trade_plan.exit;
+    ExitPolicySpec {
         take_profit_price: exit.take_profit_price,
         take_profit_pct: exit.take_profit_pct,
         stop_loss_price: exit.stop_loss_price,
@@ -893,8 +886,10 @@ fn project_exit_policy_spec(
         redeem_policy: exit.redeem_policy,
         manual_review_at: exit.manual_review_at,
         entry_reference_price,
-        entry_composite_score: rec.composite_score,
-    })
+        entry_composite_score: Probability::new(
+            rec.economics_json.profit_probability_bps.to_fraction(),
+        ),
+    }
 }
 
 fn execution_time_conversion(
@@ -1020,8 +1015,8 @@ mod tests {
         types::{
             Bps, ContentHash, DecisionPolicySnapshotId, EntryOrderPolicy, EntryOrderSpec,
             EntryPlan, EvmAddress, EvmBlockHash, ExitPlan, OrderAmount, OrderIntentId, Price,
-            RecommendationId, RecommendationReportId, RecommendationTradePlan, RiskEnvelope,
-            RoleCode, Shares, SizingPlan, TokenId, Usd, UserId,
+            RecommendationId, RecommendationReportId, RiskEnvelope, RoleCode, Shares, SizingPlan,
+            TokenId, Usd, UserId,
         },
     };
     use rust_decimal_macros::dec;
@@ -1066,35 +1061,23 @@ mod tests {
     }
 
     fn entry(rec: &RecommendationInfo) -> &EntryPlan {
-        match &rec.trade_plan {
-            RecommendationTradePlan::Frozen { entry, .. } => entry,
-            RecommendationTradePlan::Unavailable { .. } => panic!("fixture must be frozen"),
-        }
+        &rec.trade_plan.entry
     }
 
     fn entry_mut(rec: &mut RecommendationInfo) -> &mut EntryPlan {
-        match &mut rec.trade_plan {
-            RecommendationTradePlan::Frozen { entry, .. } => entry,
-            RecommendationTradePlan::Unavailable { .. } => panic!("fixture must be frozen"),
-        }
+        &mut rec.trade_plan.entry
     }
 
     fn sizing(rec: &RecommendationInfo) -> &SizingPlan {
-        rec.trade_plan.sizing().expect("fixture frozen sizing")
+        &rec.trade_plan.sizing
     }
 
     fn exit(rec: &RecommendationInfo) -> &ExitPlan {
-        match &rec.trade_plan {
-            RecommendationTradePlan::Frozen { exit, .. } => exit,
-            RecommendationTradePlan::Unavailable { .. } => panic!("fixture must be frozen"),
-        }
+        &rec.trade_plan.exit
     }
 
     fn risk(rec: &RecommendationInfo) -> &RiskEnvelope {
-        match &rec.trade_plan {
-            RecommendationTradePlan::Frozen { risk_envelope, .. } => risk_envelope,
-            RecommendationTradePlan::Unavailable { .. } => panic!("fixture must be frozen"),
-        }
+        &rec.trade_plan.risk_envelope
     }
 
     fn approve_command() -> ApproveIntentCommand {
@@ -1230,8 +1213,7 @@ mod tests {
     #[test]
     fn exit_projection_drops_nodes() {
         let rec = rec();
-        let projected =
-            project_exit_policy_spec(&rec, Price::new(dec!(0.60))).expect("exit projection");
+        let projected = project_exit_policy_spec(&rec, Price::new(dec!(0.60)));
         assert_eq!(projected.take_profit_price, exit(&rec).take_profit_price);
         assert!(
             projected
@@ -1528,7 +1510,8 @@ mod tests {
             enums::{common::MarketCategory, quant::DownsideSource},
             types::{
                 CalibrationArtifactId, FactorDefinitionId, ModelRunId, ModelSpecId, ModelVersionId,
-                calibration::{MonotoneMapping, ReliabilityReport},
+                PayoutRatio, Probability,
+                calibration::{MonotoneMapping, ReliabilityReport, SplitPayoutRateEvidence},
             },
         };
         use quant_pivot_repository::traits::ModelRegistryRepository;
@@ -1644,6 +1627,14 @@ mod tests {
                             log_loss: Decimal::ZERO,
                             ece: Decimal::ZERO,
                             n_samples: 0,
+                        },
+                        split_payout_rate: SplitPayoutRateEvidence {
+                            total_sample_count: 1,
+                            split_sample_count: 0,
+                            empirical_probability: Probability::ZERO,
+                            wilson_ci: (Probability::ZERO, Probability::ONE),
+                            split_payout_ratio: PayoutRatio::try_new(Decimal::new(5, 1))
+                                .expect("canonical split payout"),
                         },
                     })
                 } else {

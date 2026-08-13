@@ -4,28 +4,36 @@
 //! artifact store is Local for development or S3-compatible WORM storage for
 //! production evidence and model artifacts.
 
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use super::secret::SecretText;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactStoreKind {
     Local,
     S3,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactStoreDeployConfig {
+    /// Storage backend used for immutable research evidence and model artifacts.
     pub kind: ArtifactStoreKind,
+    /// S3 bucket that owns immutable evidence objects; empty for the Local backend.
     pub bucket: String,
     /// Object key prefix, or the Local filesystem root.
     pub prefix: String,
+    /// AWS-compatible signing region used by the S3 client.
     pub region: String,
+    /// Optional S3-compatible service endpoint; omitted for the public AWS endpoint.
     pub endpoint: Option<String>,
+    /// Whether S3 requests use path-style bucket addressing instead of virtual-hosted style.
     pub path_style: bool,
+    /// Requires bucket-level object lock before production evidence writes are admitted.
     pub require_object_lock: bool,
+    /// Requires bucket versioning before production evidence writes are admitted.
     pub require_versioning: bool,
 }
 
@@ -45,8 +53,8 @@ impl Default for ArtifactStoreDeployConfig {
 }
 
 /// Deploy-time research plane settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResearchDeployConfig {
     pub artifact_store: ArtifactStoreDeployConfig,
     pub evidence_attestation: EvidenceAttestationConfig,
@@ -54,8 +62,8 @@ pub struct ResearchDeployConfig {
 }
 
 /// Restart-to-apply budgets for immutable model-serving runtime loads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ModelServingRegistryConfig {
     /// Maximum successfully validated contracts retained in process.
     pub max_cached_contracts: u64,
@@ -84,11 +92,13 @@ impl Default for ModelServingRegistryConfig {
 
 /// Dedicated keyed-BLAKE3 attestation identity for operational evidence.
 /// This key is separate from venue signing and JWT credentials.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EvidenceAttestationConfig {
     /// Active lowercase-hex encoded 32-byte keyed-BLAKE3 key.
+    #[serde(serialize_with = "super::secret::serialize_empty")]
     pub signing_key: SecretText,
     /// Historical verification-only keys, newest first.
+    #[serde(serialize_with = "super::secret::serialize_vec_empty")]
     pub previous_signing_keys: Vec<SecretText>,
 }

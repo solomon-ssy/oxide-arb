@@ -34,7 +34,7 @@ use quant_pivot_models::{
     types::{
         ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId,
         ModelInputContract, ModelInputRequiredness, SelectionExclusionSummary,
-        SelectionMemberEvidence, TokenId, Usd,
+        SelectionMemberEvidence, SelectorHashEvidence, TokenId, Usd,
     },
 };
 pub use selector::ConfiguredMarketSelector;
@@ -148,6 +148,19 @@ impl ModelFeatureRequirements {
         }
         set.into_iter().collect()
     }
+
+    /// Merge exact per-category requirements from another represented Route.
+    pub fn merge(&mut self, other: Self) {
+        let mut generic = self.generic.iter().cloned().collect::<BTreeSet<_>>();
+        generic.extend(other.generic);
+        self.generic = generic.into_iter().collect();
+        for (category, required) in other.by_category {
+            let entry = self.by_category.entry(category).or_default();
+            let mut merged = entry.iter().cloned().collect::<BTreeSet<_>>();
+            merged.extend(required);
+            *entry = merged.into_iter().collect();
+        }
+    }
 }
 
 /// The included / excluded partition produced by the filter chain + cap, before
@@ -177,6 +190,8 @@ pub struct MarketSelectionSnapshot {
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Canonical selector hash (same inputs → same hash).
     pub selector_hash: ContentHash,
+    /// Component-level commitments for diagnosing replay drift without exposing facts.
+    pub selector_evidence: SelectorHashEvidence,
     /// Included markets.
     pub included: Vec<SelectedMarket>,
     /// Excluded markets with reasons.

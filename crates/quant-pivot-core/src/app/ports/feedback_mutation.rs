@@ -125,7 +125,8 @@ pub struct FeedbackCycleFreezePlan {
 
 impl FeedbackCycleFreezePlan {
     /// Derive the cadence bucket, purged cohorts, source window, and canonical
-    /// research-program commitment from one exact serving preimage.
+    /// research-program commitment from one exact decision-time policy and
+    /// champion model specification.
     pub fn derive(
         profile: &ResearchProfileArtifact,
         model_spec_id: ModelSpecId,
@@ -498,24 +499,21 @@ impl CoreFeedbackMutationPort {
         if preimage.profile() != profile
             || champion.profile_ref != profile.profile_ref
             || champion.category_scope != route.category()
-            || serving.decision_policy_snapshot_id()
-                != preimage.policy_snapshot().decision_policy_snapshot_id
             || champion_identity.route != route
             || champion_identity.champion_model_version_id != champion.model_version_id
             || champion_identity.champion_serving_contract_hash != champion.serving_contract_hash
         {
             return Err(Self::invalid(
-                "current route, champion, profile, or committed policy preimage differs",
+                "current Route, champion, profile, or serving contract differs",
             ));
         }
         let model_spec = preimage.model_spec();
-        let policy = preimage.policy_snapshot();
         let plan = FeedbackCycleFreezePlan::derive_at_cutoff(
             profile,
             model_spec.model_spec_id,
             model_spec.definition_hash,
-            policy.decision_policy_snapshot_id,
-            policy.snapshot_hash,
+            champion_identity.decision_policy_snapshot_id,
+            champion_identity.decision_policy_snapshot_hash,
             label_cutoff,
         )?;
         let feedback_policy_hash =
@@ -536,8 +534,8 @@ impl CoreFeedbackMutationPort {
             champion_model_spec_definition_hash: model_spec.definition_hash,
             champion_model_family: champion.model_family,
             route,
-            decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
-            decision_policy_snapshot_hash: policy.snapshot_hash,
+            decision_policy_snapshot_id: champion_identity.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: champion_identity.decision_policy_snapshot_hash,
             policy_bundle_generation: champion_identity.policy_bundle_generation,
             route_generation: champion_identity.route_generation,
             evaluation_mode: attempt.evaluation_mode,

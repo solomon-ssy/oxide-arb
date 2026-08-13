@@ -51,8 +51,7 @@ use quant_pivot_models::{
     types::{
         EvmTransactionHash, ExecutionOrderId, ExecutionTradeRefId, ExecutionTransactionRefId,
         ExitReinferenceObservation, FeatureParityStateId, OrderIntentId, PendingScaleOut, Price,
-        RecommendationId, RecommendationReportId, ReconciliationId, ResearchProfileArtifactId,
-        ResearchProfileId,
+        RecommendationId, RecommendationReportId, ReconciliationId,
     },
 };
 use sea_orm::{
@@ -106,8 +105,6 @@ impl PgExecutionSubmissionRepository {
 struct SubmissionReportScope {
     report_id: RecommendationReportId,
     recommendation_id: RecommendationId,
-    profile_id: ResearchProfileId,
-    research_profile_artifact_id: ResearchProfileArtifactId,
     report_kind: ReportKind,
 }
 
@@ -273,8 +270,6 @@ impl PgExecutionSubmissionRepository {
         Ok(SubmissionReportScope {
             report_id: report.recommendation_report_id,
             recommendation_id: recommendation.recommendation_id,
-            profile_id: report.research_profile_artifact_id.profile_ref().id,
-            research_profile_artifact_id: report.research_profile_artifact_id,
             report_kind: report.report_kind,
         })
     }
@@ -292,8 +287,7 @@ impl PgExecutionSubmissionRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, scope.report_id))?;
-        if report.research_profile_artifact_id != scope.research_profile_artifact_id
-            || report.report_kind != scope.report_kind
+        if report.report_kind != scope.report_kind
             || report.status != RecommendationReportStatus::Published
         {
             return Err(StorageError::state_conflict(
@@ -340,9 +334,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let intent_id = &claim.order_intent_id;
         let scope = Self::probe_submission_scope(&txn, intent_id).await?;
-        ReportScope::new(&scope.profile_id, scope.report_kind)
-            .acquire(&txn)
-            .await?;
+        ReportScope::new(scope.report_kind).acquire(&txn).await?;
         let row = Self::lock_submission_graph(&txn, intent_id, &scope).await?;
         if !matches!(
             row.status,
@@ -448,9 +440,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         // The read-only probe is never authoritative; every parent row is
         // re-locked and revalidated after the advisory lock is held.
         let scope = Self::probe_submission_scope(&txn, &intent_id).await?;
-        ReportScope::new(&scope.profile_id, scope.report_kind)
-            .acquire(&txn)
-            .await?;
+        ReportScope::new(scope.report_kind).acquire(&txn).await?;
         let intent = Self::lock_submission_graph(&txn, &intent_id, &scope).await?;
         PgFeatureParityRepository::verify_clear_latch_generation(&txn, feature_parity_state_id)
             .await?;

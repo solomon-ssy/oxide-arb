@@ -4,16 +4,20 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantError;
 use quant_pivot_models::{
     clickhouse::{QuantReportRecommendationFactRow, ReportMarketFunnelRow},
+    domain::quant::ExecutableEconomicTier,
     domain::quant::NewReportTransaction,
     enums::quant::{
         EmptyReportReason, OutcomeSide, QuantRuntimeMode, ReportKind, ReportTriggerKind,
     },
+    runtime_config::BuyModelRoute,
     runtime_config::ReportDeliveryPolicy,
     types::{
-        CorrelationId, Probability, RecommendationReportId, ReportScheduleId, ReportTriggerKey,
-        SemanticTextError, Usd,
+        Bps, CorrelationId, EconomicTierId, MarketId, ModelRunId, ModelVersionId, Price,
+        RecommendationReportId, ReportRouteRunId, ReportRunId, ReportScheduleId, ReportTriggerKey,
+        SemanticTextError, TradePolicyCohort, TradePolicyCohortProvenance, Usd,
     },
 };
+use quant_pivot_research::{model::SignalCandidate, portfolio::TierAdmissionRejectionCode};
 
 /// Source that triggered one report build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +53,8 @@ impl ReportTrigger {
 /// Builder input after lifecycle idempotency resolution.
 #[derive(Debug, Clone)]
 pub struct BuildReportRequest {
+    /// Durable report-attempt identity used by every per-Route diagnostic row.
+    pub report_run_id: ReportRunId,
     pub trigger: ReportTrigger,
     pub trigger_time: DateTime<Utc>,
     pub top_n_override: Option<u32>,
@@ -64,13 +70,39 @@ pub struct EmptyReportContext {
     pub warnings: Vec<String>,
 }
 
+/// One globally selected executable tier enriched with its exact Route/model lineage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedReportRecommendation {
+    pub rank: u32,
+    pub route: BuyModelRoute,
+    pub report_route_run_id: ReportRouteRunId,
+    pub model_version_id: ModelVersionId,
+    pub model_run_id: ModelRunId,
+    pub candidate: SignalCandidate,
+    pub tier: ExecutableEconomicTier,
+    pub trade_policy: TradePolicyCohortProvenance,
+    pub trade_policy_cohort: TradePolicyCohort,
+    pub entry_limit_price: Price,
+}
+
+/// Report-funnel projection of one tier rejected before or by the global MILP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportTierRejection {
+    pub economic_tier_id: EconomicTierId,
+    pub market_id: MarketId,
+    pub code: TierAdmissionRejectionCode,
+}
+
 /// One recommendation summarized for an operator notification (`TopN` preview).
 #[derive(Debug, Clone)]
 pub struct NotificationRecommendation {
     pub market_id: String,
     pub outcome_side: OutcomeSide,
-    pub score: Probability,
-    pub suggested_usd: Option<Usd>,
+    pub route: BuyModelRoute,
+    pub profit_probability_bps: Bps,
+    pub robust_expected_net_usd: Usd,
+    pub marginal_portfolio_value_usd: Usd,
+    pub suggested_usd: Usd,
 }
 
 /// Operator-facing notification payload for a committed report.

@@ -30,8 +30,10 @@ pub struct Model {
     pub deflated_sharpe: Decimal,
     pub dsr_benchmark_sharpe: Decimal,
     pub pbo: Decimal,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub cscv_selection_evidence: Json,
     pub min_track_record_length_secs: Option<i64>,
-    pub trial_count: i64,
+    pub dsr_conservative_independent_trial_count: i64,
     pub trial_grid_count: i64,
     pub coord_search_effective_n: i64,
     #[sea_orm(column_type = "Text")]

@@ -10,18 +10,19 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
         governance::{PreflightCheck, PreflightReport},
         ports::DataQualityPort,
+        quant::RepresentedRouteSet,
     },
     enums::{
         execution::KillSwitchState,
         quant::{ExecutionWalletKind, QuantRuntimeMode},
     },
-    runtime_config::{BuyModelRoute, DecisionPolicySnapshot},
+    runtime_config::DecisionPolicySnapshot,
     types::ModelVersionId,
 };
 use quant_pivot_repository::traits::{
@@ -85,7 +86,8 @@ impl ModePreflight for DefaultModePreflight {
             self.check_credentials(),
             self.check_jwt(target),
             self.check_order_client_ready(),
-            self.check_model_available(&config).await?,
+            self.check_route_champions(&config, "model_available")
+                .await?,
             self.check_data_quality(&config),
             self.check_no_unresolvable().await?,
             self.check_no_impaired_capital().await?,
@@ -93,7 +95,10 @@ impl ModePreflight for DefaultModePreflight {
         ];
 
         if target == QuantRuntimeMode::AutoExecution {
-            checks.push(self.check_active_route_model(&config).await?);
+            checks.push(
+                self.check_route_champions(&config, "active_route_models")
+                    .await?,
+            );
             checks.push(self.check_shadow_period(&config, now).await?);
             checks.push(Self::check_auto_policy(&config));
             checks.push(self.check_kill_switch_closed());
@@ -234,93 +239,35 @@ impl DefaultModePreflight {
         PreflightCheck::hard("runtime_config_valid", passed, detail)
     }
 
-    async fn check_model_available(
+    async fn check_route_champions(
         &self,
         config: &DecisionPolicySnapshot,
+        check_name: &'static str,
     ) -> QuantResult<PreflightCheck> {
-        let route = BuyModelRoute::try_from(&config.recommendation.selection)
-            .map_err(|error| error.to_string());
-        let active_binding = route.as_ref().map_err(Clone::clone).and_then(|route| {
-            config
-                .model_routing
-                .model
-                .champion(*route)
-                .map_err(|error| error.to_string())
-        });
-        let active = match active_binding {
-            Ok(binding) => self.active_status(binding.model_version_id).await?,
-            Err(error) => Err(error),
-        };
-        if active.is_ok() {
-            return Ok(PreflightCheck::hard(
-                "model_available",
-                true,
-                "active route model is loadable",
-            ));
-        }
-        let shadow = match route
-            .ok()
-            .and_then(|route| config.model_routing.model.buy_routes.get(&route))
-            .and_then(|binding| binding.shadow.as_ref())
-        {
-            Some(binding) => self.shadow_status(binding.model_version_id).await?,
-            None => Err("selected route has no shadow model configured".to_owned()),
-        };
-        match shadow {
-            Ok(()) => Ok(PreflightCheck::hard(
-                "model_available",
-                true,
-                "shadow route model is loadable",
-            )),
-            Err(shadow_detail) => Ok(PreflightCheck::hard(
-                "model_available",
-                false,
-                format!(
-                    "active: {}; shadow: {shadow_detail}",
-                    active.err().unwrap_or_default()
-                ),
-            )),
-        }
-    }
-
-    async fn check_active_route_model(
-        &self,
-        config: &DecisionPolicySnapshot,
-    ) -> QuantResult<PreflightCheck> {
-        let reference = match BuyModelRoute::try_from(&config.recommendation.selection)
-            .map_err(|error| error.to_string())
-            .and_then(|route| {
-                config
-                    .model_routing
-                    .model
-                    .champion(route)
-                    .map_err(|error| error.to_string())
-            }) {
-            Ok(reference) => reference,
-            Err(error) => {
-                return Ok(PreflightCheck::hard(
-                    "active_route_model",
-                    false,
-                    format!("auto_execution requires the exact active report route: {error}"),
-                ));
+        let routes = configured_routes(config).map_err(QuantError::config)?;
+        let mut failures = Vec::new();
+        for route in &routes.routes {
+            let binding = match config.model_routing.model.champion(*route) {
+                Ok(binding) => binding,
+                Err(error) => {
+                    failures.push(format!("{}: {error}", route.as_str()));
+                    continue;
+                }
+            };
+            if let Err(detail) = self.active_status(binding.model_version_id).await? {
+                failures.push(format!("{}: {detail}", route.as_str()));
             }
+        }
+        let passed = failures.is_empty();
+        let detail = if passed {
+            format!(
+                "all configured Route champions are loadable: {}",
+                route_names(&routes)
+            )
+        } else {
+            failures.join("; ")
         };
-        let id = reference.model_version_id;
-        let Some(version) = self.deps.model_registry.find_model_version(&id).await? else {
-            return Ok(PreflightCheck::hard(
-                "active_route_model",
-                false,
-                format!("active model {id} not found in registry"),
-            ));
-        };
-        Ok(match active_load_ok(&version) {
-            Ok(()) => PreflightCheck::hard(
-                "active_route_model",
-                true,
-                "active route model contract is valid",
-            ),
-            Err(detail) => PreflightCheck::hard("active_route_model", false, detail),
-        })
+        Ok(PreflightCheck::hard(check_name, passed, detail))
     }
 
     async fn check_shadow_period(
@@ -328,71 +275,87 @@ impl DefaultModePreflight {
         config: &DecisionPolicySnapshot,
         now: DateTime<Utc>,
     ) -> QuantResult<PreflightCheck> {
-        let route = match BuyModelRoute::try_from(&config.recommendation.selection) {
-            Ok(route) => route,
-            Err(error) => {
-                return Ok(PreflightCheck::hard(
-                    "shadow_period_complete",
-                    false,
-                    format!("selected report route is invalid: {error}"),
-                ));
-            }
-        };
-        let binding = match config.model_routing.model.route_binding(route) {
-            Ok(binding) => binding,
-            Err(error) => {
-                return Ok(PreflightCheck::hard(
-                    "shadow_period_complete",
-                    false,
-                    format!("selected route has no binding: {error}"),
-                ));
-            }
-        };
-        let Some(shadow) = &binding.shadow else {
-            return Ok(PreflightCheck::hard(
-                "shadow_period_complete",
-                true,
-                "selected route has no shadow; champion cleared its promotion-time shadow gate",
-            ));
-        };
-        let id = shadow.model_version_id;
+        let routes = configured_routes(config).map_err(QuantError::config)?;
         let required = config
             .profile_artifacts
             .research_method
             .model_promotion
             .required_shadow_window_secs;
-        let since = shadow.bound_at;
-        let summary = self.deps.shadow_comparison.summary(&id, since).await?;
-        let covered = match (summary.window_start, summary.window_end) {
-            (Some(start), Some(end)) => {
-                (end - start).num_seconds() >= i64::try_from(required).unwrap_or(i64::MAX)
-                    && now - shadow.bound_at
-                        >= Duration::seconds(i64::try_from(required).unwrap_or(i64::MAX))
+        let required_secs = i64::try_from(required)
+            .map_err(|error| QuantError::config(format!("shadow window exceeds i64: {error}")))?;
+        let mut checked = 0_u32;
+        let mut failures = Vec::new();
+        for route in &routes.routes {
+            let binding = match config.model_routing.model.route_binding(*route) {
+                Ok(binding) => binding,
+                Err(error) => {
+                    failures.push(format!("{}: {error}", route.as_str()));
+                    continue;
+                }
+            };
+            let Some(shadow) = &binding.shadow else {
+                continue;
+            };
+            checked = checked.saturating_add(1);
+            if let Err(detail) = self.shadow_status(shadow.model_version_id).await? {
+                failures.push(format!("{}: {detail}", route.as_str()));
+                continue;
             }
-            _ => false,
+            let summary = self
+                .deps
+                .shadow_comparison
+                .summary(&shadow.model_version_id, shadow.bound_at)
+                .await?;
+            let covered = match (summary.window_start, summary.window_end) {
+                (Some(start), Some(end)) => {
+                    (end - start).num_seconds() >= required_secs
+                        && now - shadow.bound_at >= Duration::seconds(required_secs)
+                }
+                _ => false,
+            };
+            if summary.sample_count == 0 || summary.any_hard_divergence || !covered {
+                failures.push(format!(
+                    "{}: samples={}, hard_divergence={}, window_covered={covered}",
+                    route.as_str(),
+                    summary.sample_count,
+                    summary.any_hard_divergence
+                ));
+            }
+        }
+        let passed = failures.is_empty();
+        let detail = if passed {
+            format!("{checked} configured Route shadows satisfy the {required}s comparison window")
+        } else {
+            failures.join("; ")
         };
-        let stable = summary.sample_count > 0 && !summary.any_hard_divergence && covered;
-        let detail = format!(
-            "samples={}, hard_divergence={}, window_covered={covered} (required {required}s)",
-            summary.sample_count, summary.any_hard_divergence
-        );
         Ok(PreflightCheck::hard(
             "shadow_period_complete",
-            stable,
+            passed,
             detail,
         ))
     }
 
     fn check_auto_policy(config: &DecisionPolicySnapshot) -> PreflightCheck {
-        let auto = &config.execution_authorization.auto_execution;
-        let capital = &config.execution_risk.capital;
-        let ok = (Decimal::ZERO..=Decimal::ONE).contains(&auto.min_confidence.value)
-            && auto.max_total_usd_per_report.value >= Decimal::ZERO
-            && capital.max_reserved_usd.value >= Decimal::ZERO;
+        let auto = &config.execution_automation_policy.auto_execution;
+        let ok = auto.max_orders_per_report > 0
+            && auto.max_total_usd_per_report.value > Decimal::ZERO
+            && config
+                .execution_risk
+                .portfolio
+                .budget
+                .max_open_capital_usd
+                .value
+                > Decimal::ZERO
+            && config
+                .execution_risk
+                .portfolio
+                .exposure_limits
+                .max_open_recommendations
+                > 0;
         PreflightCheck::hard(
             "auto_policy_valid",
             ok,
-            "execution.auto_execution + capital thresholds satisfy typed ranges",
+            "execution automation caps and governed portfolio capital thresholds are positive",
         )
     }
 
@@ -441,4 +404,20 @@ impl DefaultModePreflight {
         };
         Ok(shadow_load_ok(&version))
     }
+}
+
+fn configured_routes(config: &DecisionPolicySnapshot) -> Result<RepresentedRouteSet, String> {
+    RepresentedRouteSet::from_enabled_categories(
+        &config.recommendation.selection.enabled_categories,
+    )
+    .map_err(|error| format!("configured Route-set digest failed: {error}"))
+}
+
+fn route_names(routes: &RepresentedRouteSet) -> String {
+    routes
+        .routes
+        .iter()
+        .map(|route| route.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
 }

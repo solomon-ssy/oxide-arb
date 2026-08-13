@@ -11,7 +11,10 @@ use std::{
 
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_migration::inspect_preproduction_postgres;
-use quant_pivot_models::config::{ClickHouseConfig, DeployConfig, PostgresConfig};
+use quant_pivot_models::{
+    config::{ClickHouseConfig, DeployConfig, DeployConfigLoadRequest, PostgresConfig},
+    types::DeploymentEnvironment,
+};
 use quant_pivot_repository::{postgres::PgPolicyRepository, traits::PolicyRepository};
 use quant_pivot_storage::{
     cache::{CacheBackend, RedisBackend, connect_pool, count_preproduction_namespace},
@@ -39,6 +42,7 @@ use tokio::{
     process::Command,
     time::{Instant, sleep},
 };
+use toml::Value;
 use uuid::Uuid;
 
 const POSTGRES_PASSWORD: &str = "w9-postgres-test-secret";
@@ -134,28 +138,29 @@ async fn clean_recovers_restores_backups() {
         .expect("resolve Redis port");
     configure_disposable_redis_user(&redis).await;
 
-    write_disposable_config(workspace.path(), postgres_port, clickhouse_port, redis_port);
+    let config_file =
+        write_disposable_config(workspace.path(), postgres_port, clickhouse_port, redis_port);
     let bootstrap_password_file = workspace.path().join("bootstrap-admin-password");
     fs::write(&bootstrap_password_file, BOOTSTRAP_ADMIN_PASSWORD)
         .expect("write bootstrap admin password");
     fs::set_permissions(&bootstrap_password_file, Permissions::from_mode(0o600))
         .expect("restrict bootstrap admin password file");
     let journal_file = workspace.path().join(JOURNAL_FILE_NAME);
-    let deploy = load_deploy(workspace.path());
+    let deploy = load_deploy(&config_file);
 
-    assert_standard_fresh_deployment(workspace.path(), &bootstrap_password_file, &deploy).await;
+    assert_standard_fresh_deployment(&config_file, &bootstrap_password_file, &deploy).await;
     let first_operation =
-        full_reset_cycle(workspace.path(), &journal_file, &bootstrap_password_file).await;
+        full_reset_cycle(&config_file, &journal_file, &bootstrap_password_file).await;
     assert_eq!(read_journal(&journal_file).operation_id, first_operation);
 
-    assert_reset_rejects_owners(&deploy, workspace.path(), &journal_file).await;
+    assert_reset_rejects_owners(&deploy, &config_file, &journal_file).await;
 
     seed_partial_reset_markers(&deploy).await;
-    let confirmation_operation = plan_reset(workspace.path(), &journal_file).await;
+    let confirmation_operation = plan_reset(&config_file, &journal_file).await;
     let confirmation_journal = read_journal(&journal_file);
     let wrong_confirmation = run_xtask(
         reset_apply_args(
-            workspace.path(),
+            &config_file,
             &journal_file,
             &confirmation_journal.nonce,
             "DELETE_ONLY_L2",
@@ -172,7 +177,7 @@ async fn clean_recovers_restores_backups() {
     assert!(clickhouse_marker_exists(&deploy).await);
     assert_redis_markers_preserved(&deploy).await;
     let confirmed_reset =
-        apply_planned_reset(workspace.path(), &journal_file, &bootstrap_password_file).await;
+        apply_planned_reset(&config_file, &journal_file, &bootstrap_password_file).await;
     assert_success(&confirmed_reset, "confirmed clean bootstrap apply");
     assert_eq!(
         read_journal(&journal_file).operation_id,
@@ -181,48 +186,48 @@ async fn clean_recovers_restores_backups() {
     assert_clean_recovery_state(&deploy).await;
 
     seed_partial_reset_markers(&deploy).await;
-    let postgres_failed_operation = plan_reset(workspace.path(), &journal_file).await;
+    let postgres_failed_operation = plan_reset(&config_file, &journal_file).await;
     set_postgres_create_allowed(&postgres, false).await;
     let postgres_failed_output =
-        apply_planned_reset(workspace.path(), &journal_file, &bootstrap_password_file).await;
+        apply_planned_reset(&config_file, &journal_file, &bootstrap_password_file).await;
     set_postgres_create_allowed(&postgres, true).await;
     assert_failed_apply(&postgres_failed_output, "PostgreSQL");
     assert_failed_journal(&journal_file, postgres_failed_operation, "applying");
     assert_postgres_failure_state(&deploy).await;
 
     let postgres_recovered_operation =
-        full_reset_cycle(workspace.path(), &journal_file, &bootstrap_password_file).await;
+        full_reset_cycle(&config_file, &journal_file, &bootstrap_password_file).await;
     assert_ne!(postgres_recovered_operation, first_operation);
     assert_ne!(postgres_recovered_operation, postgres_failed_operation);
     assert_clean_recovery_state(&deploy).await;
 
     seed_partial_reset_markers(&deploy).await;
     set_clickhouse_drop_limit(&deploy, 1).await;
-    let clickhouse_failed_operation = plan_reset(workspace.path(), &journal_file).await;
+    let clickhouse_failed_operation = plan_reset(&config_file, &journal_file).await;
     let clickhouse_failed_output =
-        apply_planned_reset(workspace.path(), &journal_file, &bootstrap_password_file).await;
+        apply_planned_reset(&config_file, &journal_file, &bootstrap_password_file).await;
     set_clickhouse_drop_limit(&deploy, 0).await;
     assert_failed_apply(&clickhouse_failed_output, "ClickHouse");
     assert_failed_journal(&journal_file, clickhouse_failed_operation, "postgres_reset");
     assert_clickhouse_failure_state(&deploy).await;
 
     let clickhouse_recovered_operation =
-        full_reset_cycle(workspace.path(), &journal_file, &bootstrap_password_file).await;
+        full_reset_cycle(&config_file, &journal_file, &bootstrap_password_file).await;
     assert_ne!(clickhouse_recovered_operation, clickhouse_failed_operation);
     assert_clean_recovery_state(&deploy).await;
 
     seed_partial_reset_markers(&deploy).await;
-    let redis_failed_operation = plan_reset(workspace.path(), &journal_file).await;
+    let redis_failed_operation = plan_reset(&config_file, &journal_file).await;
     set_redis_unlink_allowed(&redis, false).await;
     let redis_failed_output =
-        apply_planned_reset(workspace.path(), &journal_file, &bootstrap_password_file).await;
+        apply_planned_reset(&config_file, &journal_file, &bootstrap_password_file).await;
     set_redis_unlink_allowed(&redis, true).await;
     assert_failed_apply(&redis_failed_output, "Redis");
     assert_failed_journal(&journal_file, redis_failed_operation, "clickhouse_reset");
     assert_redis_failure_state(&deploy).await;
 
     let redis_recovered_operation =
-        full_reset_cycle(workspace.path(), &journal_file, &bootstrap_password_file).await;
+        full_reset_cycle(&config_file, &journal_file, &bootstrap_password_file).await;
     assert_ne!(redis_recovered_operation, redis_failed_operation);
     assert_clean_recovery_state(&deploy).await;
 
@@ -231,7 +236,7 @@ async fn clean_recovers_restores_backups() {
 }
 
 async fn assert_standard_fresh_deployment(
-    config_dir: &Path,
+    config_file: &Path,
     bootstrap_password_file: &Path,
     deploy: &DeployConfig,
 ) {
@@ -239,8 +244,10 @@ async fn assert_standard_fresh_deployment(
         vec![
             "postgres-schema".to_owned(),
             "apply".to_owned(),
-            "--config-dir".to_owned(),
-            path_text(config_dir),
+            "--config-file".to_owned(),
+            path_text(config_file),
+            "--expected-environment".to_owned(),
+            "w9-disposable".to_owned(),
         ],
         Some(bootstrap_password_file),
     )
@@ -292,15 +299,15 @@ async fn assert_standard_fresh_deployment(
 }
 
 async fn full_reset_cycle(
-    config_dir: &Path,
+    config_file: &Path,
     journal_file: &Path,
     bootstrap_password_file: &Path,
 ) -> Uuid {
-    let operation_id = plan_reset(config_dir, journal_file).await;
+    let operation_id = plan_reset(config_file, journal_file).await;
     let journal = read_journal(journal_file);
     let apply = run_xtask(
         reset_apply_args(
-            config_dir,
+            config_file,
             journal_file,
             &journal.nonce,
             CLEAN_BOOTSTRAP_CONFIRMATION,
@@ -327,8 +334,10 @@ async fn full_reset_cycle(
         vec![
             "preproduction-reset".to_owned(),
             "verify".to_owned(),
-            "--config-dir".to_owned(),
-            path_text(config_dir),
+            "--config-file".to_owned(),
+            path_text(config_file),
+            "--expected-environment".to_owned(),
+            "w9-disposable".to_owned(),
             "--journal-file".to_owned(),
             path_text(journal_file),
             "--operation-id".to_owned(),
@@ -343,7 +352,7 @@ async fn full_reset_cycle(
 }
 
 async fn apply_planned_reset(
-    config_dir: &Path,
+    config_file: &Path,
     journal_file: &Path,
     bootstrap_password_file: &Path,
 ) -> Output {
@@ -352,7 +361,7 @@ async fn apply_planned_reset(
         Duration::from_mins(2),
         run_xtask(
             reset_apply_args(
-                config_dir,
+                config_file,
                 journal_file,
                 &journal.nonce,
                 CLEAN_BOOTSTRAP_CONFIRMATION,
@@ -385,26 +394,28 @@ fn assert_failed_journal(path: &Path, operation_id: Uuid, failed_stage: &str) {
     );
 }
 
-async fn plan_reset(config_dir: &Path, journal_file: &Path) -> Uuid {
-    let plan = run_xtask(reset_plan_args(config_dir, journal_file), None).await;
+async fn plan_reset(config_file: &Path, journal_file: &Path) -> Uuid {
+    let plan = run_xtask(reset_plan_args(config_file, journal_file), None).await;
     assert_success(&plan, "preproduction reset plan");
     assert_output_redacted(&plan);
     read_journal(journal_file).operation_id
 }
 
-fn reset_plan_args(config_dir: &Path, journal_file: &Path) -> Vec<String> {
+fn reset_plan_args(config_file: &Path, journal_file: &Path) -> Vec<String> {
     vec![
         "preproduction-reset".to_owned(),
         "plan".to_owned(),
-        "--config-dir".to_owned(),
-        path_text(config_dir),
+        "--config-file".to_owned(),
+        path_text(config_file),
+        "--expected-environment".to_owned(),
+        "w9-disposable".to_owned(),
         "--journal-file".to_owned(),
         path_text(journal_file),
     ]
 }
 
 fn reset_apply_args(
-    config_dir: &Path,
+    config_file: &Path,
     journal_file: &Path,
     nonce: &str,
     confirmation: &str,
@@ -412,8 +423,10 @@ fn reset_apply_args(
     vec![
         "preproduction-reset".to_owned(),
         "apply".to_owned(),
-        "--config-dir".to_owned(),
-        path_text(config_dir),
+        "--config-file".to_owned(),
+        path_text(config_file),
+        "--expected-environment".to_owned(),
+        "w9-disposable".to_owned(),
         "--journal-file".to_owned(),
         path_text(journal_file),
         "--confirm-nonce".to_owned(),
@@ -748,7 +761,7 @@ async fn assert_clean_recovery_state(deploy: &DeployConfig) {
 
 async fn assert_reset_rejects_owners(
     deploy: &DeployConfig,
-    config_dir: &Path,
+    config_file: &Path,
     journal_file: &Path,
 ) {
     let postgres = PostgresPool::connect_existing(&deploy.db.postgres)
@@ -759,7 +772,7 @@ async fn assert_reset_rejects_owners(
         .execute_unprepared("SELECT 1")
         .await
         .expect("activate held PostgreSQL connection");
-    let postgres_denial = run_xtask(reset_plan_args(config_dir, journal_file), None).await;
+    let postgres_denial = run_xtask(reset_plan_args(config_file, journal_file), None).await;
     assert!(!postgres_denial.status.success());
     assert_output_redacted(&postgres_denial);
     assert!(
@@ -798,7 +811,7 @@ async fn assert_reset_rejects_owners(
         observed,
         "long-running project query must become observable"
     );
-    let clickhouse_denial = run_xtask(reset_plan_args(config_dir, journal_file), None).await;
+    let clickhouse_denial = run_xtask(reset_plan_args(config_file, journal_file), None).await;
     assert!(!clickhouse_denial.status.success());
     assert_output_redacted(&clickhouse_denial);
     let clickhouse_stderr = String::from_utf8_lossy(&clickhouse_denial.stderr);
@@ -998,45 +1011,88 @@ fn write_disposable_config(
     postgres_port: u16,
     clickhouse_port: u16,
     redis_port: u16,
-) {
-    let contents = format!(
-        r#"
-[deployment]
-environment = "w9-disposable"
-
-[db.postgres]
-host = "127.0.0.1"
-port = {postgres_port}
-user = "quant_pivot"
-password = "{POSTGRES_PASSWORD}"
-database = "quant_pivot"
-min_connections = 1
-max_connections = 4
-verify_session_params = false
-
-[db.clickhouse]
-deployment_id = "w9-disposable"
-cluster_id = "testcontainer"
-url = "http://127.0.0.1:{clickhouse_port}"
-database = "quant_pivot"
-user = "quant_pivot"
-password = ""
-
-[cache.redis]
-host = "127.0.0.1"
-port = {redis_port}
-user = "quant_pivot"
-password = "{REDIS_PASSWORD}"
-database = 0
-key_prefix = "qp:"
-"#
+) -> PathBuf {
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/quant-pivot.toml");
+    let source = fs::read_to_string(&source_path).expect("read canonical deploy config");
+    let mut config: Value = toml::from_str(&source).expect("parse canonical deploy config");
+    set(&mut config, &["deployment", "environment"], "w9-disposable");
+    set(&mut config, &["db", "postgres", "host"], "127.0.0.1");
+    set(
+        &mut config,
+        &["db", "postgres", "port"],
+        i64::from(postgres_port),
     );
-    fs::write(directory.join("quant-pivot.local.toml"), contents)
-        .expect("write disposable deploy config");
+    set(&mut config, &["db", "postgres", "user"], "quant_pivot");
+    set(
+        &mut config,
+        &["db", "postgres", "password"],
+        POSTGRES_PASSWORD,
+    );
+    set(&mut config, &["db", "postgres", "database"], "quant_pivot");
+    set(&mut config, &["db", "postgres", "min_connections"], 1_i64);
+    set(&mut config, &["db", "postgres", "max_connections"], 4_i64);
+    set(
+        &mut config,
+        &["db", "postgres", "verify_session_params"],
+        false,
+    );
+    set(
+        &mut config,
+        &["db", "clickhouse", "deployment_id"],
+        "w9-disposable",
+    );
+    set(
+        &mut config,
+        &["db", "clickhouse", "cluster_id"],
+        "testcontainer",
+    );
+    set(
+        &mut config,
+        &["db", "clickhouse", "url"],
+        format!("http://127.0.0.1:{clickhouse_port}"),
+    );
+    set(
+        &mut config,
+        &["db", "clickhouse", "database"],
+        "quant_pivot",
+    );
+    set(&mut config, &["db", "clickhouse", "user"], "quant_pivot");
+    set(&mut config, &["db", "clickhouse", "password"], "");
+    set(&mut config, &["cache", "redis", "host"], "127.0.0.1");
+    set(
+        &mut config,
+        &["cache", "redis", "port"],
+        i64::from(redis_port),
+    );
+    set(&mut config, &["cache", "redis", "user"], "quant_pivot");
+    set(&mut config, &["cache", "redis", "password"], REDIS_PASSWORD);
+    set(&mut config, &["cache", "redis", "database"], 0_i64);
+    set(&mut config, &["cache", "redis", "key_prefix"], "qp:");
+    let contents = toml::to_string_pretty(&config).expect("render disposable deploy config");
+    let config_file = directory.join("quant-pivot.toml");
+    fs::write(&config_file, contents).expect("write disposable deploy config");
+    fs::set_permissions(&config_file, Permissions::from_mode(0o600))
+        .expect("restrict disposable deploy config");
+    config_file
 }
 
-fn load_deploy(directory: &Path) -> DeployConfig {
-    DeployConfig::load_for_migration(&path_text(directory)).expect("load disposable deploy config")
+fn set(config: &mut Value, path: &[&str], value: impl Into<Value>) {
+    let (leaf, parents) = path.split_last().expect("TOML path must not be empty");
+    let mut current = config.as_table_mut().expect("deploy root must be a table");
+    for segment in parents {
+        current = current
+            .get_mut(*segment)
+            .and_then(Value::as_table_mut)
+            .unwrap_or_else(|| panic!("missing deploy table {segment}"));
+    }
+    current.insert((*leaf).to_owned(), value.into());
+}
+
+fn load_deploy(config_file: &Path) -> DeployConfig {
+    let environment =
+        DeploymentEnvironment::parse("w9-disposable").expect("valid disposable environment");
+    let request = DeployConfigLoadRequest::new(config_file.to_path_buf(), environment);
+    DeployConfig::load(&request).expect("load disposable deploy config")
 }
 
 fn path_text(path: &Path) -> String {

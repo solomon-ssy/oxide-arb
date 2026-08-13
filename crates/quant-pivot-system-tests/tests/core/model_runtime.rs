@@ -49,8 +49,9 @@ use quant_pivot_models::{
             book::{BookLevel, BookSnapshot},
         },
         quant::{
-            NewModelRun, NewModelVersion, NewShadowComparison, ShadowObservationQuery,
-            ShadowObservationWindow, ShadowStabilitySummary,
+            NewMarketSelection, NewMarketSelectionMember, NewModelRun, NewModelVersion,
+            NewShadowComparison, ShadowObservationQuery, ShadowObservationWindow,
+            ShadowStabilitySummary,
         },
     },
     entities::quant_model_run::Entity as ModelRunEntity,
@@ -69,22 +70,23 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FeatureVectorId,
-        FeedbackCycleId, MarketId, ModelInputContract, ModelRunId, ModelSpecId,
+        FeedbackCycleId, MarketId, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
         ModelTrainingContract, ModelVersionId, PolicyBundleGeneration, Price, SchemaVersion,
-        Shares, TokenId, Usd, model_metrics::ModelVersionMetrics,
+        SelectionExclusionSummary, Shares, TokenId, Usd, model_metrics::ModelVersionMetrics,
         model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgCalibrationArtifactRepository, PgEventRepository, PgFactorRepository,
-        PgFeatureRepository, PgMarketRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgPolicyRepository, PgShadowComparisonRepository,
+        PgFeatureRepository, PgMarketRepository, PgMarketSelectionRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgPolicyRepository,
+        PgShadowComparisonRepository,
     },
     traits::{
         EventRepository, FactorRepository, FeatureRepository, MarketRepository,
-        ModelRegistryRepository, ModelRunRepository, PolicyRepository, QuantFactReadRepository,
-        ShadowComparisonRepository, ShadowComparisonWriteOutcome,
+        MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository, PolicyRepository,
+        QuantFactReadRepository, ShadowComparisonRepository, ShadowComparisonWriteOutcome,
     },
 };
 use quant_pivot_research::{
@@ -99,6 +101,7 @@ use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObse
 use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
+        SelectorFixture,
         catalog_fixtures::{make_event, make_market},
         fact_sink::DiscardFactWriter,
         factor_definitions::register_all_factor_definitions,
@@ -648,7 +651,6 @@ async fn build_cross_section_features(
         window_provider: FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
         feature_repo,
         event_writer: noop_feature_writer(),
-        market_registry: Arc::clone(&registry),
         block_cursor_repo: live_tape_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
@@ -703,6 +705,53 @@ async fn build_cross_section_features(
     )
 }
 
+async fn persist_live_selection(
+    db: &DatabaseConnection,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    decision_at: DateTime<Utc>,
+    selection: &[SelectedMarket],
+) -> MarketSelectionId {
+    let market_selection_id = MarketSelectionId::from_v7();
+    let selector_hash = ResearchHasher::canonical(&(
+        "model-runtime-live-selection-v1",
+        decision_policy_snapshot_id,
+        decision_at,
+        selection,
+    ))
+    .expect("hash exact live selection");
+    let members = selection
+        .iter()
+        .map(|market| NewMarketSelectionMember {
+            market_selection_id,
+            market_id: market.market_id.clone(),
+            event_id: market.event_id.clone(),
+            category: market.category,
+            status: MarketStatus::Active,
+            primary_token_id: market.primary_token_id.clone(),
+            secondary_token_id: market.secondary_token_id.clone(),
+            liquidity_usd: market.liquidity_usd,
+            volume_24h_usd: market.volume_24h_usd,
+        })
+        .collect::<Vec<_>>();
+    let market_count = i32::try_from(members.len()).expect("selection count fits i32");
+    PgMarketSelectionRepository::new(db.clone())
+        .create_snapshot(
+            NewMarketSelection {
+                market_selection_id,
+                decision_at,
+                decision_policy_snapshot_id,
+                selector_hash,
+                selector_evidence: SelectorFixture::evidence(selector_hash),
+                market_count,
+                exclusion_summary: SelectionExclusionSummary::default(),
+            },
+            members,
+        )
+        .await
+        .expect("persist exact live selection");
+    market_selection_id
+}
+
 /// Author a weighted artifact bound to the active schema, weighting every enabled
 /// factor equally, and persist its bytes + registry rows. Returns the version id.
 async fn publish_weighted_model(
@@ -728,7 +777,7 @@ async fn publish_weighted_model(
         ModelFamily::WeightedFactor,
         model_spec_fixtures::pooled_horizon_secs(),
         input_contract.clone(),
-        ModelTrainingContract::settlement_default(),
+        ModelTrainingContract::outcome_default(),
     );
     let model_spec_definition_hash = spec.definition_hash;
     let registry = PgModelRegistryRepository::new(db.clone());
@@ -1001,8 +1050,6 @@ fn model_config(active: &ModelVersionId, shadow: Option<&ModelVersionId>) -> Mod
                 }),
             },
         )]),
-        min_model_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
-        candidate_score_floor: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
         ..ModelConfig::default()
     }
 }
@@ -1038,6 +1085,7 @@ async fn resolve_active_model(
         .active_requirements(ActiveModelRequirementsRequest {
             policy,
             decision_at: boundary.decision_at(),
+            route: BuyModelRoute::Pooled,
         })
         .await
         .expect("resolve exact active serving route")
@@ -1120,6 +1168,13 @@ pub async fn online_loop_selection_candidates() {
     let policy = activate_model_config(&db, &active, None).await;
     let (vectors, ids, selection, evidence, boundary) =
         build_cross_section_features(&db, policy.decision_policy_snapshot_id).await;
+    let market_selection_id = persist_live_selection(
+        &db,
+        policy.decision_policy_snapshot_id,
+        boundary.decision_at(),
+        &selection,
+    )
+    .await;
 
     let critical = Arc::new(AtomicUsize::new(0));
     let runner = build_runner(&db, Arc::clone(&store), Arc::clone(&critical), None)
@@ -1127,9 +1182,39 @@ pub async fn online_loop_selection_candidates() {
         .expect("bootstrap serving generation");
     let active_model = resolve_active_model(&runner, &policy, &boundary).await;
 
-    let outcome = Box::pin(runner.run(ModelRunRequest {
+    let rejected = Box::pin(runner.run(ModelRunRequest {
         decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
         market_selection_id: None,
+        selection: &selection,
+        feature_vectors: &vectors,
+        feature_vector_ids: &ids,
+        feature_evidence: &evidence,
+        serving: &active_model.serving,
+        top_n: 10,
+        boundary: boundary.clone(),
+    }))
+    .await;
+    let Err(error) = rejected else {
+        panic!("live inference without a persisted selection must fail closed");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("requires an exact persisted market selection"),
+        "unexpected missing-selection error: {error}"
+    );
+    assert!(
+        ModelRunEntity::find()
+            .all(&db)
+            .await
+            .expect("load model runs after rejected live inference")
+            .is_empty(),
+        "rejected live inference must not create a model-run side effect"
+    );
+
+    let outcome = Box::pin(runner.run(ModelRunRequest {
+        decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
+        market_selection_id: Some(market_selection_id),
         selection: &selection,
         feature_vectors: &vectors,
         feature_vector_ids: &ids,
@@ -1213,7 +1298,7 @@ pub async fn generation_rejects_bad_shadow() {
     );
 }
 
-struct ModelRoundInput<'a> {
+struct ShadowRoundInput<'a> {
     runner: &'a ModelRunner,
     active: &'a ActiveModelRequirements,
     selection: &'a [SelectedMarket],
@@ -1224,8 +1309,8 @@ struct ModelRoundInput<'a> {
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
 
-async fn run_model_round(input: ModelRoundInput<'_>) -> ModelRunOutcome {
-    let ModelRoundInput {
+async fn run_shadow_round(input: ShadowRoundInput<'_>) -> ModelRunOutcome {
+    let ShadowRoundInput {
         runner,
         active,
         selection,
@@ -1235,7 +1320,7 @@ async fn run_model_round(input: ModelRoundInput<'_>) -> ModelRunOutcome {
         boundary,
         decision_policy_snapshot_id,
     } = input;
-    Box::pin(runner.run(ModelRunRequest {
+    Box::pin(runner.run_shadow_evaluation(ModelRunRequest {
         decision_policy_snapshot_id,
         market_selection_id: None,
         selection,
@@ -1274,7 +1359,7 @@ pub async fn cached_planes_stay_stable() {
         .await
         .expect("bootstrap active and shadow generation");
     let active = resolve_active_model(&runner, &policy, &boundary).await;
-    let first = run_model_round(ModelRoundInput {
+    let first = run_shadow_round(ShadowRoundInput {
         runner: &runner,
         active: &active,
         selection: &selection,
@@ -1285,7 +1370,7 @@ pub async fn cached_planes_stay_stable() {
         decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
     })
     .await;
-    let second = run_model_round(ModelRoundInput {
+    let second = run_shadow_round(ShadowRoundInput {
         runner: &runner,
         active: &active,
         selection: &selection,
@@ -1365,7 +1450,7 @@ pub async fn shadow_persistence_degrades_only() {
     .await
     .expect("bootstrap active and shadow generation");
     let active = resolve_active_model(&runner, &policy, &boundary).await;
-    let outcome = run_model_round(ModelRoundInput {
+    let outcome = run_shadow_round(ShadowRoundInput {
         runner: &runner,
         active: &active,
         selection: &selection,
@@ -1383,6 +1468,7 @@ pub async fn shadow_persistence_degrades_only() {
         .expect("find active run")
         .expect("active run row");
     assert_eq!(active_run.status, ModelRunStatus::Succeeded);
+    assert_eq!(active_run.run_kind, ModelRunKind::Shadow);
     assert!(!outcome.accepted.is_empty(), "active result remains usable");
     let shadow = outcome.shadow.expect("configured shadow outcome");
     assert_eq!(shadow.emitted, 0);

@@ -8,11 +8,11 @@ use quant_pivot_models::{
         quant::{
             FactDeliverySettlement, NewReportTransaction, OrderIntentInfo, PreparedReportOutcome,
             PublishReportOutcome, RecommendationReportInfo, ReportDataQualitySnapshotInfo,
-            ReportFactDeliveryInfo, ReportRunClaim,
+            ReportFactDeliveryInfo, ReportRouteRunInfo, ReportRunClaim,
         },
     },
     enums::quant::{ReportFactDeliveryStatus, ReportKind},
-    types::{ModelRunId, RecommendationReportId, ResearchProfileId, WorkerId},
+    types::{ModelRunId, RecommendationReportId, ReportRouteRunId, ReportRunId, WorkerId},
 };
 
 #[async_trait::async_trait]
@@ -29,6 +29,24 @@ pub trait RecommendationReportRepository: Send + Sync {
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;
+
+    /// Load one immutable Route outcome by its recommendation lineage id.
+    async fn find_route_run(
+        &self,
+        route_run_id: &ReportRouteRunId,
+    ) -> Result<Option<ReportRouteRunInfo>, StorageError>;
+
+    /// Load every Route outcome for one global report in canonical Route order.
+    async fn list_route_runs(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Vec<ReportRouteRunInfo>, StorageError>;
+
+    /// Resolve the unique report Route outcome that owns one live model run.
+    async fn find_model_route_run(
+        &self,
+        model_run_id: &ModelRunId,
+    ) -> Result<Option<ReportRouteRunInfo>, StorageError>;
 
     /// Direct report that was current immediately before this report.
     async fn find_predecessor_id(
@@ -88,11 +106,10 @@ pub trait RecommendationReportRepository: Send + Sync {
         worker_id: WorkerId,
     ) -> Result<ReportFactDeliveryInfo, StorageError>;
 
-    /// Report produced by an exact serving run. The schema enforces at most one
-    /// report per non-null run id.
-    async fn find_by_model_run(
+    /// Report produced by one exact report run. The schema enforces one-to-one identity.
+    async fn find_by_report_run(
         &self,
-        model_run_id: &ModelRunId,
+        report_run_id: &ReportRunId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;
 
     /// Every committed report whose decision lies in `[from, to)`, including
@@ -120,7 +137,6 @@ pub trait RecommendationReportRepository: Send + Sync {
 
     async fn current(
         &self,
-        profile_id: &ResearchProfileId,
         kind: ReportKind,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;
 

@@ -5,8 +5,8 @@
   "migrations": [
     {
       "version": "m00000000_000001_bootstrap",
-      "checksum": "d648c41f2b4dc5eb8620c03518606fca1786f99a097ffb8217dfe435d8a0827e",
-      "artifact_length": 727598
+      "checksum": "7a10273a34315e6488c31612d0afb61c5af85ee6e2a39295eb1534bc3e27ce91",
+      "artifact_length": 739590
     }
   ]
 }

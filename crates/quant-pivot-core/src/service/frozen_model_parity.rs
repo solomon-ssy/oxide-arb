@@ -358,8 +358,8 @@ impl FrozenModelParityService {
         }
 
         let label = LabelSelector {
-            name: LabelName::new(spec.training_contract.target_label_name.clone()),
-            horizon_secs: spec.training_contract.target_label_horizon_secs,
+            name: LabelName::new(spec.training_contract.target.label_name().to_owned()),
+            horizon_secs: spec.training_contract.target.label_horizon_secs(),
         };
         let (transform_hash, training_input_hash) = match artifact.payload() {
             ModelPayload::WeightedFactor(weighted) => verify_weighted_payload(
@@ -428,8 +428,8 @@ impl FrozenModelParityService {
                     required: input.required,
                 })
                 .collect(),
-            label_name: LabelName::new(spec.training_contract.target_label_name.clone()),
-            label_horizon_secs: spec.training_contract.target_label_horizon_secs,
+            label_name: LabelName::new(spec.training_contract.target.label_name().to_owned()),
+            label_horizon_secs: spec.training_contract.target.label_horizon_secs(),
         };
         let matrix = build_training_matrix(examples, &matrix_spec)?;
         let (refitted, standardized) = FittedInputTransform::fit(&matrix)?;
@@ -577,21 +577,22 @@ fn verify_classical_binding(
         }
         .into());
     }
-    let target = spec.training_contract.target_label_name.as_str();
+    let target = spec.training_contract.target.label_name();
     let target_semantics = if payload.kind == ClassicalKind::LogisticRegression
         && target == TOKEN_PAYOUT_RATIO.as_str()
     {
         ClassicalOutputSemantics::FullPayoutProbability
     } else if !matches!(payload.kind, ClassicalKind::LogisticRegression)
         && target == RETURN_TO_HORIZON.as_str()
-        && spec.training_contract.target_label_horizon_secs == prediction_horizon_secs
+        && spec.training_contract.target.label_horizon_secs() == prediction_horizon_secs
     {
         ClassicalOutputSemantics::ForwardReturnBps
     } else {
         return Err(ResearchError::Determinism {
             detail: format!(
                 "classical kind {} has unsupported frozen target `{target}` at {}s",
-                payload.kind, spec.training_contract.target_label_horizon_secs
+                payload.kind,
+                spec.training_contract.target.label_horizon_secs()
             ),
         }
         .into());

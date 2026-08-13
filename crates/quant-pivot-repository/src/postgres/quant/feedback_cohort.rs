@@ -7,7 +7,7 @@ use quant_pivot_models::{
     domain::quant::{
         FeedbackCohortCandidate, FeedbackCohortPage, FeedbackCohortPageQuery,
         FeedbackRecommendationContext, RecommendationExecutionRollupInfo, RecommendationInfo,
-        RecommendationReportInfo, RecommendationResolutionOutcomeInfo,
+        RecommendationReportInfo, RecommendationResolutionOutcomeInfo, ReportRouteRunInfo,
     },
     entities::{
         quant_recommendation::{
@@ -23,6 +23,9 @@ use quant_pivot_models::{
         quant_recommendation_resolution_outcome::{
             Column as QuantRecommendationResolutionOutcomeColumn,
             Entity as QuantRecommendationResolutionOutcomeEntity,
+        },
+        quant_report_route_run::{
+            Column as QuantReportRouteRunColumn, Entity as QuantReportRouteRunEntity,
         },
     },
     types::RecommendationId,
@@ -128,17 +131,17 @@ impl PgFeedbackCohortRepository {
         });
         let condition = Condition::all()
             .add(
-                QuantRecommendationColumn::ResearchProfileArtifactId
+                QuantReportRouteRunColumn::ResearchProfileArtifactId
                     .eq(profile_artifact_id.clone()),
             )
             .add(QuantRecommendationColumn::CreatedAt.lte(window.cutoff()))
-            .add(QuantRecommendationReportColumn::ResearchProfileArtifactId.eq(profile_artifact_id))
             .add(QuantRecommendationReportColumn::DecisionAt.gte(window.window_start()))
             .add(QuantRecommendationReportColumn::DecisionAt.lte(window.cutoff()))
             .add(QuantRecommendationReportColumn::CreatedAt.lte(window.cutoff()))
             .add_option(keyset);
         let fetch_limit = u64::from(query.limit()) + 1;
         let rows = QuantRecommendationEntity::find()
+            .inner_join(QuantReportRouteRunEntity)
             .find_also_related(QuantRecommendationReportEntity)
             .filter(condition)
             .order_by_asc(QuantRecommendationColumn::CreatedAt)
@@ -147,6 +150,18 @@ impl PgFeedbackCohortRepository {
             .all(transaction)
             .await
             .map_err(StorageError::from)?;
+        let route_run_ids = rows
+            .iter()
+            .map(|(recommendation, _)| recommendation.report_route_run_id)
+            .collect::<Vec<_>>();
+        let route_runs = QuantReportRouteRunEntity::find()
+            .filter(QuantReportRouteRunColumn::ReportRouteRunId.is_in(route_run_ids))
+            .all(transaction)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(|route_run| (route_run.report_route_run_id, route_run))
+            .collect::<HashMap<_, _>>();
         rows.into_iter()
             .map(|(recommendation, report)| {
                 let report = report.ok_or_else(|| {
@@ -155,9 +170,19 @@ impl PgFeedbackCohortRepository {
                         "recommendation lost its required report relation",
                     )
                 })?;
+                let route_run = route_runs
+                    .get(&recommendation.report_route_run_id)
+                    .ok_or_else(|| {
+                        StorageError::invariant_violation(
+                            Some(QUANT_RECOMMENDATION),
+                            "recommendation lost its required Route-run relation",
+                        )
+                    })?;
+                let route_run_info = ReportRouteRunInfo::from(route_run.clone());
                 FeedbackRecommendationContext::try_from_report(
                     &RecommendationInfo::from(recommendation),
                     &RecommendationReportInfo::from(report),
+                    &route_run_info,
                 )
                 .map_err(feedback_contract_error)
             })

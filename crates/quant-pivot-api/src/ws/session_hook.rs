@@ -1,4 +1,4 @@
-//! Hook invoked when bounded enqueue failure invalidates a WS stream session.
+//! Hook invoked when a WebSocket stream session loses continuity.
 
 use std::sync::Arc;
 

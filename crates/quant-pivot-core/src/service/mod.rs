@@ -55,6 +55,7 @@ pub mod model_training;
 pub mod opportunistic_sell;
 pub mod password_crypto;
 pub mod pit_selection;
+pub(crate) mod portfolio_context;
 pub mod promotion_preflight;
 pub mod research_readiness;
 pub mod signal_reinference;

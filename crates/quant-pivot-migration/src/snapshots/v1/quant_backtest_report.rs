@@ -30,6 +30,8 @@ pub struct Model {
     pub tail_loss: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
     pub report_pnl_simulation: Json,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub portfolio_funnel: Json,
     #[sea_orm(column_type = "Text")]
     pub report_hash: String,
     pub parquet_uri: Option<String>,

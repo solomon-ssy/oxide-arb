@@ -136,6 +136,7 @@ impl DeployConfig {
             });
         }
 
+        validate_portfolio_solver(self, &mut report);
         validate_research_jobs(self, &mut report);
         validate_databases(self, &mut report);
         validate_cache_redis(self, &mut report);
@@ -155,6 +156,41 @@ impl DeployConfig {
         validate_domain_sources(self, &mut report);
 
         report
+    }
+}
+
+fn validate_portfolio_solver(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
+    let solver = &deploy.quant.portfolio_solver;
+    if !(1..=600).contains(&solver.deadline_secs) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.portfolio_solver.deadline_secs",
+            detail: "global-planner deadline must be between 1 and 600 seconds inclusive"
+                .to_owned(),
+        });
+    }
+    if solver.threads != 1 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.portfolio_solver.threads",
+            detail: "must be exactly 1 for deterministic serial HiGHS execution".to_owned(),
+        });
+    }
+    if !(1..=50_000).contains(&solver.max_tiers) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.portfolio_solver.max_tiers",
+            detail: "must be between 1 and 50000 inclusive".to_owned(),
+        });
+    }
+    if !(3..=10_000).contains(&solver.max_scenarios) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.portfolio_solver.max_scenarios",
+            detail: "must be between 3 and 10000 inclusive".to_owned(),
+        });
+    }
+    if !(1..=1_000).contains(&solver.max_top_n) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.portfolio_solver.max_top_n",
+            detail: "must be between 1 and 1000 inclusive".to_owned(),
+        });
     }
 }
 

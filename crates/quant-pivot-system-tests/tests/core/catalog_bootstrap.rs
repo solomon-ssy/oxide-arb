@@ -63,7 +63,7 @@ pub async fn model_spec_service_spec() {
                     ],
                 },
                 input_contract: ModelInputContract::single_required("book.mid"),
-                training_contract: ModelTrainingContract::settlement_default(),
+                training_contract: ModelTrainingContract::outcome_default(),
                 reason: "bootstrap the first model spec".to_owned(),
             },
             actor(),

@@ -35,7 +35,7 @@ use quant_pivot_models::{
     runtime_config::ResearchValidationConfig,
     types::{
         ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetSourceLineage, ResearchJobParams,
-        ResearchJobProgress, ResearchProfileArtifact, TrainingDatasetId, builtin_research_profiles,
+        ResearchJobProgress, ResearchProfileArtifact, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::traits::{
@@ -169,13 +169,6 @@ impl CandidateRecipePlanExecutionService {
                 StorageError::not_found("quant_feedback_cycle", params.feedback_cycle_id)
             })?;
         Self::require_cycle(&cycle, params)?;
-        let profile = builtin_research_profiles()
-            .map_err(Self::invalid)?
-            .into_iter()
-            .find(|profile| profile.profile_ref == cycle.profile_ref)
-            .ok_or_else(|| {
-                Self::invalid("recipe-plan profile is not an exact built-in revision")
-            })?;
         let champion = self
             .models
             .find_model_version(&cycle.champion_model_version_id)
@@ -184,19 +177,9 @@ impl CandidateRecipePlanExecutionService {
                 StorageError::not_found("quant_model_version", cycle.champion_model_version_id)
             })?;
         let preimage = self.serving_preimages.load(&champion).await?;
+        preimage.verify_feedback_cycle(&cycle)?;
+        let profile = preimage.profile().clone();
         let model_spec = preimage.model_spec();
-        let policy = preimage.policy_snapshot();
-        if preimage.profile() != &profile
-            || model_spec.model_spec_id != cycle.champion_model_spec_id
-            || model_spec.definition_hash != cycle.champion_model_spec_definition_hash
-            || model_spec.model_family != cycle.champion_model_family
-            || policy.decision_policy_snapshot_id != cycle.decision_policy_snapshot_id
-            || policy.snapshot_hash != cycle.decision_policy_snapshot_hash
-        {
-            return Err(Self::invalid(
-                "recipe-plan serving preimage differs from the frozen cycle",
-            ));
-        }
         let bundle = self
             .policies
             .load_current_bundle()
@@ -223,6 +206,25 @@ impl CandidateRecipePlanExecutionService {
                 CandidateRecipeReadinessBlocker::RouteStateStale,
             );
         }
+        let active_profiles = bundle
+            .snapshot
+            .profile_artifacts
+            .references()
+            .map_err(|error| Self::invalid(error.to_string()))?;
+        let champion_profiles = &preimage
+            .artifact()
+            .header()
+            .serving_contract()
+            .bindings()
+            .policy_snapshot
+            .profile_artifacts;
+        if &active_profiles != champion_profiles {
+            return Self::no_action(
+                params,
+                &cycle,
+                CandidateRecipeReadinessBlocker::RouteStateStale,
+            );
+        }
         if route.shadow.is_some() {
             return Self::no_action(
                 params,
@@ -239,7 +241,7 @@ impl CandidateRecipePlanExecutionService {
                 params,
                 &profile,
                 model_spec,
-                &policy
+                &bundle
                     .snapshot
                     .profile_artifacts
                     .research_method
@@ -272,9 +274,9 @@ impl CandidateRecipePlanExecutionService {
             .freeze_feedback_source(
                 FeedbackSourceFreeze {
                     profile: &profile,
-                    runtime: &policy.snapshot,
-                    decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
-                    runtime_config_hash: policy.snapshot_hash,
+                    runtime: &bundle.snapshot,
+                    decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
+                    runtime_config_hash: bundle.snapshot_hash,
                     research_program_hash: plan.research_program_hash(),
                     window_start: plan.source_start(),
                     window_end: plan.label_cutoff(),
@@ -1094,7 +1096,7 @@ mod tests {
                 ModelSpecId::new(Uuid::from_u128(0x100)),
                 hash('1'),
                 ModelInputContract::single_required("fixture_feature"),
-                ModelTrainingContract::settlement_default(),
+                ModelTrainingContract::outcome_default(),
                 1,
             )
             .expect("valid training recipe"),

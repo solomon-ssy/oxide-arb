@@ -2,7 +2,9 @@
 
 use std::{future::Future, pin::Pin};
 
-use quant_pivot_system_tests::postgres::{run_suite_task, with_postgres_suite};
+use quant_pivot_system_tests::postgres::{
+    run_suite_large_stack, run_suite_task, with_postgres_suite,
+};
 
 macro_rules! run_scenarios {
     ($($scenario:path),+ $(,)?) => {
@@ -16,6 +18,14 @@ macro_rules! run_scenarios_result {
     ($($scenario:path),+ $(,)?) => {
         $(
             scenario_result(stringify!($scenario), Box::pin($scenario())).await?;
+        )+
+    };
+}
+
+macro_rules! run_large_scenarios {
+    ($($scenario:path),+ $(,)?) => {
+        $(
+            scenario_large(stringify!($scenario), $scenario()).await;
         )+
     };
 }
@@ -560,7 +570,7 @@ async fn feedback_shadow_stage_contracts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn feedback_decision_stage_contracts() {
     Box::pin(with_postgres_suite(async {
-        run_scenarios!(
+        run_large_scenarios!(
             feedback_decision_stage::promotion_preflight_contracts,
             feedback_decision_stage::model_route_promotion_contracts,
             feedback_decision_stage::promotion_runtime_apply_contracts,
@@ -574,18 +584,26 @@ async fn feedback_decision_stage_contracts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn feedback_terminal_decision_contracts() {
-    Box::pin(with_postgres_suite(
-        feedback_decision_stage::terminal_decision_contracts(),
-    ))
+    Box::pin(with_postgres_suite(async {
+        Box::pin(run_suite_task(
+            feedback_decision_stage::terminal_decision_contracts(),
+        ))
+        .await
+        .expect("run terminal-decision contract task");
+    }))
     .await
     .expect("start feedback terminal-decision PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn decision_path_evidence_contracts() {
-    Box::pin(with_postgres_suite(
-        feedback_decision_stage::decision_path_evidence_contracts(),
-    ))
+    Box::pin(with_postgres_suite(async {
+        Box::pin(run_suite_task(
+            feedback_decision_stage::decision_path_evidence_contracts(),
+        ))
+        .await
+        .expect("run four-path decision evidence task");
+    }))
     .await
     .expect("start four-path decision evidence PostgreSQL suite");
 }
@@ -692,6 +710,14 @@ async fn scenario(name: &str, future: Pin<Box<dyn Future<Output = ()> + Send>>) 
     scenario_result(name, future)
         .await
         .expect("run isolated repository scenario");
+}
+
+async fn scenario_large(name: &str, future: impl Future<Output = ()> + Send + 'static) {
+    eprintln!("large-stack repository scenario started: {name}");
+    run_suite_large_stack(future)
+        .await
+        .expect("run large-stack repository scenario");
+    eprintln!("large-stack repository scenario passed: {name}");
 }
 
 async fn scenario_result(

@@ -79,7 +79,7 @@ use quant_pivot_repository::traits::{
     ModelRegistryRepository, OperationLogRepository, OrderIntentRepository, PolicyRepository,
     PositionRepository, RecommendationExecutionRollupRepository, RecommendationReportRepository,
     RecommendationRepository, RecommendationResolutionOutcomeRepository, ReconciliationRepository,
-    ResolutionObservationRepository, TradePolicyRepository,
+    ResolutionObservationRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
     quant::{
         settlement_governance::{
             SettlementExternalCursorRepository, SettlementGovernanceRepository,
@@ -219,6 +219,7 @@ impl ExecutionBundle {
         // + per-lot sweep service.
         let exit_monitor = build_exit_monitor(
             ExitMonitorWiring {
+                deploy: deps.deploy,
                 infra,
                 data: deps.data,
                 governance: deps.governance,
@@ -450,6 +451,7 @@ fn build_admission_builder(
 /// the partially-moved [`ExecutionBundleDeps`]).
 #[derive(Clone, Copy)]
 struct ExitMonitorWiring<'a> {
+    deploy: &'a DeployConfig,
     infra: &'a InfraBundle,
     data: &'a DataBundle,
     governance: &'a GovernanceBundle,
@@ -476,6 +478,9 @@ fn build_exit_monitor(
         factors: Arc::clone(&wiring.research.factor_repo) as Arc<dyn FactorRepository>,
         pit_source: Arc::clone(&wiring.data.pit_source),
         window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
+        block_cursor_repo: Arc::clone(&repos.trade_tape_block_cursor)
+            as Arc<dyn TradeTapeBlockCursorRepository>,
+        trade_tape_on_chain: wiring.deploy.market_data.trade_tape_on_chain.clone(),
     });
     // thesis-invalidation re-inference (invalidation-first).
     let reinference: Arc<dyn ExitSignalEvaluator> = Arc::new(ReinferenceSignalEvaluator::new(
@@ -497,6 +502,9 @@ fn build_exit_monitor(
             factors: Arc::clone(&wiring.research.factor_repo) as Arc<dyn FactorRepository>,
             pit_source: Arc::clone(&wiring.data.pit_source),
             window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
+            block_cursor_repo: Arc::clone(&repos.trade_tape_block_cursor)
+                as Arc<dyn TradeTapeBlockCursorRepository>,
+            trade_tape_on_chain: wiring.deploy.market_data.trade_tape_on_chain.clone(),
         });
     let opportunistic: Arc<dyn ExitSignalEvaluator> = Arc::new(
         OpportunisticSellSignalEvaluator::new(OpportunisticSellSignalEvaluatorDeps {

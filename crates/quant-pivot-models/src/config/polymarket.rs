@@ -3,13 +3,14 @@
 //! This is the sole venue. There is no abstraction layer for "multiple venues" —
 //! quant-pivot operates exclusively on Polymarket (Polygon chain).
 
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use super::secret::SecretText;
 
 /// Polymarket platform configuration. Mounted at `[polymarket]` in TOML.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PolymarketConfig {
     /// CLOB REST base URL. Default: `https://clob.polymarket.com`.
     pub clob_base_url: String,
@@ -63,8 +64,8 @@ const fn default_market_refresh_secs() -> u64 {
 }
 
 /// On-chain interaction parameters (Polygon RPC).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OnchainConfig {
     /// Typed Polygon JSON-RPC endpoint source.
     pub rpc_endpoint: PolygonRpcEndpoint,
@@ -94,11 +95,16 @@ impl OnchainConfig {
 /// Public, non-secret endpoints may remain in source TOML. Authenticated URLs
 /// (including provider keys embedded in path/query/user-info) use a protected
 /// secret text and are never rendered by `Debug`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PolygonRpcEndpoint {
-    Public { url: String },
-    Protected { url: SecretText },
+    Public {
+        url: String,
+    },
+    Protected {
+        #[serde(serialize_with = "super::secret::serialize_empty")]
+        url: SecretText,
+    },
 }
 
 impl Default for PolygonRpcEndpoint {
@@ -127,8 +133,8 @@ const fn default_rpc_timeout() -> u64 {
 /// This switch is necessary but never sufficient: runtime mode, kill switch,
 /// authorization, verified deployment capability and production evidence are
 /// independent fail-closed gates.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SettlementDeployConfig {
     /// Exclusive case-claim lease duration. A crashed worker may be replaced
     /// only after this database-backed lease expires.
@@ -151,7 +157,7 @@ pub struct SettlementDeployConfig {
     pub external_scan_block_span: u64,
     /// First durable retry delay before exponential backoff.
     pub retry_initial_secs: u64,
-    /// Maximum durable retry delay.
+    /// Maximum durable delay between settlement retry attempts after exponential backoff.
     pub retry_max_secs: u64,
 }
 
@@ -179,12 +185,13 @@ impl Default for SettlementDeployConfig {
 /// a deploy secret plus the non-secret key-owner address.
 /// Required for every non-EOA wallet when order submission is enabled; EOA
 /// settlement signs and pays gas directly and ignores these fields.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RelayerConfig {
     /// Relayer submit/status base URL. Default: `https://relayer-v2.polymarket.com`.
     pub base_url: String,
-    /// Relayer API key (secret).
+    /// Zeroizing Polymarket relayer API key used only by the authenticated submission adapter.
+    #[serde(serialize_with = "super::secret::serialize_optional_empty")]
     pub api_key: Option<SecretText>,
     /// Ethereum address that owns the relayer API key (the signer EOA address).
     pub api_key_address: Option<String>,
@@ -268,6 +275,7 @@ rpc_endpoint = { source = "public", url = "https://polygon-rpc.com" }
 
         let protected: OnchainConfig = toml::from_str(
             r#"
+rpc_timeout_ms = 5000
 rpc_endpoint = { source = "protected", url = "https://provider.invalid/v2/private-provider-key" }
 "#,
         )

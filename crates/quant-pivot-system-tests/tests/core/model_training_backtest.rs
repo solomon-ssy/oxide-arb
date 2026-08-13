@@ -25,8 +25,11 @@ use quant_pivot_core::{
         backtest::{CoreBacktestPort, CoreBacktestPortDeps},
         cpcv_backtest::{CoreCpcvBacktestPort, CoreCpcvBacktestPortDeps},
     },
+    governance::{CoreCalibrationArtifactLoader, ModelGovernanceDeps, ModelGovernanceService},
+    runtime_config::DecisionPolicyStore,
     service::{
         backtest::{BacktestInput, BacktestService, BacktestServiceDeps},
+        frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
         model_calibration_fit::ModelCalibrationFitService,
         model_serving_preimage::{ModelServingPreimageDeps, ModelServingPreimageService},
         model_training::{
@@ -39,6 +42,7 @@ use quant_pivot_core::{
 };
 use quant_pivot_error::{QuantError, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
+    config::PortfolioSolverDeployConfig,
     domain::{
         api::{
             BacktestPathSetView, CpcvBacktestJobParams, FactorDefinitionListQuery,
@@ -47,17 +51,18 @@ use quant_pivot_models::{
         data_plane::DecisionClock,
         pagination::Paginated,
         ports::{
-            BacktestPort, CpcvBacktestPort, FeedbackComparisonCandidateRef,
-            FeedbackComparisonContract, FeedbackComparisonJobInput, FeedbackComparisonJobParams,
-            FeedbackEvaluationUseRef, FeedbackLearningStageArtifactRef,
-            FeedbackValidationArtifactRef, GovernanceActor, ModelCalibrationFitJobParams,
-            ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+            BacktestPort, CalibratedModelSealCommand, CpcvBacktestPort,
+            FeedbackComparisonCandidateRef, FeedbackComparisonContract, FeedbackComparisonJobInput,
+            FeedbackComparisonJobParams, FeedbackEvaluationUseRef,
+            FeedbackLearningStageArtifactRef, FeedbackValidationArtifactRef, GovernanceActor,
+            ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+            ModelGovernancePort,
         },
         quant::{
             CalibrationArtifactPayload, FactorDefinitionInfo, FactorRegistrationOutcome,
             FactorValueInfo, JobProgressSink, LatestFactorSnapshotBundleInfo,
             LatestFactorSnapshotInfo, ModelSpecInfo, ModelVersionInfo, NewFactorDefinition,
-            NewFactorValue, NoopProgressSink, ResearchJobArtifactRef,
+            NewFactorValue, NoopProgressSink, ResearchJobArtifactRef, TrainingDatasetInfo,
         },
     },
     entities::{
@@ -92,12 +97,17 @@ use quant_pivot_models::{
         FeatureValue, FeatureVectorId, FeedbackComparisonArtifactId, FeedbackCycleId,
         FeedbackEvaluationUseId, FeedbackLearningStageArtifactId, FeedbackValidationArtifactId,
         MarketId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, OrderIntentId, POOLED_1H_CONTROL_PROFILE_ID, POOLED_1H_HORIZON_SECS,
-        PositionId, Price, Probability, ResearchEvaluationTrack, ResearchJobId,
-        ResearchJobProgress, SchemaVersion, Shares, SourceSliceManifest, TokenId,
-        TradePolicyEvidenceBundleManifest, TrainingDatasetId, TrainingExampleId,
-        TrainingSampleSource, TrainingSampleSources, Usd, builtin_research_profiles,
-        factor::{FactorDefinitionRef, FactorExplanation, FactorServingPlane},
+        ModelTrainingTarget, ModelVersionId, OrderIntentId, POOLED_1H_CONTROL_PROFILE_ID,
+        POOLED_1H_HORIZON_SECS, PositionId, Price, Probability, ResearchEvaluationTrack,
+        ResearchJobId, ResearchJobProgress, ResearchProfileRef, SchemaVersion, Shares,
+        SourceSliceManifest, TokenId, TradePolicyEvidenceBundleManifest, TrainingDatasetId,
+        TrainingExampleId, TrainingSampleSource, TrainingSampleSources, Usd,
+        builtin_research_profiles,
+        calibration::ModelScoreCalibrationPayload,
+        factor::{
+            FactorContextEffect, FactorDefinitionRef, FactorExplanation, FactorOutputSemantics,
+            FactorServingPlane,
+        },
         model_metrics::{HeldOutMetricKind, ModelVersionMetricsDefinition},
         model_serving::ModelServingTradePolicyBinding,
         model_training::ModelTrainingObjectiveDefinition,
@@ -107,10 +117,11 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgBacktestPathSetRepository, PgBacktestReportRepository, PgCalibrationArtifactRepository,
-        PgEventRepository, PgFactorRepository, PgMarketRepository,
-        PgModelComparisonReportRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgPolicyRepository, PgResearchReadinessEvidenceRepository, PgSourceSliceRepository,
-        PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgEventRepository, PgFactorRepository, PgFeatureParityRepository, PgMarketRepository,
+        PgModelComparisonReportRepository, PgModelGovernanceAuditRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgPolicyRepository,
+        PgResearchReadinessEvidenceRepository, PgShadowComparisonRepository,
+        PgSourceSliceRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
         BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
@@ -122,7 +133,7 @@ use quant_pivot_repository::{
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
     execution_semantics::BookFidelity,
-    factors::{FactorEngine, FactorValue, NormalizedFactor},
+    factors::{FactorEngine, FactorValue, NormalizedFactor, names::MOMENTUM_ROC},
     features::{
         FeatureSchema, FeatureVector,
         names::{
@@ -130,13 +141,15 @@ use quant_pivot_research::{
             market::CATEGORY,
         },
     },
+    gates::{DefaultModelQualityGate, ModelQualityGate},
     hashing::ResearchHasher,
-    model::{ModelArtifact, PositionStateFeatures},
+    model::{CalibrationArtifactLoader, ModelArtifact, PositionStateFeatures},
     selection::SelectedMarket,
     training::{
         DatasetHashContract, DatasetParquetCodec, HOLD_VS_EXIT_ALPHA_BPS, LabelName,
-        LotTrainingContext, POLICY_NET_RETURN_BPS, RETURN_TO_HORIZON, TrainingDatasetArtifact,
-        TrainingExample, TrainingLabel, dataset_source_fingerprint, label_names_for_sources,
+        LotTrainingContext, POLICY_ENTRY_FILL_RATIO, POLICY_EXIT_FILL_RATIO, POLICY_NET_POSITIVE,
+        POLICY_NET_RETURN_BPS, RETURN_TO_HORIZON, TrainingDatasetArtifact, TrainingExample,
+        TrainingLabel, dataset_source_fingerprint, label_names_for_sources,
     },
 };
 use quant_pivot_system_tests::{
@@ -147,15 +160,17 @@ use quant_pivot_system_tests::{
             VersionedArtifactStoreFixture,
         },
         catalog_fixtures::{make_event, make_market},
+        fact_sink::DiscardFactWriter,
         model_serving_fixtures::{ModelDatasetLedgerFixture, ModelDatasetLedgerSeed},
         model_spec_fixtures,
         policy_fixtures::{activate_policy_bundle, bootstrap_policy_bundle},
+        portfolio_scenario_fixtures::bootstrap_weather_evaluation_portfolio,
         research_fixtures::{
             DatasetLedgerFixture, DatasetLedgerSeed, ReplayableSourceSliceFixture,
             bind_fixture_decision_capture, model_learning_cohort, persist_replayable_source_slice,
             seed_source_manifest,
         },
-        trade_policy_fixtures::PublishedTradePolicyFixture,
+        trade_policy_fixtures::{PublishedTradePolicyFixture, PublishedTradePolicyFixtureInput},
     },
 };
 use rust_decimal::Decimal;
@@ -371,10 +386,10 @@ fn spread_bps(i: usize) -> Decimal {
 
 fn feature_values(i: usize) -> BTreeMap<FeatureName2, FeatureCell> {
     let values = [
-        (MID, FeatureValue::Probability(Probability::new(dec!(0.5)))),
+        (MID, FeatureValue::Probability(Probability::new(dec!(0.20)))),
         (
             BEST_ASK,
-            FeatureValue::Probability(Probability::new(dec!(0.51))),
+            FeatureValue::Probability(Probability::new(dec!(0.21))),
         ),
         (
             VISIBLE_LIQUIDITY_USD,
@@ -498,22 +513,110 @@ impl PolicyLabelFixture {
     }
 }
 
-/// Independent later-window examples used only by reusable evaluation.
-fn evaluation_examples() -> Vec<TrainingExample> {
-    shift_examples(examples(), ChronoDuration::days(30))
+fn weather_policy_example(mut example: TrainingExample, positive: bool) -> TrainingExample {
+    let matured_at = example
+        .labels
+        .first()
+        .map(|label| label.matured_at)
+        .expect("Weather policy example has a payout label");
+    example.selected_market.category = MarketCategory::Weather;
+    example.feature_vector.generic.insert(
+        CATEGORY,
+        FeatureCell::observed(
+            FeatureValue::Category(MarketCategory::Weather),
+            None,
+            FeatureStaleness::Unknown,
+        ),
+    );
+    example.labels = vec![
+        TrainingLabel {
+            label_name: settlement(),
+            horizon_secs: 0,
+            value: if positive {
+                Decimal::ONE
+            } else {
+                Decimal::ZERO
+            },
+            is_resolved: true,
+            matured_at,
+        },
+        TrainingLabel {
+            label_name: POLICY_NET_RETURN_BPS,
+            horizon_secs: 0,
+            value: if positive { dec!(25) } else { dec!(-25) },
+            is_resolved: true,
+            matured_at,
+        },
+        TrainingLabel {
+            label_name: POLICY_NET_POSITIVE,
+            horizon_secs: 0,
+            value: if positive {
+                Decimal::ONE
+            } else {
+                Decimal::ZERO
+            },
+            is_resolved: true,
+            matured_at,
+        },
+        TrainingLabel {
+            label_name: POLICY_ENTRY_FILL_RATIO,
+            horizon_secs: 0,
+            value: Decimal::ONE,
+            is_resolved: true,
+            matured_at,
+        },
+        TrainingLabel {
+            label_name: POLICY_EXIT_FILL_RATIO,
+            horizon_secs: 0,
+            value: Decimal::ONE,
+            is_resolved: true,
+            matured_at,
+        },
+    ];
+    example.labels.sort_unstable_by(|left, right| {
+        left.label_name
+            .cmp(&right.label_name)
+            .then_with(|| left.horizon_secs.cmp(&right.horizon_secs))
+    });
+    bind_fixture_decision_capture(&mut example);
+    example
 }
 
-fn calibration_examples() -> Vec<TrainingExample> {
+fn weather_policy_examples(rows: Vec<TrainingExample>) -> Vec<TrainingExample> {
+    rows.into_iter()
+        .map(|example| {
+            let positive = example
+                .labels
+                .first()
+                .is_some_and(|label| label.value > Decimal::ZERO);
+            weather_policy_example(example, positive)
+        })
+        .collect()
+}
+
+fn weather_evaluation_examples() -> Vec<TrainingExample> {
+    weather_policy_examples(shift_examples(examples(), ChronoDuration::days(30)))
+}
+
+fn weather_calibration_examples() -> Vec<TrainingExample> {
     shift_examples(examples(), ChronoDuration::days(60))
         .into_iter()
         .enumerate()
-        .map(|(index, mut example)| {
-            if index / MARKETS_PER_TICK % 2 == 1 {
-                for label in &mut example.labels {
-                    label.value = Decimal::ONE - label.value;
-                }
-            }
-            example
+        .map(|(index, example)| {
+            let observed = example
+                .labels
+                .first()
+                .is_some_and(|label| label.value > Decimal::ZERO);
+            // Keep the held-out calibration population independently timed and
+            // non-degenerate without destroying the score/outcome relationship
+            // that it is meant to estimate. The previous whole-tick inversion
+            // made every score stratum approximately 50/50 and therefore
+            // manufactured a correctly rejected zero-allocation backtest.
+            // A sparse deterministic error process exercises imperfect
+            // calibration while retaining an economically meaningful high-score
+            // reliability stratum.
+            let positive = if index % 23 == 0 { !observed } else { observed };
+            weather_policy_example(example, positive)
         })
         .collect()
 }
@@ -716,30 +819,38 @@ fn e2e_runtime_config() -> DecisionPolicySnapshot {
         .max_book_staleness_ms = replay.max_book_staleness_ms;
     let portfolio = &mut config.execution_risk.portfolio;
     portfolio.budget.total_budget_usd = DecimalValue::new(dec!(5_000));
-    portfolio.budget.min_recommendation_usd = DecimalValue::new(dec!(10));
-    portfolio.budget.max_single_recommendation_usd = DecimalValue::new(dec!(100));
-    portfolio.constraints.max_market_exposure_usd = DecimalValue::new(dec!(100));
-    portfolio.constraints.max_event_exposure_usd = DecimalValue::new(dec!(2_000));
-    portfolio.constraints.max_category_exposure_usd = DecimalValue::new(dec!(5_000));
-    portfolio.constraints.max_correlated_exposure_usd = DecimalValue::new(dec!(5_000));
+    portfolio.budget.cash_reserve_usd = DecimalValue::new(dec!(500));
+    portfolio.budget.max_open_capital_usd = DecimalValue::new(dec!(4_500));
+    portfolio.exposure_limits.max_single_recommendation_usd = DecimalValue::new(dec!(100));
+    portfolio.exposure_limits.max_market_exposure_usd = DecimalValue::new(dec!(100));
+    portfolio.exposure_limits.max_event_exposure_usd = DecimalValue::new(dec!(4_500));
+    portfolio.exposure_limits.max_category_exposure_usd = DecimalValue::new(dec!(4_500));
+    portfolio.exposure_limits.max_route_exposure_usd = DecimalValue::new(dec!(4_500));
+    portfolio.tail_risk.max_cvar_usd = DecimalValue::new(dec!(4_500));
+    portfolio.tail_risk.max_scenario_loss_usd = DecimalValue::new(dec!(4_500));
+    portfolio.tail_risk.max_drawdown_usd = DecimalValue::new(dec!(4_500));
+    for bucket in &mut portfolio.tail_risk.capital_time_buckets {
+        bucket.max_capital_usd = DecimalValue::new(dec!(4_500));
+    }
     config.profile_artifacts.research_method.research.training = e2e_research_training();
-    // Twelve decision groups provide enough independent replay samples for
-    // Platt calibration while still partitioning exactly into four CPCV/PBO
-    // blocks for the governed validation contract below.
+    // The integration boundary exercises the production CPCV methodology,
+    // including all 56 outer combinations and 21 reconstructed paths. A
+    // smaller N=4 fixture would validate a different estimator contract and
+    // can no longer stand in for governed persistence/idempotency evidence.
     config
         .profile_artifacts
         .research_method
         .research
         .validation
         .cpcv
-        .n_groups = 4;
+        .n_groups = 8;
     config
         .profile_artifacts
         .research_method
         .research
         .validation
         .cpcv
-        .k_test = 2;
+        .k_test = 3;
     config
         .profile_artifacts
         .research_method
@@ -770,7 +881,7 @@ fn e2e_runtime_config() -> DecisionPolicySnapshot {
         .research
         .validation
         .trials
-        .max_trials = 4;
+        .max_trials = 6;
     config
         .profile_artifacts
         .research_method
@@ -790,6 +901,29 @@ async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotI
         "integration test",
     )
     .await
+}
+
+async fn seed_evaluation_runtime_config(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    replay_data_cutoff: DateTime<Utc>,
+) -> DecisionPolicySnapshotId {
+    let mut config = e2e_runtime_config();
+    config.profile_artifacts.domain.definition = DomainConfig::default();
+    config
+        .profile_artifacts
+        .features
+        .definition
+        .enabled_feature_families
+        .push(FeatureFamily::Domain);
+    Box::pin(bootstrap_weather_evaluation_portfolio(
+        db,
+        store,
+        config,
+        replay_data_cutoff,
+    ))
+    .await
+    .expect("bootstrap governed Weather evaluation portfolio")
 }
 
 struct ModelSpecFixture;
@@ -823,14 +957,37 @@ impl ModelSpecFixture {
             .expect("persisted model spec")
     }
 
-    async fn weighted(db: &DatabaseConnection) -> ModelSpecInfo {
+    async fn weather_policy(
+        db: &DatabaseConnection,
+        store: &Arc<dyn ArtifactStore>,
+        policy_snapshot_id: DecisionPolicySnapshotId,
+        scope: &str,
+        training_window_start: DateTime<Utc>,
+    ) -> ModelSpecInfo {
+        let profile_ref = model_spec_fixtures::weather_profile_ref();
+        let profile = profile_ref
+            .resolve_builtin_research_profile()
+            .expect("Weather ResearchProfile");
+        let trade_policy = PublishedTradePolicyFixture::persist(
+            db,
+            store,
+            PublishedTradePolicyFixtureInput {
+                decision_policy_snapshot_id: policy_snapshot_id,
+                profile_ref,
+                scope,
+                training_window_start,
+            },
+        )
+        .await
+        .expect("persist Weather evaluation TradePolicy preimage");
         Self::persist(
             db,
-            "train-backtest-e2e",
+            scope,
             ModelFamily::WeightedFactor,
-            model_spec_fixtures::pooled_horizon_secs(),
+            i64::try_from(profile.spec.target_horizon_secs)
+                .expect("Weather profile horizon fits i64"),
             ModelInputContract::single_required("book.mid"),
-            ModelTrainingContract::settlement_default(),
+            trade_policy.outcome_training_contract(),
         )
         .await
     }
@@ -844,7 +1001,7 @@ async fn seed_catalog(db: &DatabaseConnection) {
             EVENT_ID,
             "Train/Backtest E2E",
             "train-backtest-e2e",
-            MarketCategory::Politics,
+            MarketCategory::Weather,
         ))
         .await
         .expect("seed event");
@@ -860,7 +1017,7 @@ async fn seed_catalog(db: &DatabaseConnection) {
                 EVENT_ID,
                 "Train/Backtest E2E?",
                 &format!("tb-{tick}-{i}"),
-                MarketCategory::Politics,
+                MarketCategory::Weather,
                 Some(end_date),
             );
             market.yes_token_id = token_id(tick, i);
@@ -902,13 +1059,17 @@ impl FactorPlaneFixture {
         plane
             .definitions()
             .iter()
-            .enumerate()
-            .map(|(index, revision)| {
+            .map(|revision| {
                 let definition = revision.definition();
-                let score = if index % 2 == 0 {
-                    strength
-                } else {
-                    Decimal::ONE - strength
+                let score = match definition.output {
+                    FactorOutputSemantics::OutcomeAlpha { .. } => strength,
+                    FactorOutputSemantics::Context {
+                        effect: FactorContextEffect::HigherIsSupportive,
+                    } => Decimal::ONE,
+                    FactorOutputSemantics::Context {
+                        effect: FactorContextEffect::LowerIsSupportive,
+                    } => Decimal::ZERO,
+                    FactorOutputSemantics::Diagnostic => dec!(0.5),
                 };
                 let direction = definition
                     .contribution_direction(score)
@@ -929,6 +1090,14 @@ impl FactorPlaneFixture {
                 }
             })
             .collect()
+    }
+
+    fn strength(values: &[FactorValue]) -> Decimal {
+        values
+            .iter()
+            .find(|value| value.name == MOMENTUM_ROC)
+            .and_then(|value| value.raw_value)
+            .expect("fixture row has the canonical momentum-ROC latent signal")
     }
 
     fn rebind(values: &[FactorValue], plane: &FactorServingPlane) -> Vec<FactorValue> {
@@ -994,6 +1163,8 @@ impl FactorPlaneFixture {
 struct TrainingDatasetSeed<'a> {
     model_spec: &'a ModelSpecInfo,
     policy_snapshot_id: DecisionPolicySnapshotId,
+    profile_ref: ResearchProfileRef,
+    evaluation_track: ResearchEvaluationTrack,
     label_name: LabelName,
     examples: Vec<TrainingExample>,
     purpose: DatasetPurpose,
@@ -1004,6 +1175,8 @@ struct TrainingDatasetSeed<'a> {
 struct DatasetBuildContext<'a> {
     model_spec: &'a ModelSpecInfo,
     policy_snapshot_id: DecisionPolicySnapshotId,
+    profile_ref: ResearchProfileRef,
+    evaluation_track: ResearchEvaluationTrack,
     examples: Vec<TrainingExample>,
     purpose: DatasetPurpose,
     scope: &'a str,
@@ -1024,6 +1197,8 @@ impl<'a> DatasetBuildContext<'a> {
         let TrainingDatasetSeed {
             model_spec,
             policy_snapshot_id,
+            profile_ref,
+            evaluation_track,
             label_name,
             mut examples,
             purpose,
@@ -1050,6 +1225,9 @@ impl<'a> DatasetBuildContext<'a> {
             .expect("load dataset policy snapshot")
             .expect("dataset policy snapshot");
         let runtime = &policy.snapshot;
+        let profile = profile_ref
+            .resolve_builtin_research_profile()
+            .expect("Dataset ResearchProfile");
         let feature_schema = FeatureSchema::build(&runtime.profile_artifacts.features.definition)
             .expect("feature schema");
         let feature_schema_hash =
@@ -1057,10 +1235,11 @@ impl<'a> DatasetBuildContext<'a> {
         let canonical_plane = if model_family.is_classical() {
             FactorServingPlane::try_empty().expect("canonical factor-free plane")
         } else {
-            FactorEngine::new(
+            FactorEngine::for_model_scope(
                 &runtime.profile_artifacts.scoring.definition,
                 &runtime.profile_artifacts.features.definition,
                 &runtime.profile_artifacts.domain.definition,
+                profile.spec.category,
                 None,
             )
             .serving_plane()
@@ -1077,8 +1256,14 @@ impl<'a> DatasetBuildContext<'a> {
             );
         } else {
             for example in &mut examples {
-                example.factor_values =
-                    FactorPlaneFixture::rebind(&example.factor_values, &factor_serving_plane);
+                if profile.spec.category.is_some() {
+                    let strength = FactorPlaneFixture::strength(&example.factor_values);
+                    example.factor_values =
+                        FactorPlaneFixture::values(&factor_serving_plane, strength);
+                } else {
+                    example.factor_values =
+                        FactorPlaneFixture::rebind(&example.factor_values, &factor_serving_plane);
+                }
             }
         }
         let mut sample_sources = Vec::new();
@@ -1093,7 +1278,7 @@ impl<'a> DatasetBuildContext<'a> {
             sample_sources.as_slice(),
             model_spec
                 .training_contract
-                .trade_policy_artifact_id
+                .evaluation_trade_policy_artifact_id
                 .is_some(),
         );
         assert!(
@@ -1116,7 +1301,10 @@ impl<'a> DatasetBuildContext<'a> {
             &examples,
         )
         .expect("semantic dataset hash");
-        let trade_policy = match model_spec.training_contract.trade_policy_artifact_id {
+        let trade_policy = match model_spec
+            .training_contract
+            .evaluation_trade_policy_artifact_id
+        {
             Some(artifact_id) => {
                 let policy = PgTradePolicyRepository::new(db.clone())
                     .find(&artifact_id)
@@ -1134,6 +1322,8 @@ impl<'a> DatasetBuildContext<'a> {
         Self {
             model_spec,
             policy_snapshot_id,
+            profile_ref,
+            evaluation_track,
             examples,
             purpose,
             scope,
@@ -1155,11 +1345,10 @@ impl<'a> DatasetBuildContext<'a> {
         db: &DatabaseConnection,
         store: &Arc<dyn ArtifactStore>,
     ) -> DatasetSourceLineage {
-        let profile = builtin_research_profiles()
-            .expect("built-in research profiles")
-            .into_iter()
-            .find(|profile| profile.profile_ref.id.as_str() == POOLED_1H_CONTROL_PROFILE_ID)
-            .expect("pooled research profile");
+        let profile = self
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .expect("resolve Dataset ResearchProfile");
         let source_window_end = self
             .window_end
             .checked_add_signed(ChronoDuration::seconds(
@@ -1180,7 +1369,7 @@ impl<'a> DatasetBuildContext<'a> {
             &self.examples,
             ReplayableSourceSliceFixture {
                 profile_ref: profile_ref.clone(),
-                evaluation_track: ResearchEvaluationTrack::ResearchOnly,
+                evaluation_track: self.evaluation_track,
                 research_program_hash,
                 decision_policy_snapshot_id: self.policy_snapshot_id,
                 runtime_config_hash: self.runtime_config_hash,
@@ -1535,6 +1724,31 @@ async fn assert_artifact_pooled_scope(store: &Arc<dyn ArtifactStore>, version: &
     );
 }
 
+async fn assert_artifact_weather_scope(store: &Arc<dyn ArtifactStore>, version: &ModelVersionInfo) {
+    let bytes = store
+        .get_by_key(&ModelArtifact::artifact_key(&version.artifact_hash).expect("key"))
+        .await
+        .expect("artifact bytes");
+    let artifact = ModelArtifact::from_bytes(&bytes).expect("decode");
+    assert_eq!(
+        artifact.content_hash().expect("hash"),
+        version.artifact_hash,
+        "Weather artifact must retain its exact content commitment"
+    );
+    let bindings = artifact.header().serving_contract().bindings();
+    let expected_profile = model_spec_fixtures::weather_profile_ref();
+    assert_eq!(
+        bindings.model.category_scope,
+        Some(MarketCategory::Weather),
+        "economic evaluation must use an executable Route-owned model"
+    );
+    assert_eq!(bindings.model.profile_ref, expected_profile);
+    assert!(
+        bindings.trade_policy.is_some(),
+        "economic evaluation model must bind its immutable TradePolicy"
+    );
+}
+
 struct TrainerFixture;
 
 struct TrainerPreimageFixture;
@@ -1635,6 +1849,8 @@ struct PolicyTrainingFixture {
     policy: PublishedTradePolicyFixture,
     model_spec: ModelSpecInfo,
     dataset_id: TrainingDatasetId,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
     tamper_uri: ArtifactUri,
 }
 
@@ -1667,7 +1883,7 @@ impl TrainerContractMatrix {
             ModelFamily::WeightedFactor,
             model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
-            ModelTrainingContract::settlement_default(),
+            ModelTrainingContract::outcome_default(),
         )
         .await;
         let weighted_dataset = SeededDataset::persist(
@@ -1676,6 +1892,8 @@ impl TrainerContractMatrix {
             TrainingDatasetSeed {
                 model_spec: &weighted_spec,
                 policy_snapshot_id,
+                profile_ref: model_spec_fixtures::pooled_profile_ref(),
+                evaluation_track: ResearchEvaluationTrack::ResearchOnly,
                 label_name: settlement(),
                 examples: examples(),
                 purpose: DatasetPurpose::Training,
@@ -1724,6 +1942,7 @@ impl TrainerContractMatrix {
         Box::pin(self.verify_classical_contracts()).await;
         let policy = Box::pin(self.policy_training_fixture()).await;
         Box::pin(self.verify_policy_training(&policy)).await;
+        Box::pin(self.verify_policy_routing_rebind(&policy)).await;
         Box::pin(self.reject_policy_tamper(&policy)).await;
         Box::pin(self.reject_policy_profile_drift(&policy)).await;
     }
@@ -1820,9 +2039,9 @@ impl TrainerContractMatrix {
             matches!(
                 &error,
                 QuantError::Research(ResearchError::InvalidModelArtifact { detail })
-                    if detail.contains("model-spec definition mismatch")
+                    if detail.contains("cannot emit a calibrated outcome-payout forecast")
             ),
-            "family tamper must fail at the sealed model-spec definition, got {error}"
+            "family tamper must fail at the typed training-target contract, got {error}"
         );
         self.assert_rejected_state().await;
     }
@@ -1834,6 +2053,8 @@ impl TrainerContractMatrix {
             TrainingDatasetSeed {
                 model_spec: &self.weighted_spec,
                 policy_snapshot_id: self.policy_snapshot_id,
+                profile_ref: model_spec_fixtures::pooled_profile_ref(),
+                evaluation_track: ResearchEvaluationTrack::ResearchOnly,
                 label_name: settlement(),
                 examples: examples(),
                 purpose: DatasetPurpose::Training,
@@ -1888,20 +2109,23 @@ impl TrainerContractMatrix {
             .single()
             .expect("millisecond-aligned policy training window");
         let window_start = window_end - ChronoDuration::days(180);
-        let policy = PublishedTradePolicyFixture::persist(
-            &self.db,
-            &self.store,
-            weather_policy_snapshot_id,
-            "trainer-policy-bound",
-            window_start,
-        )
-        .await
-        .expect("persist complete trainer TradePolicy preimage");
         let profile = builtin_research_profiles()
             .expect("built-in ResearchProfiles")
             .into_iter()
             .find(|profile| profile.spec.category == Some(MarketCategory::Weather))
             .expect("Weather ResearchProfile");
+        let policy = PublishedTradePolicyFixture::persist(
+            &self.db,
+            &self.store,
+            PublishedTradePolicyFixtureInput {
+                decision_policy_snapshot_id: weather_policy_snapshot_id,
+                profile_ref: profile.profile_ref.clone(),
+                scope: "trainer-policy-bound",
+                training_window_start: window_start,
+            },
+        )
+        .await
+        .expect("persist complete trainer TradePolicy preimage");
         let policy_snapshot = PgPolicyRepository::new(self.db.clone())
             .load_snapshot(&weather_policy_snapshot_id)
             .await
@@ -1940,7 +2164,7 @@ impl TrainerContractMatrix {
             i64::try_from(profile.spec.target_horizon_secs)
                 .expect("Weather profile horizon fits i64"),
             ModelInputContract::single_required("book.mid"),
-            policy.target_training_contract(),
+            policy.outcome_training_contract(),
         )
         .await;
         let provenance = policy.provenance();
@@ -2004,6 +2228,8 @@ impl TrainerContractMatrix {
             policy,
             model_spec,
             dataset_id: dataset.training_dataset_id,
+            window_start,
+            window_end,
             tamper_uri,
         }
     }
@@ -2068,6 +2294,132 @@ impl TrainerContractMatrix {
         assert_eq!(
             verified.training_dataset().training_dataset_id,
             fixture.dataset_id
+        );
+    }
+
+    async fn verify_policy_routing_rebind(&self, fixture: &PolicyTrainingFixture) {
+        let rebound_policy_snapshot_id = activate_policy_bundle(
+            &PgPolicyRepository::new(self.db.clone()),
+            ConfigResourceKind::ModelRouting,
+            "trainer-policy-routing-rebind",
+            "bind the same immutable TradePolicy into a later compatible training context",
+            |snapshot| {
+                snapshot.model_routing.model.shadow_diff_threshold = DecimalValue::new(dec!(0.125));
+            },
+        )
+        .await;
+        assert_ne!(
+            rebound_policy_snapshot_id, fixture.policy_snapshot_id,
+            "the compatibility test must cross an actual policy snapshot boundary"
+        );
+        let provenance = fixture.policy.provenance();
+        let policy_artifact = PgTradePolicyRepository::new(self.db.clone())
+            .find(&provenance.artifact_id)
+            .await
+            .expect("load routing-rebound TradePolicy")
+            .expect("routing-rebound TradePolicy");
+        let fit = &policy_artifact.payload_json.fit_contract;
+        assert_eq!(
+            fit.decision_policy_snapshot_id, fixture.policy_snapshot_id,
+            "the immutable TradePolicy must retain its own fit snapshot"
+        );
+
+        let rebound_policy = PgPolicyRepository::new(self.db.clone())
+            .load_snapshot(&rebound_policy_snapshot_id)
+            .await
+            .expect("load rebound policy snapshot")
+            .expect("rebound policy snapshot");
+        let profile = fit
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .expect("resolve rebound ResearchProfile");
+        let feature_schema = FeatureSchema::build(
+            &rebound_policy
+                .snapshot
+                .profile_artifacts
+                .features
+                .definition,
+        )
+        .expect("rebound feature schema");
+        let factor_plane = FactorEngine::for_model_scope(
+            &rebound_policy.snapshot.profile_artifacts.scoring.definition,
+            &rebound_policy
+                .snapshot
+                .profile_artifacts
+                .features
+                .definition,
+            &rebound_policy.snapshot.profile_artifacts.domain.definition,
+            profile.spec.category,
+            None,
+        )
+        .serving_plane()
+        .expect("rebound factor plane")
+        .clone();
+        let dataset = ModelDatasetLedgerFixture::persist(
+            &self.db,
+            &self.store,
+            ModelDatasetLedgerSeed {
+                scope: "trainer-policy-routing-rebind".to_owned(),
+                model_spec_id: fixture.model_spec.model_spec_id,
+                model_family: fixture.model_spec.model_family,
+                model_spec_definition_hash: fixture.model_spec.definition_hash,
+                factor_serving_plane: factor_plane,
+                feature_schema_version: feature_schema.version(),
+                feature_schema_hash: ResearchHasher::feature_schema(&feature_schema)
+                    .expect("rebound feature schema hash"),
+                decision_policy_snapshot_id: rebound_policy_snapshot_id,
+                profile_ref: profile.profile_ref,
+                prediction_horizon_secs: profile.spec.target_horizon_secs,
+                purpose: DatasetPurpose::Training,
+                window_start: fixture.window_start,
+                window_end: fixture.window_end,
+                research_program_hash: ResearchHasher::canonical(
+                    &"trainer-policy-routing-rebind-program-v1",
+                )
+                .expect("rebound training program hash"),
+                sample_count: 500,
+                decision_interval_secs: 604_800,
+                trade_policy: Some(ModelServingTradePolicyBinding {
+                    artifact_id: provenance.artifact_id,
+                    content_hash: provenance.artifact_hash,
+                }),
+            },
+        )
+        .await
+        .expect("persist routing-rebound Training Dataset");
+        let factor_repo = Arc::clone(&self.factor_repo);
+        let factor_repo: Arc<dyn FactorRepository> = factor_repo;
+        let trainer = TrainerFixture::build(
+            &self.db,
+            Arc::clone(&self.store),
+            Arc::clone(&self.registry),
+            factor_repo,
+            rebound_policy_snapshot_id,
+        )
+        .await;
+        let outcome = Box::pin(trainer.train(
+            TrainInputFixture::for_dataset(&fixture.model_spec, dataset.training_dataset_id),
+            &NoopProgressSink,
+            &CancellationToken::new(),
+        ))
+        .await
+        .expect("train with a cross-snapshot compatible TradePolicy binding");
+        let bindings = outcome
+            .version
+            .verified_serving_contract()
+            .expect("routing-rebound serving contract")
+            .bindings();
+        assert_eq!(
+            bindings.policy_snapshot.decision_policy_snapshot_id,
+            rebound_policy_snapshot_id
+        );
+        assert_eq!(
+            bindings
+                .trade_policy
+                .as_ref()
+                .expect("routing-rebound TradePolicy binding")
+                .artifact_id,
+            provenance.artifact_id
         );
     }
 
@@ -2145,7 +2497,7 @@ impl TrainerContractMatrix {
             ModelFamily::WeightedFactor,
             model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
-            fixture.policy.target_training_contract(),
+            fixture.policy.outcome_training_contract(),
         )
         .await;
         let dataset = SeededDataset::persist(
@@ -2154,6 +2506,8 @@ impl TrainerContractMatrix {
             TrainingDatasetSeed {
                 model_spec: &spec,
                 policy_snapshot_id: self.policy_snapshot_id,
+                profile_ref: model_spec_fixtures::pooled_profile_ref(),
+                evaluation_track: ResearchEvaluationTrack::ResearchOnly,
                 label_name: label.label_name.clone(),
                 examples: label.relabel(examples()),
                 purpose: DatasetPurpose::Training,
@@ -2233,6 +2587,7 @@ impl TrainerContractMatrix {
         .expect("first weighted training");
         assert_eq!(first.version.model_version_id, model_version_id);
         assert_eq!(first.model_run_id, model_run_id);
+        assert_artifact_pooled_scope(&self.store, &first.version).await;
         let plane_size = self
             .weighted_dataset
             .factor_serving_plane
@@ -2276,10 +2631,9 @@ impl TrainerContractMatrix {
 
     async fn verify_sell_contract(&self, plane_size: usize) {
         let training_contract = ModelTrainingContract {
-            target_label_name: HOLD_VS_EXIT_ALPHA_BPS.to_string(),
-            target_label_horizon_secs: 0,
+            target: ModelTrainingTarget::HoldVsExitAlpha,
             validation_folds: 3,
-            trade_policy_artifact_id: None,
+            evaluation_trade_policy_artifact_id: None,
         };
         let spec = ModelSpecFixture::persist(
             &self.db,
@@ -2296,6 +2650,8 @@ impl TrainerContractMatrix {
             TrainingDatasetSeed {
                 model_spec: &spec,
                 policy_snapshot_id: self.policy_snapshot_id,
+                profile_ref: model_spec_fixtures::pooled_profile_ref(),
+                evaluation_track: ResearchEvaluationTrack::ResearchOnly,
                 label_name: HOLD_VS_EXIT_ALPHA_BPS,
                 examples: exit_examples(),
                 purpose: DatasetPurpose::Training,
@@ -2410,10 +2766,15 @@ impl TrainerContractMatrix {
             } = ClassicalDatasetFixture::for_family(family);
             let input_contract = ModelInputContract::single_required("book.visible_liquidity_usd");
             let training_contract = ModelTrainingContract {
-                target_label_name: label_name.to_string(),
-                target_label_horizon_secs: label_horizon_secs,
+                target: if label_horizon_secs == 0 {
+                    ModelTrainingTarget::OutcomePayout
+                } else {
+                    ModelTrainingTarget::ForwardReturn {
+                        horizon_secs: label_horizon_secs,
+                    }
+                },
                 validation_folds: 3,
-                trade_policy_artifact_id: None,
+                evaluation_trade_policy_artifact_id: None,
             };
             let spec = ModelSpecFixture::persist(
                 &self.db,
@@ -2430,6 +2791,8 @@ impl TrainerContractMatrix {
                 TrainingDatasetSeed {
                     model_spec: &spec,
                     policy_snapshot_id: self.policy_snapshot_id,
+                    profile_ref: model_spec_fixtures::pooled_profile_ref(),
+                    evaluation_track: ResearchEvaluationTrack::ResearchOnly,
                     label_name,
                     examples: rows,
                     purpose: DatasetPurpose::Training,
@@ -3041,8 +3404,26 @@ async fn prepare_training_scenario(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
 ) -> TrainingBacktestScenario {
-    let policy_snapshot_id = seed_runtime_config(db).await;
-    let model_spec = ModelSpecFixture::weighted(db).await;
+    let policy_snapshot_id = Box::pin(seed_evaluation_runtime_config(
+        db,
+        store,
+        as_of_for(0) + ChronoDuration::days(30),
+    ))
+    .await;
+    let profile_ref = model_spec_fixtures::weather_profile_ref();
+    let evaluation_track = profile_ref
+        .resolve_builtin_research_profile()
+        .expect("Weather ResearchProfile")
+        .spec
+        .activation_eligibility;
+    let model_spec = ModelSpecFixture::weather_policy(
+        db,
+        store,
+        policy_snapshot_id,
+        "train-backtest-weather",
+        as_of_for(0),
+    )
+    .await;
     seed_catalog(db).await;
     let training_dataset = SeededDataset::persist(
         db,
@@ -3050,8 +3431,10 @@ async fn prepare_training_scenario(
         TrainingDatasetSeed {
             model_spec: &model_spec,
             policy_snapshot_id,
+            profile_ref: profile_ref.clone(),
+            evaluation_track,
             label_name: settlement(),
-            examples: examples(),
+            examples: weather_policy_examples(examples()),
             purpose: DatasetPurpose::Training,
             scope: "train-backtest-training",
             factor_serving_plane: None,
@@ -3064,8 +3447,10 @@ async fn prepare_training_scenario(
         TrainingDatasetSeed {
             model_spec: &model_spec,
             policy_snapshot_id,
+            profile_ref: profile_ref.clone(),
+            evaluation_track,
             label_name: settlement(),
-            examples: evaluation_examples(),
+            examples: weather_evaluation_examples(),
             purpose: DatasetPurpose::Evaluation,
             scope: "train-backtest-evaluation",
             factor_serving_plane: None,
@@ -3078,8 +3463,10 @@ async fn prepare_training_scenario(
         TrainingDatasetSeed {
             model_spec: &model_spec,
             policy_snapshot_id,
+            profile_ref,
+            evaluation_track,
             label_name: settlement(),
-            examples: calibration_examples(),
+            examples: weather_calibration_examples(),
             purpose: DatasetPurpose::Calibration,
             scope: "train-backtest-calibration",
             factor_serving_plane: None,
@@ -3109,7 +3496,7 @@ async fn prepare_training_scenario(
         Some(&training_dataset.id)
     );
     WeightedVersionContract { version: &version }.assert_metrics();
-    assert_artifact_pooled_scope(store, &version).await;
+    assert_artifact_weather_scope(store, &version).await;
     assert_training_run_ledger(db, &version, training_dataset.hash).await;
 
     TrainingBacktestScenario {
@@ -3130,6 +3517,7 @@ struct BacktestScenarioServices {
     backtest_port: Arc<CoreBacktestPort>,
     calibration_fitter: ModelCalibrationFitService,
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
+    model_governance: Arc<dyn ModelGovernancePort>,
     policy_hash: ContentHash,
 }
 
@@ -3162,9 +3550,46 @@ async fn build_backtest_services(
         .await
         .expect("load backtest policy")
         .expect("backtest policy");
+    let active_bundle = policy_repo
+        .load_current_bundle()
+        .await
+        .expect("load active backtest policy bundle")
+        .expect("active backtest policy bundle");
+    assert_eq!(
+        active_bundle.decision_policy_snapshot_id, scenario.policy_snapshot_id,
+        "backtest services must freeze the exact active policy bundle"
+    );
+    let frozen_model_parity = Arc::new(FrozenModelParityService::new(FrozenModelParityDeps {
+        dataset_repo: Arc::clone(&dataset_repo),
+        model_registry_repo: Arc::clone(&scenario.registry),
+        parity_repo: Arc::new(PgFeatureParityRepository::new(db.clone())),
+        artifact_store: Arc::clone(store),
+        evidence_writer: Arc::new(DiscardFactWriter::new()),
+    }));
+    let calibration_loader: Arc<dyn CalibrationArtifactLoader> = Arc::new(
+        CoreCalibrationArtifactLoader::new(Arc::clone(&calibration_repo)),
+    );
+    let gate: Arc<dyn ModelQualityGate> = Arc::new(DefaultModelQualityGate::new());
+    let model_governance: Arc<dyn ModelGovernancePort> =
+        Arc::new(ModelGovernanceService::new(ModelGovernanceDeps {
+            model_registry_repo: Arc::clone(&scenario.registry),
+            backtest_report_repo: Arc::clone(&backtest_report_repo),
+            backtest_path_set_repo: Arc::new(PgBacktestPathSetRepository::new(db.clone())),
+            shadow_comparison_repo: Arc::new(PgShadowComparisonRepository::new(db.clone())),
+            governance_audit_repo: Arc::new(PgModelGovernanceAuditRepository::new(db.clone())),
+            dataset_repo: Arc::clone(&dataset_repo),
+            serving_preimages: Arc::clone(&serving_preimages),
+            artifact_store: Arc::clone(store),
+            calibration_repo: Arc::clone(&calibration_repo),
+            calibration_loader,
+            gate,
+            runtime_config: Arc::new(DecisionPolicyStore::new_active(active_bundle)),
+            frozen_model_parity,
+        }));
     let backtester = BacktestService::new(
         BacktestServiceDeps {
             compute: Arc::clone(&compute),
+            portfolio_solver: PortfolioSolverDeployConfig::default(),
             dataset_repo: Arc::clone(&dataset_repo),
             artifact_store: Arc::clone(store),
             model_registry_repo: Arc::clone(&scenario.registry),
@@ -3178,6 +3603,7 @@ async fn build_backtest_services(
     .expect("backtest service");
     let backtest_port = Arc::new(CoreBacktestPort::new(CoreBacktestPortDeps {
         compute,
+        portfolio_solver: PortfolioSolverDeployConfig::default(),
         dataset_repo: Arc::clone(&dataset_repo),
         artifact_store: Arc::clone(store),
         model_registry_repo: Arc::clone(&scenario.registry),
@@ -3200,6 +3626,7 @@ async fn build_backtest_services(
         backtest_port,
         calibration_fitter,
         calibration_repo,
+        model_governance,
         policy_hash: policy.snapshot_hash,
     }
 }
@@ -3232,14 +3659,30 @@ async fn train_comparison_candidate(
     .version
 }
 
+#[derive(Clone, Copy)]
+struct ComparisonReplayScope {
+    evaluation_dataset_id: TrainingDatasetId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+}
+
+impl From<&TrainingBacktestScenario> for ComparisonReplayScope {
+    fn from(scenario: &TrainingBacktestScenario) -> Self {
+        Self {
+            evaluation_dataset_id: scenario.evaluation_dataset_id,
+            decision_policy_snapshot_id: scenario.policy_snapshot_id,
+        }
+    }
+}
+
 async fn comparison_replay_fixture(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
-    scenario: &TrainingBacktestScenario,
+    scope: ComparisonReplayScope,
+    champion: &ModelVersionInfo,
     candidate: &ModelVersionInfo,
 ) -> (FeedbackComparisonJobParams, Vec<ArtifactUri>) {
     let dataset = PgTrainingDatasetRepository::new(db.clone())
-        .find_by_id(&scenario.evaluation_dataset_id)
+        .find_by_id(&scope.evaluation_dataset_id)
         .await
         .expect("load comparison Evaluation Dataset")
         .expect("comparison Evaluation Dataset");
@@ -3312,8 +3755,8 @@ async fn comparison_replay_fixture(
         evaluation_window_start: dataset.window_start,
         evaluation_window_end: dataset.window_end,
         label_cutoff: dataset.pit_cutoff,
-        champion_model_version_id: scenario.version.model_version_id,
-        champion_serving_contract_hash: scenario.version.serving_contract_hash,
+        champion_model_version_id: champion.model_version_id,
+        champion_serving_contract_hash: champion.serving_contract_hash,
         candidate_family_hash,
         comparison_contract_hash: comparison_contract.comparison_contract_hash(),
         semantic_use_hash,
@@ -3353,20 +3796,182 @@ async fn comparison_replay_fixture(
         validation,
         evaluation_use,
         comparison_contract,
-        decision_policy_snapshot_id: scenario.policy_snapshot_id,
-        champion_model_version_id: scenario.version.model_version_id,
-        champion_serving_contract_hash: scenario.version.serving_contract_hash,
+        decision_policy_snapshot_id: scope.decision_policy_snapshot_id,
+        champion_model_version_id: champion.model_version_id,
+        champion_serving_contract_hash: champion.serving_contract_hash,
         candidates: vec![candidate_ref],
     })
     .expect("freeze comparison replay params");
     (params, read_targets)
 }
 
-async fn assert_calibration_persisted(
+async fn assert_decision_policy_replay(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    services: &BacktestScenarioServices,
+    scenario: &TrainingBacktestScenario,
+    champion: &ModelVersionInfo,
+    candidate: &ModelVersionInfo,
+) {
+    let decision_policy_snapshot_id = activate_policy_bundle(
+        &PgPolicyRepository::new(db.clone()),
+        ConfigResourceKind::OperationsPolicy,
+        "feedback-comparison-decision-policy",
+        "prove build-time model policy and decision-time Evaluation policy remain distinct",
+        |snapshot| {
+            snapshot.operations_policy.outcome_reconciliation.sweep_secs = snapshot
+                .operations_policy
+                .outcome_reconciliation
+                .sweep_secs
+                .checked_add(1)
+                .expect("decision-policy sweep interval successor");
+        },
+    )
+    .await;
+    assert_ne!(
+        decision_policy_snapshot_id, scenario.policy_snapshot_id,
+        "regression requires distinct model-build and Evaluation policy identities"
+    );
+    let profile_ref = model_spec_fixtures::weather_profile_ref();
+    let evaluation_track = profile_ref
+        .resolve_builtin_research_profile()
+        .expect("Weather ResearchProfile")
+        .spec
+        .activation_eligibility;
+    let evaluation = SeededDataset::persist(
+        db,
+        store,
+        TrainingDatasetSeed {
+            model_spec: &scenario.model_spec,
+            policy_snapshot_id: decision_policy_snapshot_id,
+            profile_ref,
+            evaluation_track,
+            label_name: settlement(),
+            examples: shift_examples(weather_evaluation_examples(), ChronoDuration::days(1)),
+            purpose: DatasetPurpose::Evaluation,
+            scope: "feedback-comparison-decision-policy",
+            factor_serving_plane: None,
+        },
+    )
+    .await;
+    let (params, _) = comparison_replay_fixture(
+        db,
+        store,
+        ComparisonReplayScope {
+            evaluation_dataset_id: evaluation.id,
+            decision_policy_snapshot_id,
+        },
+        champion,
+        candidate,
+    )
+    .await;
+    let decision_backtester = services
+        .backtest_port
+        .backtest_service_for(&decision_policy_snapshot_id)
+        .await
+        .expect("build decision-time Comparison backtester");
+    let replay = Box::pin(decision_backtester.replay_feedback_family(
+        &params,
+        Arc::new(NoopProgressSink),
+        CancellationToken::new(),
+    ))
+    .await
+    .expect("replay frozen models against a compatible decision-time Evaluation policy");
+    assert_eq!(replay.champion.model_version_id, champion.model_version_id);
+    assert_eq!(replay.candidates.len(), 1);
+    assert_eq!(
+        replay.candidates[0].model_version_id,
+        candidate.model_version_id
+    );
+}
+
+fn assert_calibration_contract(
+    payload: &ModelScoreCalibrationPayload,
+    calibration_info: &TrainingDatasetInfo,
+    scenario: &TrainingBacktestScenario,
+    source: &ModelVersionInfo,
+    policy_hash: ContentHash,
+) {
+    payload
+        .validate_contract()
+        .expect("persisted calibration payload contract");
+    let fit = &payload.fit_contract;
+    assert_eq!(fit.model.model_version_id, source.model_version_id);
+    assert_eq!(fit.model.artifact_hash, source.artifact_hash);
+    assert_eq!(
+        fit.model.serving_contract_hash,
+        source.serving_contract_hash
+    );
+    assert_eq!(fit.model.model_spec_id, scenario.model_spec.model_spec_id);
+    assert_eq!(
+        fit.model.model_spec_definition_hash,
+        scenario.model_spec.definition_hash
+    );
+    assert_eq!(fit.model.training_dataset_id, scenario.training_dataset_id);
+    assert_eq!(
+        fit.model.training_dataset_hash,
+        scenario.training_dataset_hash
+    );
+    assert_eq!(
+        fit.calibration_dataset.calibration_dataset_id,
+        scenario.calibration_dataset_id
+    );
+    assert_eq!(
+        fit.calibration_dataset.dataset_hash,
+        scenario.calibration_dataset_hash
+    );
+    assert_eq!(
+        Some(fit.calibration_dataset.manifest_hash),
+        calibration_info.manifest_hash
+    );
+    assert_eq!(
+        Some(fit.calibration_dataset.artifact_bytes_hash),
+        calibration_info.artifact_bytes_hash
+    );
+    assert_eq!(
+        fit.calibration_dataset.source_slice_manifest_hash,
+        calibration_info.source_lineage.source_slice.manifest_hash
+    );
+    assert_eq!(
+        fit.calibration_dataset.feature_schema_hash,
+        calibration_info.feature_schema_hash
+    );
+    assert_eq!(
+        fit.calibration_dataset.factor_schema_hash,
+        calibration_info.factor_schema_hash
+    );
+    assert_eq!(
+        Some(fit.calibration_dataset.label_schema_hash),
+        calibration_info.label_schema_hash
+    );
+    assert_eq!(
+        fit.policy_snapshot.decision_policy_snapshot_id,
+        scenario.policy_snapshot_id
+    );
+    assert_eq!(fit.policy_snapshot.snapshot_hash, policy_hash);
+    fit.validate().expect("calibration fit contract");
+}
+
+async fn fit_and_seal_calibration(
     db: &DatabaseConnection,
     scenario: &TrainingBacktestScenario,
     services: &BacktestScenarioServices,
-) {
+    source: &ModelVersionInfo,
+) -> ModelVersionInfo {
+    let frozen_policy = PgPolicyRepository::new(db.clone())
+        .load_snapshot(&scenario.policy_snapshot_id)
+        .await
+        .expect("load calibration policy snapshot")
+        .expect("calibration policy snapshot");
+    assert!(
+        frozen_policy
+            .snapshot
+            .model_routing
+            .model
+            .route_for_champion(source.model_version_id)
+            .is_err(),
+        "regression requires a pre-promotion challenger, not an active Route champion"
+    );
     let calibration_info = PgTrainingDatasetRepository::new(db.clone())
         .find_by_id(&scenario.calibration_dataset_id)
         .await
@@ -3375,7 +3980,7 @@ async fn assert_calibration_persisted(
     let fit_params = ModelCalibrationFitJobParams {
         model_run_id: ModelRunId::from_v7(),
         request: FitModelCalibratorRequest {
-            model_version_id: scenario.version.model_version_id,
+            model_version_id: source.model_version_id,
             calibration_dataset_id: scenario.calibration_dataset_id,
             method: CalibrationMethod::Platt,
             reason: "persist an exact-preimage model calibrator".to_owned(),
@@ -3453,68 +4058,66 @@ async fn assert_calibration_persisted(
     let CalibrationArtifactPayload::ModelScore(payload) = &calibration_artifact.payload else {
         panic!("model-score fitter persisted a non-model-score payload");
     };
-    let payload = payload.as_ref();
-    payload
-        .validate_contract()
-        .expect("persisted calibration payload contract");
-    let fit = &payload.fit_contract;
-    assert_eq!(
-        fit.model.model_version_id,
-        scenario.version.model_version_id
+    assert_calibration_contract(
+        payload,
+        &calibration_info,
+        scenario,
+        source,
+        services.policy_hash,
     );
-    assert_eq!(fit.model.artifact_hash, scenario.version.artifact_hash);
-    assert_eq!(
-        fit.model.serving_contract_hash,
-        scenario.version.serving_contract_hash
-    );
-    assert_eq!(fit.model.model_spec_id, scenario.model_spec.model_spec_id);
-    assert_eq!(
-        fit.model.model_spec_definition_hash,
-        scenario.model_spec.definition_hash
-    );
-    assert_eq!(fit.model.training_dataset_id, scenario.training_dataset_id);
-    assert_eq!(
-        fit.model.training_dataset_hash,
-        scenario.training_dataset_hash
-    );
-    assert_eq!(
-        fit.calibration_dataset.calibration_dataset_id,
-        scenario.calibration_dataset_id
+    CalibrationSignalEvidence(payload).assert_admission();
+    let calibrated = services
+        .model_governance
+        .seal_calibrated_model(
+            &source.model_version_id,
+            CalibratedModelSealCommand {
+                calibrator_ref: calibration_artifact_id,
+                downside_source: DownsideSource::MfeMae,
+                reason: "seal exact held-out probability calibration".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await
+        .expect("seal calibrated challenger model");
+    assert_ne!(
+        calibrated.model_version_id, source.model_version_id,
+        "calibration must derive a new immutable model version"
     );
     assert_eq!(
-        fit.calibration_dataset.dataset_hash,
-        scenario.calibration_dataset_hash
+        calibrated
+            .verified_serving_contract()
+            .expect("calibrated serving contract")
+            .bindings()
+            .model
+            .calibration
+            .as_ref()
+            .expect("sealed model calibration binding")
+            .artifact_id,
+        calibration_artifact_id
     );
-    assert_eq!(
-        Some(fit.calibration_dataset.manifest_hash),
-        calibration_info.manifest_hash
-    );
-    assert_eq!(
-        Some(fit.calibration_dataset.artifact_bytes_hash),
-        calibration_info.artifact_bytes_hash
-    );
-    assert_eq!(
-        fit.calibration_dataset.source_slice_manifest_hash,
-        calibration_info.source_lineage.source_slice.manifest_hash
-    );
-    assert_eq!(
-        fit.calibration_dataset.feature_schema_hash,
-        calibration_info.feature_schema_hash
-    );
-    assert_eq!(
-        fit.calibration_dataset.factor_schema_hash,
-        calibration_info.factor_schema_hash
-    );
-    assert_eq!(
-        Some(fit.calibration_dataset.label_schema_hash),
-        calibration_info.label_schema_hash
-    );
-    assert_eq!(
-        fit.policy_snapshot.decision_policy_snapshot_id,
-        scenario.policy_snapshot_id
-    );
-    assert_eq!(fit.policy_snapshot.snapshot_hash, services.policy_hash);
-    fit.validate().expect("calibration fit contract");
+    calibrated
+}
+
+struct CalibrationSignalEvidence<'a>(&'a ModelScoreCalibrationPayload);
+
+impl CalibrationSignalEvidence<'_> {
+    fn assert_admission(&self) {
+        let strongest_bin = self
+            .0
+            .reliability
+            .bins
+            .iter()
+            .max_by_key(|bin| bin.mean_predicted)
+            .expect("calibration reliability has an occupied bin");
+        assert!(
+            strongest_bin.wilson_ci.0.inner() > dec!(0.52),
+            "independent calibration evidence has no high-score stratum whose conservative win-rate bound clears portfolio admission: {strongest_bin:#?}"
+        );
+        assert!(
+            strongest_bin.empirical_frequency.inner() > dec!(0.60),
+            "independent calibration high-score stratum is not economically informative: {strongest_bin:#?}"
+        );
+    }
 }
 
 pub async fn train_backtest_evaluation_e2e() {
@@ -3526,11 +4129,18 @@ pub async fn train_backtest_evaluation_e2e() {
 
     let scenario = Box::pin(prepare_training_scenario(&db, &store)).await;
     let services = build_backtest_services(&db, &store, &scenario).await;
+    let calibrated_version =
+        fit_and_seal_calibration(&db, &scenario, &services, &scenario.version).await;
+    let next_before_backtest = scenario
+        .registry
+        .next_version_for_spec(&scenario.model_spec.model_spec_id)
+        .await
+        .expect("next version before Evaluation backtest");
 
     assert_policy_rejected(
         &db,
         &services.backtester,
-        &scenario.version,
+        &calibrated_version,
         scenario.evaluation_dataset_id,
     )
     .await;
@@ -3539,7 +4149,7 @@ pub async fn train_backtest_evaluation_e2e() {
         .backtester
         .run(
             BacktestInput {
-                model_version_id: scenario.version.model_version_id,
+                model_version_id: calibrated_version.model_version_id,
                 evaluation_dataset_id: scenario.evaluation_dataset_id,
                 decision_policy_snapshot_id: scenario.policy_snapshot_id,
                 backtest_report_id: None,
@@ -3553,7 +4163,7 @@ pub async fn train_backtest_evaluation_e2e() {
         report.sample_count > 0,
         "replay produced no resolved sample: {report:#?}"
     );
-    assert_eq!(report.model_version_id, scenario.version.model_version_id);
+    assert_eq!(report.model_version_id, calibrated_version.model_version_id);
     assert!(
         report
             .report_hash
@@ -3569,13 +4179,13 @@ pub async fn train_backtest_evaluation_e2e() {
         .await
         .expect("count");
     assert_eq!(
-        next, 2,
-        "Evaluation backtests must not register a derived model version"
+        next, next_before_backtest,
+        "Evaluation backtests must not register another model version"
     );
     assert_cache_rejected(
         &db,
         &services.backtest_port,
-        &scenario.version,
+        &calibrated_version,
         scenario.evaluation_dataset_id,
         scenario.policy_snapshot_id,
         report.backtest_report_id,
@@ -3584,7 +4194,7 @@ pub async fn train_backtest_evaluation_e2e() {
     assert_dataset_rejected(
         &db,
         &services.backtester,
-        &scenario.version,
+        &calibrated_version,
         scenario.evaluation_dataset_id,
         scenario.policy_snapshot_id,
     )
@@ -3592,7 +4202,7 @@ pub async fn train_backtest_evaluation_e2e() {
     assert_source_rejected(
         &db,
         &services.backtester,
-        &scenario.version,
+        &calibrated_version,
         scenario.evaluation_dataset_id,
         scenario.policy_snapshot_id,
     )
@@ -3601,7 +4211,7 @@ pub async fn train_backtest_evaluation_e2e() {
         &db,
         &artifact_root,
         &services.backtester,
-        &scenario.version,
+        &calibrated_version,
         scenario.evaluation_dataset_id,
         scenario.policy_snapshot_id,
     )
@@ -3623,7 +4233,6 @@ pub async fn train_backtest_evaluation_e2e() {
         scenario.policy_snapshot_id,
     )
     .await;
-    assert_calibration_persisted(&db, &scenario, &services).await;
 }
 
 pub async fn comparison_reuses_inputs() {
@@ -3634,17 +4243,27 @@ pub async fn comparison_reuses_inputs() {
     let inner: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(&artifact_root));
     let base_store: Arc<dyn ArtifactStore> = Arc::new(VersionedArtifactStoreFixture::new(inner));
     let scenario = Box::pin(prepare_training_scenario(&db, &base_store)).await;
-    let candidate = train_comparison_candidate(&db, &base_store, &scenario).await;
+    let raw_candidate = train_comparison_candidate(&db, &base_store, &scenario).await;
+    let base_services = build_backtest_services(&db, &base_store, &scenario).await;
+    let champion =
+        fit_and_seal_calibration(&db, &scenario, &base_services, &scenario.version).await;
+    let candidate = fit_and_seal_calibration(&db, &scenario, &base_services, &raw_candidate).await;
     assert_ne!(
-        candidate.model_version_id, scenario.version.model_version_id,
+        candidate.model_version_id, champion.model_version_id,
         "comparison requires distinct champion and challenger identities"
     );
     assert_ne!(
-        candidate.serving_contract_hash, scenario.version.serving_contract_hash,
+        candidate.serving_contract_hash, champion.serving_contract_hash,
         "distinct model versions require distinct serving contracts"
     );
-    let (params, read_targets) =
-        comparison_replay_fixture(&db, &base_store, &scenario, &candidate).await;
+    let (params, read_targets) = comparison_replay_fixture(
+        &db,
+        &base_store,
+        ComparisonReplayScope::from(&scenario),
+        &champion,
+        &candidate,
+    )
+    .await;
     let counted = Arc::new(ReadCountingArtifactStoreFixture::new(
         base_store,
         read_targets.clone(),
@@ -3663,7 +4282,7 @@ pub async fn comparison_reuses_inputs() {
         &calibration_repo,
     );
     serving_preimages
-        .load(&scenario.version)
+        .load(&champion)
         .await
         .expect("load champion preimage baseline");
     serving_preimages
@@ -3684,10 +4303,7 @@ pub async fn comparison_reuses_inputs() {
     ))
     .await
     .expect("replay one shared Evaluation input across the candidate family");
-    assert_eq!(
-        replay.champion.model_version_id,
-        scenario.version.model_version_id
-    );
+    assert_eq!(replay.champion.model_version_id, champion.model_version_id);
     assert_eq!(replay.candidates.len(), 1);
     assert_eq!(
         replay.candidates[0].model_version_id,
@@ -3702,13 +4318,43 @@ pub async fn comparison_reuses_inputs() {
         replay.candidates[0].portfolio_returns.len(),
         "champion and challenger must share the same observation universe"
     );
+    let mut exclusive_evaluation_objects = 0_usize;
     for (uri, preimage_read_count) in read_targets.into_iter().zip(preimage_reads) {
-        assert_eq!(
-            counted.reads(&uri),
-            preimage_read_count + 1,
-            "family replay must add exactly one shared Evaluation read after the two full serving-preimage reads: {uri}"
-        );
+        let family_read_count = counted.reads(&uri);
+        if preimage_read_count == 0 {
+            exclusive_evaluation_objects += 1;
+            assert_eq!(
+                family_read_count, 1,
+                "family replay must read an Evaluation-exclusive object exactly once: {uri}"
+            );
+        } else {
+            // Empty/source-independent Parquet objects are content-addressed,
+            // so one URI can legitimately belong to the Training,
+            // Calibration, Evaluation, Trade-Policy, and scenario preimages.
+            // Their physical read count cannot identify the logical
+            // Evaluation load; require the complete serving baseline plus the
+            // shared Evaluation use, while exact-once is proven by the
+            // Evaluation-exclusive Dataset and manifest objects above.
+            assert!(
+                family_read_count > preimage_read_count,
+                "family replay omitted a shared Evaluation object: {uri}"
+            );
+        }
     }
+    assert!(
+        exclusive_evaluation_objects >= 2,
+        "comparison fixture must expose at least its Dataset bytes and Source Slice manifest as Evaluation-exclusive identities"
+    );
+
+    assert_decision_policy_replay(
+        &db,
+        &counted_store,
+        &services,
+        &scenario,
+        &champion,
+        &candidate,
+    )
+    .await;
 }
 
 struct CpcvTrainingScenario {
@@ -3723,8 +4369,22 @@ async fn prepare_cpcv_scenario(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
 ) -> CpcvTrainingScenario {
-    let policy_snapshot_id = seed_runtime_config(db).await;
-    let model_spec = ModelSpecFixture::weighted(db).await;
+    let policy_snapshot_id =
+        Box::pin(seed_evaluation_runtime_config(db, store, as_of_for(0))).await;
+    let profile_ref = model_spec_fixtures::weather_profile_ref();
+    let evaluation_track = profile_ref
+        .resolve_builtin_research_profile()
+        .expect("Weather ResearchProfile")
+        .spec
+        .activation_eligibility;
+    let model_spec = ModelSpecFixture::weather_policy(
+        db,
+        store,
+        policy_snapshot_id,
+        "train-cpcv-weather",
+        as_of_for(0),
+    )
+    .await;
     seed_catalog(db).await;
     let training_dataset = SeededDataset::persist(
         db,
@@ -3732,8 +4392,10 @@ async fn prepare_cpcv_scenario(
         TrainingDatasetSeed {
             model_spec: &model_spec,
             policy_snapshot_id,
+            profile_ref,
+            evaluation_track,
             label_name: settlement(),
-            examples: examples(),
+            examples: weather_policy_examples(examples()),
             purpose: DatasetPurpose::Training,
             scope: "train-cpcv-training",
             factor_serving_plane: None,
@@ -3791,7 +4453,7 @@ pub async fn train_cpcv_persists_decomposition() {
         registry,
         version,
         coord_search_effective_n: coord_n,
-    } = prepare_cpcv_scenario(&db, &store).await;
+    } = Box::pin(prepare_cpcv_scenario(&db, &store)).await;
 
     let path_set_id = BacktestPathSetId::from_v7();
     let dataset_repo: Arc<dyn TrainingDatasetRepository> =
@@ -3806,6 +4468,7 @@ pub async fn train_cpcv_persists_decomposition() {
         TrainerPreimageFixture::build(&db, &store, &registry, &dataset_repo, &calibration_repo);
     let port = CoreCpcvBacktestPort::new(CoreCpcvBacktestPortDeps {
         compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
+        portfolio_solver: PortfolioSolverDeployConfig::default(),
         artifact_store: Arc::clone(&store),
         path_set_repo,
         model_registry_repo: Arc::clone(&registry),
@@ -3855,24 +4518,27 @@ async fn assert_cpcv_view_bind(
 ) {
     assert_eq!(view.path_set_id, *path_set_id);
     assert_eq!(
-        view.trial_count, view.trial_grid_count,
-        "DSR N must equal the governed trial-grid count (same population as V)"
+        view.dsr_conservative_independent_trial_count,
+        i64::from(
+            view.cscv_selection_evidence
+                .trial_dependence
+                .conservative_independent_trial_count(),
+        ),
+        "persisted DSR N must equal the conservative dependence-adjusted count"
     );
     assert_eq!(
         view.coord_search_effective_n,
         i64::from(coord_n),
         "coord_search_effective_n is audit-only and must still be persisted"
     );
-    assert_eq!(view.path_count, 3);
-    assert_eq!(view.combination_count, 6);
+    assert_eq!(view.path_count, 21);
+    assert_eq!(view.combination_count, 56);
     assert!(
         view.path_set_hash.as_bytes().iter().any(|byte| *byte != 0),
         "canonical CPCV persistence must seal a content hash"
     );
 
-    let cpcv_run = Entity::find()
-        .filter(Column::RunKind.eq(ModelRunKind::Cpcv))
-        .filter(Column::Status.eq(ModelRunStatus::Succeeded))
+    let cpcv_run = Entity::find_by_id(view.model_run_id)
         .one(db)
         .await
         .expect("query cpcv run")

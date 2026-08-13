@@ -127,7 +127,7 @@ impl FeatureParityRunCoordinator {
             window_start: report.decision_at,
             window_end,
             report_id: Some(report.recommendation_report_id),
-            model_version_id: Some(report.model_version_id),
+            model_version_id: None,
             training_dataset_id: None,
             triggered_by: SYSTEM_ACTOR.to_owned(),
             requested_by: None,
@@ -178,7 +178,7 @@ impl FeatureParityRunCoordinator {
                     ),
                 })
             })?;
-        if sampled.model_version_id.as_ref() != Some(&report.model_version_id)
+        if sampled.model_version_id.is_some()
             || sampled.window_start != report.decision_at
             || sampled.report_id.as_ref() != Some(&report.recommendation_report_id)
         {
@@ -1122,6 +1122,14 @@ mod tests {
             Ok(lock(&self.latest).clone())
         }
 
+        async fn find_unsettled_runtime(
+            &self,
+        ) -> Result<Option<FeatureParityRunInfo>, StorageError> {
+            Ok(lock(&self.latest)
+                .clone()
+                .filter(|run| run.training_dataset_id.is_none() && !run.status.is_terminal()))
+        }
+
         async fn latest_unbound_full(&self) -> Result<Option<FeatureParityRunInfo>, StorageError> {
             Ok(lock(&self.latest).clone())
         }
@@ -1355,8 +1363,8 @@ mod tests {
                 execution_risk_policy_revision_id: PolicyRevisionId::from_v7(),
                 model_routing_revision_id: PolicyRevisionId::from_v7(),
                 report_schedule_revision_id: PolicyRevisionId::from_v7(),
-                operational_control_revision_id: PolicyRevisionId::from_v7(),
-                execution_authorization_revision_id: PolicyRevisionId::from_v7(),
+                operations_policy_revision_id: PolicyRevisionId::from_v7(),
+                execution_automation_policy_revision_id: PolicyRevisionId::from_v7(),
                 source: DecisionPolicySnapshotSource::Bootstrap,
                 created_by_kind: PolicyActorKind::System,
                 created_by_user_id: None,
@@ -1391,16 +1399,16 @@ mod tests {
     fn new_report(info: RecommendationReportInfo) -> NewRecommendationReport {
         NewRecommendationReport {
             recommendation_report_id: info.recommendation_report_id,
-            research_profile_artifact_id: info.profile_ref.artifact_id(),
+            report_run_id: info.report_run_id,
             report_kind: info.report_kind,
             decision_at: info.decision_at,
-            horizon_secs: info.horizon_secs,
             runtime_mode: info.runtime_mode,
             decision_policy_snapshot_id: info.decision_policy_snapshot_id,
-            model_run_id: info.model_run_id,
-            model_version_id: info.model_version_id,
             market_selection_id: info.market_selection_id,
             portfolio_plan_id: info.portfolio_plan_id,
+            represented_routes_json: info.represented_routes_json,
+            scenario_artifact_id: info.scenario_artifact_id,
+            scenario_artifact_hash: info.scenario_artifact_hash,
             top_n: info.top_n,
             status: info.status,
             account_source: info.account_source,
@@ -1417,6 +1425,7 @@ mod tests {
             revoked_at: info.revoked_at,
             expired_at: info.expired_at,
             status_reason: info.status_reason,
+            created_at: info.created_at,
         }
     }
 
@@ -1472,7 +1481,6 @@ mod tests {
             RecommendationReportStatus::Published,
         );
         info.decision_policy_snapshot_id = decision_policy_snapshot_id;
-        info.model_run_id = None;
         info.summary_json.empty_reason = Some(EmptyReportReason::EmptySelection);
         let report = new_report(info);
         let run = report_run(
@@ -1492,10 +1500,7 @@ mod tests {
             parity.run.report_id.as_ref(),
             Some(&report.recommendation_report_id)
         );
-        assert_eq!(
-            parity.run.model_version_id.as_ref(),
-            Some(&report.model_version_id)
-        );
+        assert_eq!(parity.run.model_version_id.as_ref(), None);
         assert_eq!(parity.job.kind, ResearchJobKind::FeatureParity);
         assert_eq!(
             parity.job.decision_policy_snapshot_id.as_ref(),

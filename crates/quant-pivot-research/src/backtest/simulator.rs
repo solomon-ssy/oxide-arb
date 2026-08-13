@@ -31,7 +31,10 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::settle_executed_buy;
-    use crate::execution_semantics::{LiquidityRole, PitFeeSchedule, walk_buy_cash_budget};
+    use crate::{
+        execution_semantics::{LiquidityRole, PitFeeSchedule, walk_buy_cash_budget},
+        precision::quantize_venue_amount,
+    };
 
     impl PitFeeSchedule {
         fn simulator_fixture() -> Self {
@@ -82,7 +85,9 @@ mod tests {
         assert!(won.realized_return_bps < Bps::new(dec!(10_000)));
         assert_eq!(
             split.payout_usd,
-            Usd::new(split.economics.filled_shares.inner() * dec!(0.5))
+            Usd::new(quantize_venue_amount(
+                split.economics.filled_shares.inner() * dec!(0.5)
+            ))
         );
         assert!(!won.economics.all_in_price.inner().is_zero());
     }

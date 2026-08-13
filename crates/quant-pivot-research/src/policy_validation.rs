@@ -14,7 +14,10 @@ use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     hashing::CanonicalDigest,
-    types::{BacktestPathSetId, ContentHash, MarketId},
+    types::{
+        BacktestPathSetId, ContentHash, MarketId,
+        backtest::{CscvSelectionEvidence, CscvTrialDescriptor, CscvTrialGridBinding},
+    },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -26,9 +29,9 @@ use crate::{
     validation::{
         BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
         DefaultCombinatorialPurgedBacktester, DsrInput, FoldModelSource, FoldRuntime,
-        FoldTrainingIdentity, FoldTrainingRequest, GroupEvaluation, GroupRowFilter, PboInput,
+        FoldTrainingIdentity, FoldTrainingRequest, GroupEvaluation, GroupRowFilter,
         PolicyFoldRuntime, PurgeConfig, RankObservation, ReplayEngine, TimelineGroup,
-        TrialPerformanceMatrix, probability_of_backtest_overfitting,
+        TrialPerformanceMatrix, analyze_selection_bias,
     },
 };
 
@@ -36,12 +39,12 @@ pub const POLICY_CPCV_GROUPS: u32 = 8;
 pub const POLICY_CPCV_TEST_GROUPS: u32 = 3;
 pub const POLICY_CPCV_COMBINATIONS: u64 = 56;
 pub const POLICY_CPCV_PATHS: u64 = 21;
-pub const POLICY_PBO_BLOCKS: u32 = 8;
+pub const POLICY_PBO_BLOCKS: u32 = 16;
 pub const POLICY_BOOTSTRAP_REPLICATIONS: usize = 2_000;
 /// Hash-bound policy-performance methodology. Bump whenever candidate support,
 /// CPCV path selection, DSR/PBO inputs, ESS, or bootstrap semantics change.
 pub const POLICY_PERFORMANCE_METHODOLOGY_VERSION: &str =
-    "policy_performance_common_support_cpcv_dsr_pbo_v2";
+    "policy_performance_common_support_cpcv_dsr_pbo_v3";
 
 /// One observation's terminal candidate vector. `None` is an explicit replay
 /// gap and excludes this observation from every candidate's common support.
@@ -105,6 +108,7 @@ pub struct PolicyPerformanceSummary {
     pub deflated_sharpe_ratio: Decimal,
     pub dsr_benchmark_sharpe: Decimal,
     pub probability_of_backtest_overfitting: Decimal,
+    pub cscv_selection_evidence: CscvSelectionEvidence,
     pub lower_confidence_utility_bps: Decimal,
 }
 
@@ -132,6 +136,7 @@ struct PolicySignificance {
     deflated_sharpe_ratio: Decimal,
     dsr_benchmark_sharpe: Decimal,
     probability_of_backtest_overfitting: Decimal,
+    cscv_selection_evidence: CscvSelectionEvidence,
     effective_sample_size: Decimal,
     lower_confidence_utility_bps: Decimal,
 }
@@ -209,11 +214,13 @@ impl ReplayEngine for PolicyReplay<'_> {
                 Ok(GroupEvaluation {
                     group_index,
                     return_value: realized / Decimal::from(10_000),
+                    scenario_residual: None,
                     rank_observations: vec![RankObservation {
                         score: selected.training_utility_bps,
                         realized,
                     }],
-                    allocation_weights: None,
+                    executed_turnover: None,
+                    portfolio_replay: None,
                 })
             })
             .collect()
@@ -259,6 +266,7 @@ pub fn evaluate_policy_performance(
         deflated_sharpe_ratio: significance.deflated_sharpe_ratio,
         dsr_benchmark_sharpe: significance.dsr_benchmark_sharpe,
         probability_of_backtest_overfitting: significance.probability_of_backtest_overfitting,
+        cscv_selection_evidence: significance.cscv_selection_evidence,
         lower_confidence_utility_bps: significance.lower_confidence_utility_bps,
     })
 }
@@ -407,25 +415,6 @@ fn policy_significance(
         .iter()
         .min_by_key(|path| (path.sharpe - paths.sharpe_distribution.median).abs())
         .ok_or_else(|| methodology("policy CPCV produced no representative path".to_owned()))?;
-    let candidate_sharpes = basis
-        .candidate_performance
-        .iter()
-        .map(|candidate| candidate.sharpe_ratio)
-        .collect::<Vec<_>>();
-    let dsr = DsrInput {
-        observed_sharpe: representative.sharpe,
-        returns_period_count: u64::try_from(representative.group_returns.len()).map_err(
-            |error| methodology(format!("policy DSR period count does not fit u64: {error}")),
-        )?,
-        period_length: request.period_length,
-        skewness: stats::skewness(&representative.group_returns),
-        kurtosis: stats::kurtosis(&representative.group_returns),
-        trial_count: u32::try_from(request.candidate_ids.len()).map_err(|error| {
-            methodology(format!("policy DSR trial count does not fit u32: {error}"))
-        })?,
-        trial_sharpe_variance: stats::variance(&candidate_sharpes),
-    }
-    .deflated_sharpe_ratio()?;
     let trial_matrix = TrialPerformanceMatrix::from_rows(
         basis
             .groups
@@ -444,12 +433,22 @@ fn policy_significance(
             })
             .collect(),
     )?;
-    let pbo = probability_of_backtest_overfitting(
-        &trial_matrix,
-        &PboInput {
-            block_count: POLICY_PBO_BLOCKS,
-        },
-    )?;
+    let cscv_selection_evidence =
+        analyze_selection_bias(&trial_matrix, &policy_trial_grid(request)?)?;
+    let dsr = DsrInput {
+        observed_sharpe: representative.sharpe,
+        returns_period_count: u64::try_from(representative.group_returns.len()).map_err(
+            |error| methodology(format!("policy DSR period count does not fit u64: {error}")),
+        )?,
+        period_length: request.period_length,
+        skewness: stats::skewness(&representative.group_returns),
+        kurtosis: stats::kurtosis(&representative.group_returns),
+        trial_count: u32::try_from(request.candidate_ids.len()).map_err(|error| {
+            methodology(format!("policy DSR trial count does not fit u32: {error}"))
+        })?,
+        trial_sharpe_variance: cscv_selection_evidence.behavioral_trial_sharpe_variance,
+    }
+    .deflated_sharpe_ratio()?;
     let effective_sample_size = effective_sample_size(
         &basis
             .common
@@ -466,9 +465,34 @@ fn policy_significance(
         effective_sample_size,
         deflated_sharpe_ratio: dsr.deflated_sharpe,
         dsr_benchmark_sharpe: dsr.benchmark_sharpe,
-        probability_of_backtest_overfitting: pbo,
+        probability_of_backtest_overfitting: cscv_selection_evidence.pbo,
+        cscv_selection_evidence,
         lower_confidence_utility_bps,
     })
+}
+
+fn policy_trial_grid(request: &PolicyPerformanceRequest<'_>) -> QuantResult<CscvTrialGridBinding> {
+    let trials = request
+        .candidate_ids
+        .iter()
+        .enumerate()
+        .map(|(index, candidate_id)| {
+            Ok(CscvTrialDescriptor {
+                trial_id: u32::try_from(index).map_err(|error| {
+                    methodology(format!("policy trial id does not fit u32: {error}"))
+                })?,
+                label: candidate_id.clone(),
+                config_hash: CanonicalDigest::content_hash_typed(
+                    "quant-pivot/policy-cscv-candidate",
+                    1,
+                    &(request.experiment_family_hash, candidate_id),
+                )
+                .map_err(QuantError::from)?,
+            })
+        })
+        .collect::<QuantResult<Vec<_>>>()?;
+    CscvTrialGridBinding::try_new(POLICY_PBO_BLOCKS, trials)
+        .map_err(|error| methodology(format!("invalid policy CSCV trial grid: {error}")))
 }
 
 fn validate_request(request: &PolicyPerformanceRequest<'_>) -> QuantResult<()> {
@@ -851,7 +875,9 @@ mod tests {
     #[test]
     fn common_support_candidate_symmetric() {
         let mut rows = observations();
-        rows[3].candidate_return_bps[2] = None;
+        for row in &mut rows[..16] {
+            row.candidate_return_bps[2] = None;
+        }
         let candidate_ids = vec!["stable".to_owned(), "noisy".to_owned(), "weak".to_owned()];
         let summary = evaluate_policy_performance(&PolicyPerformanceRequest {
             candidate_ids: &candidate_ids,
@@ -863,10 +889,10 @@ mod tests {
         .expect("performance");
 
         assert_eq!(summary.sample_count, 80);
-        assert_eq!(summary.common_sample_count, 79);
+        assert_eq!(summary.common_sample_count, 64);
         assert_eq!(
             summary.common_candidate_support,
-            Decimal::from(79) / Decimal::from(80)
+            Decimal::from(64) / Decimal::from(80)
         );
     }
 

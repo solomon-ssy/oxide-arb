@@ -1085,7 +1085,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "operational_control_revision_id",
+      "name": "operations_policy_revision_id",
       "nullable": false,
       "ordinal": 8,
       "storage": "p",
@@ -1098,7 +1098,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "execution_authorization_revision_id",
+      "name": "execution_automation_policy_revision_id",
       "nullable": false,
       "ordinal": 9,
       "storage": "p",
@@ -3841,12 +3841,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "min_track_record_length_secs",
-      "nullable": true,
+      "name": "cscv_selection_evidence",
+      "nullable": false,
       "ordinal": 19,
-      "storage": "p",
+      "storage": "x",
       "table": "quant_backtest_path_set",
-      "type": "bigint"
+      "type": "jsonb"
     },
     {
       "collation": null,
@@ -3854,8 +3854,8 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "trial_count",
-      "nullable": false,
+      "name": "min_track_record_length_secs",
+      "nullable": true,
       "ordinal": 20,
       "storage": "p",
       "table": "quant_backtest_path_set",
@@ -3867,7 +3867,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "trial_grid_count",
+      "name": "dsr_conservative_independent_trial_count",
       "nullable": false,
       "ordinal": 21,
       "storage": "p",
@@ -3880,9 +3880,22 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "coord_search_effective_n",
+      "name": "trial_grid_count",
       "nullable": false,
       "ordinal": 22,
+      "storage": "p",
+      "table": "quant_backtest_path_set",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "coord_search_effective_n",
+      "nullable": false,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_backtest_path_set",
       "type": "bigint"
@@ -3895,7 +3908,7 @@
       "identity": "",
       "name": "path_set_hash",
       "nullable": false,
-      "ordinal": 23,
+      "ordinal": 24,
       "storage": "x",
       "table": "quant_backtest_path_set",
       "type": "text"
@@ -3908,7 +3921,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 24,
+      "ordinal": 25,
       "storage": "p",
       "table": "quant_backtest_path_set",
       "type": "timestamp with time zone"
@@ -4174,6 +4187,19 @@
       "type": "jsonb"
     },
     {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "portfolio_funnel",
+      "nullable": false,
+      "ordinal": 21,
+      "storage": "x",
+      "table": "quant_backtest_report",
+      "type": "jsonb"
+    },
+    {
       "collation": "default",
       "compression": "",
       "default": null,
@@ -4181,7 +4207,7 @@
       "identity": "",
       "name": "report_hash",
       "nullable": false,
-      "ordinal": 21,
+      "ordinal": 22,
       "storage": "x",
       "table": "quant_backtest_report",
       "type": "text"
@@ -4194,7 +4220,7 @@
       "identity": "",
       "name": "parquet_uri",
       "nullable": true,
-      "ordinal": 22,
+      "ordinal": 23,
       "storage": "x",
       "table": "quant_backtest_report",
       "type": "character varying"
@@ -4207,7 +4233,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 23,
+      "ordinal": 24,
       "storage": "p",
       "table": "quant_backtest_report",
       "type": "timestamp with time zone"
@@ -11680,9 +11706,22 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "market_count",
+      "name": "selector_evidence",
       "nullable": false,
       "ordinal": 5,
+      "storage": "x",
+      "table": "quant_market_selection",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "market_count",
+      "nullable": false,
+      "ordinal": 6,
       "storage": "p",
       "table": "quant_market_selection",
       "type": "integer"
@@ -11695,7 +11734,7 @@
       "identity": "",
       "name": "exclusion_summary",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 7,
       "storage": "x",
       "table": "quant_market_selection",
       "type": "jsonb"
@@ -11708,7 +11747,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 8,
       "storage": "p",
       "table": "quant_market_selection",
       "type": "timestamp with time zone"
@@ -13695,8 +13734,8 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "model_run_id",
-      "nullable": true,
+      "name": "account_snapshot_id",
+      "nullable": false,
       "ordinal": 2,
       "storage": "p",
       "table": "quant_portfolio_plan",
@@ -13708,7 +13747,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "market_selection_id",
+      "name": "decision_policy_snapshot_id",
       "nullable": false,
       "ordinal": 3,
       "storage": "p",
@@ -13721,9 +13760,22 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "decision_at",
+      "name": "market_selection_id",
       "nullable": false,
       "ordinal": 4,
+      "storage": "p",
+      "table": "quant_portfolio_plan",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_at",
+      "nullable": false,
+      "ordinal": 5,
       "storage": "p",
       "table": "quant_portfolio_plan",
       "type": "timestamp with time zone"
@@ -13734,35 +13786,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "budget_usd",
-      "nullable": false,
-      "ordinal": 5,
-      "storage": "m",
-      "table": "quant_portfolio_plan",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "allocated_usd",
+      "name": "represented_routes_json",
       "nullable": false,
       "ordinal": 6,
-      "storage": "m",
-      "table": "quant_portfolio_plan",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "risk_budget_json",
-      "nullable": false,
-      "ordinal": 7,
       "storage": "x",
       "table": "quant_portfolio_plan",
       "type": "jsonb"
@@ -13773,12 +13799,25 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "constraints_json",
-      "nullable": false,
+      "name": "scenario_artifact_id",
+      "nullable": true,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_portfolio_plan",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "scenario_artifact_hash",
+      "nullable": true,
       "ordinal": 8,
       "storage": "x",
       "table": "quant_portfolio_plan",
-      "type": "jsonb"
+      "type": "character varying"
     },
     {
       "collation": null,
@@ -13786,8 +13825,8 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "rejected_summary",
-      "nullable": false,
+      "name": "scenario_artifact_json",
+      "nullable": true,
       "ordinal": 9,
       "storage": "x",
       "table": "quant_portfolio_plan",
@@ -13799,9 +13838,35 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "optimizer_meta_json",
+      "name": "portfolio_policy_json",
       "nullable": false,
       "ordinal": 10,
+      "storage": "x",
+      "table": "quant_portfolio_plan",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "existing_state_json",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_portfolio_plan",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_json",
+      "nullable": false,
+      "ordinal": 12,
       "storage": "x",
       "table": "quant_portfolio_plan",
       "type": "jsonb"
@@ -13814,7 +13879,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 13,
       "storage": "p",
       "table": "quant_portfolio_plan",
       "type": "timestamp with time zone"
@@ -14054,17 +14119,17 @@
       "type": "uuid"
     },
     {
-      "collation": "default",
+      "collation": null,
       "compression": "",
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "research_profile_artifact_id",
+      "name": "recommendation_report_id",
       "nullable": false,
       "ordinal": 2,
-      "storage": "x",
+      "storage": "p",
       "table": "quant_recommendation",
-      "type": "text"
+      "type": "uuid"
     },
     {
       "collation": null,
@@ -14072,7 +14137,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "recommendation_report_id",
+      "name": "report_route_run_id",
       "nullable": false,
       "ordinal": 3,
       "storage": "p",
@@ -14085,12 +14150,51 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "rank",
+      "name": "portfolio_plan_id",
       "nullable": false,
       "ordinal": 4,
       "storage": "p",
       "table": "quant_recommendation",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "economic_tier_id",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_recommendation",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "rank",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_recommendation",
       "type": "integer"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "route",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_recommendation",
+      "type": "jsonb"
     },
     {
       "collation": "default",
@@ -14100,7 +14204,7 @@
       "identity": "",
       "name": "market_id",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 8,
       "storage": "x",
       "table": "quant_recommendation",
       "type": "text"
@@ -14113,7 +14217,7 @@
       "identity": "",
       "name": "event_id",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 9,
       "storage": "x",
       "table": "quant_recommendation",
       "type": "text"
@@ -14126,7 +14230,7 @@
       "identity": "",
       "name": "token_id",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 10,
       "storage": "x",
       "table": "quant_recommendation",
       "type": "text"
@@ -14139,7 +14243,7 @@
       "identity": "",
       "name": "outcome_side",
       "nullable": false,
-      "ordinal": 8,
+      "ordinal": 11,
       "storage": "p",
       "table": "quant_recommendation",
       "type": "qp_outcome_side"
@@ -14150,51 +14254,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "composite_score",
-      "nullable": false,
-      "ordinal": 9,
-      "storage": "m",
-      "table": "quant_recommendation",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "risk_adjusted_score",
-      "nullable": false,
-      "ordinal": 10,
-      "storage": "m",
-      "table": "quant_recommendation",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "confidence",
-      "nullable": false,
-      "ordinal": 11,
-      "storage": "m",
-      "table": "quant_recommendation",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "expected_return_bps",
+      "name": "economics_json",
       "nullable": false,
       "ordinal": 12,
-      "storage": "m",
+      "storage": "x",
       "table": "quant_recommendation",
-      "type": "numeric"
+      "type": "jsonb"
     },
     {
       "collation": null,
@@ -14202,12 +14267,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "downside_bps",
+      "name": "economic_tier_json",
       "nullable": false,
       "ordinal": 13,
-      "storage": "m",
+      "storage": "x",
       "table": "quant_recommendation",
-      "type": "numeric"
+      "type": "jsonb"
     },
     {
       "collation": null,
@@ -14241,61 +14306,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "rank_before_portfolio",
-      "nullable": false,
-      "ordinal": 16,
-      "storage": "p",
-      "table": "quant_recommendation",
-      "type": "integer"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "liquidity_score",
-      "nullable": false,
-      "ordinal": 17,
-      "storage": "m",
-      "table": "quant_recommendation",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "data_quality_score",
-      "nullable": false,
-      "ordinal": 18,
-      "storage": "m",
-      "table": "quant_recommendation",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "model_score_percentile",
-      "nullable": false,
-      "ordinal": 19,
-      "storage": "m",
-      "table": "quant_recommendation",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
       "name": "trade_plan",
       "nullable": false,
-      "ordinal": 20,
+      "ordinal": 16,
       "storage": "x",
       "table": "quant_recommendation",
       "type": "jsonb"
@@ -14308,7 +14321,7 @@
       "identity": "",
       "name": "factor_breakdown",
       "nullable": false,
-      "ordinal": 21,
+      "ordinal": 17,
       "storage": "x",
       "table": "quant_recommendation",
       "type": "jsonb"
@@ -14321,7 +14334,7 @@
       "identity": "",
       "name": "evidence_refs",
       "nullable": false,
-      "ordinal": 22,
+      "ordinal": 18,
       "storage": "x",
       "table": "quant_recommendation",
       "type": "jsonb"
@@ -14334,7 +14347,7 @@
       "identity": "",
       "name": "execution_eligibility",
       "nullable": false,
-      "ordinal": 23,
+      "ordinal": 19,
       "storage": "x",
       "table": "quant_recommendation",
       "type": "jsonb"
@@ -14347,7 +14360,7 @@
       "identity": "",
       "name": "valid_from",
       "nullable": false,
-      "ordinal": 24,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_recommendation",
       "type": "timestamp with time zone"
@@ -14360,7 +14373,7 @@
       "identity": "",
       "name": "valid_until",
       "nullable": false,
-      "ordinal": 25,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_recommendation",
       "type": "timestamp with time zone"
@@ -14373,7 +14386,7 @@
       "identity": "",
       "name": "status",
       "nullable": false,
-      "ordinal": 26,
+      "ordinal": 22,
       "storage": "p",
       "table": "quant_recommendation",
       "type": "qp_recommendation_status"
@@ -14386,7 +14399,7 @@
       "identity": "",
       "name": "status_changed_at",
       "nullable": false,
-      "ordinal": 27,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_recommendation",
       "type": "timestamp with time zone"
@@ -14399,7 +14412,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 28,
+      "ordinal": 24,
       "storage": "p",
       "table": "quant_recommendation",
       "type": "timestamp with time zone"
@@ -14756,17 +14769,17 @@
       "type": "uuid"
     },
     {
-      "collation": "default",
+      "collation": null,
       "compression": "",
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "research_profile_artifact_id",
+      "name": "report_run_id",
       "nullable": false,
       "ordinal": 2,
-      "storage": "x",
+      "storage": "p",
       "table": "quant_recommendation_report",
-      "type": "text"
+      "type": "uuid"
     },
     {
       "collation": null,
@@ -14800,22 +14813,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "horizon_secs",
-      "nullable": false,
-      "ordinal": 5,
-      "storage": "p",
-      "table": "quant_recommendation_report",
-      "type": "bigint"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
       "name": "runtime_mode",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 5,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "qp_quant_runtime_mode"
@@ -14828,33 +14828,7 @@
       "identity": "",
       "name": "decision_policy_snapshot_id",
       "nullable": false,
-      "ordinal": 7,
-      "storage": "p",
-      "table": "quant_recommendation_report",
-      "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "model_run_id",
-      "nullable": true,
-      "ordinal": 8,
-      "storage": "p",
-      "table": "quant_recommendation_report",
-      "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "model_version_id",
-      "nullable": false,
-      "ordinal": 9,
+      "ordinal": 6,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -14867,7 +14841,7 @@
       "identity": "",
       "name": "market_selection_id",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 7,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -14880,10 +14854,49 @@
       "identity": "",
       "name": "portfolio_plan_id",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 8,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "represented_routes_json",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_recommendation_report",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "scenario_artifact_id",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_recommendation_report",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "scenario_artifact_hash",
+      "nullable": true,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_recommendation_report",
+      "type": "character varying"
     },
     {
       "collation": null,
@@ -15806,6 +15819,188 @@
       "ordinal": 18,
       "storage": "p",
       "table": "quant_report_fact_delivery",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "report_route_run_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_report_route_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "report_run_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_report_route_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "route",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_report_route_run",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "outcome",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_report_route_run",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "model_version_id",
+      "nullable": true,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_report_route_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "model_run_id",
+      "nullable": true,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_report_route_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "calibration_artifact_id",
+      "nullable": true,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_report_route_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "trade_policy_artifact_id",
+      "nullable": true,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_report_route_run",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_profile_artifact_id",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_report_route_run",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "lineage_json",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_report_route_run",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "funnel_json",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_report_route_run",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "diagnostic_code",
+      "nullable": true,
+      "ordinal": 12,
+      "storage": "x",
+      "table": "quant_report_route_run",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "finished_at",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_report_route_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "quant_report_route_run",
       "type": "timestamp with time zone"
     },
     {
@@ -23869,7 +24064,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((window_start < window_end) AND (coverage >= (0)::numeric) AND (coverage <= (1)::numeric) AND (sample_count >= 0) AND (missing_feature_count >= 0) AND (hit_rate >= (0)::numeric) AND (hit_rate <= (1)::numeric) AND (liquidity_feasibility >= (0)::numeric) AND (liquidity_feasibility <= (1)::numeric) AND (jsonb_typeof(expected_vs_realized) = 'object'::text) AND (jsonb_typeof(category_breakdown) = 'array'::text) AND (jsonb_typeof(report_pnl_simulation) = 'object'::text) AND (report_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "definition": "CHECK (((window_start < window_end) AND (coverage >= (0)::numeric) AND (coverage <= (1)::numeric) AND (sample_count >= 0) AND (missing_feature_count >= 0) AND (hit_rate >= (0)::numeric) AND (hit_rate <= (1)::numeric) AND (liquidity_feasibility >= (0)::numeric) AND (liquidity_feasibility <= (1)::numeric) AND (jsonb_typeof(expected_vs_realized) = 'object'::text) AND (jsonb_typeof(category_breakdown) = 'array'::text) AND (jsonb_typeof(report_pnl_simulation) = 'object'::text) AND (jsonb_typeof(portfolio_funnel) = 'object'::text) AND (portfolio_funnel ?& ARRAY['schema_version'::text, 'decision_tick_count'::text, 'emitted_candidate_count'::text, 'candidate_without_executable_tier_count'::text, 'executable_tier_count'::text, 'admission_rejected_tier_count'::text, 'admitted_tier_count'::text, 'selected_tier_count'::text, 'executed_entry_count'::text, 'resolved_allocation_count'::text, 'no_candidate_tick_count'::text, 'no_executable_tier_tick_count'::text, 'no_selection_tick_count'::text, 'selected_tick_count'::text, 'tier_exclusion_reasons'::text]) AND ((portfolio_funnel - ARRAY['schema_version'::text, 'decision_tick_count'::text, 'emitted_candidate_count'::text, 'candidate_without_executable_tier_count'::text, 'executable_tier_count'::text, 'admission_rejected_tier_count'::text, 'admitted_tier_count'::text, 'selected_tier_count'::text, 'executed_entry_count'::text, 'resolved_allocation_count'::text, 'no_candidate_tick_count'::text, 'no_executable_tier_tick_count'::text, 'no_selection_tick_count'::text, 'selected_tick_count'::text, 'tier_exclusion_reasons'::text]) = '{}'::jsonb) AND (((portfolio_funnel ->> 'schema_version'::text))::integer = 1) AND (((portfolio_funnel ->> 'executable_tier_count'::text))::bigint = (((portfolio_funnel ->> 'admission_rejected_tier_count'::text))::bigint + ((portfolio_funnel ->> 'admitted_tier_count'::text))::bigint)) AND (((portfolio_funnel ->> 'selected_tier_count'::text))::bigint = ((portfolio_funnel ->> 'executed_entry_count'::text))::bigint) AND (((portfolio_funnel ->> 'resolved_allocation_count'::text))::bigint <= ((portfolio_funnel ->> 'executed_entry_count'::text))::bigint) AND (((portfolio_funnel ->> 'resolved_allocation_count'::text))::bigint = sample_count) AND (((portfolio_funnel ->> 'decision_tick_count'::text))::bigint = (((((portfolio_funnel ->> 'no_candidate_tick_count'::text))::bigint + ((portfolio_funnel ->> 'no_executable_tier_tick_count'::text))::bigint) + ((portfolio_funnel ->> 'no_selection_tick_count'::text))::bigint) + ((portfolio_funnel ->> 'selected_tick_count'::text))::bigint)) AND (jsonb_typeof((portfolio_funnel -> 'tier_exclusion_reasons'::text)) = 'array'::text) AND (report_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
       "initially_deferred": false,
       "name": "ck_quant_backtest_report_evaluation",
       "table": "quant_backtest_report",
@@ -25237,7 +25432,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((revision > 0) AND (template_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(route) = 'string'::text) AND (route = ANY (ARRAY['\"pooled\"'::jsonb, '\"crypto\"'::jsonb, '\"weather\"'::jsonb])) AND ((octet_length((governance_reason)::text) >= 1) AND (octet_length((governance_reason)::text) <= 2048)) AND ((governance_reason)::text = btrim((governance_reason)::text)) AND ((governance_reason)::text !~ '[[:cntrl:]]'::text) AND (jsonb_typeof(template) = 'object'::text) AND (template ?& ARRAY['format_version'::text, 'recipe_template_id'::text, 'revision'::text, 'template_hash'::text, 'profile_ref'::text, 'route'::text, 'model_family'::text, 'training_spec'::text, 'calibration_spec'::text, 'cpcv_spec'::text, 'downside_spec'::text, 'diagnostic_spec'::text, 'responsive_triggers'::text, 'catalog_priority'::text, 'resource_budget'::text, 'status'::text, 'approved_by_user_id'::text, 'approved_by_role'::text, 'approved_at'::text, 'governance_reason'::text]) AND ((template - ARRAY['format_version'::text, 'recipe_template_id'::text, 'revision'::text, 'template_hash'::text, 'profile_ref'::text, 'route'::text, 'model_family'::text, 'training_spec'::text, 'calibration_spec'::text, 'cpcv_spec'::text, 'downside_spec'::text, 'diagnostic_spec'::text, 'responsive_triggers'::text, 'catalog_priority'::text, 'resource_budget'::text, 'status'::text, 'approved_by_user_id'::text, 'approved_by_role'::text, 'approved_at'::text, 'governance_reason'::text]) = '{}'::jsonb) AND (((template ->> 'format_version'::text))::integer = 3) AND (((template ->> 'recipe_template_id'::text))::uuid = recipe_template_id) AND (((template ->> 'revision'::text))::integer = revision) AND ((template ->> 'template_hash'::text) = template_hash) AND ((template -> 'route'::text) = route) AND ((template ->> 'model_family'::text) = (model_family)::text) AND ((((template -> 'training_spec'::text) ->> 'model_spec_id'::text))::uuid = model_spec_id) AND ((template ->> 'status'::text) = (status)::text) AND (((template ->> 'catalog_priority'::text))::integer = catalog_priority) AND ((template ->> 'governance_reason'::text) = (governance_reason)::text) AND (((template -> 'training_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (((template -> 'training_spec'::text) ->> 'model_spec_definition_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'training_spec'::text) ->> 'training_window_days'::text))::numeric > (0)::numeric) AND (((template -> 'calibration_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'calibration_spec'::text) ->> 'calibration_window_days'::text))::numeric > (0)::numeric) AND (jsonb_typeof((template -> 'cpcv_spec'::text)) = 'object'::text) AND ((template -> 'cpcv_spec'::text) ?& ARRAY['spec_hash'::text, 'validation'::text, 'target_horizon_secs'::text, 'purge_embargo_secs'::text]) AND (((template -> 'cpcv_spec'::text) - ARRAY['spec_hash'::text, 'validation'::text, 'target_horizon_secs'::text, 'purge_embargo_secs'::text]) = '{}'::jsonb) AND (((template -> 'cpcv_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'cpcv_spec'::text) ->> 'target_horizon_secs'::text))::numeric > (0)::numeric) AND ((((template -> 'cpcv_spec'::text) ->> 'purge_embargo_secs'::text))::numeric > (0)::numeric) AND (jsonb_typeof(((template -> 'cpcv_spec'::text) -> 'validation'::text)) = 'object'::text) AND (((template -> 'cpcv_spec'::text) -> 'validation'::text) ?& ARRAY['purge'::text, 'cpcv'::text, 'trials'::text, 'pbo'::text, 'gates'::text]) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) - ARRAY['purge'::text, 'cpcv'::text, 'trials'::text, 'pbo'::text, 'gates'::text]) = '{}'::jsonb) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ?& ARRAY['embargo_pct'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) - ARRAY['embargo_pct'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ->> 'embargo_pct'::text))::numeric >= (0)::numeric) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ->> 'embargo_pct'::text))::numeric < (1)::numeric) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ?& ARRAY['n_groups'::text, 'k_test'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) - ARRAY['n_groups'::text, 'k_test'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'n_groups'::text))::integer > 1) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'k_test'::text))::integer > 0) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'k_test'::text))::integer < (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'n_groups'::text))::integer) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) ?& ARRAY['lambda_multipliers'::text, 'rank_loss_kinds'::text, 'forest_n_trees_multipliers'::text, 'linear_alpha_multipliers'::text, 'max_trials'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) - ARRAY['lambda_multipliers'::text, 'rank_loss_kinds'::text, 'forest_n_trees_multipliers'::text, 'linear_alpha_multipliers'::text, 'max_trials'::text]) = '{}'::jsonb) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'lambda_multipliers'::text)) > 0) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'rank_loss_kinds'::text)) > 0) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'forest_n_trees_multipliers'::text)) > 0) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'linear_alpha_multipliers'::text)) > 0) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) ->> 'max_trials'::text))::integer > 0) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ?& ARRAY['block_count'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) - ARRAY['block_count'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ->> 'block_count'::text))::integer >= 4) AND (mod((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ->> 'block_count'::text))::integer, 2) = 0) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) ?& ARRAY['min_cpcv_paths'::text, 'rank_ic_min'::text, 'dsr_significance'::text, 'max_pbo'::text, 'max_turnover'::text, 'min_tail_loss_bps'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) - ARRAY['min_cpcv_paths'::text, 'rank_ic_min'::text, 'dsr_significance'::text, 'max_pbo'::text, 'max_turnover'::text, 'min_tail_loss_bps'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) ->> 'min_cpcv_paths'::text))::integer >= 21) AND (((template -> 'downside_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(((template -> 'diagnostic_spec'::text) -> 'accepted_artifact_kinds'::text)) = 'array'::text) AND (jsonb_array_length(((template -> 'diagnostic_spec'::text) -> 'accepted_artifact_kinds'::text)) > 0) AND ((((template -> 'diagnostic_spec'::text) ->> 'minimum_evidence_count'::text))::numeric > (0)::numeric) AND (jsonb_typeof((template -> 'responsive_triggers'::text)) = 'array'::text) AND (jsonb_array_length((template -> 'responsive_triggers'::text)) > 0) AND (jsonb_typeof((template -> 'resource_budget'::text)) = 'object'::text) AND ((((template -> 'resource_budget'::text) ->> 'max_concurrency'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'max_working_set_bytes'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'max_resident_model_bytes'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'deadline_secs'::text))::numeric > (0)::numeric) AND (((template -> 'profile_ref'::text) ->> 'content_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (research_profile_artifact_id = ((((('rpa:'::text || ((template -> 'profile_ref'::text) ->> 'id'::text)) || ':'::text) || ((template -> 'profile_ref'::text) ->> 'version'::text)) || ':'::text) || ((template -> 'profile_ref'::text) ->> 'content_hash'::text))) AND (NOT (((template ->> 'approved_by_user_id'::text))::uuid IS DISTINCT FROM approved_by_user_id)) AND (NOT ((template ->> 'approved_by_role'::text) IS DISTINCT FROM (approved_by_role)::text)) AND (NOT (((template ->> 'approved_at'::text))::timestamp with time zone IS DISTINCT FROM approved_at)) AND (((status = 'draft'::qp_feedback_recipe_template_status) AND (approved_by_user_id IS NULL) AND (approved_by_role IS NULL) AND (approved_at IS NULL)) OR ((status = ANY (ARRAY['approved'::qp_feedback_recipe_template_status, 'retired'::qp_feedback_recipe_template_status])) AND (approved_by_user_id IS NOT NULL) AND ((approved_by_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text) AND (approved_at IS NOT NULL) AND (approved_at <= created_at)))))",
+      "definition": "CHECK (((revision > 0) AND (template_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(route) = 'string'::text) AND (route = ANY (ARRAY['\"pooled\"'::jsonb, '\"crypto\"'::jsonb, '\"weather\"'::jsonb])) AND ((octet_length((governance_reason)::text) >= 1) AND (octet_length((governance_reason)::text) <= 2048)) AND ((governance_reason)::text = btrim((governance_reason)::text)) AND ((governance_reason)::text !~ '[[:cntrl:]]'::text) AND (jsonb_typeof(template) = 'object'::text) AND (template ?& ARRAY['format_version'::text, 'recipe_template_id'::text, 'revision'::text, 'template_hash'::text, 'profile_ref'::text, 'route'::text, 'model_family'::text, 'training_spec'::text, 'calibration_spec'::text, 'cpcv_spec'::text, 'downside_spec'::text, 'diagnostic_spec'::text, 'responsive_triggers'::text, 'catalog_priority'::text, 'resource_budget'::text, 'status'::text, 'approved_by_user_id'::text, 'approved_by_role'::text, 'approved_at'::text, 'governance_reason'::text]) AND ((template - ARRAY['format_version'::text, 'recipe_template_id'::text, 'revision'::text, 'template_hash'::text, 'profile_ref'::text, 'route'::text, 'model_family'::text, 'training_spec'::text, 'calibration_spec'::text, 'cpcv_spec'::text, 'downside_spec'::text, 'diagnostic_spec'::text, 'responsive_triggers'::text, 'catalog_priority'::text, 'resource_budget'::text, 'status'::text, 'approved_by_user_id'::text, 'approved_by_role'::text, 'approved_at'::text, 'governance_reason'::text]) = '{}'::jsonb) AND (((template ->> 'format_version'::text))::integer = 3) AND (((template ->> 'recipe_template_id'::text))::uuid = recipe_template_id) AND (((template ->> 'revision'::text))::integer = revision) AND ((template ->> 'template_hash'::text) = template_hash) AND ((template -> 'route'::text) = route) AND ((template ->> 'model_family'::text) = (model_family)::text) AND ((((template -> 'training_spec'::text) ->> 'model_spec_id'::text))::uuid = model_spec_id) AND ((template ->> 'status'::text) = (status)::text) AND (((template ->> 'catalog_priority'::text))::integer = catalog_priority) AND ((template ->> 'governance_reason'::text) = (governance_reason)::text) AND (((template -> 'training_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (((template -> 'training_spec'::text) ->> 'model_spec_definition_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'training_spec'::text) ->> 'training_window_days'::text))::numeric > (0)::numeric) AND (((template -> 'calibration_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'calibration_spec'::text) ->> 'calibration_window_days'::text))::numeric > (0)::numeric) AND (jsonb_typeof((template -> 'cpcv_spec'::text)) = 'object'::text) AND ((template -> 'cpcv_spec'::text) ?& ARRAY['spec_hash'::text, 'validation'::text, 'target_horizon_secs'::text, 'purge_embargo_secs'::text]) AND (((template -> 'cpcv_spec'::text) - ARRAY['spec_hash'::text, 'validation'::text, 'target_horizon_secs'::text, 'purge_embargo_secs'::text]) = '{}'::jsonb) AND (((template -> 'cpcv_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'cpcv_spec'::text) ->> 'target_horizon_secs'::text))::numeric > (0)::numeric) AND ((((template -> 'cpcv_spec'::text) ->> 'purge_embargo_secs'::text))::numeric > (0)::numeric) AND (jsonb_typeof(((template -> 'cpcv_spec'::text) -> 'validation'::text)) = 'object'::text) AND (((template -> 'cpcv_spec'::text) -> 'validation'::text) ?& ARRAY['purge'::text, 'cpcv'::text, 'trials'::text, 'pbo'::text, 'gates'::text]) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) - ARRAY['purge'::text, 'cpcv'::text, 'trials'::text, 'pbo'::text, 'gates'::text]) = '{}'::jsonb) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ?& ARRAY['embargo_pct'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) - ARRAY['embargo_pct'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ->> 'embargo_pct'::text))::numeric >= (0)::numeric) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ->> 'embargo_pct'::text))::numeric < (1)::numeric) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ?& ARRAY['n_groups'::text, 'k_test'::text, 'nested_estimator_holdout_bps'::text, 'nested_estimator_min_groups'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) - ARRAY['n_groups'::text, 'k_test'::text, 'nested_estimator_holdout_bps'::text, 'nested_estimator_min_groups'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'n_groups'::text))::integer > 1) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'k_test'::text))::integer > 0) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'k_test'::text))::integer < (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'n_groups'::text))::integer) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'nested_estimator_holdout_bps'::text))::integer > 0) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'nested_estimator_holdout_bps'::text))::integer < 10000) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'nested_estimator_min_groups'::text))::integer >= 4) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) ?& ARRAY['lambda_multipliers'::text, 'rank_loss_kinds'::text, 'forest_n_trees_multipliers'::text, 'linear_alpha_multipliers'::text, 'max_trials'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) - ARRAY['lambda_multipliers'::text, 'rank_loss_kinds'::text, 'forest_n_trees_multipliers'::text, 'linear_alpha_multipliers'::text, 'max_trials'::text]) = '{}'::jsonb) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'lambda_multipliers'::text)) > 0) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'rank_loss_kinds'::text)) > 0) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'forest_n_trees_multipliers'::text)) > 0) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'linear_alpha_multipliers'::text)) > 0) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) ->> 'max_trials'::text))::integer > 0) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ?& ARRAY['block_count'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) - ARRAY['block_count'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ->> 'block_count'::text))::integer >= 4) AND (mod((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ->> 'block_count'::text))::integer, 2) = 0) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) ?& ARRAY['min_cpcv_paths'::text, 'rank_ic_min'::text, 'dsr_significance'::text, 'max_pbo'::text, 'max_turnover'::text, 'min_tail_loss_bps'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) - ARRAY['min_cpcv_paths'::text, 'rank_ic_min'::text, 'dsr_significance'::text, 'max_pbo'::text, 'max_turnover'::text, 'min_tail_loss_bps'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) ->> 'min_cpcv_paths'::text))::integer >= 21) AND (((template -> 'downside_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(((template -> 'diagnostic_spec'::text) -> 'accepted_artifact_kinds'::text)) = 'array'::text) AND (jsonb_array_length(((template -> 'diagnostic_spec'::text) -> 'accepted_artifact_kinds'::text)) > 0) AND ((((template -> 'diagnostic_spec'::text) ->> 'minimum_evidence_count'::text))::numeric > (0)::numeric) AND (jsonb_typeof((template -> 'responsive_triggers'::text)) = 'array'::text) AND (jsonb_array_length((template -> 'responsive_triggers'::text)) > 0) AND (jsonb_typeof((template -> 'resource_budget'::text)) = 'object'::text) AND ((((template -> 'resource_budget'::text) ->> 'max_concurrency'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'max_working_set_bytes'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'max_resident_model_bytes'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'deadline_secs'::text))::numeric > (0)::numeric) AND (((template -> 'profile_ref'::text) ->> 'content_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (research_profile_artifact_id = ((((('rpa:'::text || ((template -> 'profile_ref'::text) ->> 'id'::text)) || ':'::text) || ((template -> 'profile_ref'::text) ->> 'version'::text)) || ':'::text) || ((template -> 'profile_ref'::text) ->> 'content_hash'::text))) AND (NOT (((template ->> 'approved_by_user_id'::text))::uuid IS DISTINCT FROM approved_by_user_id)) AND (NOT ((template ->> 'approved_by_role'::text) IS DISTINCT FROM (approved_by_role)::text)) AND (NOT (((template ->> 'approved_at'::text))::timestamp with time zone IS DISTINCT FROM approved_at)) AND (((status = 'draft'::qp_feedback_recipe_template_status) AND (approved_by_user_id IS NULL) AND (approved_by_role IS NULL) AND (approved_at IS NULL)) OR ((status = ANY (ARRAY['approved'::qp_feedback_recipe_template_status, 'retired'::qp_feedback_recipe_template_status])) AND (approved_by_user_id IS NOT NULL) AND ((approved_by_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text) AND (approved_at IS NOT NULL) AND (approved_at <= created_at)))))",
       "initially_deferred": false,
       "name": "ck_quant_feedback_recipe_template",
       "table": "quant_feedback_recipe_template",
@@ -25503,6 +25698,15 @@
       "name": "pk-quant_market_linkage_source",
       "table": "quant_market_linkage_source",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((selector_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(selector_evidence) = 'object'::text) AND (selector_evidence ?& ARRAY['selector_hash'::text, 'contract_hash'::text, 'boundary_hash'::text, 'selection_policy_hash'::text, 'data_quality_policy_hash'::text, 'feature_schema_hash'::text, 'model_requirements_hash'::text, 'candidates_hash'::text, 'candidate_catalog_hash'::text, 'candidate_book_hash'::text, 'candidate_domain_hash'::text, 'candidate_decision_hash'::text, 'included_hash'::text, 'excluded_hash'::text, 'exclusion_summary_hash'::text]) AND ((selector_evidence - ARRAY['selector_hash'::text, 'contract_hash'::text, 'boundary_hash'::text, 'selection_policy_hash'::text, 'data_quality_policy_hash'::text, 'feature_schema_hash'::text, 'model_requirements_hash'::text, 'candidates_hash'::text, 'candidate_catalog_hash'::text, 'candidate_book_hash'::text, 'candidate_domain_hash'::text, 'candidate_decision_hash'::text, 'included_hash'::text, 'excluded_hash'::text, 'exclusion_summary_hash'::text]) = '{}'::jsonb) AND ((selector_evidence ->> 'selector_hash'::text) = selector_hash) AND ((selector_evidence ->> 'contract_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'boundary_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'selection_policy_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'data_quality_policy_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'feature_schema_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'model_requirements_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'candidates_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'candidate_catalog_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'candidate_book_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'candidate_domain_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'candidate_decision_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'included_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'excluded_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((selector_evidence ->> 'exclusion_summary_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_market_selection_evidence",
+      "table": "quant_market_selection",
+      "type": "c",
       "validated": true
     },
     {
@@ -25966,7 +26170,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof((input_contract -> 'inputs'::text)) = 'array'::text) AND (jsonb_array_length((input_contract -> 'inputs'::text)) > 0) AND (jsonb_typeof(training_contract) = 'object'::text) AND (jsonb_typeof((training_contract -> 'target_label_name'::text)) = 'string'::text) AND ((length((training_contract ->> 'target_label_name'::text)) >= 1) AND (length((training_contract ->> 'target_label_name'::text)) <= 128)) AND ((((training_contract ->> 'validation_folds'::text))::integer >= 2) AND (((training_contract ->> 'validation_folds'::text))::integer <= 20)) AND ((definition_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "definition": "CHECK (((jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof((input_contract -> 'inputs'::text)) = 'array'::text) AND (jsonb_array_length((input_contract -> 'inputs'::text)) > 0) AND (jsonb_typeof(training_contract) = 'object'::text) AND (training_contract ?& ARRAY['target'::text, 'validation_folds'::text, 'evaluation_trade_policy_artifact_id'::text]) AND ((training_contract - ARRAY['target'::text, 'validation_folds'::text, 'evaluation_trade_policy_artifact_id'::text]) = '{}'::jsonb) AND (jsonb_typeof((training_contract -> 'target'::text)) = 'object'::text) AND ((((training_contract #>> '{target,kind}'::text[]) = 'outcome_payout'::text) AND (((training_contract -> 'target'::text) - 'kind'::text) = '{}'::jsonb) AND (model_family = ANY (ARRAY['weighted_factor'::qp_model_family, 'classical_logistic_regression'::qp_model_family]))) OR (((training_contract #>> '{target,kind}'::text[]) = 'forward_return'::text) AND ((training_contract -> 'target'::text) ?& ARRAY['kind'::text, 'horizon_secs'::text]) AND (((training_contract -> 'target'::text) - ARRAY['kind'::text, 'horizon_secs'::text]) = '{}'::jsonb) AND (jsonb_typeof((training_contract #> '{target,horizon_secs}'::text[])) = 'number'::text) AND (((training_contract #>> '{target,horizon_secs}'::text[]))::bigint > 0) AND (model_family = ANY (ARRAY['classical_gradient_boosted_trees'::qp_model_family, 'classical_random_forest'::qp_model_family, 'classical_extra_trees'::qp_model_family, 'classical_ridge'::qp_model_family, 'classical_lasso'::qp_model_family, 'classical_elastic_net'::qp_model_family]))) OR (((training_contract #>> '{target,kind}'::text[]) = 'hold_vs_exit_alpha'::text) AND (((training_contract -> 'target'::text) - 'kind'::text) = '{}'::jsonb) AND (model_family = 'hold_vs_exit_weighted'::qp_model_family))) AND ((((training_contract ->> 'validation_folds'::text))::integer >= 2) AND (((training_contract ->> 'validation_folds'::text))::integer <= 20)) AND (((training_contract -> 'evaluation_trade_policy_artifact_id'::text) = 'null'::jsonb) OR ((jsonb_typeof((training_contract -> 'evaluation_trade_policy_artifact_id'::text)) = 'string'::text) AND (((training_contract ->> 'evaluation_trade_policy_artifact_id'::text))::uuid IS NOT NULL))) AND ((definition_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)))",
       "initially_deferred": false,
       "name": "quant_model_spec_check",
       "table": "quant_model_spec",
@@ -26182,18 +26386,36 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (market_selection_id) REFERENCES quant_market_selection(market_selection_id)",
+      "definition": "CHECK ((((scenario_artifact_id IS NULL) AND (scenario_artifact_hash IS NULL) AND (scenario_artifact_json IS NULL)) OR ((scenario_artifact_id IS NOT NULL) AND (scenario_artifact_hash IS NOT NULL) AND (scenario_artifact_json IS NOT NULL) AND ((scenario_artifact_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text))))",
       "initially_deferred": false,
-      "name": "fk-quant_portfolio_plan-market_selection_id",
+      "name": "ck_quant_portfolio_plan_scenario_binding",
+      "table": "quant_portfolio_plan",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (account_snapshot_id) REFERENCES quant_account_snapshot(account_snapshot_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_portfolio_plan-account_snapshot_id",
       "table": "quant_portfolio_plan",
       "type": "f",
       "validated": true
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (model_run_id) REFERENCES quant_model_run(model_run_id)",
+      "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
       "initially_deferred": false,
-      "name": "fk-quant_portfolio_plan-model_run_id",
+      "name": "fk-quant_portfolio_plan-decision_policy_snapshot_id",
+      "table": "quant_portfolio_plan",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (market_selection_id) REFERENCES quant_market_selection(market_selection_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_portfolio_plan-market_selection_id",
       "table": "quant_portfolio_plan",
       "type": "f",
       "validated": true
@@ -26308,6 +26530,15 @@
     },
     {
       "deferrable": false,
+      "definition": "FOREIGN KEY (portfolio_plan_id) REFERENCES quant_portfolio_plan(portfolio_plan_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation-portfolio_plan_id",
+      "table": "quant_recommendation",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (recommendation_report_id) REFERENCES quant_recommendation_report(recommendation_report_id)",
       "initially_deferred": false,
       "name": "fk-quant_recommendation-recommendation_report_id",
@@ -26317,9 +26548,9 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "definition": "FOREIGN KEY (report_route_run_id) REFERENCES quant_report_route_run(report_route_run_id)",
       "initially_deferred": false,
-      "name": "fk-quant_recommendation-research_profile_artifact_id",
+      "name": "fk-quant_recommendation-report_route_run_id",
       "table": "quant_recommendation",
       "type": "f",
       "validated": true
@@ -26338,6 +26569,15 @@
       "definition": "UNIQUE (recommendation_id, market_id, token_id)",
       "initially_deferred": false,
       "name": "uq_quant_recommendation_identity",
+      "table": "quant_recommendation",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (recommendation_report_id, economic_tier_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_recommendation_report_tier",
       "table": "quant_recommendation",
       "type": "u",
       "validated": true
@@ -26425,6 +26665,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK ((((scenario_artifact_id IS NULL) AND (scenario_artifact_hash IS NULL)) OR ((scenario_artifact_id IS NOT NULL) AND (scenario_artifact_hash IS NOT NULL) AND ((scenario_artifact_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_recommendation_report_scenario_binding",
+      "table": "quant_recommendation_report",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (account_snapshot_ref) REFERENCES quant_account_snapshot(account_snapshot_id)",
       "initially_deferred": false,
       "name": "fk-quant_recommendation_report-account_snapshot_ref",
@@ -26437,6 +26686,15 @@
       "definition": "FOREIGN KEY (data_quality_snapshot_ref) REFERENCES quant_report_data_quality_snapshot(report_data_quality_snapshot_id)",
       "initially_deferred": false,
       "name": "fk-quant_recommendation_report-data_quality_snapshot_ref",
+      "table": "quant_recommendation_report",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_report-decision_policy_snapshot_id",
       "table": "quant_recommendation_report",
       "type": "f",
       "validated": true
@@ -26461,24 +26719,6 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (model_run_id) REFERENCES quant_model_run(model_run_id)",
-      "initially_deferred": false,
-      "name": "fk-quant_recommendation_report-model_run_id",
-      "table": "quant_recommendation_report",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "FOREIGN KEY (model_version_id) REFERENCES quant_model_version(model_version_id)",
-      "initially_deferred": false,
-      "name": "fk-quant_recommendation_report-model_version_id",
-      "table": "quant_recommendation_report",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
       "definition": "FOREIGN KEY (portfolio_plan_id) REFERENCES quant_portfolio_plan(portfolio_plan_id)",
       "initially_deferred": false,
       "name": "fk-quant_recommendation_report-portfolio_plan_id",
@@ -26488,9 +26728,9 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "definition": "FOREIGN KEY (report_run_id) REFERENCES quant_report_run(report_run_id)",
       "initially_deferred": false,
-      "name": "fk-quant_recommendation_report-research_profile_artifact_id",
+      "name": "fk-quant_recommendation_report-report_run_id",
       "table": "quant_recommendation_report",
       "type": "f",
       "validated": true
@@ -26641,20 +26881,20 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK ((horizon_secs > 0))",
-      "initially_deferred": false,
-      "name": "quant_recommendation_report_horizon_secs_check",
-      "table": "quant_recommendation_report",
-      "type": "c",
-      "validated": true
-    },
-    {
-      "deferrable": false,
       "definition": "PRIMARY KEY (recommendation_report_id)",
       "initially_deferred": false,
       "name": "quant_recommendation_report_pkey",
       "table": "quant_recommendation_report",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (report_run_id)",
+      "initially_deferred": false,
+      "name": "quant_recommendation_report_report_run_id_key",
+      "table": "quant_recommendation_report",
+      "type": "u",
       "validated": true
     },
     {
@@ -26884,6 +27124,87 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((finished_at <= created_at) AND ((diagnostic_code IS NULL) OR ((char_length(btrim((diagnostic_code)::text)) >= 1) AND (char_length(btrim((diagnostic_code)::text)) <= 128)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_report_route_run_timeline",
+      "table": "quant_report_route_run",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (calibration_artifact_id) REFERENCES quant_calibration_artifact(artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_report_route_run-calibration_artifact_id",
+      "table": "quant_report_route_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (model_run_id) REFERENCES quant_model_run(model_run_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_report_route_run-model_run_id",
+      "table": "quant_report_route_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (model_version_id) REFERENCES quant_model_version(model_version_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_report_route_run-model_version_id",
+      "table": "quant_report_route_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (report_run_id) REFERENCES quant_report_run(report_run_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_report_route_run-report_run_id",
+      "table": "quant_report_route_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_report_route_run-research_profile_artifact_id",
+      "table": "quant_report_route_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (trade_policy_artifact_id) REFERENCES quant_trade_policy_artifact(artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_report_route_run-trade_policy_artifact_id",
+      "table": "quant_report_route_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (report_route_run_id)",
+      "initially_deferred": false,
+      "name": "quant_report_route_run_pkey",
+      "table": "quant_report_route_run",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (report_run_id, route)",
+      "initially_deferred": false,
+      "name": "uq_quant_report_route_run_route",
+      "table": "quant_report_route_run",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK (((length((trigger_key)::text) >= 1) AND (length((trigger_key)::text) <= 256) AND (octet_length((trigger_key)::text) = length((trigger_key)::text)) AND ((trigger_key)::text ~ '^[[:graph:]]+$'::text) AND (POSITION((chr(92)) IN ((trigger_key)::text)) = 0) AND (POSITION((chr(34)) IN ((trigger_key)::text)) = 0)))",
       "initially_deferred": false,
       "name": "ck_quant_report_run_trigger_key",
@@ -26902,18 +27223,18 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (output_report_id) REFERENCES quant_recommendation_report(recommendation_report_id)",
+      "definition": "FOREIGN KEY (retry_of_run_id) REFERENCES quant_report_run(report_run_id)",
       "initially_deferred": false,
-      "name": "fk-quant_report_run-output_report_id",
+      "name": "fk-quant_report_run-retry_of_run_id",
       "table": "quant_report_run",
       "type": "f",
       "validated": true
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (retry_of_run_id) REFERENCES quant_report_run(report_run_id)",
+      "definition": "FOREIGN KEY (output_report_id) REFERENCES quant_recommendation_report(recommendation_report_id) ON UPDATE RESTRICT ON DELETE RESTRICT",
       "initially_deferred": false,
-      "name": "fk-quant_report_run-retry_of_run_id",
+      "name": "fk_quant_report_run_output_report",
       "table": "quant_report_run",
       "type": "f",
       "validated": true
@@ -28622,8 +28943,8 @@
         "execution_risk_policy",
         "model_routing",
         "report_schedule",
-        "operational_control",
-        "execution_authorization"
+        "operations_policy",
+        "execution_automation_policy"
       ],
       "name": "qp_config_resource_kind"
     },
@@ -34221,6 +34542,55 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_report_route_run",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_report_route_run",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_report_route_run",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_report_route_run",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_report_route_run",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_report_route_run",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_report_route_run",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_report_run",
       "privilege": "DELETE"
     },
@@ -38763,9 +39133,9 @@
       "valid": true
     },
     {
-      "definition": "CREATE INDEX idx_quant_recommendation_profile_available_id ON public.quant_recommendation USING btree (research_profile_artifact_id, created_at, recommendation_id)",
+      "definition": "CREATE INDEX idx_quant_recommendation_route_rank ON public.quant_recommendation USING btree (report_route_run_id, rank)",
       "method": "btree",
-      "name": "idx_quant_recommendation_profile_available_id",
+      "name": "idx_quant_recommendation_route_rank",
       "primary": false,
       "ready": true,
       "table": "quant_recommendation",
@@ -38823,6 +39193,16 @@
       "valid": true
     },
     {
+      "definition": "CREATE UNIQUE INDEX uq_quant_recommendation_report_tier ON public.quant_recommendation USING btree (recommendation_report_id, economic_tier_id)",
+      "method": "btree",
+      "name": "uq_quant_recommendation_report_tier",
+      "primary": false,
+      "ready": true,
+      "table": "quant_recommendation",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_execution_rollup_available ON public.quant_recommendation_execution_rollup USING btree (available_at, recommendation_id)",
       "method": "btree",
       "name": "idx_quant_execution_rollup_available",
@@ -38873,26 +39253,6 @@
       "valid": true
     },
     {
-      "definition": "CREATE INDEX idx_quant_recommendation_report_model_decision_at ON public.quant_recommendation_report USING btree (model_version_id, decision_at DESC)",
-      "method": "btree",
-      "name": "idx_quant_recommendation_report_model_decision_at",
-      "primary": false,
-      "ready": true,
-      "table": "quant_recommendation_report",
-      "unique": false,
-      "valid": true
-    },
-    {
-      "definition": "CREATE INDEX idx_quant_recommendation_report_profile_artifact_kind_decision_ ON public.quant_recommendation_report USING btree (research_profile_artifact_id, report_kind, decision_at DESC)",
-      "method": "btree",
-      "name": "idx_quant_recommendation_report_profile_artifact_kind_decision_",
-      "primary": false,
-      "ready": true,
-      "table": "quant_recommendation_report",
-      "unique": false,
-      "valid": true
-    },
-    {
       "definition": "CREATE INDEX idx_quant_recommendation_report_status_decision_at ON public.quant_recommendation_report USING btree (status, decision_at DESC)",
       "method": "btree",
       "name": "idx_quant_recommendation_report_status_decision_at",
@@ -38923,9 +39283,9 @@
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX uq_quant_recommendation_report_current_artifact_scope ON public.quant_recommendation_report USING btree (research_profile_artifact_id, report_kind) WHERE (status = 'published'::qp_recommendation_report_status)",
+      "definition": "CREATE UNIQUE INDEX quant_recommendation_report_report_run_id_key ON public.quant_recommendation_report USING btree (report_run_id)",
       "method": "btree",
-      "name": "uq_quant_recommendation_report_current_artifact_scope",
+      "name": "quant_recommendation_report_report_run_id_key",
       "primary": false,
       "ready": true,
       "table": "quant_recommendation_report",
@@ -38933,9 +39293,9 @@
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX uq_quant_recommendation_report_model_run ON public.quant_recommendation_report USING btree (model_run_id)",
+      "definition": "CREATE UNIQUE INDEX uq_quant_recommendation_report_current_scope ON public.quant_recommendation_report USING btree (report_kind) WHERE (status = 'published'::qp_recommendation_report_status)",
       "method": "btree",
-      "name": "uq_quant_recommendation_report_model_run",
+      "name": "uq_quant_recommendation_report_current_scope",
       "primary": false,
       "ready": true,
       "table": "quant_recommendation_report",
@@ -39039,6 +39399,46 @@
       "primary": true,
       "ready": true,
       "table": "quant_report_fact_delivery",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_report_route_run_model ON public.quant_report_route_run USING btree (model_run_id)",
+      "method": "btree",
+      "name": "idx_quant_report_route_run_model",
+      "primary": false,
+      "ready": true,
+      "table": "quant_report_route_run",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_report_route_run_report ON public.quant_report_route_run USING btree (report_run_id, finished_at)",
+      "method": "btree",
+      "name": "idx_quant_report_route_run_report",
+      "primary": false,
+      "ready": true,
+      "table": "quant_report_route_run",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_report_route_run_pkey ON public.quant_report_route_run USING btree (report_route_run_id)",
+      "method": "btree",
+      "name": "quant_report_route_run_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_report_route_run",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_report_route_run_route ON public.quant_report_route_run USING btree (report_run_id, route)",
+      "method": "btree",
+      "name": "uq_quant_report_route_run_route",
+      "primary": false,
+      "ready": true,
+      "table": "quant_report_route_run",
       "unique": true,
       "valid": true
     },
@@ -40766,6 +41166,13 @@
     {
       "kind": "r",
       "name": "quant_report_fact_delivery",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_report_route_run",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false

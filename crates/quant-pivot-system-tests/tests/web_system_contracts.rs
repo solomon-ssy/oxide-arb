@@ -981,7 +981,7 @@ async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -
             admin,
             "super_admin",
             feedback_trigger_body(
-                "crypto_price_15m",
+                "pooled_1h_control",
                 "operator_retrain",
                 "web-feedback-missing-route",
             ),
@@ -995,7 +995,7 @@ async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -
     .await?;
     ensure!(
         missing_route["message"]
-            == "invalid feedback-cycle state: feedback profile crypto_price_15m has no active serving route Crypto"
+            == "invalid feedback-cycle state: feedback profile pooled_1h_control has no active serving route Pooled"
             && missing_route["data"].is_null(),
         "missing feedback route lost its typed conflict envelope: {missing_route}"
     );

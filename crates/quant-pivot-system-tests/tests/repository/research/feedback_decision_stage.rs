@@ -82,12 +82,13 @@ use quant_pivot_models::{
             CommitModelRoutePromotion, ExecutionAttemptBarrier, ExecutionRollupBarrier,
             FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackStageEventInfo,
             FeedbackStageEventInput, FeedbackStageJobIdentity, IssuePromotionPermit,
-            ModelVersionInfo, NewFeedbackStageEvent, NewResearchJob, NoopProgressSink,
-            PromoteModelRoute, PromotionPermitActor, PromotionPermitInfo, PromotionPermitScope,
-            PromotionPermitScopeInput, PromotionPermitStatus, PromotionPolicyProjection,
-            PromotionPreflight, PromotionPreflightInput, ResearchJobArtifactRef,
-            ResearchJobFinalization, ResearchJobInfo, ResearchJobResultRef,
-            ResolutionProjectionBarrier, RevokePromotionPermit,
+            ModelVersionInfo, NewBacktestPathSet, NewBacktestPathSetInput, NewFeedbackStageEvent,
+            NewModelRun, NewResearchJob, NoopProgressSink, PromoteModelRoute, PromotionPermitActor,
+            PromotionPermitInfo, PromotionPermitScope, PromotionPermitScopeInput,
+            PromotionPermitStatus, PromotionPolicyProjection, PromotionPreflight,
+            PromotionPreflightInput, ResearchJobArtifactRef, ResearchJobFinalization,
+            ResearchJobInfo, ResearchJobResultRef, ResolutionProjectionBarrier,
+            RevokePromotionPermit,
         },
     },
     entities::{
@@ -119,8 +120,9 @@ use quant_pivot_models::{
         common::MarketCategory,
         quant::{
             CalibrationMethod, DatasetPurpose, DownsideSource, FeedbackCycleStatus,
-            FeedbackDecision, FeedbackStage, FeedbackStageEventKind, QuantRuntimeMode,
-            ResearchJobKind, ResearchJobResultKind, ResearchJobStatus, ShadowBindingStatus,
+            FeedbackDecision, FeedbackStage, FeedbackStageEventKind, ModelRunKind,
+            QuantRuntimeMode, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
+            ShadowBindingStatus,
         },
         runtime_config::PolicyActivationKind,
     },
@@ -134,6 +136,12 @@ use quant_pivot_models::{
         FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackDriftArtifactId, ModelRunId,
         ModelVersionId, PolicyIdempotencyKey, PromotionPermitId, ResearchJobParams, RoleCode,
         ShadowBindingArtifactId, TrainingDatasetId, WorkerId,
+        backtest::{
+            BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
+            CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
+            CpcvTrialPathBinding, SharpeDistribution,
+        },
+        model_lineage::ModelVersionDerivation,
         model_quality::{
             GateClass, GateId, GateIntent, GateOutcome, GateStatus, GateSubject, QualityGateReport,
             QualityGateReportInput,
@@ -143,27 +151,28 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgBacktestPathSetRepository, PgBacktestReportRepository, PgFeatureParityRepository,
-        PgFeedbackCycleRepository, PgModelCandidateManifestRepository,
+        PgBacktestPathSetRepository, PgBacktestReportRepository, PgCalibrationArtifactRepository,
+        PgFeatureParityRepository, PgFeedbackCycleRepository, PgModelCandidateManifestRepository,
         PgModelGovernanceAuditRepository, PgModelRegistryRepository,
         PgModelRouteBootstrapRepository, PgModelRoutePromotionRepository,
-        PgModelRouteShadowBindingRepository, PgPolicyRepository, PgPromotionPermitRepository,
-        PgResearchJobRepository, PgRuntimeControlRepository, PgShadowComparisonRepository,
-        PgTrainingDatasetRepository,
+        PgModelRouteShadowBindingRepository, PgModelRunRepository, PgPolicyRepository,
+        PgPromotionPermitRepository, PgResearchJobRepository, PgRuntimeControlRepository,
+        PgShadowComparisonRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        BacktestPathSetRepository, BacktestReportRepository, FeatureParityLatchActor,
-        FeatureParityRepository, FeedbackCycleClaim, FeedbackCycleGeneration,
-        FeedbackCycleLeaseGuard, FeedbackCycleRepository, ModelCandidateManifestRepository,
-        ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRouteBootstrapRepository,
-        ModelRoutePromotionCommit, ModelRoutePromotionOutcome, ModelRoutePromotionRepository,
-        ModelRouteShadowBindingRepository, PolicyRepository, PromotionPermitIssueOutcome,
-        PromotionPermitRepository, PromotionPermitRevokeOutcome, ResearchJobEnqueueOutcome,
-        ResearchJobRepository, RuntimeControlRepository, TrainingDatasetRepository,
+        BacktestPathSetRepository, BacktestReportRepository, CpcvPathSetCommit,
+        FeatureParityLatchActor, FeatureParityRepository, FeedbackCycleClaim,
+        FeedbackCycleGeneration, FeedbackCycleLeaseGuard, FeedbackCycleRepository,
+        ModelCandidateManifestRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
+        ModelRouteBootstrapRepository, ModelRoutePromotionCommit, ModelRoutePromotionOutcome,
+        ModelRoutePromotionRepository, ModelRouteShadowBindingRepository, ModelRunRepository,
+        PolicyRepository, PromotionPermitIssueOutcome, PromotionPermitRepository,
+        PromotionPermitRevokeOutcome, ResearchJobEnqueueOutcome, ResearchJobRepository,
+        RuntimeControlRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
-    artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
+    artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     feedback::{
         ConceptDriftDetail, DriftGateOutcome, FEEDBACK_DRIFT_ARTIFACT_FORMAT_VERSION,
         FeatureDriftDetail, FeedbackCoverageArtifact, FeedbackCoverageCodec, FeedbackDriftArtifact,
@@ -179,9 +188,10 @@ use quant_pivot_research::{
     feedback_shadow_binding::ShadowBindingCodec,
 };
 use quant_pivot_system_tests::{
-    postgres::setup_pg,
+    postgres::{run_suite_large_stack, setup_pg},
     support::{
-        artifact_store::ReadTamperArtifactStoreFixture, model_serving_fixtures::ModelVersionFixture,
+        artifact_store::ReadTamperArtifactStoreFixture,
+        model_serving_fixtures::ModelVersionFixture, research_fixtures::cscv_selection_fixture,
     },
 };
 use rust_decimal::Decimal;
@@ -296,6 +306,8 @@ fn shadow_binding_stage(
             cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
             jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
             models: Arc::new(PgModelRegistryRepository::new(db.clone())),
+            path_sets: Arc::new(PgBacktestPathSetRepository::new(db.clone())),
+            calibrations: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
             policies: Arc::new(PgPolicyRepository::new(db.clone())),
             manifests: Arc::new(PgModelCandidateManifestRepository::new(db.clone())),
             artifacts: store,
@@ -1311,6 +1323,7 @@ struct ValidationGateFixture {
 }
 
 struct ValidationGateRecorder<'a> {
+    db: &'a DatabaseConnection,
     store: &'a Arc<dyn ArtifactStore>,
     cycles: &'a PgFeedbackCycleRepository,
     jobs: &'a PgResearchJobRepository,
@@ -1334,6 +1347,260 @@ struct TrainingGateFixture {
 }
 
 impl ValidationGateRecorder<'_> {
+    fn fold_artifacts() -> CpcvFoldArtifacts {
+        CpcvFoldArtifacts::try_new(vec![
+            CpcvFoldArtifact {
+                identity: CpcvEstimatorIdentity::Validation {
+                    combination_index: 0,
+                    test_partitions_hash: content_hash('b'),
+                    test_partition_count: 1,
+                    test_groups_hash: content_hash('c'),
+                    test_group_count: 1,
+                },
+                training_groups_hash: content_hash('b'),
+                training_group_count: 2,
+                calibration_fit_groups_hash: content_hash('4'),
+                calibration_fit_group_count: 1,
+                scenario_fit_groups_hash: content_hash('0'),
+                scenario_fit_group_count: 1,
+                model_artifact_hash: content_hash('c'),
+                serving_contract_hash: content_hash('d'),
+                model_payload_hash: content_hash('e'),
+                calibration_function_hash: content_hash('7'),
+                scenario_economic_function_hash: content_hash('8'),
+                calibration_artifact_hash: content_hash('5'),
+                scenario_model_hash: content_hash('6'),
+            },
+            CpcvFoldArtifact {
+                identity: CpcvEstimatorIdentity::TrialPathValidation {
+                    trial_id: 0,
+                    path_index: 0,
+                    combination_index: 0,
+                    test_partitions_hash: content_hash('b'),
+                    test_partition_count: 1,
+                    test_groups_hash: content_hash('c'),
+                    test_group_count: 1,
+                },
+                training_groups_hash: content_hash('f'),
+                training_group_count: 3,
+                calibration_fit_groups_hash: content_hash('4'),
+                calibration_fit_group_count: 1,
+                scenario_fit_groups_hash: content_hash('0'),
+                scenario_fit_group_count: 1,
+                model_artifact_hash: content_hash('1'),
+                serving_contract_hash: content_hash('2'),
+                model_payload_hash: content_hash('3'),
+                calibration_function_hash: content_hash('7'),
+                scenario_economic_function_hash: content_hash('8'),
+                calibration_artifact_hash: content_hash('5'),
+                scenario_model_hash: content_hash('6'),
+            },
+            CpcvFoldArtifact {
+                identity: CpcvEstimatorIdentity::TrialPathValidation {
+                    trial_id: 1,
+                    path_index: 0,
+                    combination_index: 0,
+                    test_partitions_hash: content_hash('b'),
+                    test_partition_count: 1,
+                    test_groups_hash: content_hash('c'),
+                    test_group_count: 1,
+                },
+                training_groups_hash: content_hash('e'),
+                training_group_count: 3,
+                calibration_fit_groups_hash: content_hash('4'),
+                calibration_fit_group_count: 1,
+                scenario_fit_groups_hash: content_hash('0'),
+                scenario_fit_group_count: 1,
+                model_artifact_hash: content_hash('2'),
+                serving_contract_hash: content_hash('3'),
+                model_payload_hash: content_hash('4'),
+                calibration_function_hash: content_hash('9'),
+                scenario_economic_function_hash: content_hash('a'),
+                calibration_artifact_hash: content_hash('5'),
+                scenario_model_hash: content_hash('6'),
+            },
+        ])
+        .expect("build promotion CPCV fold artifacts")
+    }
+
+    fn path_series(
+        window_start: DateTime<Utc>,
+        bucket_secs: i64,
+        observation_count: i64,
+    ) -> (Vec<DateTime<Utc>>, Vec<Decimal>) {
+        let decision_times = (0..observation_count)
+            .map(|bucket| {
+                window_start
+                    + Duration::seconds(
+                        bucket_secs
+                            .checked_mul(bucket)
+                            .expect("promotion CPCV decision offset fits i64"),
+                    )
+                    + Duration::seconds(1)
+            })
+            .collect::<Vec<_>>();
+        let group_returns = (0..observation_count)
+            .map(|ordinal| match ordinal.rem_euclid(8) {
+                0 | 3 => dec!(0.012),
+                1 | 6 => dec!(-0.005),
+                _ => dec!(0.004),
+            })
+            .collect::<Vec<_>>();
+        (decision_times, group_returns)
+    }
+
+    async fn persist_path_set(
+        &self,
+        path_set_id: BacktestPathSetId,
+        model_run_id: ModelRunId,
+    ) -> ContentHash {
+        let model = &self.models.candidate;
+        let bindings = model
+            .verified_serving_contract()
+            .expect("verify promotion CPCV serving contract")
+            .bindings();
+        let training_dataset_id = model
+            .training_dataset_id
+            .expect("promotion candidate has a training dataset");
+        let observation_count = 96_i64;
+        let bucket_secs = model.model_spec_prediction_horizon_secs;
+        assert!(bucket_secs > 0, "promotion candidate horizon is positive");
+        let window_end = self.claim.cycle.label_cutoff - Duration::seconds(bucket_secs);
+        let window_start = window_end
+            - Duration::seconds(
+                bucket_secs
+                    .checked_mul(observation_count)
+                    .expect("promotion CPCV window fits i64"),
+            );
+        let (decision_times, group_returns) =
+            Self::path_series(window_start, bucket_secs, observation_count);
+        let challenger_returns = group_returns
+            .iter()
+            .map(|value| *value - dec!(0.001))
+            .collect::<Vec<_>>();
+        let (trial_grid, cscv_selection_evidence) = cscv_selection_fixture(
+            "feedback-decision-path-set",
+            &decision_times,
+            &[group_returns.clone(), challenger_returns],
+            4,
+        );
+        let dsr_conservative_independent_trial_count = i64::from(
+            cscv_selection_evidence
+                .trial_dependence
+                .conservative_independent_trial_count(),
+        );
+        let input_hash = content_hash('b');
+        let ModelVersionDerivation::ReturnCalibration {
+            parent_model_version_id,
+            calibration_artifact_id,
+        } = model
+            .verified_derivation()
+            .expect("verify promotion candidate derivation")
+        else {
+            panic!("promotion candidate must be a calibrated child")
+        };
+        let calibration = bindings
+            .model
+            .calibration
+            .as_ref()
+            .expect("promotion candidate has a calibration binding");
+        assert_eq!(calibration.artifact_id, calibration_artifact_id);
+        let parent = PgModelRegistryRepository::new(self.db.clone())
+            .find_model_version(&parent_model_version_id)
+            .await
+            .expect("load promotion candidate parent")
+            .expect("promotion candidate parent exists");
+        PgModelRunRepository::new(self.db.clone())
+            .start_exact(NewModelRun {
+                model_run_id,
+                run_kind: ModelRunKind::Cpcv,
+                model_version_id: Some(model.model_version_id),
+                decision_policy_snapshot_id: bindings.policy_snapshot.decision_policy_snapshot_id,
+                market_selection_id: None,
+                window_start,
+                window_end,
+                input_hash,
+            })
+            .await
+            .expect("start exact promotion CPCV model run");
+        let path_set = NewBacktestPathSet::try_seal(NewBacktestPathSetInput {
+            path_set_id,
+            model_version_id: model.model_version_id,
+            model_run_id,
+            training_dataset_id,
+            decision_policy_snapshot_id: bindings.policy_snapshot.decision_policy_snapshot_id,
+            window_start,
+            window_end,
+            subject: CpcvPathSetSubject::new(
+                model.artifact_hash,
+                model.serving_contract_hash,
+                bindings.transform.training_dataset_hash,
+                bindings.dataset.manifest_hash,
+                bindings.dataset.artifact_bytes_hash,
+                bindings.policy_snapshot.snapshot_hash,
+            ),
+            methodology: CpcvMethodologyBinding::new(
+                content_hash('7'),
+                content_hash('8'),
+                content_hash('9'),
+                CpcvFoldCalibrationPolicy::CalibratedSubjectParentHeuristic {
+                    calibration_artifact_id,
+                    calibration_hash: calibration.content_hash,
+                    parent_model_version_id,
+                    parent_artifact_hash: parent.artifact_hash,
+                    parent_serving_contract_hash: parent.serving_contract_hash,
+                    parent_return_model_hash: content_hash('a'),
+                },
+                CpcvTrialPathBinding::try_new(0, vec![0]).expect("build promotion CPCV trial path"),
+                trial_grid,
+            ),
+            fold_artifacts: Self::fold_artifacts(),
+            path_count: 1,
+            combination_count: 1,
+            median_rank_ic: dec!(0.12),
+            sharpe_distribution: SharpeDistribution {
+                min: dec!(0.1),
+                p25: dec!(0.4),
+                median: dec!(0.8),
+                p75: dec!(1.1),
+                max: dec!(1.5),
+                median_max_drawdown: None,
+                median_tail_loss: None,
+                median_turnover: None,
+                baseline_uplift: None,
+            },
+            paths: vec![BacktestPath {
+                path_index: 0,
+                decision_times,
+                scenario_residuals: group_returns.iter().copied().map(Some).collect(),
+                group_returns,
+                sharpe: dec!(0.8),
+                rank_ic: dec!(0.12),
+                max_drawdown: dec!(0.005),
+                tail_loss: dec!(-0.005),
+                turnover: None,
+            }]
+            .into(),
+            deflated_sharpe: dec!(0.96),
+            dsr_benchmark_sharpe: dec!(0.4),
+            pbo: cscv_selection_evidence.pbo,
+            cscv_selection_evidence,
+            min_track_record_length_secs: Some(observation_count * bucket_secs),
+            dsr_conservative_independent_trial_count,
+            trial_grid_count: 2,
+            coord_search_effective_n: 2,
+        })
+        .expect("seal promotion CPCV path set");
+        PgBacktestPathSetRepository::new(self.db.clone())
+            .commit_cpcv(CpcvPathSetCommit {
+                path_set,
+                input_hash,
+            })
+            .await
+            .expect("persist exact promotion CPCV path set")
+            .path_set_hash
+    }
+
     async fn record_dataset(&self, family_hash: ContentHash) -> DatasetGateFixture {
         let params = dataset_params(&self.claim.cycle, self.family, family_hash);
         let artifact = FeedbackLearningStageArtifact::try_new(
@@ -1553,7 +1820,15 @@ impl ValidationGateRecorder<'_> {
         let calibration_ref = self
             .record_calibration(recipe_hash, family_hash, &dataset, &training)
             .await;
+        let path_set_id = BacktestPathSetId::from_v7();
+        let model_run_id = ModelRunId::from_feedback_stage(
+            self.claim.cycle.feedback_cycle_id,
+            FeedbackStage::Cpcv,
+            recipe_hash,
+        );
+        let path_set_hash = self.persist_path_set(path_set_id, model_run_id).await;
         let Self {
+            db: _,
             store,
             cycles,
             jobs,
@@ -1566,8 +1841,6 @@ impl ValidationGateRecorder<'_> {
         let cycle = &claim.cycle;
         let candidate_training_dataset_id = dataset.training_dataset_id;
 
-        let path_set_id = BacktestPathSetId::from_v7();
-        let path_set_hash = content_hash('a');
         let cpcv_params = FeedbackCpcvJobParams::try_new(
             cycle.feedback_cycle_id,
             cycle.idempotency_hash,
@@ -1579,11 +1852,7 @@ impl ValidationGateRecorder<'_> {
                 cpcv_spec,
                 params: CpcvBacktestJobParams {
                     model_version_id: models.candidate.model_version_id,
-                    model_run_id: ModelRunId::from_feedback_stage(
-                        cycle.feedback_cycle_id,
-                        FeedbackStage::Cpcv,
-                        recipe_hash,
-                    ),
+                    model_run_id,
                     request: RunCpcvBacktestRequest {
                         training_dataset_id: candidate_training_dataset_id,
                         decision_policy_snapshot_id: cycle.decision_policy_snapshot_id,
@@ -2364,6 +2633,7 @@ impl TerminalPipeline {
         )
         .await;
         let validation = ValidationGateRecorder {
+            db,
             store,
             cycles: cycles.as_ref(),
             jobs: jobs.as_ref(),
@@ -2599,8 +2869,7 @@ impl TerminalDecisionCase {
         let (pool, _container) = setup_pg().await;
         let db = pool.connection().clone();
         let artifact_root = ArtifactRoot::create();
-        let store: Arc<dyn ArtifactStore> =
-            Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+        let store = artifact_root.store();
         let TerminalPipeline {
             models,
             serving,
@@ -2737,8 +3006,7 @@ impl TerminalDecisionCase {
         let (pool, _container) = setup_pg().await;
         let db = pool.connection().clone();
         let artifact_root = ArtifactRoot::create();
-        let store: Arc<dyn ArtifactStore> =
-            Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+        let store = artifact_root.store();
         let TerminalPipeline {
             models,
             serving,
@@ -2880,8 +3148,16 @@ impl TerminalDecisionCase {
 }
 
 pub async fn terminal_decision_contracts() {
-    let no_action = Box::pin(TerminalDecisionCase::InsufficientShadow.run()).await;
-    let rejected = Box::pin(TerminalDecisionCase::RejectedComparison.run()).await;
+    let no_action = Box::pin(run_suite_large_stack(
+        TerminalDecisionCase::InsufficientShadow.run(),
+    ))
+    .await
+    .expect("run isolated insufficient-shadow decision path");
+    let rejected = Box::pin(run_suite_large_stack(
+        TerminalDecisionCase::RejectedComparison.run(),
+    ))
+    .await
+    .expect("run isolated rejected-comparison decision path");
     no_action.validate();
     rejected.validate();
 }
@@ -2948,6 +3224,7 @@ impl ShadowBoundCase {
         )
         .await;
         let validation = ValidationGateRecorder {
+            db: &db,
             store: &store,
             cycles: cycles.as_ref(),
             jobs: jobs.as_ref(),
@@ -3434,8 +3711,7 @@ impl DecisionPathEvidence {
         let (pool, _container) = setup_pg().await;
         let db = pool.connection().clone();
         let artifact_root = ArtifactRoot::create();
-        let store: Arc<dyn ArtifactStore> =
-            Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+        let store = artifact_root.store();
         let case = Box::pin(PromotionPreflightCase::prepare(db, store)).await;
         let decisions = case.verify_decision_evidence().await;
         let permit_fixture = Box::pin(PromotionPermitFixture::issue(
@@ -4039,12 +4315,12 @@ impl AtomicPromotionCase {
             policy_before.snapshot.report_schedule
         );
         assert_eq!(
-            policy_after.snapshot.operational_control,
-            policy_before.snapshot.operational_control
+            policy_after.snapshot.operations_policy,
+            policy_before.snapshot.operations_policy
         );
         assert_eq!(
-            policy_after.snapshot.execution_authorization,
-            policy_before.snapshot.execution_authorization
+            policy_after.snapshot.execution_automation_policy,
+            policy_before.snapshot.execution_automation_policy
         );
         assert_eq!(
             policy_after.snapshot.profile_artifacts,
@@ -4650,6 +4926,11 @@ impl AtomicPromotionCase {
             &self.harness.policy_before,
             MarketCategory::Crypto,
             self.case.models.candidate.model_version_id,
+            self.harness
+                .initial_preflight
+                .serving_constraints()
+                .scenario_model_bindings()
+                .to_vec(),
         )
         .expect("rebuild P04 route projection")
         .validate_candidate(&policy_after.snapshot, committed.activation.activated_at)
@@ -4907,8 +5188,7 @@ impl DecisionPathEvidence {
         assert_authority_boundary();
         let (pool, _container) = setup_pg().await;
         let artifact_root = ArtifactRoot::create();
-        let store: Arc<dyn ArtifactStore> =
-            Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+        let store = artifact_root.store();
         let case = Box::pin(AtomicPromotionCase::prepare(
             pool.connection().clone(),
             store,
@@ -4989,12 +5269,25 @@ pub async fn model_route_promotion_contracts() {
 }
 
 pub async fn decision_path_evidence_contracts() {
-    let paths = vec![
-        Box::pin(TerminalDecisionCase::InsufficientShadow.run()).await,
-        Box::pin(TerminalDecisionCase::RejectedComparison.run()).await,
-        Box::pin(DecisionPathEvidence::candidate_ready()).await,
-        Box::pin(DecisionPathEvidence::promoted()).await,
-    ];
+    let no_action = Box::pin(run_suite_large_stack(
+        TerminalDecisionCase::InsufficientShadow.run(),
+    ))
+    .await
+    .expect("run isolated insufficient-shadow evidence path");
+    let rejected = Box::pin(run_suite_large_stack(
+        TerminalDecisionCase::RejectedComparison.run(),
+    ))
+    .await
+    .expect("run isolated rejected-comparison evidence path");
+    let candidate_ready = Box::pin(run_suite_large_stack(
+        DecisionPathEvidence::candidate_ready(),
+    ))
+    .await
+    .expect("run isolated CandidateReady evidence path");
+    let promoted = Box::pin(run_suite_large_stack(DecisionPathEvidence::promoted()))
+        .await
+        .expect("run isolated promoted evidence path");
+    let paths = vec![no_action, rejected, candidate_ready, promoted];
     let artifact = DecisionPathEvidenceManifest::new(paths).write();
     assert!(artifact.path.is_file());
     ContentHash::parse(&artifact.content_hash).expect("evidence hash uses canonical BLAKE3 text");
@@ -5003,8 +5296,7 @@ pub async fn decision_path_evidence_contracts() {
 pub async fn promotion_runtime_apply_contracts() {
     let (pool, _container) = setup_pg().await;
     let artifact_root = ArtifactRoot::create();
-    let store: Arc<dyn ArtifactStore> =
-        Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+    let store = artifact_root.store();
     let case = Box::pin(AtomicPromotionCase::prepare(
         pool.connection().clone(),
         store,
@@ -5192,8 +5484,7 @@ pub async fn shadow_cancellation_contracts() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let artifact_root = ArtifactRoot::create();
-    let store: Arc<dyn ArtifactStore> =
-        Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+    let store = artifact_root.store();
     let case = Box::pin(ShadowBoundCase::prepare(db.clone(), store)).await;
     let bindings = Arc::new(PgModelRouteShadowBindingRepository::new(db.clone()));
     let binding_id = ShadowBindingArtifactId::from_cycle_id(case.claim.cycle.feedback_cycle_id);
@@ -5211,8 +5502,7 @@ pub async fn shadow_cancellation_contracts() {
 async fn rejection_fault_matrix() {
     let (pool, _container) = setup_pg().await;
     let artifact_root = ArtifactRoot::create();
-    let store: Arc<dyn ArtifactStore> =
-        Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+    let store = artifact_root.store();
     let case = Box::pin(AtomicPromotionCase::prepare(
         pool.connection().clone(),
         store,
@@ -5230,8 +5520,7 @@ async fn rejection_fault_matrix() {
 async fn promotion_first_race() {
     let (pool, _container) = setup_pg().await;
     let artifact_root = ArtifactRoot::create();
-    let store: Arc<dyn ArtifactStore> =
-        Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+    let store = artifact_root.store();
     let case = Box::pin(AtomicPromotionCase::prepare(
         pool.connection().clone(),
         store,
@@ -5243,8 +5532,7 @@ async fn promotion_first_race() {
 async fn revocation_first_race() {
     let (pool, _container) = setup_pg().await;
     let artifact_root = ArtifactRoot::create();
-    let store: Arc<dyn ArtifactStore> =
-        Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+    let store = artifact_root.store();
     let case = Box::pin(AtomicPromotionCase::prepare(
         pool.connection().clone(),
         store,

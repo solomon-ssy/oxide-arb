@@ -9,6 +9,7 @@ use quant_pivot_api::exchange::{
 use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
     domain::data_plane::{TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus},
+    types::TradeTapeSourceEvidence,
 };
 #[cfg(test)]
 use quant_pivot_models::{domain::data_plane::TradeTapeSourceKind, types::EvmAddress};
@@ -62,6 +63,29 @@ pub fn market_tape_available<S: BuildHasher>(
             .get(&address)
             .is_some_and(|cursor| cursor_is_healthy(cursor))
     })
+}
+
+/// Recompute one market's runtime availability from frozen raw source evidence.
+///
+/// Historical materialization and a schema that did not request trade tape are
+/// intentionally rejected: runtime parity must prove it received the exact
+/// deploy-toggle/cursor input consumed by online serving.
+pub fn runtime_market_tape_available(
+    evidence: &TradeTapeSourceEvidence,
+    neg_risk: bool,
+) -> Result<bool, String> {
+    let (ingest_enabled, cursors) = evidence.runtime_parts().ok_or_else(|| {
+        "runtime trade-tape parity requires frozen deploy-toggle/cursor evidence".to_owned()
+    })?;
+    Ok(ingest_enabled
+        && exchange_route(neg_risk).iter().any(|contract| {
+            let address = format!("{:#x}", contract.address);
+            cursors.iter().any(|cursor| {
+                cursor.contract_address.as_str() == address
+                    && cursor.status != TradeTapeBlockCursorStatus::Faulted
+                    && cursor.last_finalized_block > 0
+            })
+        }))
 }
 
 /// Whether the on-chain trade-tape ingest plane is operable for both exchange
@@ -159,5 +183,18 @@ mod tests {
             cursor(NEG_RISK_EXCHANGE_V2, TradeTapeBlockCursorStatus::Faulted, 0),
         ];
         assert!(!trade_tape_ingest_available(&enabled_config(), &partial));
+    }
+
+    #[test]
+    fn frozen_source_replays_gate() {
+        let cursor = cursor(CTF_EXCHANGE_V2, TradeTapeBlockCursorStatus::Live, 42);
+        let enabled = TradeTapeSourceEvidence::runtime(true, vec![cursor.clone()])
+            .expect("valid runtime evidence");
+        assert!(runtime_market_tape_available(&enabled, false).expect("runtime availability"));
+        assert!(!runtime_market_tape_available(&enabled, true).expect("runtime availability"));
+
+        let disabled =
+            TradeTapeSourceEvidence::runtime(false, vec![cursor]).expect("valid runtime evidence");
+        assert!(!runtime_market_tape_available(&disabled, false).expect("runtime availability"));
     }
 }

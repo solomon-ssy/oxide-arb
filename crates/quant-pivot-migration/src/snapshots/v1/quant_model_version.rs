@@ -82,7 +82,7 @@ pub struct Model {
     #[sea_orm(has_many)]
     pub quant_order_intents: HasMany<super::quant_order_intent::Entity>,
     #[sea_orm(has_many)]
-    pub quant_recommendation_reports: HasMany<super::quant_recommendation_report::Entity>,
+    pub quant_report_route_runs: HasMany<super::quant_report_route_run::Entity>,
     #[sea_orm(
         belongs_to,
         from = "trade_policy_artifact_id",

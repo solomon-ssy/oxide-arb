@@ -40,27 +40,28 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, Bps, ContentHash, DecisionPolicySnapshotId, EntryConditionTemplate,
         EntryOrderTemplate, ExecutablePriceBasis, ExitExecutionTemplate, MarketId,
-        ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        OpportunisticExitPolicy, Price, Probability, ResearchEvaluationTrack, ResearchJobId,
-        ResearchJobParams, ResearchProfileArtifact, ResearchReadinessEvidencePayload,
-        ResidualSharePolicy, RoleCode, SHADOW_LATENCY_PROFILE_FORMAT_VERSION, SchemaVersion,
-        ShadowLatencyProfileV1, Shares, SourceSliceManifest, StructuralVolatilityOosEvidence,
-        StructuralVolatilityOosFoldRow, TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
-        TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId, TradePolicyArtifactId,
-        TradePolicyArtifactPayload, TradePolicyCandidateId, TradePolicyCandidateSpec,
-        TradePolicyCandidateTrialRow, TradePolicyCohort, TradePolicyCohortDimension,
-        TradePolicyCohortKey, TradePolicyCohortProvenance, TradePolicyCohortTrialRow,
-        TradePolicyCpcvPathRow, TradePolicyEvidenceBundleManifest, TradePolicyEvidenceBundleRef,
-        TradePolicyEvidenceFillOutcome, TradePolicyEvidenceLiquidityRole,
-        TradePolicyEvidenceObjectKind, TradePolicyEvidenceObjectRef, TradePolicyExecutionEvidence,
-        TradePolicyExitTemplate, TradePolicyFillEvidenceRow, TradePolicyFitContract,
-        TradePolicyGovernanceAuditId, TradePolicyLatencyScenario, TradePolicyObservationCapability,
+        ModelInputContract, ModelSpecId, ModelTrainingContract, ModelTrainingTarget,
+        ModelVersionId, OpportunisticExitPolicy, Price, Probability, ResearchEvaluationTrack,
+        ResearchJobId, ResearchJobParams, ResearchProfileArtifact, ResearchProfileRef,
+        ResearchReadinessEvidencePayload, ResidualSharePolicy, RoleCode,
+        SHADOW_LATENCY_PROFILE_FORMAT_VERSION, SchemaVersion, ShadowLatencyProfileV1, Shares,
+        SourceSliceManifest, StructuralVolatilityOosEvidence, StructuralVolatilityOosFoldRow,
+        TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId,
+        TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateId,
+        TradePolicyCandidateSpec, TradePolicyCandidateTrialRow, TradePolicyCohort,
+        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance,
+        TradePolicyCohortTrialRow, TradePolicyCpcvPathRow, TradePolicyEvidenceBundleManifest,
+        TradePolicyEvidenceBundleRef, TradePolicyEvidenceFillOutcome,
+        TradePolicyEvidenceLiquidityRole, TradePolicyEvidenceObjectKind,
+        TradePolicyEvidenceObjectRef, TradePolicyExecutionEvidence, TradePolicyExitTemplate,
+        TradePolicyFillEvidenceRow, TradePolicyFitContract, TradePolicyGovernanceAuditId,
+        TradePolicyLatencyScenario, TradePolicyObservationCapability,
         TradePolicyObservationEligibilityRow, TradePolicyParameterSource,
         TradePolicyPitCutoffEvidence, TradePolicyStatisticalSummaryRow, TradePolicyTrialAttemptId,
         TradePolicyTrialMetrics, TradePolicyValidationEvidence, TrainingDatasetId,
         TrainingExampleId, Usd, UserId, VerticalActivationTarget, VerticalGateEvidence,
-        VerticalGateKind, WorkerId, builtin_research_profiles, factor::FactorServingPlane,
-        model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
+        VerticalGateKind, WorkerId, factor::FactorServingPlane, model_metrics::ModelVersionMetrics,
+        model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -81,7 +82,6 @@ use quant_pivot_research::{
     hashing::ResearchHasher,
     model::ReturnModelSpec,
     policy_evidence::{PolicyEvidenceParquetCodec, PolicyEvidenceRecord},
-    training::POLICY_NET_RETURN_BPS,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -93,7 +93,7 @@ use super::{
         ModelArtifactFixtureSeed, ModelDatasetLedgerFixture, ModelDatasetLedgerSeed,
         ModelPayloadFixture, ModelVersionFixture, SealedModelFixture,
     },
-    model_spec_fixtures::{new_model_spec_fixture, weather_horizon_secs},
+    model_spec_fixtures::new_model_spec_fixture,
 };
 
 const POLICY_CANDIDATE_ID: &str = "immediate";
@@ -108,6 +108,14 @@ pub struct PublishedTradePolicyFixture {
     provenance: TradePolicyCohortProvenance,
     subject_model_version_id: ModelVersionId,
     source_dataset_id: TrainingDatasetId,
+}
+
+/// Exact Route/Profile contract used to build one complete policy fixture.
+pub struct PublishedTradePolicyFixtureInput<'a> {
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub profile_ref: ResearchProfileRef,
+    pub scope: &'a str,
+    pub training_window_start: DateTime<Utc>,
 }
 
 impl PublishedTradePolicyFixture {
@@ -144,23 +152,14 @@ impl PublishedTradePolicyFixture {
         })
     }
 
-    /// Materialize a complete Weather policy preimage and publish its immutable
-    /// row through the repository state machine.
+    /// Materialize a complete Route-owned policy preimage and publish its
+    /// immutable row through the repository state machine.
     pub async fn persist(
         db: &DatabaseConnection,
         store: &Arc<dyn ArtifactStore>,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId,
-        scope: &str,
-        training_window_start: DateTime<Utc>,
+        input: PublishedTradePolicyFixtureInput<'_>,
     ) -> QuantResult<Self> {
-        let context = Box::pin(TradePolicyFixtureContext::load(
-            db,
-            store,
-            decision_policy_snapshot_id,
-            scope,
-            training_window_start,
-        ))
-        .await?;
+        let context = Box::pin(TradePolicyFixtureContext::load(db, store, input)).await?;
         let sealed = PolicyEvidenceFixture::persist(&context).await?;
         let blockers = sealed.payload.publication_blockers();
         if !blockers.is_empty() {
@@ -267,12 +266,11 @@ impl PublishedTradePolicyFixture {
     }
 
     #[must_use]
-    pub fn target_training_contract(&self) -> ModelTrainingContract {
+    pub const fn outcome_training_contract(&self) -> ModelTrainingContract {
         ModelTrainingContract {
-            target_label_name: POLICY_NET_RETURN_BPS.to_string(),
-            target_label_horizon_secs: 0,
+            target: ModelTrainingTarget::OutcomePayout,
             validation_folds: 3,
-            trade_policy_artifact_id: Some(self.provenance.artifact_id),
+            evaluation_trade_policy_artifact_id: Some(self.provenance.artifact_id),
         }
     }
 }
@@ -294,42 +292,18 @@ struct TradePolicyFixtureContext<'a> {
     readiness: Arc<ResearchReadinessEvidenceService>,
 }
 
-impl<'a> TradePolicyFixtureContext<'a> {
-    async fn load(
-        db: &'a DatabaseConnection,
-        store: &'a Arc<dyn ArtifactStore>,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId,
-        scope: &str,
+struct PolicyFitWindow {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    embargo: Duration,
+    embargo_secs: u64,
+}
+
+impl PolicyFitWindow {
+    fn derive(
+        profile: &ResearchProfileArtifact,
         training_window_start: DateTime<Utc>,
     ) -> QuantResult<Self> {
-        let profile = builtin_research_profiles()
-            .map_err(|detail| ResearchError::ValidationMethodology { detail })?
-            .into_iter()
-            .find(|profile| {
-                profile.spec.category == Some(MarketCategory::Weather)
-                    && profile.spec.activation_eligibility
-                        == ResearchEvaluationTrack::SemiAutoCandidate
-            })
-            .ok_or_else(|| ResearchError::ValidationMethodology {
-                detail: "built-in SemiAuto Weather ResearchProfile is missing".to_owned(),
-            })?;
-        let policy = PgPolicyRepository::new(db.clone())
-            .load_snapshot(&decision_policy_snapshot_id)
-            .await?
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "decision_policy_snapshot",
-                id: decision_policy_snapshot_id.to_string(),
-            })?;
-        let features = &policy.snapshot.profile_artifacts.features.definition;
-        let scoring = &policy.snapshot.profile_artifacts.scoring.definition;
-        let domain = &policy.snapshot.profile_artifacts.domain.definition;
-        let feature_schema_hash = ResearchHasher::feature_schema(&FeatureSchema::build(features)?)?;
-        let factor_plane =
-            FactorEngine::for_model_scope(scoring, features, domain, profile.spec.category, None)
-                .serving_plane()?
-                .clone();
-        let research_program_hash =
-            ResearchHasher::canonical(&("system-trade-policy-program-v1", scope))?;
         let fit_span = Duration::days(i64::from(profile.spec.fit_span_days));
         let fit_span_secs = u64::try_from(fit_span.num_seconds()).map_err(|error| {
             ResearchError::ValidationMethodology {
@@ -354,17 +328,83 @@ impl<'a> TradePolicyFixtureContext<'a> {
                 detail: format!("system policy embargo does not fit i64: {error}"),
             }
         })?);
-        let fit_window_end = training_window_start
+        let end = training_window_start
             .checked_sub_signed(embargo)
             .and_then(|value| value.checked_sub_signed(horizon))
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: "system policy timeline underflows before model training".to_owned(),
             })?;
-        let fit_window_start = fit_window_end.checked_sub_signed(fit_span).ok_or_else(|| {
+        let start = end.checked_sub_signed(fit_span).ok_or_else(|| {
             ResearchError::ValidationMethodology {
                 detail: "system policy fit window underflows".to_owned(),
             }
         })?;
+        Ok(Self {
+            start,
+            end,
+            embargo,
+            embargo_secs,
+        })
+    }
+}
+
+impl<'a> TradePolicyFixtureContext<'a> {
+    async fn load(
+        db: &'a DatabaseConnection,
+        store: &'a Arc<dyn ArtifactStore>,
+        input: PublishedTradePolicyFixtureInput<'_>,
+    ) -> QuantResult<Self> {
+        let profile = input
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
+        let category =
+            profile
+                .spec
+                .category
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "pooled ResearchProfile cannot own an executable Trade Policy fixture"
+                        .to_owned(),
+                })?;
+        if profile.spec.activation_eligibility != ResearchEvaluationTrack::SemiAutoCandidate
+            || !matches!(category, MarketCategory::Crypto | MarketCategory::Weather)
+        {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "ResearchProfile {} is not an executable Crypto/Weather SemiAuto candidate",
+                    profile.profile_ref.id
+                ),
+            }
+            .into());
+        }
+        let PublishedTradePolicyFixtureInput {
+            decision_policy_snapshot_id,
+            scope,
+            training_window_start,
+            ..
+        } = input;
+        let policy = PgPolicyRepository::new(db.clone())
+            .load_snapshot(&decision_policy_snapshot_id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "decision_policy_snapshot",
+                id: decision_policy_snapshot_id.to_string(),
+            })?;
+        let features = &policy.snapshot.profile_artifacts.features.definition;
+        let scoring = &policy.snapshot.profile_artifacts.scoring.definition;
+        let domain = &policy.snapshot.profile_artifacts.domain.definition;
+        let feature_schema_hash = ResearchHasher::feature_schema(&FeatureSchema::build(features)?)?;
+        let factor_plane =
+            FactorEngine::for_model_scope(scoring, features, domain, profile.spec.category, None)
+                .serving_plane()?
+                .clone();
+        let research_program_hash =
+            ResearchHasher::canonical(&("system-trade-policy-program-v1", scope, category))?;
+        let fit_window = PolicyFitWindow::derive(&profile, training_window_start)?;
+        let fit_window_start = fit_window.start;
+        let fit_window_end = fit_window.end;
+        let embargo = fit_window.embargo;
+        let embargo_secs = fit_window.embargo_secs;
         let subject = Box::pin(PolicySubjectFixture::persist(PolicySubjectSeed {
             db,
             store,
@@ -459,9 +499,13 @@ impl PolicySubjectFixture {
             model_spec_id,
             format!("{}-policy-subject", seed.scope),
             ModelFamily::WeightedFactor,
-            weather_horizon_secs(),
+            i64::try_from(seed.profile.spec.target_horizon_secs).map_err(|error| {
+                ResearchError::ValidationMethodology {
+                    detail: format!("policy subject horizon does not fit i64: {error}"),
+                }
+            })?,
             input_contract.clone(),
-            ModelTrainingContract::settlement_default(),
+            ModelTrainingContract::outcome_default(),
         );
         let definition_hash = spec.definition_hash;
         registry.create_model_spec(spec).await?;
@@ -606,7 +650,16 @@ impl PolicyEvidenceFixture {
     async fn persist(context: &TradePolicyFixtureContext<'_>) -> QuantResult<SealedPolicyEvidence> {
         let latency = Self::persist_latency(context).await?;
         let source_manifest = Self::source_manifest(context).await?;
-        let methodology_hash = ResearchHasher::canonical(&"system-weather-policy-methodology-v1")?;
+        let category =
+            context
+                .profile
+                .spec
+                .category
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "policy evidence profile has no executable category".to_owned(),
+                })?;
+        let methodology_hash =
+            ResearchHasher::canonical(&("system-trade-policy-methodology-v1", category))?;
         let candidates = policy_candidates();
         let candidate_set_hash = ResearchHasher::canonical(&candidates)?;
         let cohort = policy_cohort(context.cohort_key.clone());
@@ -618,6 +671,8 @@ impl PolicyEvidenceFixture {
                 cohort_hash,
                 cohort: &cohort,
                 candidates: &candidates,
+                category,
+                target_horizon_secs: context.profile.spec.target_horizon_secs,
             },
         )
         .await?;
@@ -891,7 +946,16 @@ impl PolicyEvidenceFixture {
                 detail: "PolicyFit Dataset has no complete materialization".to_owned(),
             }
         })?;
-        let vertical_gate = weather_vertical_gate(context.fit_window_end, methodology_hash);
+        let vertical_gate_evidence =
+            vertical_gate_evidence(
+                context.profile.spec.category.ok_or_else(|| {
+                    ResearchError::ValidationMethodology {
+                        detail: "policy payload profile has no executable category".to_owned(),
+                    }
+                })?,
+                context.fit_window_end,
+                methodology_hash,
+            )?;
         Ok(TradePolicyArtifactPayload {
             format_version: TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
             activation_target: VerticalActivationTarget::SemiAuto,
@@ -938,7 +1002,7 @@ impl PolicyEvidenceFixture {
             candidate_set_hash,
             candidates,
             evidence_bundle: None,
-            vertical_gate_evidence: vec![vertical_gate],
+            vertical_gate_evidence,
             structural_volatility_oos: structural_volatility_evidence(),
             cohorts: vec![cohort],
             validation: TradePolicyValidationEvidence {
@@ -968,6 +1032,8 @@ struct EvidenceRowContext<'a> {
     cohort_hash: ContentHash,
     cohort: &'a TradePolicyCohort,
     candidates: &'a [TradePolicyCandidateSpec],
+    category: MarketCategory,
+    target_horizon_secs: u64,
 }
 
 impl PolicyEvidenceObjects {
@@ -1062,6 +1128,9 @@ fn evidence_records(
     kind: TradePolicyEvidenceObjectKind,
     context: &EvidenceRowContext<'_>,
 ) -> QuantResult<Vec<PolicyEvidenceRecord>> {
+    if kind == TradePolicyEvidenceObjectKind::VerticalGates {
+        return vertical_gate_records(context);
+    }
     let candidate =
         context
             .candidates
@@ -1087,11 +1156,11 @@ fn evidence_records(
             Some(cohort_trial_record(context, &subject)?)
         }
         TradePolicyEvidenceObjectKind::CpcvPaths => Some(cpcv_record(context)?),
-        TradePolicyEvidenceObjectKind::CoverageGaps => None,
+        TradePolicyEvidenceObjectKind::CoverageGaps
+        | TradePolicyEvidenceObjectKind::VerticalGates => None,
         TradePolicyEvidenceObjectKind::StatisticalSummaries => {
             Some(summary_record(context, &subject)?)
         }
-        TradePolicyEvidenceObjectKind::VerticalGates => Some(vertical_gate_record(context)?),
         TradePolicyEvidenceObjectKind::StructuralVolatilityOos => Some(volatility_record(context)?),
     };
     Ok(record.into_iter().collect())
@@ -1108,12 +1177,14 @@ fn observation_record(
     context: &EvidenceRowContext<'_>,
     subject: &EvidenceSubject<'_>,
 ) -> QuantResult<PolicyEvidenceRecord> {
-    let capabilities = BTreeSet::from([
+    let mut capabilities = BTreeSet::from([
         TradePolicyObservationCapability::FullL2,
         TradePolicyObservationCapability::PitFeeSchedule,
         TradePolicyObservationCapability::ModelReinference,
-        TradePolicyObservationCapability::WeatherLinkage,
     ]);
+    if context.category == MarketCategory::Weather {
+        capabilities.insert(TradePolicyObservationCapability::WeatherLinkage);
+    }
     let scenarios = BTreeSet::from([
         TradePolicyLatencyScenario::Base1x,
         TradePolicyLatencyScenario::Stress2x,
@@ -1126,7 +1197,12 @@ fn observation_record(
             market_id: subject.market.clone(),
             token_id: subject.token.clone(),
             decision_at: context.now,
-            label_horizon_end: context.now + Duration::days(1),
+            label_horizon_end: context.now
+                + Duration::seconds(i64::try_from(context.target_horizon_secs).map_err(
+                    |error| ResearchError::ValidationMethodology {
+                        detail: format!("policy evidence horizon does not fit i64: {error}"),
+                    },
+                )?),
             cohort_hash: context.cohort_hash,
             candidate_count: 1,
             available_capabilities: capabilities,
@@ -1270,15 +1346,22 @@ fn summary_record(
     )
 }
 
-fn vertical_gate_record(context: &EvidenceRowContext<'_>) -> QuantResult<PolicyEvidenceRecord> {
-    PolicyEvidenceRecord::from_typed(
-        "vertical-gate-0001",
-        Some(context.now),
-        &weather_vertical_gate(
-            context.now,
-            ResearchHasher::canonical(&"system-weather-policy-methodology-v1")?,
-        ),
-    )
+fn vertical_gate_records(
+    context: &EvidenceRowContext<'_>,
+) -> QuantResult<Vec<PolicyEvidenceRecord>> {
+    let methodology_hash =
+        ResearchHasher::canonical(&("system-trade-policy-methodology-v1", context.category))?;
+    vertical_gate_evidence(context.category, context.now, methodology_hash)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, evidence)| {
+            PolicyEvidenceRecord::from_typed(
+                format!("vertical-gate-{index:04}"),
+                Some(context.now),
+                &evidence,
+            )
+        })
+        .collect()
 }
 
 fn volatility_record(context: &EvidenceRowContext<'_>) -> QuantResult<PolicyEvidenceRecord> {
@@ -1325,7 +1408,7 @@ fn policy_exit_template() -> TradePolicyExitTemplate {
         trailing_stop: None,
         min_score_retention: dec!(0.6),
         min_expected_return_bps: Bps::ZERO,
-        require_execution_eligibility: true,
+        require_route_gate_eligibility: true,
         opportunistic_exit: OpportunisticExitPolicy {
             min_confidence: Probability::new(dec!(0.65)),
             min_expected_alpha_bps: Bps::new(dec!(50)),
@@ -1350,16 +1433,22 @@ fn policy_exit_template() -> TradePolicyExitTemplate {
 }
 
 fn policy_cohort_key(profile: &ResearchProfileArtifact) -> QuantResult<TradePolicyCohortKey> {
+    let category = profile
+        .spec
+        .category
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: "pooled ResearchProfile cannot own an executable policy cohort".to_owned(),
+        })?;
     let dimension = TradePolicyCohortDimension {
         methodology_id: "system-structural-volatility-v1".to_owned(),
         methodology_hash: ResearchHasher::canonical(
             &"system-structural-volatility-methodology-v1",
         )?,
-        bucket_id: "all-weather".to_owned(),
+        bucket_id: format!("all-{category}"),
     };
     Ok(TradePolicyCohortKey {
         profile_ref: profile.profile_ref.clone(),
-        category: MarketCategory::Weather,
+        category,
         horizon_secs: profile.spec.target_horizon_secs,
         entry_price_min: Price::new(dec!(0.01)),
         entry_price_max: Price::new(dec!(0.99)),
@@ -1389,7 +1478,7 @@ fn policy_cohort(key: TradePolicyCohortKey) -> TradePolicyCohort {
         trailing_stop: exit.trailing_stop,
         min_score_retention: exit.min_score_retention,
         min_expected_return_bps: exit.min_expected_return_bps,
-        require_execution_eligibility: exit.require_execution_eligibility,
+        require_route_gate_eligibility: exit.require_route_gate_eligibility,
         opportunistic_exit: exit.opportunistic_exit,
         settlement_mode: exit.settlement_mode,
         redeem_policy: exit.redeem_policy,
@@ -1418,26 +1507,72 @@ fn policy_cohort(key: TradePolicyCohortKey) -> TradePolicyCohort {
     }
 }
 
-fn weather_vertical_gate(
+fn vertical_gate_evidence(
+    category: MarketCategory,
     now: DateTime<Utc>,
     methodology_hash: ContentHash,
-) -> VerticalGateEvidence {
-    VerticalGateEvidence {
-        gate: VerticalGateKind::WeatherNoaaProxy,
-        target: VerticalActivationTarget::SemiAuto,
-        methodology_hash,
-        evidence_window_start: now - Duration::days(31),
-        evidence_window_end: now,
-        sample_count: 500,
-        distinct_subject_count: 20,
-        distinct_local_dates: 30,
-        availability: dec!(0.99),
-        agreement_wilson_lower_bound: dec!(0.95),
-        target_subject_sample_count: Some(20),
-        target_subject_wilson_lower_bound: Some(dec!(0.90)),
-        unresolved_mismatch_count: 0,
-        gaps_recovered: true,
-    }
+) -> QuantResult<Vec<VerticalGateEvidence>> {
+    let evidence = match category {
+        MarketCategory::Weather => vec![VerticalGateEvidence {
+            gate: VerticalGateKind::WeatherNoaaProxy,
+            target: VerticalActivationTarget::SemiAuto,
+            methodology_hash,
+            evidence_window_start: now - Duration::days(31),
+            evidence_window_end: now,
+            sample_count: 500,
+            distinct_subject_count: 20,
+            distinct_local_dates: 30,
+            availability: dec!(0.99),
+            agreement_wilson_lower_bound: dec!(0.95),
+            target_subject_sample_count: Some(20),
+            target_subject_wilson_lower_bound: Some(dec!(0.90)),
+            unresolved_mismatch_count: 0,
+            gaps_recovered: true,
+        }],
+        MarketCategory::Crypto => vec![
+            VerticalGateEvidence {
+                gate: VerticalGateKind::CryptoChainlinkResolution,
+                target: VerticalActivationTarget::SemiAuto,
+                methodology_hash,
+                evidence_window_start: now - Duration::days(31),
+                evidence_window_end: now,
+                sample_count: 2_000,
+                distinct_subject_count: 0,
+                distinct_local_dates: 0,
+                availability: dec!(0.999),
+                agreement_wilson_lower_bound: Decimal::ONE,
+                target_subject_sample_count: None,
+                target_subject_wilson_lower_bound: None,
+                unresolved_mismatch_count: 0,
+                gaps_recovered: true,
+            },
+            VerticalGateEvidence {
+                gate: VerticalGateKind::CryptoBinanceContinuity,
+                target: VerticalActivationTarget::SemiAuto,
+                methodology_hash,
+                evidence_window_start: now - Duration::days(31),
+                evidence_window_end: now,
+                sample_count: 100_000,
+                distinct_subject_count: 0,
+                distinct_local_dates: 0,
+                availability: Decimal::ONE,
+                agreement_wilson_lower_bound: Decimal::ONE,
+                target_subject_sample_count: None,
+                target_subject_wilson_lower_bound: None,
+                unresolved_mismatch_count: 0,
+                gaps_recovered: true,
+            },
+        ],
+        _ => {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "category {category} has no production Trade Policy fixture methodology"
+                ),
+            }
+            .into());
+        }
+    };
+    Ok(evidence)
 }
 
 fn structural_volatility_evidence() -> StructuralVolatilityOosEvidence {

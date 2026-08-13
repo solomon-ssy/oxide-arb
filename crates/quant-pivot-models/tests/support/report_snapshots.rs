@@ -10,18 +10,22 @@ use chrono::{DateTime, TimeZone, Utc};
 use quant_pivot_models::{
     domain::{
         api::{QuantRecommendationView, QuantReportDetailView, RecommendationViewContext},
-        quant::{RecommendationInfo, RecommendationReportInfo},
+        quant::{
+            ExactVerificationEvidence, GlobalPortfolioPlan, PortfolioConstraintEvidence,
+            PortfolioDecisionResult, PortfolioObjectiveEvidence, RecommendationInfo,
+            RecommendationReportInfo, SolverEvidence,
+        },
     },
     enums::quant::{
         EmptyReportReason, ExitSettlementMode, FillRequirement, IneligibilityReason, OutcomeSide,
         QuantRuntimeMode, RecommendationReportStatus, RedeemPolicy, ReportKind,
     },
     types::{
-        BookSnapshotRef, Bps, ContentHash, EligibilitySummary, EntryConditionArtifactId,
-        EntryConditionPlan, EntryOrderPolicy, EntryPlan, EquitySnapshotId, EvidenceRefs,
-        ExecutionEligibility, ExitPlan, OpportunisticExitPolicy, Price, Probability,
-        RecommendationId, RecommendationReportId, RecommendationTradePlan, ReportSummary,
-        ScaleOutTarget, ThesisInvalidationPolicy, TrailingStopPolicy, Usd,
+        BookSnapshotRef, Bps, ContentHash, EconomicTierId, EligibilitySummary,
+        EntryConditionArtifactId, EntryConditionPlan, EntryOrderPolicy, EntryPlan,
+        EquitySnapshotId, EvidenceRefs, ExecutionEligibility, ExitPlan, OpportunisticExitPolicy,
+        PortfolioPlanId, Price, Probability, RecommendationId, RecommendationReportId,
+        ReportSummary, ScaleOutTarget, ThesisInvalidationPolicy, TrailingStopPolicy, Usd, UsdHours,
     },
 };
 use rust_decimal_macros::dec;
@@ -81,6 +85,7 @@ fn snapshot_summary() -> ReportSummary {
     let mut summary = report_fixtures::report_summary();
     summary.category_allocation = BTreeMap::new();
     summary.event_allocation = BTreeMap::new();
+    summary.route_allocation = BTreeMap::new();
     summary
 }
 
@@ -91,9 +96,9 @@ fn base_report(
 ) -> RecommendationReportInfo {
     let id = report_id(seed);
     let mut info = report_fixtures::report(id, ReportKind::TopN, status);
+    info.report_run_id = ref_id(&format!("snapshot-report-run:{seed}"));
     info.decision_at = at(1_699_999_880);
     info.decision_policy_snapshot_id = ref_id("snapshot-runtime-config");
-    info.model_version_id = ref_id("snapshot-model-version");
     info.market_selection_id = ref_id("snapshot-market-selection");
     info.portfolio_plan_id = ref_id("snapshot-portfolio-plan");
     info.account_snapshot_ref = ref_id("snapshot-account");
@@ -103,6 +108,72 @@ fn base_report(
     info.published_at = Some(at(1_700_000_000));
     info.created_at = at(1_700_000_000);
     info
+}
+
+fn fixture_hash(seed: char) -> ContentHash {
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
+        .expect("snapshot content hash")
+}
+
+fn optimized_decision(portfolio_plan_id: PortfolioPlanId) -> PortfolioDecisionResult {
+    let selected_tier_ids = vec![
+        EconomicTierId::new(seeded_uuid("snapshot-tier-1")),
+        EconomicTierId::new(seeded_uuid("snapshot-tier-2")),
+    ];
+    PortfolioDecisionResult::Optimized {
+        plan: Box::new(GlobalPortfolioPlan {
+            portfolio_plan_id,
+            selected_tier_ids,
+            objectives: PortfolioObjectiveEvidence {
+                robust_expected_net_usd: Usd::new(dec!(18.25)),
+                nominal_expected_net_usd: Usd::new(dec!(24.50)),
+                cvar_usd: Usd::new(dec!(82.00)),
+                capital_occupancy_usd_hours: UsdHours::new(dec!(9600)),
+                stable_tie_break_stages: 2,
+            },
+            constraints: PortfolioConstraintEvidence {
+                available_cash_used_usd: Usd::new(dec!(500)),
+                open_capital_usd: Usd::new(dec!(500)),
+                selected_recommendation_count: 2,
+                maximum_scenario_loss_usd: Usd::new(dec!(110)),
+                checked_constraint_count: 14,
+                evidence_hash: fixture_hash('d'),
+            },
+            solver: SolverEvidence {
+                backend: "highs".to_owned(),
+                lexicographic_model_build_count: 1,
+                lexicographic_solve_count: 7,
+                tie_break_proof_count: 1,
+                lexicographic_warm_start_count: 6,
+                marginal_model_build_count: 0,
+                marginal_solve_count: 2,
+                marginal_model_reuse_count: 2,
+                configured_deadline_secs: 30,
+                deterministic_threads: 1,
+                coefficient_scale: 10_000,
+                bound_scale_exponent: 0,
+                optimal: true,
+            },
+            exact_verification: ExactVerificationEvidence {
+                passed: true,
+                selected_tier_digest: fixture_hash('e'),
+                recomputed_economics_hash: fixture_hash('f'),
+            },
+            content_hash: fixture_hash('a'),
+        }),
+    }
+}
+
+fn detail_view(info: RecommendationReportInfo) -> QuantReportDetailView {
+    let decision = if info.summary_json.published_recommendation_count == 0 {
+        PortfolioDecisionResult::ZeroCandidates {
+            rejected_tier_count: info.summary_json.rejected_tier_count,
+            evidence_hash: fixture_hash('b'),
+        }
+    } else {
+        optimized_decision(info.portfolio_plan_id)
+    };
+    QuantReportDetailView::from_parts(info, None, None, None, decision)
 }
 
 fn base_recommendation(
@@ -117,6 +188,15 @@ fn base_recommendation(
     let id = recommendation_id(rec_seed);
     let mut info =
         report_fixtures::recommendation(report_id, id, rank, market, side, suggested_usd);
+    let report_route_run_id = ref_id(&format!("snapshot-route-run:{report_seed}:pooled"));
+    let candidate_id = ref_id(&format!("snapshot-candidate:{rec_seed}"));
+    let economic_tier_id = ref_id(&format!("snapshot-tier:{rec_seed}:1"));
+    info.report_route_run_id = report_route_run_id;
+    info.portfolio_plan_id = ref_id("snapshot-portfolio-plan");
+    info.economic_tier_id = economic_tier_id;
+    info.economic_tier_json.report_route_run_id = report_route_run_id;
+    info.economic_tier_json.candidate_id = candidate_id;
+    info.economic_tier_json.economic_tier_id = economic_tier_id;
     info.evidence_refs = evidence_refs();
     info.valid_from = at(1_700_000_000);
     info.valid_until = at(1_700_086_400);
@@ -200,7 +280,7 @@ fn partial_exit_plan() -> ExitPlan {
         thesis_invalidation: ThesisInvalidationPolicy {
             min_score_retention: dec!(0.6),
             min_expected_return_bps: Bps::ZERO,
-            require_execution_eligibility: true,
+            require_route_gate_eligibility: true,
         },
         opportunistic_exit: OpportunisticExitPolicy {
             min_confidence: Probability::new(dec!(0.65)),
@@ -219,10 +299,9 @@ fn partial_exit_plan() -> ExitPlan {
 fn not_auto_eligible() -> ExecutionEligibility {
     ExecutionEligibility {
         eligible_modes: vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto],
-        ineligibility_reasons: vec![IneligibilityReason::LowConfidence],
+        ineligibility_reasons: vec![IneligibilityReason::AutomationCapExceeded],
         approval_required: true,
         auto_policy_id: None,
-        uncalibrated_watermark: false,
     }
 }
 
@@ -231,7 +310,7 @@ impl TopNReportSnapshot {
     #[must_use]
     pub fn non_empty() -> Self {
         let summary = snapshot_summary();
-        let report = QuantReportDetailView::from(base_report(
+        let report = detail_view(base_report(
             "snapshot-report-topn",
             RecommendationReportStatus::Published,
             summary,
@@ -270,10 +349,11 @@ pub fn empty_report() -> QuantReportDetailView {
     summary.max_single_recommendation_usd = Usd::ZERO;
     summary.category_allocation = BTreeMap::new();
     summary.event_allocation = BTreeMap::new();
+    summary.route_allocation = BTreeMap::new();
     summary.execution_eligibility_summary = EligibilitySummary::default();
     summary.empty_reason = Some(EmptyReportReason::NoPositiveSignal);
     summary.warnings = vec!["no candidates passed score floor".to_owned()];
-    QuantReportDetailView::from(base_report(
+    detail_view(base_report(
         "snapshot-report-empty",
         RecommendationReportStatus::Published,
         summary,
@@ -290,7 +370,7 @@ pub fn revoked_report() -> QuantReportDetailView {
     );
     info.revoked_at = Some(at(1_700_010_000));
     info.status_reason = Some("operator revoked stale report".to_owned());
-    QuantReportDetailView::from(info)
+    detail_view(info)
 }
 
 /// Recommendation with production-default limit-price entry.
@@ -304,9 +384,7 @@ pub fn recommendation_limit_entry() -> QuantRecommendationView {
         OutcomeSide::Yes,
         Usd::new(dec!(250)),
     );
-    if let RecommendationTradePlan::Frozen { entry, .. } = &mut rec.trade_plan {
-        *entry = limit_entry_plan();
-    }
+    rec.trade_plan.entry = limit_entry_plan();
     view(rec)
 }
 
@@ -321,9 +399,7 @@ pub fn recommendation_immediate_entry() -> QuantRecommendationView {
         OutcomeSide::Yes,
         Usd::new(dec!(250)),
     );
-    if let RecommendationTradePlan::Frozen { entry, .. } = &mut rec.trade_plan {
-        *entry = immediate_entry_plan();
-    }
+    rec.trade_plan.entry = immediate_entry_plan();
     view(rec)
 }
 
@@ -338,9 +414,7 @@ pub fn recommendation_partial_exits() -> QuantRecommendationView {
         OutcomeSide::Yes,
         Usd::new(dec!(250)),
     );
-    if let RecommendationTradePlan::Frozen { exit, .. } = &mut rec.trade_plan {
-        **exit = partial_exit_plan();
-    }
+    *rec.trade_plan.exit = partial_exit_plan();
     view(rec)
 }
 

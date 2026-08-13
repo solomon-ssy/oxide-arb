@@ -4,7 +4,8 @@
 //! **not** configured here — `ClobClient::connect` derives them from
 //! `private_key` via the SDK at runtime.
 
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use super::secret::SecretText;
 
@@ -12,10 +13,11 @@ use super::secret::SecretText;
 ///
 /// This is the single credential the process signs with and derives Polymarket
 /// CLOB L2 read/write credentials from at connect time.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct KeysConfig {
     /// Wallet private key for signing, CLOB L1 auth, and runtime L2 derivation.
+    #[serde(serialize_with = "super::secret::serialize_optional_empty")]
     pub private_key: Option<SecretText>,
 }
 

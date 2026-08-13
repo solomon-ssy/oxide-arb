@@ -1,5 +1,6 @@
 mod account_read_smoke;
 mod architecture;
+mod config_contract;
 mod function_design;
 mod performance;
 mod public_read_smoke;
@@ -23,12 +24,12 @@ use quant_pivot_migration::{
     plan as plan_postgres_migrations,
 };
 use quant_pivot_models::{
-    config::{ClickHouseConfig, DeployConfig, PostgresConfig},
+    config::{ClickHouseConfig, DeployConfig, DeployConfigLoadRequest, PostgresConfig},
     domain::api::{ConfigApiContractSchema, ResearchModelApiContractSchema},
     hashing::CanonicalDigest,
     runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
     security::hash_password,
-    types::{ContentHash, PreproductionResetNonce},
+    types::{ContentHash, DeploymentEnvironment, PreproductionResetNonce},
 };
 use quant_pivot_repository::{
     postgres::{
@@ -41,7 +42,8 @@ use quant_pivot_storage::{
     cache::{count_preproduction_namespace, unlink_preproduction_namespace},
     clickhouse::{
         ClickHousePool, active_preproduction_query_count, apply_offline_schema_migrations,
-        apply_online_schema_migrations, database_object_count, plan_schema,
+        apply_online_schema_migrations, database_object_count,
+        generate_clean_schema_manifest as generate_clean_clickhouse_schema_manifest, plan_schema,
         render_schema_manifest as render_clickhouse_schema_manifest,
         reset_preproduction_database as reset_clickhouse_preproduction_database, verify_schema,
     },
@@ -57,11 +59,16 @@ use quant_pivot_storage::{
 use quant_pivot_system_tests::{
     performance::PerformanceProfile,
     production_stack::{self, ProductionStackFixture},
+    stack::CLICKHOUSE_IMAGE_TAG,
 };
 use rustls::crypto::aws_lc_rs;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
-use testcontainers::{ImageExt, runners::AsyncRunner};
+use testcontainers::{
+    GenericImage, ImageExt,
+    core::{WaitFor, wait::HttpWaitStrategy},
+    runners::AsyncRunner,
+};
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -83,6 +90,11 @@ enum Commands {
     Architecture {
         #[command(subcommand)]
         command: ArchitectureCommand,
+    },
+    /// Render or audit the descriptor-owned Deploy Config contract.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
     /// Run the real production binary against disposable infrastructure.
     #[command(name = "production-stack")]
@@ -151,18 +163,32 @@ enum ArchitectureCommand {
 }
 
 #[derive(Subcommand)]
+enum ConfigCommand {
+    /// Render both canonical Deploy Config TOML files.
+    Render {
+        /// Fail when committed files differ instead of writing them.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Audit descriptors, comments, strict parsing, coverage, and render drift.
+    Audit,
+}
+
+#[derive(Subcommand)]
 enum ProductionStackCommand {
     /// Serve until terminated for browser E2E or local system verification.
     Serve(ProductionStackServeArgs),
     /// Boot, probe, and stop fresh stacks repeatedly.
     Verify(ProductionStackVerifyArgs),
+    /// Run the governed 15-stage feedback closure on fresh stacks.
+    FeedbackClosure(ProductionStackVerifyArgs),
 }
 
 #[derive(Subcommand)]
 enum SmokeCommand {
     /// Verify configured account identity and venue reads without submitting.
     #[command(name = "account-read")]
-    AccountRead(ConfigDirArgs),
+    AccountRead(DeployConfigArgs),
     /// Probe public endpoints without credentials or money-moving operations.
     #[command(name = "public-read")]
     PublicRead(PublicReadSmokeArgs),
@@ -202,6 +228,9 @@ struct PublicReadSmokeArgs {
 struct ProductionStackServeArgs {
     #[arg(long, default_value_t = 8088)]
     listen_port: u16,
+    /// Expose a probe only after the complete fixture readiness contract passes.
+    #[arg(long)]
+    readiness_port: Option<u16>,
     /// Select one coherent disposable-stack evidence graph.
     #[arg(long, value_enum, default_value_t = ProductionStackFixture::Empty)]
     fixture: ProductionStackFixture,
@@ -219,27 +248,29 @@ struct ProductionStackVerifyArgs {
 #[derive(Subcommand)]
 enum ClickHouseSchemaCommand {
     /// Print pending migrations without changing the target database.
-    Plan(ConfigDirArgs),
+    Plan(DeployConfigArgs),
     /// Create the database and apply pending online-safe migrations.
-    ApplyOnline(ConfigDirArgs),
+    ApplyOnline(DeployConfigArgs),
     /// Apply pending offline migrations after proving destructive source tables are empty.
-    ApplyOffline(ConfigDirArgs),
+    ApplyOffline(DeployConfigArgs),
     /// Verify the migration ledger and runtime schema contract read-only.
-    Verify(ConfigDirArgs),
+    Verify(DeployConfigArgs),
     /// Generate the normalized SHOW CREATE semantic manifest after migrations.
-    Manifest(ConfigDirArgs),
+    Manifest(DeployConfigArgs),
+    /// Generate the semantic manifest from a clean, owned disposable `ClickHouse` container.
+    ManifestClean,
 }
 
 #[derive(Subcommand)]
 enum PostgresSchemaCommand {
     /// Print pending migrations without mutating the target database.
-    Plan(ConfigDirArgs),
+    Plan(DeployConfigArgs),
     /// Apply pending migrations and versioned catalog seeds with deploy credentials.
-    Apply(ConfigDirArgs),
+    Apply(DeployConfigArgs),
     /// Verify checksums, seeds, and the runtime schema contract read-only.
-    Verify(ConfigDirArgs),
+    Verify(DeployConfigArgs),
     /// Generate the normalized `pg_catalog` manifest after applying migrations.
-    Manifest(ConfigDirArgs),
+    Manifest(DeployConfigArgs),
     /// Generate both manifests from a clean, owned disposable `PostgreSQL` 16 container.
     ManifestClean,
     /// Regenerate only the immutable compiled migration-artifact manifest.
@@ -247,10 +278,19 @@ enum PostgresSchemaCommand {
 }
 
 #[derive(Args)]
-struct ConfigDirArgs {
-    /// Directory containing quant-pivot.toml.
-    #[arg(long, env = "QUANT_PIVOT_CONFIG_DIR", default_value = "config")]
-    config_dir: PathBuf,
+struct DeployConfigArgs {
+    /// Absolute path to the single deploy configuration file.
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    config_file: PathBuf,
+    /// Environment identity that must exactly match `[deployment].environment`.
+    #[arg(long, value_name = "ENVIRONMENT")]
+    expected_environment: DeploymentEnvironment,
+}
+
+impl DeployConfigArgs {
+    fn request(&self) -> DeployConfigLoadRequest {
+        DeployConfigLoadRequest::new(self.config_file.clone(), self.expected_environment.clone())
+    }
 }
 
 #[derive(Subcommand)]
@@ -266,7 +306,7 @@ enum PreproductionResetCommand {
 #[derive(Args)]
 struct PreproductionResetPlanArgs {
     #[command(flatten)]
-    config: ConfigDirArgs,
+    config: DeployConfigArgs,
     #[arg(
         long,
         default_value = ".local/preproduction-reset/active-operation.json"
@@ -277,7 +317,7 @@ struct PreproductionResetPlanArgs {
 #[derive(Args)]
 struct PreproductionResetApplyArgs {
     #[command(flatten)]
-    config: ConfigDirArgs,
+    config: DeployConfigArgs,
     #[arg(
         long,
         default_value = ".local/preproduction-reset/active-operation.json"
@@ -293,7 +333,7 @@ struct PreproductionResetApplyArgs {
 #[derive(Args)]
 struct PreproductionResetVerifyArgs {
     #[command(flatten)]
-    config: ConfigDirArgs,
+    config: DeployConfigArgs,
     #[arg(
         long,
         default_value = ".local/preproduction-reset/active-operation.json"
@@ -323,19 +363,27 @@ async fn run() -> Result<()> {
             ArchitectureCommand::Check => architecture::run(),
             ArchitectureCommand::AuditFunctions => function_design::run(),
         },
+        Commands::Config { command } => match command {
+            ConfigCommand::Render { check } => config_contract::render(&workspace_root()?, check),
+            ConfigCommand::Audit => config_contract::audit(&workspace_root()?),
+        },
         Commands::ProductionStack { command } => match command {
             ProductionStackCommand::Serve(args) => {
                 Box::pin(production_stack::serve(
                     args.listen_port,
+                    args.readiness_port,
                     args.fixture,
                     args.retain_artifacts,
                 ))
                 .await
             }
             ProductionStackCommand::Verify(args) => production_stack::verify(args.runs).await,
+            ProductionStackCommand::FeedbackClosure(args) => {
+                production_stack::verify_feedback_closure(args.runs).await
+            }
         },
         Commands::Smoke { command } => match command {
-            SmokeCommand::AccountRead(args) => account_read_smoke::run(&args.config_dir).await,
+            SmokeCommand::AccountRead(args) => account_read_smoke::run(&args.request()).await,
             SmokeCommand::PublicRead(args) => {
                 if args.stream_timeout_secs == 0 {
                     bail!("public-read smoke requires --stream-timeout-secs greater than zero");
@@ -836,14 +884,9 @@ async fn verify_clean_bootstrap_facts(
     Ok(())
 }
 
-impl ConfigDirArgs {
+impl DeployConfigArgs {
     fn load_reset_deploy(&self) -> Result<DeployConfig> {
-        let config_dir = self
-            .config_dir
-            .to_str()
-            .context("preproduction reset config directory is not valid UTF-8")?;
-        let deploy =
-            DeployConfig::load_for_migration(config_dir).context("load reset deploy config")?;
+        let deploy = DeployConfig::load(&self.request()).context("load reset deploy config")?;
         if !deploy.deployment.permits_destructive_reset() {
             bail!("destructive fresh-boot reset is forbidden in the production environment");
         }
@@ -1123,11 +1166,7 @@ impl PostgresSchemaCommand {
                 _ => unreachable!("commands carrying config arguments were handled above"),
             };
         };
-        let config_dir = args
-            .config_dir
-            .to_str()
-            .context("PostgreSQL schema config directory is not valid UTF-8")?;
-        let deploy = DeployConfig::load_for_migration(config_dir).context("load deploy config")?;
+        let deploy = DeployConfig::load(&args.request()).context("load deploy config")?;
         match self {
             Self::Plan(_) => {
                 let pool = PostgresPool::connect_existing(&deploy.db.postgres)
@@ -1379,17 +1418,18 @@ fn write_postgres_migration_manifest() -> Result<PathBuf> {
 
 impl ClickHouseSchemaCommand {
     async fn clickhouse_schema(self) -> Result<()> {
-        let config_dir = match &self {
+        let args = match &self {
             Self::Plan(args)
             | Self::ApplyOnline(args)
             | Self::ApplyOffline(args)
             | Self::Verify(args)
-            | Self::Manifest(args) => &args.config_dir,
+            | Self::Manifest(args) => Some(args),
+            Self::ManifestClean => None,
         };
-        let config_dir = config_dir
-            .to_str()
-            .context("ClickHouse schema config directory is not valid UTF-8")?;
-        let deploy = DeployConfig::load_for_migration(config_dir).context("load deploy config")?;
+        let Some(args) = args else {
+            return generate_clean_clickhouse_manifest().await;
+        };
+        let deploy = DeployConfig::load(&args.request()).context("load deploy config")?;
         let config = &deploy.db.clickhouse;
         let mutates_schema = matches!(&self, Self::ApplyOnline(_) | Self::ApplyOffline(_));
         let schema_mutation_lease = if mutates_schema || matches!(&self, Self::Verify(_)) {
@@ -1499,6 +1539,9 @@ impl ClickHouseSchemaCommand {
                 println!("generated {}", path.display());
                 Ok(())
             }
+            Self::ManifestClean => {
+                unreachable!("clean manifest generation was handled without Deploy Config")
+            }
         };
         let active_result = schema_mutation_lease
             .as_ref()
@@ -1517,6 +1560,53 @@ impl ClickHouseSchemaCommand {
             (Ok(()), Ok(()), Ok(())) => Ok(()),
         }
     }
+}
+
+async fn generate_clean_clickhouse_manifest() -> Result<()> {
+    let container = GenericImage::new("clickhouse/clickhouse-server", CLICKHOUSE_IMAGE_TAG)
+        .with_exposed_port(8123.into())
+        .with_wait_for(WaitFor::http(
+            HttpWaitStrategy::new("/ping")
+                .with_port(8123.into())
+                .with_expected_status_code(200u16),
+        ))
+        .with_env_var("CLICKHOUSE_SKIP_USER_SETUP", "1")
+        .with_startup_timeout(StdDuration::from_mins(2))
+        .start()
+        .await
+        .context("start disposable ClickHouse manifest container")?;
+    let port = container
+        .get_host_port_ipv4(8123)
+        .await
+        .context("resolve disposable ClickHouse manifest port")?;
+    let config = ClickHouseConfig {
+        deployment_id: "manifest-codegen".to_owned(),
+        cluster_id: "disposable-clickhouse".to_owned(),
+        url: format!("http://127.0.0.1:{port}"),
+        database: "quant_pivot_manifest".to_owned(),
+        user: "default".to_owned(),
+        password: "".into(),
+        batch_size: 100,
+        flush_interval_secs: 1,
+        max_concurrent_inserts: 1,
+    };
+    let rendered = generate_clean_clickhouse_schema_manifest(&config)
+        .await
+        .context("generate disposable ClickHouse semantic manifest")?;
+    let path = workspace_root()?
+        .join("schema")
+        .join("clickhouse")
+        .join("manifest.json");
+    fs::create_dir_all(path.parent().context("manifest path has no parent")?)
+        .context("create ClickHouse manifest directory")?;
+    fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
+    drop(container);
+    println!(
+        "generated {} from disposable ClickHouse {}",
+        path.display(),
+        CLICKHOUSE_IMAGE_TAG
+    );
+    Ok(())
 }
 
 fn bootstrap_admin_password_hash() -> Result<Zeroizing<String>> {

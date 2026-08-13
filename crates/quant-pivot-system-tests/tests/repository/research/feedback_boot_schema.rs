@@ -756,7 +756,7 @@ fn fixture_recipe_template(
             shared_evaluation.model_spec_id,
             shared_evaluation.model_spec_definition_hash,
             ModelInputContract::single_required("fixture_feature"),
-            ModelTrainingContract::settlement_default(),
+            ModelTrainingContract::outcome_default(),
             1,
         )
         .expect("fixture training spec"),
@@ -1001,7 +1001,7 @@ async fn prepare_champion_fixture(
             ModelFamily::WeightedFactor,
             prediction_horizon_secs,
             ModelInputContract::single_required("book.mid"),
-            ModelTrainingContract::settlement_default(),
+            ModelTrainingContract::outcome_default(),
         ))
         .await
         .expect("feedback-schema model spec");

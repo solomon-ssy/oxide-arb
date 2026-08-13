@@ -12,6 +12,7 @@ use quant_pivot_models::{
     enums::quant::AccountSource,
     types::{ExposureBreakdown, PositionSnapshot, Usd},
 };
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 /// Real venue account state frozen at a report's `as_of`.
@@ -62,6 +63,29 @@ impl AccountSnapshot {
             reserved_usd,
             positions,
             exposures,
+        }
+    }
+}
+
+/// Frozen peak-to-trough strategy drawdown ratio at a decision boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccountDrawdown {
+    pub current_ratio: Decimal,
+}
+
+impl AccountDrawdown {
+    #[must_use]
+    pub const fn neutral() -> Self {
+        Self {
+            current_ratio: Decimal::ZERO,
+        }
+    }
+
+    /// Preserve the most conservative ledger observation within one report run.
+    #[must_use]
+    pub fn conservative_max(self, other: Self) -> Self {
+        Self {
+            current_ratio: self.current_ratio.max(other.current_ratio),
         }
     }
 }

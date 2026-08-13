@@ -6,13 +6,16 @@ use std::{
 };
 
 use futures_util::future::BoxFuture;
-use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_error::{
+    QuantResult, feedback::FeedbackError, research::ResearchError, storage::StorageError,
+};
 use quant_pivot_models::{
     domain::{
         governance::DecisionPolicySnapshotInfo,
         quant::{
-            CalibrationArtifactInfo, ModelSpecInfo, ModelVersionInfo, SourceSliceIdentity,
-            SourceSliceIdentityInput, TrainingDatasetInfo, TrainingDatasetMaterialization,
+            CalibrationArtifactInfo, FeedbackCycleInfo, ModelSpecInfo, ModelVersionInfo,
+            SourceSliceIdentity, SourceSliceIdentityInput, TrainingDatasetInfo,
+            TrainingDatasetMaterialization,
         },
         query::TimeWindow,
     },
@@ -153,6 +156,71 @@ impl VerifiedModelServingPreimage {
     #[must_use]
     pub const fn profile(&self) -> &ResearchProfileArtifact {
         &self.profile
+    }
+
+    /// Verify that this immutable serving graph is the exact champion frozen
+    /// into one feedback cycle.
+    ///
+    /// `FeedbackCycleInfo::decision_policy_snapshot_*` identifies the active
+    /// decision policy that published the Route at trigger time. The model's
+    /// own build-time policy preimage is already committed by
+    /// `champion_serving_contract_hash` and is intentionally allowed to differ
+    /// after a governed Route or scenario-model activation. Treating those two
+    /// snapshots as one identity makes every successful promotion invalidate
+    /// the newly published champion.
+    ///
+    /// The diagnostic names every divergent champion dimension so a
+    /// fail-closed cycle never collapses distinct contract failures into an
+    /// opaque worker error.
+    pub(crate) fn verify_feedback_cycle(&self, cycle: &FeedbackCycleInfo) -> QuantResult<()> {
+        let contract = self.artifact.header().serving_contract();
+        let feedback_policy_hash =
+            self.profile
+                .spec
+                .feedback_policy
+                .content_hash()
+                .map_err(|error| FeedbackError::InvalidCycleIdentity {
+                    detail: format!("champion feedback-policy hash failed: {error}"),
+                })?;
+        let mut mismatches = Vec::new();
+        if self.artifact.header().model_version_id() != cycle.champion_model_version_id {
+            mismatches.push("model_version_id");
+        }
+        if contract.contract_hash() != cycle.champion_serving_contract_hash {
+            mismatches.push("serving_contract_hash");
+        }
+        if self.profile.profile_ref != cycle.profile_ref {
+            mismatches.push("research_profile_ref");
+        }
+        if self.profile.profile_ref.artifact_id() != cycle.research_profile_artifact_id {
+            mismatches.push("research_profile_artifact_id");
+        }
+        if self.profile.profile_ref.content_hash != cycle.profile_hash {
+            mismatches.push("research_profile_hash");
+        }
+        if feedback_policy_hash != cycle.feedback_policy_hash {
+            mismatches.push("feedback_policy_hash");
+        }
+        if self.model_spec.model_spec_id != cycle.champion_model_spec_id {
+            mismatches.push("model_spec_id");
+        }
+        if self.model_spec.definition_hash != cycle.champion_model_spec_definition_hash {
+            mismatches.push("model_spec_definition_hash");
+        }
+        if self.model_spec.model_family != cycle.champion_model_family {
+            mismatches.push("model_family");
+        }
+        if mismatches.is_empty() {
+            return Ok(());
+        }
+        Err(FeedbackError::InvalidCycleIdentity {
+            detail: format!(
+                "champion serving preimage differs from frozen feedback cycle {}: {}",
+                cycle.feedback_cycle_id,
+                mismatches.join(", ")
+            ),
+        }
+        .into())
     }
 
     #[must_use]
@@ -470,13 +538,21 @@ impl ModelServingPreimageService {
 
     /// Verify a frozen non-training Dataset against one exact model source
     /// before replay, cache lookup, run creation, or artifact persistence.
+    ///
+    /// The model source retains its immutable build-time policy preimage. The
+    /// Dataset instead binds the decision-time policy that produced its frozen
+    /// cohort. Those identities may differ after a compatible Route/scenario
+    /// activation; feature, factor, input, Trade Policy, source-schema, and PIT
+    /// contracts remain exact and fail closed.
     pub(crate) async fn verify_replay_dataset<'a>(
         &self,
         source: &VerifiedModelServingPreimage,
         dataset: &'a TrainingDatasetInfo,
         purpose: DatasetPurpose,
+        dataset_policy: &ModelServingPolicySnapshotBinding,
     ) -> QuantResult<VerifiedReplayDataset<'a>> {
-        let replay = Box::pin(self.verify_replay_bindings(source, dataset, purpose)).await?;
+        let replay =
+            Box::pin(self.verify_replay_bindings(source, dataset, purpose, dataset_policy)).await?;
         self.verify_source_slice_ledger(dataset).await?;
         Ok(replay)
     }
@@ -489,6 +565,7 @@ impl ModelServingPreimageService {
         source: &VerifiedModelServingPreimage,
         dataset: &'a TrainingDatasetInfo,
         purpose: DatasetPurpose,
+        dataset_policy: &ModelServingPolicySnapshotBinding,
     ) -> QuantResult<VerifiedReplayDataset<'a>> {
         if !source.graph_verified {
             return Err(ResearchError::InvalidModelArtifact {
@@ -511,6 +588,7 @@ impl ModelServingPreimageService {
             source.model_spec(),
             source.profile(),
             source.policy_snapshot(),
+            dataset_policy,
             dataset,
         )?;
         let trade_policy = Box::pin(self.deps.trade_policy_preimages.verify(
@@ -568,9 +646,19 @@ impl ModelServingPreimageService {
         source: &VerifiedModelServingPreimage,
         dataset: &TrainingDatasetInfo,
     ) -> QuantResult<ModelScoreCalibrationFitContract> {
-        let verified =
-            Box::pin(self.verify_replay_dataset(source, dataset, DatasetPurpose::Calibration))
-                .await?;
+        let model_policy = &source
+            .artifact()
+            .header()
+            .serving_contract()
+            .bindings()
+            .policy_snapshot;
+        let verified = Box::pin(self.verify_replay_dataset(
+            source,
+            dataset,
+            DatasetPurpose::Calibration,
+            model_policy,
+        ))
+        .await?;
         let calibration = verified.materialization();
         let training = require_dataset_materialization(source.training_dataset())?;
         if calibration.manifest.source_lineage.research_program_hash
@@ -1124,7 +1212,14 @@ impl ModelServingPreimageService {
             }
             .into());
         }
-        Self::verify_semantic_bindings(artifact, model_spec, profile, policy, &dataset)?;
+        Self::verify_semantic_bindings(
+            artifact,
+            model_spec,
+            profile,
+            policy,
+            &contract.bindings().policy_snapshot,
+            &dataset,
+        )?;
         self.verify_dataset(&dataset, profile, depth).await?;
         Ok(dataset)
     }
@@ -1133,7 +1228,8 @@ impl ModelServingPreimageService {
         artifact: &ModelArtifact,
         model_spec: &ModelSpecInfo,
         profile: &ResearchProfileArtifact,
-        policy: &DecisionPolicySnapshotInfo,
+        model_policy: &DecisionPolicySnapshotInfo,
+        dataset_policy: &ModelServingPolicySnapshotBinding,
         dataset: &TrainingDatasetInfo,
     ) -> QuantResult<()> {
         let contract = artifact.header().serving_contract();
@@ -1141,7 +1237,7 @@ impl ModelServingPreimageService {
         let materialization = require_dataset_materialization(dataset)?;
         let manifest = materialization.manifest;
         let feature_schema =
-            FeatureSchema::build(&policy.snapshot.profile_artifacts.features.definition)?;
+            FeatureSchema::build(&model_policy.snapshot.profile_artifacts.features.definition)?;
         let feature_schema_hash = ResearchHasher::feature_schema(&feature_schema)?;
         let factor_plane = if model_spec.model_family.is_classical() {
             FactorServingPlane::try_empty().map_err(|error| {
@@ -1151,9 +1247,9 @@ impl ModelServingPreimageService {
             })?
         } else {
             FactorEngine::for_model_scope(
-                &policy.snapshot.profile_artifacts.scoring.definition,
-                &policy.snapshot.profile_artifacts.features.definition,
-                &policy.snapshot.profile_artifacts.domain.definition,
+                &model_policy.snapshot.profile_artifacts.scoring.definition,
+                &model_policy.snapshot.profile_artifacts.features.definition,
+                &model_policy.snapshot.profile_artifacts.domain.definition,
                 profile.spec.category,
                 None,
             )
@@ -1172,7 +1268,9 @@ impl ModelServingPreimageService {
                     detail: format!("source model prediction horizon is invalid: {error}"),
                 }
             })?;
-        let expected_trade_policy = model_spec.training_contract.trade_policy_artifact_id;
+        let expected_trade_policy = model_spec
+            .training_contract
+            .evaluation_trade_policy_artifact_id;
         let bound_trade_policy = bindings
             .trade_policy
             .as_ref()
@@ -1181,7 +1279,7 @@ impl ModelServingPreimageService {
             .trade_policy
             .as_ref()
             .map(|binding| binding.content_hash);
-        let target_label_horizon = model_spec.training_contract.target_label_horizon_secs;
+        let target_label_horizon = model_spec.training_contract.target.label_horizon_secs();
         let expected_model_identity = (
             model_spec.model_spec_id,
             model_spec.definition_hash,
@@ -1214,17 +1312,17 @@ impl ModelServingPreimageService {
             && dataset.source_lineage.research_profile_artifact_id
                 == profile.profile_ref.artifact_id()
             && prediction_horizon_secs == profile.spec.target_horizon_secs;
-        let policy_matches = dataset.decision_policy_snapshot_id
-            == policy.decision_policy_snapshot_id
+        let dataset_policy_matches = dataset.decision_policy_snapshot_id
+            == dataset_policy.decision_policy_snapshot_id
             && dataset.source_lineage.decision_policy_snapshot_id
-                == policy.decision_policy_snapshot_id
-            && dataset.source_lineage.runtime_config_hash == policy.snapshot_hash;
+                == dataset_policy.decision_policy_snapshot_id
+            && dataset.source_lineage.runtime_config_hash == dataset_policy.snapshot_hash;
         let trade_policy_matches = expected_trade_policy == bound_trade_policy
             && expected_trade_policy == manifest.trade_policy_artifact_id
             && bound_trade_policy_hash == manifest.trade_policy_hash;
         let label_horizon_matches =
             label_horizon_matches(&manifest.horizons_secs, target_label_horizon);
-        let configured_cross_section = &policy
+        let configured_cross_section = &model_policy
             .snapshot
             .profile_artifacts
             .scoring
@@ -1239,18 +1337,24 @@ impl ModelServingPreimageService {
             }
             ModelPayload::Classical(_) => true,
         };
-        if !model_identity_matches
-            || !schema_plane_matches
-            || !profile_matches
-            || !policy_matches
-            || !trade_policy_matches
-            || !label_horizon_matches
-            || !runtime_transform_matches
-        {
+        let mismatches = [
+            ("model_identity", model_identity_matches),
+            ("schema_plane", schema_plane_matches),
+            ("profile", profile_matches),
+            ("dataset_policy", dataset_policy_matches),
+            ("trade_policy", trade_policy_matches),
+            ("label_horizon", label_horizon_matches),
+            ("runtime_transform", runtime_transform_matches),
+        ]
+        .into_iter()
+        .filter_map(|(dimension, matches)| (!matches).then_some(dimension))
+        .collect::<Vec<_>>();
+        if !mismatches.is_empty() {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: format!(
-                    "model {} ModelSpec/profile/policy/feature/factor/domain/training preimage matrix differs from its serving contract and Dataset",
-                    bindings.model.model_version_id
+                    "model {} ModelSpec/profile/policy/feature/factor/domain/training preimage matrix differs from its serving contract and Dataset: {}",
+                    bindings.model.model_version_id,
+                    mismatches.join(",")
                 ),
             }
             .into());
@@ -1327,7 +1431,8 @@ impl ModelServingPreimageService {
             source
                 .model_spec()
                 .training_contract
-                .target_label_horizon_secs,
+                .target
+                .label_horizon_secs(),
         )?;
         Self::verify_calibration_window(source, calibrator, &dataset, &materialization)?;
         self.verify_dataset(&dataset, source.profile(), depth).await

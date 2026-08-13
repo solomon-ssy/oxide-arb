@@ -236,7 +236,8 @@ mod tests {
             FeedbackRecommendationContext, NewExecutionAttemptOutcome,
             NewRecommendationExecutionRollup, NewRecommendationResolutionOutcome,
             RecommendationExecutionRollupInfo, RecommendationInfo, RecommendationReportInfo,
-            RecommendationResolutionOutcomeInfo,
+            RecommendationResolutionOutcomeInfo, ReportRouteRunInfo, RouteCandidateFunnel,
+            RouteModelLineage, RouteRunOutcome,
         },
         enums::quant::{
             CohortCensorReason, CohortExclusionReason, ExecutionAttemptNoFillReason,
@@ -245,14 +246,18 @@ mod tests {
             RecommendationStatus, ReportKind,
         },
         types::{
-            ContentHash, ExecutionAccountId, ExecutionOrderId, OrderIntentId, PayoutRatio,
-            RecommendationId, RecommendationReportId, ReconciliationId, SchemaVersion, Shares, Usd,
+            CalibrationArtifactId, ContentHash, ExecutionAccountId, ExecutionOrderId,
+            OrderIntentId, PayoutRatio, RecommendationId, RecommendationReportId, ReconciliationId,
+            SchemaVersion, Shares, TradePolicyArtifactId, Usd,
         },
     };
     use rust_decimal_macros::dec;
 
     use super::evaluate_feedback_cohort as evaluate_snapshot;
-    use crate::test_fixtures::report_fixtures::{recommendation, report};
+    use crate::test_fixtures::{
+        execution_pg_seed::fixture_profile_ref,
+        report_fixtures::{recommendation, report},
+    };
 
     fn hash(seed: char) -> ContentHash {
         ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
@@ -278,7 +283,11 @@ mod tests {
 
     fn recommendation_and_report(
         runtime_mode: QuantRuntimeMode,
-    ) -> (RecommendationInfo, RecommendationReportInfo) {
+    ) -> (
+        RecommendationInfo,
+        RecommendationReportInfo,
+        ReportRouteRunInfo,
+    ) {
         let report_id = RecommendationReportId::from_v7();
         let recommendation_id = RecommendationId::from_v7();
         let recommendation = recommendation(
@@ -295,18 +304,53 @@ mod tests {
             RecommendationReportStatus::Published,
         );
         report.runtime_mode = runtime_mode;
-        report.model_run_id = Some(recommendation.evidence_refs.model_run_id);
-        report.model_version_id = recommendation.evidence_refs.model_version_id;
         report.market_selection_id = recommendation.evidence_refs.market_selection_id;
         report.decision_policy_snapshot_id =
             recommendation.evidence_refs.decision_policy_snapshot_id;
         report.data_quality_snapshot_ref = recommendation.evidence_refs.data_quality_snapshot_ref;
-        (recommendation, report)
+        let profile_ref = fixture_profile_ref();
+        let calibration_artifact_id = CalibrationArtifactId::from_v7();
+        let trade_policy_artifact_id = TradePolicyArtifactId::from_content_hash(&hash('7'));
+        let lineage = RouteModelLineage {
+            model_version_id: recommendation.evidence_refs.model_version_id,
+            model_run_id: Some(recommendation.evidence_refs.model_run_id),
+            calibration_artifact_id,
+            trade_policy_artifact_id,
+            research_profile_artifact_id: profile_ref.artifact_id(),
+            research_profile_ref: profile_ref,
+            prediction_horizon_secs: 86_400,
+            feature_contract_digest: hash('f'),
+            pit_lineage_digest: hash('8'),
+            serving_contract_digest: hash('9'),
+        };
+        let route_run = ReportRouteRunInfo {
+            report_route_run_id: recommendation.report_route_run_id,
+            report_run_id: report.report_run_id,
+            route: recommendation.route,
+            outcome: RouteRunOutcome::Ready,
+            model_version_id: Some(lineage.model_version_id),
+            model_run_id: lineage.model_run_id,
+            calibration_artifact_id: Some(calibration_artifact_id),
+            trade_policy_artifact_id: Some(trade_policy_artifact_id),
+            research_profile_artifact_id: Some(lineage.research_profile_artifact_id.clone()),
+            lineage_json: Some(lineage),
+            funnel_json: RouteCandidateFunnel {
+                eligible_markets: 1,
+                feature_complete_markets: 1,
+                calibrated_candidates: 1,
+                admitted_economic_tiers: 1,
+                selected_recommendations: 1,
+            },
+            diagnostic_code: None,
+            finished_at: report.decision_at,
+            created_at: report.created_at,
+        };
+        (recommendation, report, route_run)
     }
 
     fn context(runtime_mode: QuantRuntimeMode) -> FeedbackRecommendationContext {
-        let (recommendation, report) = recommendation_and_report(runtime_mode);
-        FeedbackRecommendationContext::try_from_report(&recommendation, &report)
+        let (recommendation, report, route_run) = recommendation_and_report(runtime_mode);
+        FeedbackRecommendationContext::try_from_report(&recommendation, &report, &route_run)
             .expect("coherent feedback recommendation")
     }
 
@@ -698,13 +742,14 @@ mod tests {
 
     #[test]
     fn publication_kind_window_boundaries() {
-        let (mut recommendation, mut report) =
+        let (mut recommendation, mut report, route_run) =
             recommendation_and_report(QuantRuntimeMode::SemiAuto);
         recommendation.status = RecommendationStatus::Prepared;
         report.status = RecommendationReportStatus::Prepared;
         report.published_at = None;
-        let unpublished = FeedbackRecommendationContext::try_from_report(&recommendation, &report)
-            .expect("coherent unpublished recommendation");
+        let unpublished =
+            FeedbackRecommendationContext::try_from_report(&recommendation, &report, &route_run)
+                .expect("coherent unpublished recommendation");
         let unpublished_window = FeedbackCohortWindow::try_new(
             unpublished.profile_ref().clone(),
             unpublished.decision_at() - Duration::minutes(1),
@@ -723,10 +768,12 @@ mod tests {
             );
         }
 
-        let (recommendation, mut report) = recommendation_and_report(QuantRuntimeMode::SemiAuto);
+        let (recommendation, mut report, route_run) =
+            recommendation_and_report(QuantRuntimeMode::SemiAuto);
         report.report_kind = ReportKind::ShadowTopN;
-        let shadow = FeedbackRecommendationContext::try_from_report(&recommendation, &report)
-            .expect("coherent shadow recommendation");
+        let shadow =
+            FeedbackRecommendationContext::try_from_report(&recommendation, &report, &route_run)
+                .expect("coherent shadow recommendation");
         assert_eq!(
             evaluate_feedback_cohort(
                 FeedbackCohort::PolicyEvaluation,

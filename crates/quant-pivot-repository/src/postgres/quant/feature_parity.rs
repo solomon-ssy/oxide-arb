@@ -1,6 +1,6 @@
 //! Postgres feature-parity run lifecycle and append-only latch ledger.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{
@@ -46,6 +46,9 @@ use quant_pivot_models::{
         },
         quant_model_run::{Column as QuantModelRunColumn, Entity as QuantModelRunEntity},
         quant_recommendation_report::{Column, Entity, Model},
+        quant_report_route_run::{
+            Column as QuantReportRouteRunColumn, Entity as QuantReportRouteRunEntity,
+        },
         quant_research_job::Entity as QuantResearchJobEntity,
     },
     enums::quant::{
@@ -97,6 +100,11 @@ enum ServingSubjectIdentity {
     RecommendationReport(RecommendationReportId),
 }
 
+struct CompletionEvidenceProfile {
+    has_frozen_subject: bool,
+    transform_required: bool,
+}
+
 fn map_parity_hash_error(error: &CanonicalDigestError, context: &'static str) -> StorageError {
     StorageError::invariant_violation(
         Some(QUANT_FEATURE_PARITY_RUN),
@@ -137,26 +145,6 @@ impl PgFeatureParityRepository {
             .all(txn)
             .await
             .map_err(StorageError::from)?;
-        let report_by_run = reports
-            .iter()
-            .filter_map(|report| report.model_run_id.as_ref().map(|run_id| (*run_id, report)))
-            .collect::<HashMap<_, _>>();
-        let model_run_ids = model_runs
-            .iter()
-            .map(|model_run| model_run.model_run_id)
-            .collect::<HashSet<_>>();
-        for run_id in report_by_run.keys() {
-            if !model_run_ids.contains(run_id) {
-                return Err(StorageError::state_conflict(
-                    QUANT_FEATURE_PARITY_RUN,
-                    Some(&run.run_id),
-                    format!(
-                        "serving report references model run {run_id} outside the frozen full window"
-                    ),
-                ));
-            }
-        }
-
         let mut seeds = Vec::with_capacity(model_runs.len() + reports.len());
         for model_run in model_runs {
             let selection_id = model_run.market_selection_id.ok_or_else(|| {
@@ -190,10 +178,7 @@ impl PgFeatureParityRepository {
                 evidence_hash,
             });
         }
-        for report in reports
-            .into_iter()
-            .filter(|report| report.model_run_id.is_none())
-        {
+        for report in reports {
             let generation = report_parity_generation_hash(
                 &report.recommendation_report_id,
                 report.decision_at,
@@ -202,7 +187,8 @@ impl PgFeatureParityRepository {
             .map_err(|error| map_parity_hash_error(&error, "report generation"))?;
             let evidence_hash = report_parity_evidence_hash(
                 &generation,
-                &report.model_version_id,
+                &report.represented_routes_json,
+                &report.scenario_artifact_hash,
                 &report.decision_policy_snapshot_id,
                 &report.market_selection_id,
                 &report.data_quality_snapshot_ref,
@@ -238,8 +224,40 @@ impl PgFeatureParityRepository {
         run_id: &FeatureParityRunId,
         report: &Model,
     ) -> Result<(), StorageError> {
-        let seed = if let Some(model_run_id) = report.model_run_id.as_ref() {
-            let model_run = QuantModelRunEntity::find_by_id(*model_run_id)
+        let generation = report_parity_generation_hash(
+            &report.recommendation_report_id,
+            report.decision_at,
+            report.created_at,
+        )
+        .map_err(|error| map_parity_hash_error(&error, "report generation"))?;
+        let evidence_hash = report_parity_evidence_hash(
+            &generation,
+            &report.represented_routes_json,
+            &report.scenario_artifact_hash,
+            &report.decision_policy_snapshot_id,
+            &report.market_selection_id,
+            &report.data_quality_snapshot_ref,
+            &report.portfolio_plan_id,
+        )
+        .map_err(|error| map_parity_hash_error(&error, "report evidence"))?;
+        let mut seeds = vec![ServingSubjectSeed {
+            identity: ServingSubjectIdentity::RecommendationReport(report.recommendation_report_id),
+            generation,
+            decision_at: report.decision_at,
+            selection_id: report.market_selection_id,
+            evidence_hash,
+        }];
+        let route_runs = QuantReportRouteRunEntity::find()
+            .filter(QuantReportRouteRunColumn::ReportRunId.eq(report.report_run_id))
+            .order_by_asc(QuantReportRouteRunColumn::ReportRouteRunId)
+            .all(txn)
+            .await
+            .map_err(StorageError::from)?;
+        for route_run in route_runs {
+            let Some(model_run_id) = route_run.model_run_id else {
+                continue;
+            };
+            let model_run = QuantModelRunEntity::find_by_id(model_run_id)
                 .one(txn)
                 .await
                 .map_err(StorageError::from)?
@@ -249,18 +267,18 @@ impl PgFeatureParityRepository {
                 || model_run.window_start != report.decision_at
                 || model_run.market_selection_id.as_ref() != Some(&report.market_selection_id)
                 || model_run.decision_policy_snapshot_id != report.decision_policy_snapshot_id
-                || model_run.model_version_id.as_ref() != Some(&report.model_version_id)
+                || model_run.model_version_id != route_run.model_version_id
             {
                 return Err(StorageError::state_conflict(
                     QUANT_FEATURE_PARITY_RUN,
                     Some(run_id),
-                    "sampled parity report does not bind an exact successful live model run",
+                    "sampled parity Route run does not bind an exact successful live model run",
                 ));
             }
             let generation = model_run.output_hash.ok_or_else(|| {
                 StorageError::state_conflict(
                     "quant_model_run",
-                    Some(model_run_id),
+                    Some(&model_run_id),
                     "successful live model run has no output hash",
                 )
             })?;
@@ -273,40 +291,15 @@ impl PgFeatureParityRepository {
             }
             .content_hash()
             .map_err(|error| map_parity_hash_error(&error, "model-run evidence"))?;
-            ServingSubjectSeed {
+            seeds.push(ServingSubjectSeed {
                 identity: ServingSubjectIdentity::ModelRun(model_run.model_run_id),
                 generation,
                 decision_at: model_run.window_start,
                 selection_id: report.market_selection_id,
                 evidence_hash,
-            }
-        } else {
-            let generation = report_parity_generation_hash(
-                &report.recommendation_report_id,
-                report.decision_at,
-                report.created_at,
-            )
-            .map_err(|error| map_parity_hash_error(&error, "report generation"))?;
-            let evidence_hash = report_parity_evidence_hash(
-                &generation,
-                &report.model_version_id,
-                &report.decision_policy_snapshot_id,
-                &report.market_selection_id,
-                &report.data_quality_snapshot_ref,
-                &report.portfolio_plan_id,
-            )
-            .map_err(|error| map_parity_hash_error(&error, "report evidence"))?;
-            ServingSubjectSeed {
-                identity: ServingSubjectIdentity::RecommendationReport(
-                    report.recommendation_report_id,
-                ),
-                generation,
-                decision_at: report.decision_at,
-                selection_id: report.market_selection_id,
-                evidence_hash,
-            }
-        };
-        Self::insert_frozen_subjects(txn, run_id, vec![seed]).await
+            });
+        }
+        Self::insert_frozen_subjects(txn, run_id, seeds).await
     }
 }
 
@@ -426,11 +419,15 @@ impl FeatureParityRepository for PgFeatureParityRepository {
     ) -> Result<FeatureParityRunInfo, StorageError> {
         validate_new_run(&run)?;
         let run_id = run.run_id.to_string();
-        QuantFeatureParityRunEntity::insert(run.into_active_model())
-            .exec_with_returning(&self.db)
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        Self::acquire_latch_lock(&txn).await?;
+        let inserted = QuantFeatureParityRunEntity::insert(run.into_active_model())
+            .exec_with_returning(&txn)
             .await
             .map_err(|error| error::map_unique(error, QUANT_FEATURE_PARITY_RUN, &run_id))
-            .map(Into::into)
+            .map(Into::into)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(inserted)
     }
 
     async fn create_frozen_model_run(
@@ -452,6 +449,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
         let run_id = run.run_id;
         let run_key = run_id.to_string();
         let txn = self.db.begin().await.map_err(StorageError::from)?;
+        Self::acquire_latch_lock(&txn).await?;
         let run_model = QuantFeatureParityRunEntity::insert(run.into_active_model())
             .exec_with_returning(&txn)
             .await
@@ -504,6 +502,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
+        Self::acquire_latch_lock(&txn).await?;
         let run_model = QuantFeatureParityRunEntity::insert(run.into_active_model())
             .exec_with_returning(&txn)
             .await
@@ -544,6 +543,7 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
+        Self::acquire_latch_lock(&txn).await?;
         let seeds = Self::freeze_full_window(&txn, &run).await?;
         if seeds.is_empty() {
             txn.rollback().await.map_err(StorageError::from)?;
@@ -701,6 +701,10 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             .map(|row| row.map(Into::into))
     }
 
+    async fn find_unsettled_runtime(&self) -> Result<Option<FeatureParityRunInfo>, StorageError> {
+        find_unsettled_runtime_on(&self.db).await
+    }
+
     async fn latest_unbound_full(&self) -> Result<Option<FeatureParityRunInfo>, StorageError> {
         QuantFeatureParityRunEntity::find()
             .filter(QuantFeatureParityRunColumn::Kind.eq(FeatureParityRunKind::Full))
@@ -804,7 +808,9 @@ impl FeatureParityRepository for PgFeatureParityRepository {
         run_id: &FeatureParityRunId,
         result: CompleteFeatureParityRun,
     ) -> Result<FeatureParityRunInfo, StorageError> {
-        validate_completion(&result)?;
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let evidence_profile = completion_evidence_profile(&txn, run_id).await?;
+        validate_completion(&result, &evidence_profile)?;
         let latch = match result.status {
             FeatureParityRunStatus::Mismatched => Some((
                 FeatureParityStateTransition::DeterministicMismatch,
@@ -824,7 +830,6 @@ impl FeatureParityRepository for PgFeatureParityRepository {
             | FeatureParityRunStatus::PendingMaterialization
             | FeatureParityRunStatus::Passed => None,
         };
-        let txn = self.db.begin().await.map_err(StorageError::from)?;
         let finished_at = if result.status.is_terminal() {
             Expr::current_timestamp()
         } else {
@@ -1116,7 +1121,10 @@ fn validate_new_run(run: &NewFeatureParityRun) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn validate_completion(result: &CompleteFeatureParityRun) -> Result<(), StorageError> {
+fn validate_completion(
+    result: &CompleteFeatureParityRun,
+    evidence_profile: &CompletionEvidenceProfile,
+) -> Result<(), StorageError> {
     if result.total_count < 0
         || result.compared_count < 0
         || result.matched_count < 0
@@ -1148,7 +1156,9 @@ fn validate_completion(result: &CompleteFeatureParityRun) -> Result<(), StorageE
                 && result.matched_count == result.total_count
                 && result.mismatched_count == 0
                 && result.pending_materialization_count == 0
-                && result.transform_hash.is_some()
+                && (result.transform_hash.is_some()
+                    || (evidence_profile.has_frozen_subject
+                        && !evidence_profile.transform_required))
                 && result.failure_code.is_none()
                 && result.failure_detail.is_none() =>
         {
@@ -1177,6 +1187,35 @@ fn validate_completion(result: &CompleteFeatureParityRun) -> Result<(), StorageE
             "completion counters/details do not satisfy the target status",
         )),
     }
+}
+
+async fn completion_evidence_profile<C>(
+    db: &C,
+    run_id: &FeatureParityRunId,
+) -> Result<CompletionEvidenceProfile, StorageError>
+where
+    C: ConnectionTrait,
+{
+    let has_frozen_subject = QuantFeatureParitySubjectEntity::find()
+        .filter(QuantFeatureParitySubjectColumn::RunId.eq(*run_id))
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .is_some();
+    let transform_required = QuantFeatureParitySubjectEntity::find()
+        .filter(QuantFeatureParitySubjectColumn::RunId.eq(*run_id))
+        .filter(
+            QuantFeatureParitySubjectColumn::SubjectKind
+                .is_in([ParitySubjectKind::ModelRun, ParitySubjectKind::ModelVersion]),
+        )
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .is_some();
+    Ok(CompletionEvidenceProfile {
+        has_frozen_subject,
+        transform_required,
+    })
 }
 
 fn validate_recovery_run(run: &FeatureParityRunInfo) -> Result<(), StorageError> {
@@ -1433,6 +1472,25 @@ impl PgFeatureParityRepository {
         }
         Ok(())
     }
+
+    pub(crate) async fn verify_route_governance(
+        txn: &DatabaseTransaction,
+        expected_state_id: &FeatureParityStateId,
+    ) -> Result<(), StorageError> {
+        Self::verify_clear_latch_generation(txn, expected_state_id).await?;
+        if let Some(run) = find_unsettled_runtime_on(txn).await? {
+            return Err(StorageError::state_conflict(
+                QUANT_FEATURE_PARITY_RUN,
+                Some(&run.run_id),
+                format!(
+                    "risk-increasing commit requires every earlier runtime parity replay to settle; run {} is {}",
+                    run.run_id,
+                    run.status.as_str()
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl PgFeatureParityRepository {
@@ -1558,6 +1616,25 @@ where
     QuantFeatureParityStateEntity::find()
         .order_by_desc(QuantFeatureParityStateColumn::CreatedAt)
         .order_by_desc(QuantFeatureParityStateColumn::StateId)
+        .one(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|row| row.map(Into::into))
+}
+
+async fn find_unsettled_runtime_on<C>(db: &C) -> Result<Option<FeatureParityRunInfo>, StorageError>
+where
+    C: ConnectionTrait,
+{
+    QuantFeatureParityRunEntity::find()
+        .filter(QuantFeatureParityRunColumn::TrainingDatasetId.is_null())
+        .filter(QuantFeatureParityRunColumn::Status.is_in([
+            FeatureParityRunStatus::Queued,
+            FeatureParityRunStatus::Running,
+            FeatureParityRunStatus::PendingMaterialization,
+        ]))
+        .order_by_asc(QuantFeatureParityRunColumn::CreatedAt)
+        .order_by_asc(QuantFeatureParityRunColumn::RunId)
         .one(db)
         .await
         .map_err(StorageError::from)
@@ -1694,6 +1771,53 @@ mod tests {
             reason: "bootstrap parity verified".to_owned(),
             created_at: Utc.with_ymd_and_hms(2026, 7, 11, 12, 1, 0).unwrap(),
         }
+    }
+
+    fn passed_completion(transform_hash: Option<ContentHash>) -> CompleteFeatureParityRun {
+        CompleteFeatureParityRun {
+            status: FeatureParityRunStatus::Passed,
+            total_count: 1,
+            compared_count: 1,
+            matched_count: 1,
+            mismatched_count: 0,
+            pending_materialization_count: 0,
+            feature_contract_hash: Some(hash()),
+            transform_hash,
+            failure_code: None,
+            failure_detail: None,
+        }
+    }
+
+    #[test]
+    fn completion_transform_matches_subjects() {
+        validate_completion(
+            &passed_completion(None),
+            &CompletionEvidenceProfile {
+                has_frozen_subject: true,
+                transform_required: false,
+            },
+        )
+        .expect("report-only parity stops before model-input transformation");
+
+        let model_error = validate_completion(
+            &passed_completion(None),
+            &CompletionEvidenceProfile {
+                has_frozen_subject: true,
+                transform_required: true,
+            },
+        )
+        .expect_err("a model-bound pass requires transform evidence");
+        assert!(model_error.to_string().contains("target status"));
+
+        let unfrozen_error = validate_completion(
+            &passed_completion(None),
+            &CompletionEvidenceProfile {
+                has_frozen_subject: false,
+                transform_required: false,
+            },
+        )
+        .expect_err("an unfrozen pass cannot omit transform evidence");
+        assert!(unfrozen_error.to_string().contains("target status"));
     }
 
     #[test]

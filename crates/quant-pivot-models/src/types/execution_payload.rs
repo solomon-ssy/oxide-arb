@@ -105,7 +105,7 @@ pub struct ExitReinferenceObservation {
     pub score: Probability,
     pub score_retention: Decimal,
     pub expected_return_bps: Bps,
-    pub execution_eligible: bool,
+    pub route_gate_eligible: bool,
     pub verdict: ExitReinferenceVerdictKind,
     pub detail: String,
     pub shadow: bool,

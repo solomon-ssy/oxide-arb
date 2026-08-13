@@ -1,4 +1,5 @@
-//! `ProbabilityCalibrator`: maps raw model scores to calibrated win probabilities.
+//! `ProbabilityCalibrator`: maps raw model scores to conditional winner-take-all
+//! probabilities and combines them with explicit split-resolution evidence.
 //!
 //! Fit **only** on an independent held-out calibration split.
 //!
@@ -13,18 +14,299 @@
 pub mod isotonic;
 pub mod platt;
 
+use self::{isotonic::IsotonicCalibrator, platt::PlattCalibrator};
+
 use async_trait::async_trait;
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::CalibrationMethod,
+    hashing::CanonicalDigest,
     types::{
-        CalibrationArtifactId, Price, Probability,
-        calibration::{IsotonicKnot, MonotoneMapping, ReliabilityReport},
+        CalibrationArtifactId, ContentHash, PayoutRatio, Price, Probability,
+        calibration::{
+            CalibratedPayoutDistribution, IsotonicKnot, MonotoneMapping, ReliabilityReport,
+            SplitPayoutRateEvidence,
+        },
     },
 };
 use rust_decimal::Decimal;
+use serde::Serialize;
 
-use crate::{model::artifact::ReturnEstimate, precision::RESEARCH_DECIMAL_SCALE};
+use crate::{
+    model::{ReliabilitySample, artifact::ReturnEstimate, compute_reliability},
+    precision::RESEARCH_DECIMAL_SCALE,
+    stats::{count_f64, wilson_interval, wilson_z},
+};
+
+/// One allocation-independent, resolved observation admitted to a nested
+/// calibration fit.
+///
+/// The caller must source these rows from a purge/embargo-isolated holdout.
+/// Keeping the evidence hash outside the row prevents this pure fitter from
+/// pretending it can prove temporal lineage on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct NestedCalibrationObservation {
+    pub composite_score: Probability,
+    pub token_payout_ratio: PayoutRatio,
+    pub max_adverse_excursion_bps: Option<Decimal>,
+}
+
+/// Governed method selection for one nested calibration fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct NestedCalibrationPolicy {
+    pub preferred_method: CalibrationMethod,
+    pub min_samples_isotonic: u64,
+    pub ci_confidence: Decimal,
+}
+
+/// Complete disjoint preimage for one nested calibration fit.
+pub struct NestedCalibrationFitInput<'a> {
+    pub fit_observations: &'a [NestedCalibrationObservation],
+    pub validation_observations: &'a [NestedCalibrationObservation],
+    pub policy: NestedCalibrationPolicy,
+    pub fit_evidence_hash: ContentHash,
+    pub validation_evidence_hash: ContentHash,
+}
+
+/// Content-addressed result of a purge/embargo-isolated calibration fit and
+/// independent reliability evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedCalibration {
+    pub resolved: ResolvedCalibration,
+    pub method: CalibrationMethod,
+    pub content_hash: ContentHash,
+    pub fit_binary_sample_count: u64,
+    pub fit_total_sample_count: u64,
+    pub validation_binary_sample_count: u64,
+    pub validation_total_sample_count: u64,
+}
+
+struct CalibrationPopulation<'a> {
+    split: PayoutRatio,
+    binary: Vec<&'a NestedCalibrationObservation>,
+    binary_count: u64,
+    total_count: u64,
+}
+
+impl<'a> CalibrationPopulation<'a> {
+    fn try_new(
+        role: &'static str,
+        observations: &'a [NestedCalibrationObservation],
+    ) -> QuantResult<Self> {
+        if observations.is_empty() {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!("nested calibration {role} population is empty"),
+            }
+            .into());
+        }
+        let split = PayoutRatio::try_new(Decimal::new(5, 1)).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("canonical split payout is invalid: {error}"),
+            }
+        })?;
+        if let Some(observation) = observations.iter().find(|observation| {
+            observation.token_payout_ratio != PayoutRatio::ZERO
+                && observation.token_payout_ratio != split
+                && observation.token_payout_ratio != PayoutRatio::ONE
+        }) {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "nested calibration {role} accepts only payout ratios 0, 0.5, or 1; got {}",
+                    observation.token_payout_ratio
+                ),
+            }
+            .into());
+        }
+        let binary = observations
+            .iter()
+            .filter(|observation| observation.token_payout_ratio != split)
+            .collect::<Vec<_>>();
+        let binary_count =
+            u64::try_from(binary.len()).map_err(|error| ResearchError::ValidationMethodology {
+                detail: format!("nested calibration {role} binary count does not fit u64: {error}"),
+            })?;
+        let total_count = u64::try_from(observations.len()).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("nested calibration {role} total count does not fit u64: {error}"),
+            }
+        })?;
+        if binary_count < 10 {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "nested calibration {role} has {binary_count} binary rows; at least 10 are required"
+                ),
+            }
+            .into());
+        }
+        if let Some(observation) = binary
+            .iter()
+            .find(|observation| observation.max_adverse_excursion_bps.is_none())
+        {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "nested calibration {role} score {} has no frozen adverse-excursion evidence",
+                    observation.composite_score
+                ),
+            }
+            .into());
+        }
+        Ok(Self {
+            split,
+            binary,
+            binary_count,
+            total_count,
+        })
+    }
+
+    fn scores(&self) -> Vec<Decimal> {
+        self.binary
+            .iter()
+            .map(|observation| observation.composite_score.inner())
+            .collect()
+    }
+
+    fn outcomes(&self) -> Vec<bool> {
+        self.binary
+            .iter()
+            .map(|observation| observation.token_payout_ratio == PayoutRatio::ONE)
+            .collect()
+    }
+
+    fn reliability(
+        &self,
+        mapping: &MonotoneMapping,
+        confidence: Decimal,
+    ) -> QuantResult<ReliabilityReport> {
+        let outcomes = self.outcomes();
+        let samples = self
+            .binary
+            .iter()
+            .zip(&outcomes)
+            .map(|(observation, &won)| ReliabilitySample {
+                score: observation.composite_score.inner(),
+                won,
+                max_adverse_excursion_bps: observation.max_adverse_excursion_bps,
+            })
+            .collect::<Vec<_>>();
+        compute_reliability(mapping, &samples, confidence)
+    }
+
+    fn split_rate(&self, confidence: Decimal) -> QuantResult<SplitPayoutRateEvidence> {
+        let split_count = self
+            .total_count
+            .checked_sub(self.binary_count)
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "nested calibration binary population exceeds its total".to_owned(),
+            })?;
+        let interval = wilson_interval(
+            count_f64(split_count)? / count_f64(self.total_count)?,
+            self.total_count,
+            wilson_z(confidence)?,
+            RESEARCH_DECIMAL_SCALE,
+        )?;
+        Ok(SplitPayoutRateEvidence {
+            total_sample_count: self.total_count,
+            split_sample_count: split_count,
+            empirical_probability: Probability::new(
+                Decimal::from(split_count)
+                    .checked_div(Decimal::from(self.total_count))
+                    .ok_or_else(|| ResearchError::ValidationMethodology {
+                        detail: "nested calibration population cannot be zero".to_owned(),
+                    })?
+                    .round_dp(18),
+            ),
+            wilson_ci: (Probability::new(interval.0), Probability::new(interval.1)),
+            split_payout_ratio: self.split,
+        })
+    }
+}
+
+/// Fits a low-dimensional probability map on one held-out population and
+/// computes reliability/downside evidence on a second disjoint population.
+///
+/// Isotonic is used only at or above its governed sample floor; below that
+/// floor the data-efficient Platt map is selected explicitly.
+pub struct NestedCalibrationFitter;
+
+impl NestedCalibrationFitter {
+    /// Fit and seal one nested calibration artifact.
+    ///
+    /// # Errors
+    ///
+    /// Rejects overlapping caller evidence, non-canonical payout states,
+    /// missing downside evidence, fewer than ten binary rows in either
+    /// population, invalid confidence policy, or a degenerate fit.
+    pub fn fit(input: &NestedCalibrationFitInput<'_>) -> QuantResult<NestedCalibration> {
+        if input.policy.min_samples_isotonic == 0
+            || input.policy.ci_confidence <= Decimal::ZERO
+            || input.policy.ci_confidence >= Decimal::ONE
+            || input.fit_evidence_hash == input.validation_evidence_hash
+        {
+            return Err(ResearchError::ValidationMethodology {
+                detail: "nested calibration policy or disjoint evidence contract is invalid"
+                    .to_owned(),
+            }
+            .into());
+        }
+        let fit = CalibrationPopulation::try_new("fit", input.fit_observations)?;
+        let validation =
+            CalibrationPopulation::try_new("validation", input.validation_observations)?;
+        let scores = fit.scores();
+        let outcomes = fit.outcomes();
+        let method = if input.policy.preferred_method == CalibrationMethod::Isotonic
+            && fit.binary_count >= input.policy.min_samples_isotonic
+        {
+            CalibrationMethod::Isotonic
+        } else {
+            CalibrationMethod::Platt
+        };
+        let mapping = match method {
+            CalibrationMethod::Isotonic => IsotonicCalibrator::new(
+                usize::try_from(input.policy.min_samples_isotonic).map_err(|error| {
+                    ResearchError::ValidationMethodology {
+                        detail: format!("isotonic sample floor does not fit usize: {error}"),
+                    }
+                })?,
+            )
+            .fit(&scores, &outcomes)?,
+            CalibrationMethod::Platt => PlattCalibrator.fit(&scores, &outcomes)?,
+        };
+        let reliability = validation.reliability(&mapping, input.policy.ci_confidence)?;
+        let split_payout_rate = fit.split_rate(input.policy.ci_confidence)?;
+        let content_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/cpcv-nested-calibration",
+            1,
+            &(
+                input.fit_evidence_hash,
+                input.validation_evidence_hash,
+                input.policy,
+                method,
+                fit.binary_count,
+                fit.total_count,
+                validation.binary_count,
+                validation.total_count,
+                &mapping,
+                &reliability,
+                split_payout_rate,
+            ),
+        )?;
+        let resolved = ResolvedCalibration {
+            artifact_id: CalibrationArtifactId::from_content_hash(&content_hash),
+            mapping,
+            reliability,
+            split_payout_rate,
+        };
+        Ok(NestedCalibration {
+            resolved,
+            method,
+            content_hash,
+            fit_binary_sample_count: fit.binary_count,
+            fit_total_sample_count: fit.total_count,
+            validation_binary_sample_count: validation.binary_count,
+            validation_total_sample_count: validation.total_count,
+        })
+    }
+}
 
 /// Maps raw model scores to empirically calibrated win probabilities.
 ///
@@ -87,17 +369,49 @@ pub struct ResolvedCalibration {
     pub artifact_id: CalibrationArtifactId,
     pub mapping: MonotoneMapping,
     pub reliability: ReliabilityReport,
+    pub split_payout_rate: SplitPayoutRateEvidence,
 }
 
 impl ResolvedCalibration {
-    /// Calibrated `P(win)` for one candidate's composite score.
-    pub fn calibrate(&self, composite_score: Decimal) -> QuantResult<Probability> {
-        apply_mapping(&self.mapping, composite_score)
+    /// Hash the complete inference function while excluding audit-only artifact identity.
+    ///
+    /// Outer-CPCV subject and governed base-trial estimators deliberately have
+    /// different lineage identities. They must nevertheless expose the exact
+    /// same score mapping, reliability envelope, and split-payout model when
+    /// fitted from the same rows. This commitment makes that functional parity
+    /// auditable without conflating provenance with economic behavior.
+    pub fn runtime_function_hash(&self) -> QuantResult<ContentHash> {
+        CanonicalDigest::content_hash_typed(
+            "quant-pivot/resolved-calibration-runtime-function",
+            1,
+            &(&self.mapping, &self.reliability, self.split_payout_rate),
+        )
+        .map_err(QuantError::from)
     }
 
-    /// Derive the expected return and downside (bps) using:
-    /// `E[r] = P(win)·(1-p)/p − (1−P(win))`, `downside` = the calibration
-    /// split's mean `max_adverse_excursion_bps` in the candidate's
+    /// Calibrated terminal payout distribution for one composite score.
+    pub fn calibrate_distribution(
+        &self,
+        composite_score: Decimal,
+    ) -> QuantResult<CalibratedPayoutDistribution> {
+        let distribution = CalibratedPayoutDistribution {
+            winner_take_all_win_probability: apply_mapping(&self.mapping, composite_score)?,
+            split_probability: self.split_payout_rate.empirical_probability,
+            split_probability_interval: self.split_payout_rate.wilson_ci,
+            split_payout_ratio: self.split_payout_rate.split_payout_ratio,
+        };
+        distribution
+            .validate()
+            .map_err(|detail| ResearchError::Inference {
+                detail: format!("calibrated payout distribution is invalid: {detail}"),
+            })?;
+        Ok(distribution)
+    }
+
+    /// Derive expected terminal-payout return using
+    /// `E[r] = E[payout] / entry_price - 1`, retaining explicit loss, split,
+    /// and winner-take-all mass. Downside is the calibration split's mean
+    /// `max_adverse_excursion_bps` in the candidate's
     /// **calibrated-probability** bucket (matching the reliability report's
     /// ECE bucketing — never the raw pre-calibration score bucket). Empty ECE
     /// buckets are omitted by construction, while monotone interpolation can
@@ -105,13 +419,9 @@ impl ResolvedCalibration {
     /// report's worst observed absolute bucket mean as a conservative frozen
     /// envelope. An invalid market price (outside `(0, 1)`) or an artifact
     /// with no MAE evidence rejects inference. Neither condition is a business
-    /// zero.
-    ///
-    /// `win_probability` on the returned [`ReturnEstimate`] is the *same*
-    /// `P(win)` used to derive `expected_return_bps` — Kelly sizing consumes it
-    /// directly as `q`, so the sizing decision
-    /// and the return estimate always share one probability, never two
-    /// independently-derived numbers.
+    /// zero. Global sizing consumes the complete payout distribution through
+    /// the joint scenario artifact; it never re-derives a binary probability
+    /// from this expected-return scalar.
     pub fn estimate_return(
         &self,
         composite_score: Decimal,
@@ -126,18 +436,18 @@ impl ResolvedCalibration {
             }
             .into());
         }
-        let p_win = self.calibrate(composite_score)?;
-        let p_win_inner = p_win.inner();
+        let payout_distribution = self.calibrate_distribution(composite_score)?;
+        let expected_payout = payout_distribution.expected_payout().inner();
         let bps = Decimal::from(10_000);
         let expected_return_bps =
-            ((p_win_inner * (Decimal::ONE - p) / p - (Decimal::ONE - p_win_inner)) * bps)
-                .round_dp(RESEARCH_DECIMAL_SCALE);
+            ((expected_payout / p - Decimal::ONE) * bps).round_dp(RESEARCH_DECIMAL_SCALE);
         let downside_bps = self
             .reliability
-            .conservative_downside_bps(p_win_inner)
+            .conservative_downside_bps(payout_distribution.winner_take_all_win_probability.inner())
             .ok_or_else(|| ResearchError::Inference {
                 detail: format!(
-                    "calibrated probability {p_win_inner} has no frozen MAE downside evidence"
+                    "calibrated winner-take-all probability {} has no frozen MAE downside evidence",
+                    payout_distribution.winner_take_all_win_probability
                 ),
             })?
             .round_dp(RESEARCH_DECIMAL_SCALE);
@@ -145,7 +455,7 @@ impl ResolvedCalibration {
             expected_return_bps,
             downside_bps,
             calibrated: true,
-            win_probability: Some(p_win),
+            payout_distribution: Some(payout_distribution),
         })
     }
 }
@@ -170,13 +480,98 @@ pub trait CalibrationArtifactLoader: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_models::types::{
-        CalibrationArtifactId, Price, Probability,
-        calibration::{IsotonicKnot, MonotoneMapping, ReliabilityBin, ReliabilityReport},
+    use quant_pivot_models::{
+        enums::quant::CalibrationMethod,
+        types::{
+            CalibrationArtifactId, ContentHash, PayoutRatio, Price, Probability,
+            calibration::{
+                IsotonicKnot, MonotoneMapping, ReliabilityBin, ReliabilityReport,
+                SplitPayoutRateEvidence,
+            },
+        },
     };
     use rust_decimal_macros::dec;
 
-    use super::ResolvedCalibration;
+    use super::{
+        NestedCalibrationFitInput, NestedCalibrationFitter, NestedCalibrationObservation,
+        NestedCalibrationPolicy, ResolvedCalibration,
+    };
+
+    fn content_hash(seed: char) -> ContentHash {
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
+            .expect("content hash")
+    }
+
+    fn nested_observations(count: usize, include_split: bool) -> Vec<NestedCalibrationObservation> {
+        (0..count)
+            .map(|index| {
+                let is_split = include_split && index + 1 == count;
+                let won = index % 2 == 1;
+                NestedCalibrationObservation {
+                    composite_score: Probability::new(if won { dec!(0.8) } else { dec!(0.2) }),
+                    token_payout_ratio: PayoutRatio::try_new(if is_split {
+                        dec!(0.5)
+                    } else if won {
+                        dec!(1)
+                    } else {
+                        dec!(0)
+                    })
+                    .expect("canonical payout"),
+                    max_adverse_excursion_bps: Some(if won { dec!(-100) } else { dec!(-500) }),
+                }
+            })
+            .collect()
+    }
+
+    impl NestedCalibrationPolicy {
+        fn fixture() -> Self {
+            Self {
+                preferred_method: CalibrationMethod::Platt,
+                min_samples_isotonic: 100,
+                ci_confidence: dec!(0.95),
+            }
+        }
+    }
+
+    #[test]
+    fn nested_fit_separates_evidence() {
+        let fit = nested_observations(12, true);
+        let validation = nested_observations(10, false);
+        let fitted = NestedCalibrationFitter::fit(&NestedCalibrationFitInput {
+            fit_observations: &fit,
+            validation_observations: &validation,
+            policy: NestedCalibrationPolicy::fixture(),
+            fit_evidence_hash: content_hash('1'),
+            validation_evidence_hash: content_hash('2'),
+        })
+        .expect("disjoint nested calibration");
+
+        assert_eq!(fitted.fit_binary_sample_count, 11);
+        assert_eq!(fitted.fit_total_sample_count, 12);
+        assert_eq!(fitted.validation_binary_sample_count, 10);
+        assert_eq!(fitted.validation_total_sample_count, 10);
+        assert_eq!(fitted.resolved.reliability.n_samples, 10);
+        assert_eq!(fitted.resolved.split_payout_rate.total_sample_count, 12);
+        assert_eq!(fitted.resolved.split_payout_rate.split_sample_count, 1);
+    }
+
+    #[test]
+    fn nested_fit_rejects_overlap() {
+        let fit = nested_observations(12, true);
+        let validation = nested_observations(10, false);
+        let evidence_hash = content_hash('1');
+
+        assert!(
+            NestedCalibrationFitter::fit(&NestedCalibrationFitInput {
+                fit_observations: &fit,
+                validation_observations: &validation,
+                policy: NestedCalibrationPolicy::fixture(),
+                fit_evidence_hash: evidence_hash,
+                validation_evidence_hash: evidence_hash,
+            })
+            .is_err()
+        );
+    }
 
     impl ResolvedCalibration {
         fn test_fixture() -> Self {
@@ -209,6 +604,14 @@ mod tests {
                     ece: dec!(0.05),
                     n_samples: 100,
                 },
+                split_payout_rate: SplitPayoutRateEvidence {
+                    total_sample_count: 100,
+                    split_sample_count: 0,
+                    empirical_probability: Probability::ZERO,
+                    wilson_ci: (Probability::ZERO, Probability::new(dec!(0.036995))),
+                    split_payout_ratio: PayoutRatio::try_new(dec!(0.5))
+                        .expect("split payout ratio"),
+                },
             }
         }
     }
@@ -237,11 +640,51 @@ mod tests {
         let estimate = resolved
             .estimate_return(dec!(0.5), Price::new(dec!(0.01)))
             .expect("interior estimate");
-        assert!(estimate.win_probability.is_some());
+        assert!(estimate.payout_distribution.is_some());
         let estimate = resolved
             .estimate_return(dec!(0.5), Price::new(dec!(0.99)))
             .expect("interior estimate");
-        assert!(estimate.win_probability.is_some());
+        assert!(estimate.payout_distribution.is_some());
+    }
+
+    #[test]
+    fn split_resolution_preserves_distribution() {
+        let mut resolved = ResolvedCalibration::test_fixture();
+        resolved.mapping = MonotoneMapping::Isotonic {
+            knots: vec![
+                IsotonicKnot {
+                    score: dec!(0),
+                    probability: dec!(0.8),
+                },
+                IsotonicKnot {
+                    score: dec!(1),
+                    probability: dec!(0.8),
+                },
+            ],
+        };
+        resolved.split_payout_rate = SplitPayoutRateEvidence {
+            total_sample_count: 100,
+            split_sample_count: 10,
+            empirical_probability: Probability::new(dec!(0.1)),
+            wilson_ci: (Probability::new(dec!(0.05)), Probability::new(dec!(0.2))),
+            split_payout_ratio: PayoutRatio::try_new(dec!(0.5)).expect("split payout ratio"),
+        };
+
+        let estimate = resolved
+            .estimate_return(dec!(0.5), Price::new(dec!(0.5)))
+            .expect("three-state estimate");
+        let distribution = estimate
+            .payout_distribution
+            .expect("calibrated payout distribution");
+
+        assert_eq!(distribution.win_probability(), Probability::new(dec!(0.72)));
+        assert_eq!(
+            distribution.loss_probability(),
+            Probability::new(dec!(0.18))
+        );
+        assert_eq!(distribution.split_probability, Probability::new(dec!(0.1)));
+        assert_eq!(distribution.expected_payout(), Probability::new(dec!(0.77)));
+        assert_eq!(estimate.expected_return_bps, dec!(5400));
     }
 
     #[test]

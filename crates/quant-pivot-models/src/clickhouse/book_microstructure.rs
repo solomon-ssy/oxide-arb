@@ -5,6 +5,9 @@ use crate::{
     types::{MarketId, TokenId},
 };
 
+/// Fixed aggregation width of `book_microstructure_1s`.
+pub const BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS: i64 = 1_000;
+
 /// Microstructure observation row for one time bucket.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct BookMicrostructureRow {

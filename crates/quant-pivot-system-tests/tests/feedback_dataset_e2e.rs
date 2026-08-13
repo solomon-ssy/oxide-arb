@@ -65,7 +65,7 @@ use quant_pivot_models::{
         DecisionSnapshotEvidence, DomainInstrumentKey, DomainSourceId, EvidenceSourceRef,
         EvmAddress, EvmBlockHash, EvmTransactionHash, FeatureCell, FeatureStaleness, FeatureValue,
         MarketId, PayoutRatio, Probability, ResearchEvaluationTrack, SchemaVersion,
-        TrainingDatasetId, TrainingExampleId, TrainingSampleSource,
+        TradeTapeSourceEvidence, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -357,11 +357,7 @@ async fn assert_scored_population(
         .await?;
     let profile_ref = fixture_profile_ref();
     let funnels = facts
-        .report_funnel_between(
-            &profile_ref,
-            window_start.timestamp_millis(),
-            cutoff.timestamp_millis(),
-        )
+        .report_funnel_between(window_start.timestamp_millis(), cutoff.timestamp_millis())
         .await?;
     let raw_funnel_count = ch
         .client()
@@ -589,8 +585,7 @@ async fn seed_feedback_report(
         evidence_ingestion_time,
     )?;
     let feature_vector_ids = [recommendation.evidence_refs.feature_vector_id];
-    let feature_evidence =
-        feature_commitment(&feature_rows)?.bind_model_vectors(&feature_vector_ids)?;
+    let feature_evidence = feature_commitment(&feature_rows)?;
     let inference_context =
         build_market_inference_context(&serving.feature_vector, &serving.selected_market)
             .context("feedback Dataset fixture has no executable inference context")?;
@@ -660,8 +655,12 @@ async fn assert_publication_history(
             .find_by_id(&ids.recommendation)
             .await?
             .context("published feedback recommendation")?;
-        FeedbackRecommendationContext::try_from_report(&recommendation, &report).with_context(
-            || {
+        let route_run = report_repository
+            .find_route_run(&recommendation.report_route_run_id)
+            .await?
+            .context("published feedback recommendation Route run")?;
+        FeedbackRecommendationContext::try_from_report(&recommendation, &report, &route_run)
+            .with_context(|| {
                 format!(
                     "historical publication mismatch: report={} report_status={:?} recommendation_status={:?} decision_at={} report_created_at={} recommendation_created_at={} published_at={:?} superseded_at={:?}",
                     report.recommendation_report_id,
@@ -673,8 +672,7 @@ async fn assert_publication_history(
                     report.published_at,
                     report.superseded_at,
                 )
-            },
-        )?;
+            })?;
     }
     Ok(())
 }
@@ -770,10 +768,11 @@ fn serving_evidence(
             book_available_at: ids.decision_at,
             selection: (&selected_market).into(),
         },
+        trade_tape_source: TradeTapeSourceEvidence::not_required(),
         identity: recommendation.identity.clone(),
         market_context: recommendation.market_context.clone(),
         data_quality: DataQualityStatus::Fresh,
-        liquidity_score: recommendation.liquidity_score,
+        liquidity_score: Probability::ONE,
     };
     Ok(ServingEvidence {
         selected_market,
@@ -873,6 +872,14 @@ async fn feedback_service(
             factors: runtime.profile_artifacts.scoring.definition,
             domain: runtime.profile_artifacts.domain.definition,
             data_quality: runtime.recommendation.data_quality,
+            liquidity_cap_usd: Usd::new(
+                runtime
+                    .execution_risk
+                    .portfolio
+                    .exposure_limits
+                    .max_single_recommendation_usd
+                    .value,
+            ),
             training: runtime.profile_artifacts.research_method.training,
             selection: runtime.recommendation.selection,
             labelers: default_labelers(),

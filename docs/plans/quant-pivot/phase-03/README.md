@@ -112,8 +112,9 @@ flowchart TD
 3. **ML 范围**：weighted-factor 主路径 + smartcore classical ML（shadow 候选），
    统一 `QuantModelRuntime` 隔离调用方；完整 verified serving preimage 唯一构造
    concrete runtime。
-4. **Backtest 组合层**：Phase 03 用最小 deterministic greedy allocator 产出
-   portfolio 级指标；完整受治理 `PortfolioPlanner` 留 Phase 04 复用同一 trait。
+4. **Backtest 组合层**：backtest、replay 与 production report 使用同一
+   `GlobalPortfolioPlanner`、同一经济 tier/scenario contract 和 exact verifier；不得以 greedy 或
+   score-based allocator 生成不可对比的 portfolio 指标。
 5. **零兼容、零 re-export**；`f64` 仅允许出现在训练矩阵边界，禁止泄漏到 money domain。
 6. **PIT 正确性是硬不变量**：任何特征 / 训练样本不得读取 `as_of` 之后的事实；
    回测禁止访问 live `BookStore`。
@@ -149,7 +150,8 @@ ml-classical = ["dep:smartcore"]
 - 3.0：声明 workspace 依赖与 feature gate（numeric stack 为 base dep，`default = []`）。
 - 3.2 / 3.5：base numeric stack + `dataframe`（polars/arrow/parquet 仅离线 materialization）。
 - 3.6：`optimize`（argmin）+ `ml-classical`（smartcore）。
-- 禁止本期引入：`good_lp` / `ort` / `burn` / `candle`（见父文档 §30）。
+- direct `highs` + HiGHS 由全局组合模块统一链接；Phase 03 不建立第二 allocator。`ort` / `burn` /
+  `candle` 仍按后续模型 phase 引入（见父文档 §30）。
 
 `quant-pivot-core` 链接 `quant-pivot-research/dataframe`（3.5 数据集 Parquet）；
 `quant-pivot-research` 自身 `default = []`。report_only 二进制因此含 polars，但
@@ -159,7 +161,7 @@ ml-classical = ["dep:smartcore"]
 
 | 延后能力 | 本期替代 | 落地 Phase | 标注于 |
 |---|---|---|---|
-| 完整受治理 `PortfolioPlanner` | 最小 greedy allocator（backtest 用） | Phase 04 | 3.6 / 3.4 §10 |
+| 全局组合输入装配 | production `GlobalPortfolioPlanner` + PIT economic/scenario adapter | Phase 04/05 | 3.6 / 05.8 |
 | TopN 报告生成 / report scheduler / 定时 `live_report_inference` | 按需 `ModelRunner` + SignalCandidate | Phase 04 | 3.4 §10 |
 | `required_features` → 03.1 selection 全链路编排 | `QuantModelRuntime::required_features()` trait | Phase 04 | 3.4 §10 / 3.8 §6.5 |
 | report-level shadow 完整比较（capital/would-execute/risk envelope delta） | signal/rank 层 `shadow_diff` + metrics | Phase 04 | 3.7 §10 |
@@ -172,7 +174,7 @@ ml-classical = ["dep:smartcore"]
 | `ModelConfig.prediction_horizon_secs` 在线读取 | artifact `prediction_horizon_secs`（trainer 写入） | **Phase 3.6 ✅ 已交付**（写入 artifact） | 3.4 §4.2 |
 | 垂直领域完整闭环（Crypto：linkage + domain PIT + 两层向量 + 真实特征/因子 + ModelRouting + domain dataset + 垂直训练/回测） | skeleton + `DomainDataMissing` + 3.5 generic dataset | **Phase 3.8** | [`03.8`](03.8-vertical-domain-closed-loop.md) |
 | 其余四垂直（Sports/Politics/Weather/Geopolitics）真实外部数据 | Crypto 范式加性扩展 | Post–3.8 Crypto | [`03.8`](03.8-vertical-domain-closed-loop.md) §12 |
-| `good_lp` 组合优化 | greedy allocator | Phase 05 | 3.6 |
+| direct `highs` + HiGHS 全局组合 | production 与 backtest 唯一实现 | **Phase 05 clean-break** | 3.6 / 05.8 |
 | `ort` ONNX 推理 | `QuantModelRuntime` 预留 arm | Phase 06 | 3.4 §10 |
 | auto-execution 门禁生效 | config 口径记录 | Phase 05/06 | 3.7 §10 |
 | `burn` / `candle` 深度学习 | — | Phase 08 | 3.4 §10 |

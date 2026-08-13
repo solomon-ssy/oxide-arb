@@ -1,6 +1,9 @@
 //! Postgres-backed recommendation report repository.
 
-use std::{collections::HashSet, convert::identity};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::identity,
+};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::storage::{
@@ -18,9 +21,10 @@ use quant_pivot_models::{
             FactDeliverySettlement, NewEntryConditionArtifact, NewEntryConditionAudit,
             NewEntryConditionInstance, NewRecommendation, NewRecommendationReport,
             NewReportDataQualitySnapshot, NewReportFactDelivery, NewReportFeatureParity,
-            NewReportTransaction, OrderIntentInfo, PreparedReportOutcome, PublishReportOutcome,
-            RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportFactDeliveryInfo,
-            ReportRunClaim,
+            NewReportRouteRun, NewReportTransaction, OrderIntentInfo, PortfolioDecisionResult,
+            PreparedReportOutcome, PublishReportOutcome, RecommendationReportInfo,
+            ReportDataQualitySnapshotInfo, ReportFactDeliveryInfo, ReportRouteRunInfo,
+            ReportRunClaim, RouteRunOutcome,
         },
     },
     entities::{
@@ -38,11 +42,11 @@ use quant_pivot_models::{
         },
         quant_report_data_quality_snapshot::Entity as QuantReportDataQualitySnapshotEntity,
         quant_report_fact_delivery::{Column as QuantReportFactDeliveryColumn, Entity, Model},
+        quant_report_route_run::{
+            Column as QuantReportRouteRunColumn, Entity as QuantReportRouteRunEntity,
+        },
         quant_report_run::Entity as QuantReportRunEntity,
         quant_research_job::Entity as QuantResearchJobEntity,
-        research_profile_artifact::{
-            Column as ResearchProfileArtifactColumn, Entity as ResearchProfileArtifactEntity,
-        },
     },
     enums::{
         execution::ApprovalInvalidation,
@@ -58,8 +62,8 @@ use quant_pivot_models::{
     runtime_config::MAX_REPORT_TOP_N,
     types::{
         EntryConditionArtifactId, EntryConditionAuditId, EntryConditionPlan, ModelRunId,
-        OperationDetailDocument, OperationLogId, RecommendationReportId, RecommendationTradePlan,
-        ReportDataQualitySnapshotId, ResearchJobParams, ResearchProfileId, WorkerId,
+        OperationDetailDocument, OperationLogId, RecommendationReportId,
+        ReportDataQualitySnapshotId, ReportRouteRunId, ReportRunId, ResearchJobParams, WorkerId,
     },
 };
 use sea_orm::{
@@ -74,8 +78,8 @@ use crate::{
     postgres::{
         error, primitives,
         quant::{
-            feature_parity::PgFeatureParityRepository, model_registry::PgModelRegistryRepository,
-            order_intent::PgOrderIntentRepository, report_scope::ReportScope,
+            feature_parity::PgFeatureParityRepository, order_intent::PgOrderIntentRepository,
+            report_scope::ReportScope,
         },
         query::paginate_mapped,
         state_hash,
@@ -223,7 +227,7 @@ fn validate_sampled_feature_parity(
     if run.kind != FeatureParityRunKind::Sampled
         || run.status != FeatureParityRunStatus::Queued
         || run.report_id.as_ref() != Some(&report.recommendation_report_id)
-        || run.model_version_id.as_ref() != Some(&report.model_version_id)
+        || run.model_version_id.is_some()
         || run.training_dataset_id.is_some()
         || run.window_start != report.decision_at
         || run.window_end <= run.window_start
@@ -231,7 +235,7 @@ fn validate_sampled_feature_parity(
     {
         return Err(StorageError::invariant_violation(
             Some(QUANT_FEATURE_PARITY_RUN),
-            "sampled parity run must be queued and bound to the exact report/model/decision window",
+            "sampled parity run must be queued and bound to the exact global report decision window",
         ));
     }
     if job.kind != ResearchJobKind::FeatureParity
@@ -383,39 +387,27 @@ fn validate_recommendation_condition(
     instance: &NewEntryConditionInstance,
     artifacts: &[NewEntryConditionArtifact],
 ) -> Result<(), StorageError> {
-    match &recommendation.trade_plan {
-        RecommendationTradePlan::Frozen { entry, .. } => match &entry.condition {
-            EntryConditionPlan::Immediate
-                if instance.state == EntryConditionState::NotRequired
-                    && instance.artifact_id.is_none()
-                    && instance.artifact_hash.is_none() => {}
-            EntryConditionPlan::Conditional {
-                artifact_id,
-                content_hash,
-            } if instance.state == EntryConditionState::Waiting
-                && instance.artifact_id.as_ref() == Some(artifact_id)
-                && instance.artifact_hash.as_ref() == Some(content_hash)
-                && artifacts.iter().any(|artifact| {
-                    artifact.artifact_id == *artifact_id
-                        && artifact.content_hash == *content_hash
-                        && artifact.payload_json.binding.recommendation_id
-                            == recommendation.recommendation_id
-                }) => {}
-            _ => {
-                return Err(StorageError::invariant_violation(
-                    Some("quant_entry_condition_instance"),
-                    "recommendation trade plan and condition instance disagree",
-                ));
-            }
-        },
-        RecommendationTradePlan::Unavailable { .. }
-            if instance.state == EntryConditionState::Invalidated
+    match &recommendation.trade_plan.entry.condition {
+        EntryConditionPlan::Immediate
+            if instance.state == EntryConditionState::NotRequired
                 && instance.artifact_id.is_none()
                 && instance.artifact_hash.is_none() => {}
-        RecommendationTradePlan::Unavailable { .. } => {
+        EntryConditionPlan::Conditional {
+            artifact_id,
+            content_hash,
+        } if instance.state == EntryConditionState::Waiting
+            && instance.artifact_id.as_ref() == Some(artifact_id)
+            && instance.artifact_hash.as_ref() == Some(content_hash)
+            && artifacts.iter().any(|artifact| {
+                artifact.artifact_id == *artifact_id
+                    && artifact.content_hash == *content_hash
+                    && artifact.payload_json.binding.recommendation_id
+                        == recommendation.recommendation_id
+            }) => {}
+        _ => {
             return Err(StorageError::invariant_violation(
                 Some("quant_entry_condition_instance"),
-                "unavailable trade plan must create an invalidated shadow instance",
+                "recommendation trade plan and condition instance disagree",
             ));
         }
     }
@@ -486,6 +478,7 @@ fn validate_report_transaction(
         ));
     }
     if transaction.report.status != RecommendationReportStatus::Prepared
+        || transaction.report.created_at < transaction.report.decision_at
         || transaction.report.published_at.is_some()
         || transaction.report.successor_report_id.is_some()
         || transaction.report.superseded_at.is_some()
@@ -495,18 +488,67 @@ fn validate_report_transaction(
     {
         return Err(StorageError::invariant_violation(
             Some(QUANT_RECOMMENDATION_REPORT),
-            "new report must be a scope-normalized Prepared artifact with no lifecycle timestamps",
+            format!(
+                "new report must be a scope-normalized Prepared artifact with no lifecycle timestamps: status={:?}, decision_at={}, created_at={}, published_at_present={}, successor_present={}, superseded_at_present={}, obsoleted_at_present={}, revoked_at_present={}, expired_at_present={}",
+                transaction.report.status,
+                transaction.report.decision_at,
+                transaction.report.created_at,
+                transaction.report.published_at.is_some(),
+                transaction.report.successor_report_id.is_some(),
+                transaction.report.superseded_at.is_some(),
+                transaction.report.obsoleted_at.is_some(),
+                transaction.report.revoked_at.is_some(),
+                transaction.report.expired_at.is_some(),
+            ),
         ));
     }
+    let route_runs = validated_route_runs(transaction)?;
+    validate_plan_binding(transaction)?;
     if transaction.recommendations.iter().any(|recommendation| {
+        let route_run = route_runs.get(&recommendation.report_route_run_id);
         recommendation.recommendation_report_id != transaction.report.recommendation_report_id
-            || recommendation.research_profile_artifact_id
-                != transaction.report.research_profile_artifact_id
+            || recommendation.portfolio_plan_id != transaction.report.portfolio_plan_id
             || recommendation.status != RecommendationStatus::Prepared
+            || recommendation.created_at < transaction.report.created_at
+            || recommendation.economic_tier_id != recommendation.economic_tier_json.economic_tier_id
+            || recommendation.report_route_run_id
+                != recommendation.economic_tier_json.report_route_run_id
+            || recommendation.route != recommendation.economic_tier_json.route
+            || recommendation.economics_json != recommendation.economic_tier_json.economics
+            || recommendation.market_id != recommendation.economic_tier_json.market_id
+            || recommendation.event_id != recommendation.economic_tier_json.event_id
+            || recommendation.token_id != recommendation.economic_tier_json.token_id
+            || recommendation.outcome_side != recommendation.economic_tier_json.outcome_side
+            || route_run.is_none_or(|route_run| {
+                route_run.route != recommendation.route
+                    || route_run.outcome != RouteRunOutcome::Ready
+            })
     }) {
         return Err(StorageError::invariant_violation(
             Some(QUANT_RECOMMENDATION_REPORT),
-            "every recommendation must bind the exact report id and research profile",
+            "every recommendation must bind one ready Route run and its exact selected economic tier",
+        ));
+    }
+    let recommendation_tier_ids = transaction
+        .recommendations
+        .iter()
+        .map(|recommendation| recommendation.economic_tier_id)
+        .collect::<HashSet<_>>();
+    let decision_matches = match &transaction.portfolio_plan.decision_json {
+        PortfolioDecisionResult::ZeroCandidates { .. } => transaction.recommendations.is_empty(),
+        PortfolioDecisionResult::Optimized { plan } => {
+            plan.portfolio_plan_id == transaction.report.portfolio_plan_id
+                && plan.selected_tier_ids.len() == recommendation_tier_ids.len()
+                && plan
+                    .selected_tier_ids
+                    .iter()
+                    .all(|tier_id| recommendation_tier_ids.contains(tier_id))
+        }
+    };
+    if !decision_matches {
+        return Err(StorageError::invariant_violation(
+            Some(QUANT_RECOMMENDATION_REPORT),
+            "portfolio decision and published recommendation tier identities differ",
         ));
     }
     validate_sampled_feature_parity(
@@ -520,7 +562,91 @@ fn validate_report_transaction(
         &transaction.entry_condition_instances,
     )?;
     validate_fact_delivery(&transaction.report, transaction.fact_delivery.as_ref())?;
-    Ok(transaction.report.decision_at)
+    Ok(transaction.report.created_at)
+}
+
+fn validated_route_runs(
+    transaction: &NewReportTransaction,
+) -> Result<HashMap<ReportRouteRunId, &NewReportRouteRun>, StorageError> {
+    let route_runs = transaction
+        .route_runs
+        .iter()
+        .map(|route_run| (route_run.report_route_run_id, route_run))
+        .collect::<HashMap<_, _>>();
+    if route_runs.len() != transaction.route_runs.len()
+        || transaction.route_runs.len() != transaction.report.represented_routes_json.routes.len()
+        || transaction
+            .route_runs
+            .iter()
+            .zip(&transaction.report.represented_routes_json.routes)
+            .any(|(route_run, route)| {
+                route_run.report_run_id != transaction.report.report_run_id
+                    || route_run.route != *route
+                    || route_run.outcome == RouteRunOutcome::Failed
+                    || route_run.lineage_json.is_none()
+                    || route_run.lineage_json.as_ref().is_some_and(|lineage| {
+                        route_run.model_version_id != Some(lineage.model_version_id)
+                            || route_run.model_run_id != lineage.model_run_id
+                            || route_run.calibration_artifact_id
+                                != Some(lineage.calibration_artifact_id)
+                            || route_run.trade_policy_artifact_id
+                                != Some(lineage.trade_policy_artifact_id)
+                            || route_run.research_profile_artifact_id
+                                != Some(lineage.research_profile_artifact_id.clone())
+                    })
+            })
+    {
+        return Err(StorageError::invariant_violation(
+            Some(QUANT_RECOMMENDATION_REPORT),
+            "Route-run rows must uniquely and canonically cover the represented Route set",
+        ));
+    }
+    Ok(route_runs)
+}
+
+fn validate_plan_binding(transaction: &NewReportTransaction) -> Result<(), StorageError> {
+    let plan_account_snapshot_id = transaction.portfolio_plan.account_snapshot_id;
+    let report_account_snapshot_id = transaction.report.account_snapshot_ref;
+    if transaction.portfolio_plan.portfolio_plan_id != transaction.report.portfolio_plan_id
+        || plan_account_snapshot_id != report_account_snapshot_id
+        || transaction.portfolio_plan.decision_policy_snapshot_id
+            != transaction.report.decision_policy_snapshot_id
+        || transaction.portfolio_plan.market_selection_id != transaction.report.market_selection_id
+        || transaction.portfolio_plan.decision_at != transaction.report.decision_at
+        || transaction.portfolio_plan.represented_routes_json
+            != transaction.report.represented_routes_json
+        || transaction.portfolio_plan.scenario_artifact_id
+            != transaction.report.scenario_artifact_id
+        || transaction.portfolio_plan.scenario_artifact_hash
+            != transaction.report.scenario_artifact_hash
+    {
+        return Err(StorageError::invariant_violation(
+            Some(QUANT_RECOMMENDATION_REPORT),
+            "portfolio plan must bind the exact report account, policy, selection, Route set, and scenario",
+        ));
+    }
+    let has_routes = !transaction.report.represented_routes_json.is_empty();
+    let scenario_identity_complete = matches!(
+        (
+            transaction.report.scenario_artifact_id,
+            transaction.report.scenario_artifact_hash,
+        ),
+        (Some(_), Some(_))
+    );
+    let scenario_identity_absent = matches!(
+        (
+            transaction.report.scenario_artifact_id,
+            transaction.report.scenario_artifact_hash,
+        ),
+        (None, None)
+    );
+    if (has_routes && !scenario_identity_complete) || (!has_routes && !scenario_identity_absent) {
+        return Err(StorageError::invariant_violation(
+            Some(QUANT_RECOMMENDATION_REPORT),
+            "only an empty represented Route set may omit the joint scenario artifact",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_fact_delivery(
@@ -717,10 +843,6 @@ impl PgRecommendationReportRepository {
         now: DateTime<Utc>,
     ) -> Result<Vec<RecommendationReportInfo>, StorageError> {
         let older_prepared = QuantRecommendationReportEntity::find()
-            .filter(
-                QuantRecommendationReportColumn::ResearchProfileArtifactId
-                    .eq(published.research_profile_artifact_id.clone()),
-            )
             .filter(QuantRecommendationReportColumn::ReportKind.eq(published.report_kind))
             .filter(
                 QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Prepared),
@@ -834,6 +956,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             data_quality_snapshot,
             portfolio_plan,
             report,
+            route_runs,
             recommendations,
             entry_condition_artifacts,
             entry_condition_instances,
@@ -851,6 +974,16 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
 
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let commit_at = primitives::statement_timestamp(&txn).await?;
+        if report.created_at > commit_at
+            || recommendations
+                .iter()
+                .any(|recommendation| recommendation.created_at > commit_at)
+        {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_RECOMMENDATION_REPORT),
+                "report or recommendation availability clock is later than the database commit clock",
+            ));
+        }
         let run = QuantReportRunEntity::find_by_id(run_claim.report_run_id)
             .lock_exclusive()
             .one(&txn)
@@ -874,16 +1007,6 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         }
         PgFeatureParityRepository::verify_clear_latch_generation(&txn, &feature_parity_state_id)
             .await?;
-        let profile_ref = report.research_profile_artifact_id.profile_ref();
-        let profile_artifact_id =
-            PgModelRegistryRepository::ensure_profile(&txn, &profile_ref).await?;
-        if profile_artifact_id != report.research_profile_artifact_id {
-            return Err(StorageError::invariant_violation(
-                Some(QUANT_RECOMMENDATION_REPORT),
-                "report profile identity differs from the canonical research artifact",
-            ));
-        }
-
         // Insert FK targets before the report header, then the report's children.
         QuantAccountSnapshotEntity::insert(account_snapshot.into_active_model())
             .exec(&txn)
@@ -898,6 +1021,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
+        insert_many_chunked::<QuantReportRouteRunEntity, _>(&txn, route_runs).await?;
         let report_model = QuantRecommendationReportEntity::insert(report.into_active_model())
             .exec_with_returning(&txn)
             .await
@@ -959,6 +1083,52 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         report_id: &RecommendationReportId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError> {
         QuantRecommendationReportEntity::find_by_id(*report_id)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map(Into::into))
+    }
+
+    async fn find_route_run(
+        &self,
+        route_run_id: &ReportRouteRunId,
+    ) -> Result<Option<ReportRouteRunInfo>, StorageError> {
+        QuantReportRouteRunEntity::find_by_id(*route_run_id)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map(Into::into))
+    }
+
+    async fn list_route_runs(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Vec<ReportRouteRunInfo>, StorageError> {
+        let Some(report) = QuantRecommendationReportEntity::find_by_id(*report_id)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut rows = QuantReportRouteRunEntity::find()
+            .filter(QuantReportRouteRunColumn::ReportRunId.eq(report.report_run_id))
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(ReportRouteRunInfo::from)
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| row.route);
+        Ok(rows)
+    }
+
+    async fn find_model_route_run(
+        &self,
+        model_run_id: &ModelRunId,
+    ) -> Result<Option<ReportRouteRunInfo>, StorageError> {
+        QuantReportRouteRunEntity::find()
+            .filter(QuantReportRouteRunColumn::ModelRunId.eq(*model_run_id))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -1113,12 +1283,9 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
-        ReportScope::new(
-            &report_probe.research_profile_artifact_id.profile_ref().id,
-            report_probe.report_kind,
-        )
-        .acquire(&txn)
-        .await?;
+        ReportScope::new(report_probe.report_kind)
+            .acquire(&txn)
+            .await?;
         let now = primitives::statement_timestamp(&txn).await?;
         if occurred_at > now + Duration::seconds(5) {
             return Err(StorageError::invariant_violation(
@@ -1133,7 +1300,6 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
         if report.status != RecommendationReportStatus::Prepared
-            || report.research_profile_artifact_id != report_probe.research_profile_artifact_id
             || report.report_kind != report_probe.report_kind
         {
             return Err(StorageError::state_conflict(
@@ -1178,15 +1344,9 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
-        ReportScope::new(
-            &candidate_probe
-                .research_profile_artifact_id
-                .profile_ref()
-                .id,
-            candidate_probe.report_kind,
-        )
-        .acquire(&txn)
-        .await?;
+        ReportScope::new(candidate_probe.report_kind)
+            .acquire(&txn)
+            .await?;
         let now = primitives::statement_timestamp(&txn).await?;
         if occurred_at > now + Duration::seconds(5) {
             return Err(StorageError::invariant_violation(
@@ -1215,9 +1375,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                 RecommendationReportStatus::Published,
             ));
         }
-        if candidate.research_profile_artifact_id != candidate_probe.research_profile_artifact_id
-            || candidate.report_kind != candidate_probe.report_kind
-        {
+        if candidate.report_kind != candidate_probe.report_kind {
             return Err(StorageError::state_conflict(
                 QUANT_RECOMMENDATION_REPORT,
                 Some(report_id),
@@ -1226,10 +1384,6 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         }
 
         let current = QuantRecommendationReportEntity::find()
-            .filter(
-                QuantRecommendationReportColumn::ResearchProfileArtifactId
-                    .eq(candidate.research_profile_artifact_id.clone()),
-            )
             .filter(QuantRecommendationReportColumn::ReportKind.eq(candidate.report_kind))
             .filter(
                 QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Published),
@@ -1353,12 +1507,12 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         Ok(updated.into())
     }
 
-    async fn find_by_model_run(
+    async fn find_by_report_run(
         &self,
-        model_run_id: &ModelRunId,
+        report_run_id: &ReportRunId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError> {
         QuantRecommendationReportEntity::find()
-            .filter(QuantRecommendationReportColumn::ModelRunId.eq(*model_run_id))
+            .filter(QuantRecommendationReportColumn::ReportRunId.eq(*report_run_id))
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -1414,7 +1568,6 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
     ) -> Result<Paginated<RecommendationReportInfo>, StorageError> {
         paginate_mapped(
             QuantRecommendationReportEntity::find()
-                .inner_join(ResearchProfileArtifactEntity)
                 .filter(page_condition(&query))
                 .order_by_desc(QuantRecommendationReportColumn::PublishedAt)
                 .order_by_desc(QuantRecommendationReportColumn::CreatedAt),
@@ -1427,13 +1580,10 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
 
     async fn current(
         &self,
-        profile_id: &ResearchProfileId,
         kind: ReportKind,
     ) -> Result<Option<RecommendationReportInfo>, StorageError> {
         QuantRecommendationReportEntity::find()
             .inner_join(Entity)
-            .inner_join(ResearchProfileArtifactEntity)
-            .filter(ResearchProfileArtifactColumn::ResearchProfileId.eq(profile_id))
             .filter(QuantRecommendationReportColumn::ReportKind.eq(kind))
             .filter(
                 QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Published),
@@ -1510,12 +1660,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
-        ReportScope::new(
-            &probe.research_profile_artifact_id.profile_ref().id,
-            probe.report_kind,
-        )
-        .acquire(&txn)
-        .await?;
+        ReportScope::new(probe.report_kind).acquire(&txn).await?;
         let now = primitives::statement_timestamp(&txn).await?;
         if expired_at > now + Duration::seconds(5) {
             return Err(StorageError::invariant_violation(
@@ -1535,9 +1680,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                 report_id,
             ));
         };
-        if report.research_profile_artifact_id != probe.research_profile_artifact_id
-            || report.report_kind != probe.report_kind
-        {
+        if report.report_kind != probe.report_kind {
             return Err(StorageError::state_conflict(
                 QUANT_RECOMMENDATION_REPORT,
                 Some(report_id),
@@ -1612,8 +1755,11 @@ fn report_fact_retry_delay(attempt_count: i32) -> Duration {
 
 fn page_condition(query: &QuantReportListQuery) -> Condition {
     Condition::all()
-        .add_option(query.profile_id.as_ref().map(|profile_id| {
-            ResearchProfileArtifactColumn::ResearchProfileId.eq(profile_id.clone())
+        .add_option(query.route.map(|route| {
+            Expr::cust_with_values(
+                r#""quant_recommendation_report"."represented_routes_json" -> 'routes' ? $1"#,
+                [route.as_str()],
+            )
         }))
         .add_option(
             query
@@ -1658,12 +1804,7 @@ impl PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
-        ReportScope::new(
-            &probe.research_profile_artifact_id.profile_ref().id,
-            probe.report_kind,
-        )
-        .acquire(&txn)
-        .await?;
+        ReportScope::new(probe.report_kind).acquire(&txn).await?;
         let now = primitives::statement_timestamp(&txn).await?;
         if occurred_at > now + Duration::seconds(5) {
             return Err(StorageError::invariant_violation(
@@ -1683,9 +1824,7 @@ impl PgRecommendationReportRepository {
                 report_id,
             ));
         };
-        if row.research_profile_artifact_id != probe.research_profile_artifact_id
-            || row.report_kind != probe.report_kind
-        {
+        if row.report_kind != probe.report_kind {
             return Err(StorageError::state_conflict(
                 QUANT_RECOMMENDATION_REPORT,
                 Some(report_id),
@@ -1797,12 +1936,9 @@ impl PgRecommendationReportRepository {
 mod tests {
     use quant_pivot_models::{
         domain::{api::QuantReportListQuery, pagination::PageRequest},
-        entities::{
-            quant_recommendation_report::Entity,
-            research_profile_artifact::Entity as ResearchProfileArtifactEntity,
-        },
+        entities::quant_recommendation_report::Entity,
         enums::quant::{QuantRuntimeMode, RecommendationReportStatus, ReportKind},
-        types::ResearchProfileId,
+        runtime_config::BuyModelRoute,
     };
     use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
 
@@ -1811,9 +1947,9 @@ mod tests {
     #[test]
     fn page_adds_optional_sql() {
         let query = QuantReportListQuery {
+            route: Some(BuyModelRoute::Weather),
             kind: Some(ReportKind::TopN),
             status: Some(RecommendationReportStatus::Published),
-            profile_id: Some(ResearchProfileId::new("weather_v1")),
             runtime_mode: Some(QuantRuntimeMode::ReportOnly),
             from: None,
             to: None,
@@ -1821,14 +1957,13 @@ mod tests {
         };
 
         let sql = Entity::find()
-            .inner_join(ResearchProfileArtifactEntity)
             .filter(page_condition(&query))
             .build(DbBackend::Postgres)
             .to_string();
 
         assert!(sql.contains(r#""quant_recommendation_report"."report_kind" ="#));
         assert!(sql.contains(r#""quant_recommendation_report"."status" ="#));
-        assert!(sql.contains(r#""research_profile_artifact"."research_profile_id" ="#));
+        assert!(sql.contains(r#""quant_recommendation_report"."represented_routes_json""#));
         assert!(sql.contains(r#""quant_recommendation_report"."runtime_mode" ="#));
     }
 

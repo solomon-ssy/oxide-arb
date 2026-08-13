@@ -5,13 +5,17 @@ use quant_pivot_error::feedback::FeedbackError;
 use sea_orm::{ActiveValue, DeriveIntoActiveModel, DerivePartialModel, IntoActiveValue};
 use serde::{Deserialize, Serialize, Serializer};
 
-use super::model::ModelVersionInfo;
+use super::{
+    model::ModelVersionInfo,
+    model_candidate_manifest::{scenario_model_bindings_hash, validate_scenario_model_bindings},
+};
 use crate::{
     enums::{common::MarketCategory, model::ModelFamily, quant::QuantRuntimeMode},
     hashing::CanonicalDigest,
     runtime_config::{
         ActivePolicyBundle, BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot,
         DecisionPolicySnapshotDocument, ModelBinding, ModelBindingSource,
+        PortfolioScenarioModelArtifactBinding,
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId,
@@ -426,6 +430,10 @@ pub struct PromotionPolicyProjection {
     candidate_binding_source: ModelBindingSource,
     candidate_config_revision: PolicyBundleGeneration,
     candidate_generation: u64,
+    previous_scenario_model_bindings: Vec<PortfolioScenarioModelArtifactBinding>,
+    candidate_scenario_model_bindings: Vec<PortfolioScenarioModelArtifactBinding>,
+    previous_scenario_model_bindings_hash: ContentHash,
+    candidate_scenario_model_bindings_hash: ContentHash,
     non_route_policy_hash: ContentHash,
     base_snapshot: DecisionPolicySnapshot,
 }
@@ -440,6 +448,7 @@ impl PromotionPolicyProjection {
         bundle: &ActivePolicyBundle,
         category: MarketCategory,
         candidate_model_version_id: ModelVersionId,
+        candidate_scenario_model_bindings: Vec<PortfolioScenarioModelArtifactBinding>,
     ) -> Result<Self, FeedbackError> {
         let actual_hash = bundle
             .snapshot
@@ -506,6 +515,46 @@ impl PromotionPolicyProjection {
             ));
         }
         let candidate_binding_source = shadow.source.clone();
+        validate_scenario_model_bindings(category, &candidate_scenario_model_bindings)
+            .map_err(|error| invalid_preflight(error.to_string()))?;
+        let mut previous_scenario_model_bindings = model
+            .portfolio_scenario_model_bindings
+            .iter()
+            .filter(|binding| binding.ordered_routes.contains(&route))
+            .cloned()
+            .collect::<Vec<_>>();
+        sort_scenario_bindings(&mut previous_scenario_model_bindings);
+        if previous_scenario_model_bindings.is_empty()
+            || previous_scenario_model_bindings
+                .iter()
+                .map(|binding| (&binding.ordered_routes, binding.route_set_digest))
+                .ne(candidate_scenario_model_bindings
+                    .iter()
+                    .map(|binding| (&binding.ordered_routes, binding.route_set_digest)))
+        {
+            return Err(invalid_preflight(
+                "prospective scenario-model bindings do not replace every affected Route-set binding",
+            ));
+        }
+        if previous_scenario_model_bindings
+            .iter()
+            .zip(&candidate_scenario_model_bindings)
+            .any(|(previous, candidate)| {
+                previous.portfolio_scenario_model_artifact_id
+                    == candidate.portfolio_scenario_model_artifact_id
+                    || previous.model_content_hash == candidate.model_content_hash
+            })
+        {
+            return Err(invalid_preflight(
+                "promotion must bind newly fitted scenario-model artifacts for every affected Route set",
+            ));
+        }
+        let previous_scenario_model_bindings_hash =
+            scenario_model_bindings_hash(&previous_scenario_model_bindings)
+                .map_err(|error| invalid_preflight(error.to_string()))?;
+        let candidate_scenario_model_bindings_hash =
+            scenario_model_bindings_hash(&candidate_scenario_model_bindings)
+                .map_err(|error| invalid_preflight(error.to_string()))?;
         Ok(Self {
             category,
             route,
@@ -515,6 +564,10 @@ impl PromotionPolicyProjection {
             candidate_binding_source,
             candidate_config_revision: config_revision,
             candidate_generation: generation,
+            previous_scenario_model_bindings,
+            candidate_scenario_model_bindings,
+            previous_scenario_model_bindings_hash,
+            candidate_scenario_model_bindings_hash,
             non_route_policy_hash,
             base_snapshot: bundle.snapshot.clone(),
         })
@@ -539,6 +592,22 @@ impl PromotionPolicyProjection {
             },
         );
         candidate
+            .model_routing
+            .model
+            .portfolio_scenario_model_bindings
+            .retain(|binding| !binding.ordered_routes.contains(&self.route));
+        candidate
+            .model_routing
+            .model
+            .portfolio_scenario_model_bindings
+            .extend(self.candidate_scenario_model_bindings.clone());
+        sort_scenario_bindings(
+            &mut candidate
+                .model_routing
+                .model
+                .portfolio_scenario_model_bindings,
+        );
+        candidate
     }
 
     fn project_hash(
@@ -560,6 +629,11 @@ impl PromotionPolicyProjection {
                 "policy has no exact {category} route binding to project"
             ));
         }
+        document
+            .model_routing
+            .model
+            .portfolio_scenario_model_bindings
+            .retain(|binding| !binding.ordered_routes.contains(&route));
         document.revisions.model_routing = None;
         CanonicalDigest::content_hash_typed(
             PROMOTION_NON_ROUTE_DOMAIN,
@@ -602,6 +676,15 @@ impl PromotionPolicyProjection {
         }
         let non_route_hash =
             Self::project_hash(candidate, self.category).map_err(invalid_preflight)?;
+        let mut scenario_model_bindings = candidate
+            .model_routing
+            .model
+            .portfolio_scenario_model_bindings
+            .iter()
+            .filter(|scenario| scenario.ordered_routes.contains(&route))
+            .cloned()
+            .collect::<Vec<_>>();
+        sort_scenario_bindings(&mut scenario_model_bindings);
         let mismatches = [
             (
                 binding.champion.model_version_id != expected.model_version_id,
@@ -620,6 +703,10 @@ impl PromotionPolicyProjection {
                 "champion_generation",
             ),
             (binding.shadow.is_some(), "shadow_slot"),
+            (
+                scenario_model_bindings != self.candidate_scenario_model_bindings,
+                "scenario_model_bindings",
+            ),
             (
                 non_route_hash != self.non_route_policy_hash,
                 "non_route_policy",
@@ -661,6 +748,26 @@ impl PromotionPolicyProjection {
     pub const fn non_route_policy_hash(&self) -> ContentHash {
         self.non_route_policy_hash
     }
+
+    #[must_use]
+    pub const fn previous_scenario_bindings_hash(&self) -> ContentHash {
+        self.previous_scenario_model_bindings_hash
+    }
+
+    #[must_use]
+    pub const fn candidate_scenario_bindings_hash(&self) -> ContentHash {
+        self.candidate_scenario_model_bindings_hash
+    }
+}
+
+fn sort_scenario_bindings(bindings: &mut [PortfolioScenarioModelArtifactBinding]) {
+    bindings.sort_by_key(|binding| {
+        (
+            binding.route_set_digest,
+            binding.model_content_hash,
+            binding.portfolio_scenario_model_artifact_id.as_uuid(),
+        )
+    });
 }
 
 /// Immutable model/artifact plane that must remain exact from permit issue
@@ -684,6 +791,8 @@ pub struct PromotionServingConstraints {
     feature_parity_evidence_hash: ContentHash,
     profile_ref: ResearchProfileRef,
     category: MarketCategory,
+    scenario_model_bindings: Vec<PortfolioScenarioModelArtifactBinding>,
+    scenario_model_bindings_hash: ContentHash,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -705,6 +814,8 @@ struct PromotionServingConstraintsDocument {
     feature_parity_evidence_hash: ContentHash,
     profile_ref: ResearchProfileRef,
     category: MarketCategory,
+    scenario_model_bindings: Vec<PortfolioScenarioModelArtifactBinding>,
+    scenario_model_bindings_hash: ContentHash,
 }
 
 /// Server-resolved inputs for one immutable candidate serving plane.
@@ -724,6 +835,8 @@ pub struct PromotionServingConstraintsInput {
     pub feature_parity_evidence_hash: ContentHash,
     pub profile_ref: ResearchProfileRef,
     pub category: MarketCategory,
+    pub scenario_model_bindings: Vec<PortfolioScenarioModelArtifactBinding>,
+    pub scenario_model_bindings_hash: ContentHash,
 }
 
 impl PromotionServingConstraints {
@@ -745,6 +858,8 @@ impl PromotionServingConstraints {
             feature_parity_evidence_hash: input.feature_parity_evidence_hash,
             profile_ref: input.profile_ref,
             category: input.category,
+            scenario_model_bindings: input.scenario_model_bindings,
+            scenario_model_bindings_hash: input.scenario_model_bindings_hash,
         };
         constraints.validate()?;
         Ok(constraints)
@@ -758,6 +873,10 @@ impl PromotionServingConstraints {
             .profile_ref
             .resolve_builtin_research_profile()
             .map_err(invalid_preflight)?;
+        validate_scenario_model_bindings(self.category, &self.scenario_model_bindings)
+            .map_err(|error| invalid_preflight(error.to_string()))?;
+        let scenario_bindings_hash = scenario_model_bindings_hash(&self.scenario_model_bindings)
+            .map_err(|error| invalid_preflight(error.to_string()))?;
         if self.format_version != PROMOTION_SERVING_VERSION
             || !matches!(
                 self.candidate_model_family,
@@ -770,6 +889,7 @@ impl PromotionServingConstraints {
                 self.category,
                 MarketCategory::Crypto | MarketCategory::Weather
             )
+            || self.scenario_model_bindings_hash != scenario_bindings_hash
         {
             return Err(invalid_preflight(
                 "candidate serving family, profile, or category is not promotable",
@@ -858,6 +978,16 @@ impl PromotionServingConstraints {
         self.category
     }
 
+    #[must_use]
+    pub fn scenario_model_bindings(&self) -> &[PortfolioScenarioModelArtifactBinding] {
+        &self.scenario_model_bindings
+    }
+
+    #[must_use]
+    pub const fn scenario_model_bindings_hash(&self) -> ContentHash {
+        self.scenario_model_bindings_hash
+    }
+
     /// Revalidate every persisted candidate/model-spec projection frozen by
     /// this serving contract.
     pub fn validate_model(&self, model: &ModelVersionInfo) -> Result<(), FeedbackError> {
@@ -904,6 +1034,8 @@ impl TryFrom<PromotionServingConstraintsDocument> for PromotionServingConstraint
             feature_parity_evidence_hash: document.feature_parity_evidence_hash,
             profile_ref: document.profile_ref,
             category: document.category,
+            scenario_model_bindings: document.scenario_model_bindings,
+            scenario_model_bindings_hash: document.scenario_model_bindings_hash,
         };
         constraints.validate()?;
         Ok(constraints)
@@ -1234,6 +1366,8 @@ pub struct ModelRoutePromotionRoute {
     pub candidate_artifact_hash: ContentHash,
     pub candidate_serving_contract_hash: ContentHash,
     pub consumed_candidate_model_version_id: ModelVersionId,
+    pub previous_scenario_model_bindings_hash: ContentHash,
+    pub candidate_scenario_model_bindings_hash: ContentHash,
 }
 
 /// Old/new policy identities and the single database transaction revision.
@@ -1368,6 +1502,10 @@ impl ModelRoutePromotionRecord {
                 == candidate.candidate_serving_contract_hash()
             && self.route.consumed_candidate_model_version_id
                 == self.route.candidate_model_version_id
+            && self.route.candidate_scenario_model_bindings_hash
+                == candidate.scenario_model_bindings_hash()
+            && self.route.previous_scenario_model_bindings_hash
+                != self.route.candidate_scenario_model_bindings_hash
             && self.route.champion_model_version_id != self.route.candidate_model_version_id
             && self.policy.previous_generation == scope.expected_policy_generation()
             && self.policy.transaction_revision == next_revision
@@ -2177,17 +2315,18 @@ mod tests {
     use sea_orm::{ActiveValue, IntoActiveModel};
 
     use crate::{
+        domain::quant::RepresentedRouteSet,
         enums::{common::MarketCategory, model::ModelFamily, quant::QuantRuntimeMode},
         runtime_config::{
             ActivePolicyBundle, BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot,
-            ModelBinding, ModelBindingSource,
+            ModelBinding, ModelBindingSource, PortfolioScenarioModelArtifactBinding,
         },
         types::{
             ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId,
             FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackShadowArtifactId,
             ModelCandidateManifestId, ModelSpecId, ModelVersionId, PolicyBundleGeneration,
-            PolicyIdempotencyKey, PolicyRevisionId, ResearchProfileRef, RoleCode,
-            TrainingDatasetId, UserId,
+            PolicyIdempotencyKey, PolicyRevisionId, PortfolioScenarioModelArtifactId,
+            ResearchProfileRef, RoleCode, SchemaVersion, TrainingDatasetId, UserId,
             research_profile::{CRYPTO_PRICE_15M_PROFILE_ID, builtin_research_profiles},
         },
     };
@@ -2197,9 +2336,8 @@ mod tests {
         PromotionPermitRevocation, PromotionPermitRevocationCheck, PromotionPermitScope,
         PromotionPermitScopeInput, PromotionPermitStatus, PromotionPolicyProjection,
         PromotionPreflight, PromotionPreflightInput, PromotionServingConstraints,
-        PromotionServingConstraintsInput,
+        PromotionServingConstraintsInput, scenario_model_bindings_hash,
     };
-
     struct PermitFixture {
         feedback_cycle_id: FeedbackCycleId,
         profile_ref: ResearchProfileRef,
@@ -2371,6 +2509,10 @@ mod tests {
             ]
             .into_iter()
             .collect();
+            snapshot
+                .model_routing
+                .model
+                .portfolio_scenario_model_bindings = Self::scenario_bindings(80);
             let snapshot_hash = snapshot.persistence_hash().expect("policy hash");
             ActivePolicyBundle::from_parts(
                 PolicyBundleGeneration::FIRST,
@@ -2380,8 +2522,35 @@ mod tests {
             )
         }
 
+        fn scenario_bindings(content_byte: u8) -> Vec<PortfolioScenarioModelArtifactBinding> {
+            let route_set = RepresentedRouteSet::from_routes([BuyModelRoute::Crypto])
+                .expect("Crypto route set");
+            let model_content_hash = hash(content_byte);
+            vec![PortfolioScenarioModelArtifactBinding {
+                portfolio_scenario_model_artifact_id:
+                    PortfolioScenarioModelArtifactId::from_content_hash(&model_content_hash),
+                ordered_routes: route_set.routes,
+                route_set_digest: route_set.digest,
+                serving_contract_digest: hash(content_byte.wrapping_add(1)),
+                calibration_contract_digest: hash(content_byte.wrapping_add(2)),
+                trade_policy_contract_digest: hash(content_byte.wrapping_add(3)),
+                scenario_model_schema_version: SchemaVersion::try_new(1)
+                    .expect("scenario-model schema version"),
+                capital_time_bucket_contract_digest: hash(content_byte.wrapping_add(4)),
+                model_content_hash,
+                bound_at: Utc
+                    .with_ymd_and_hms(2026, 7, 28, 11, 0, 0)
+                    .single()
+                    .expect("scenario binding time"),
+            }]
+        }
+
         fn constraints(&self, candidate: ModelVersionId) -> PromotionServingConstraints {
             let candidate_manifest_hash = hash(30);
+            let scenario_model_bindings = Self::scenario_bindings(90);
+            let scenario_model_bindings_hash =
+                scenario_model_bindings_hash(&scenario_model_bindings)
+                    .expect("scenario bindings hash");
             PromotionServingConstraints::try_new(PromotionServingConstraintsInput {
                 candidate_model_version_id: candidate,
                 candidate_manifest_id: ModelCandidateManifestId::from_content_hash(
@@ -2400,6 +2569,8 @@ mod tests {
                 feature_parity_evidence_hash: hash(35),
                 profile_ref: self.profile_ref.clone(),
                 category: MarketCategory::Crypto,
+                scenario_model_bindings,
+                scenario_model_bindings_hash,
             })
             .expect("promotion serving constraints")
         }
@@ -2408,9 +2579,13 @@ mod tests {
             let champion = ModelVersionId::from_v7();
             let candidate = ModelVersionId::from_v7();
             let bundle = Self::bundle(champion, candidate, ModelVersionId::from_v7());
-            let projection =
-                PromotionPolicyProjection::try_new(&bundle, MarketCategory::Crypto, candidate)
-                    .expect("promotion policy projection");
+            let projection = PromotionPolicyProjection::try_new(
+                &bundle,
+                MarketCategory::Crypto,
+                candidate,
+                Self::scenario_bindings(90),
+            )
+            .expect("promotion policy projection");
             let constraints = self.constraints(candidate);
             let cycle_hash = hash(35);
             let feedback_cycle_id = FeedbackCycleId::from_idempotency_hash(&cycle_hash);
@@ -2578,9 +2753,13 @@ mod tests {
             .with_ymd_and_hms(2026, 7, 28, 12, 0, 0)
             .single()
             .expect("promotion time");
-        let projection =
-            PromotionPolicyProjection::try_new(&bundle, MarketCategory::Crypto, candidate)
-                .expect("project exact promotion");
+        let projection = PromotionPolicyProjection::try_new(
+            &bundle,
+            MarketCategory::Crypto,
+            candidate,
+            PermitFixture::scenario_bindings(90),
+        )
+        .expect("project exact promotion");
         let prospective = projection.candidate_snapshot(promoted_at);
         assert_eq!(projection.champion_model_version_id(), champion);
         assert_eq!(projection.candidate_model_version_id(), candidate);
@@ -2642,8 +2821,13 @@ mod tests {
             aliased,
         );
         assert!(
-            PromotionPolicyProjection::try_new(&aliased_bundle, MarketCategory::Crypto, candidate,)
-                .is_err()
+            PromotionPolicyProjection::try_new(
+                &aliased_bundle,
+                MarketCategory::Crypto,
+                candidate,
+                PermitFixture::scenario_bindings(90),
+            )
+            .is_err()
         );
     }
 

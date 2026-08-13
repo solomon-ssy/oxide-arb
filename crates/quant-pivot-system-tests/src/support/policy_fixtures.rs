@@ -71,13 +71,13 @@ impl TryFrom<PolicySnapshotFixture<'_>> for NewDecisionPolicySnapshot {
                 fixture.snapshot,
                 ConfigResourceKind::ReportSchedule,
             ),
-            operational_control_revision_id: required_revision(
+            operations_policy_revision_id: required_revision(
                 fixture.snapshot,
-                ConfigResourceKind::OperationalControl,
+                ConfigResourceKind::OperationsPolicy,
             ),
-            execution_authorization_revision_id: required_revision(
+            execution_automation_policy_revision_id: required_revision(
                 fixture.snapshot,
-                ConfigResourceKind::ExecutionAuthorization,
+                ConfigResourceKind::ExecutionAutomationPolicy,
             ),
             source: fixture.source,
             created_by_kind: PolicyActorKind::System,
@@ -156,6 +156,11 @@ pub async fn bootstrap_policy_bundle(
     }
 
     let mut snapshot = config.clone();
+    let validation = snapshot.validate_runtime_config();
+    assert!(
+        !validation.has_errors(),
+        "fixture policy must pass production semantic validation before any persistence: {validation}"
+    );
     repo.ensure_policy_profile_artifacts(&snapshot.profile_artifacts, actor, reason)
         .await
         .expect("persist typed policy profile artifacts");

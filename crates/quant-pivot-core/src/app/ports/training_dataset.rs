@@ -24,7 +24,7 @@ use quant_pivot_models::{
         ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
         DatasetSourceLineage, DecisionPolicySnapshotId, ResearchEvaluationTrack,
         ResearchProfileArtifact, ResearchProfileRef, SourceSliceManifest, SourceSliceManifestRef,
-        TrainingDatasetId, TrainingSampleSource, TrainingSampleSources,
+        TrainingDatasetId, TrainingSampleSource, TrainingSampleSources, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -183,6 +183,14 @@ impl CoreTrainingDatasetPort {
                 factors: runtime.profile_artifacts.scoring.definition,
                 domain: runtime.profile_artifacts.domain.definition,
                 data_quality: runtime.recommendation.data_quality,
+                liquidity_cap_usd: Usd::new(
+                    runtime
+                        .execution_risk
+                        .portfolio
+                        .exposure_limits
+                        .max_single_recommendation_usd
+                        .value,
+                ),
                 training: runtime.profile_artifacts.research_method.training,
                 selection: runtime.recommendation.selection,
                 labelers: default_labelers(),

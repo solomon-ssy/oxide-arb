@@ -230,6 +230,87 @@ pub struct WeightedModelTrainingOutput {
     pub validation_metrics: ValidationReport,
 }
 
+/// Immutable, objective-independent estimator matrix for one purged CPCV model-fit split.
+///
+/// The preparation owns the fitted reference CDFs, transformed cross-sections and all output
+/// contract inputs. A governed trial grid can therefore fit several objective specifications
+/// against the exact same rows without rebuilding or re-normalizing the fold. Construction is
+/// restricted to `folds == 1`; outer CPCV remains the sole OOS estimator.
+pub struct PreparedWeightedFold {
+    cancellation: CancellationProbe,
+    factor_plane: FactorServingPlane,
+    seed_head: FactorHeadSpec,
+    seed_weights: Vec<OptimizerFactorWeight>,
+    dataset: TrainingDataset,
+    frozen_reference_quantiles: FrozenReferenceQuantiles,
+    training_input_hash: ContentHash,
+    input_contract: ModelInputContract,
+    input_contract_hash: ContentHash,
+    horizon_multipliers: HorizonMultipliers,
+    substitution_rules: SubstitutionConfidenceRules,
+    return_model: ReturnModelSpec,
+    factor_cross_section: FactorCrossSectionConfig,
+}
+
+impl PreparedWeightedFold {
+    /// Fit one governed objective against this exact prepared fold.
+    pub fn train(
+        &self,
+        objective: &TrainingObjectiveSpec,
+    ) -> QuantResult<WeightedModelTrainingOutput> {
+        self.cancellation.check("prepared fold fit")?;
+        ensure_optimizer_available(objective.optimizer)?;
+        let evaluator = ObjectiveEvaluator::new(objective.clone());
+        let seed = normalize_simplex(
+            &self
+                .seed_weights
+                .iter()
+                .map(|weight| weight.weight.max(Decimal::ZERO))
+                .collect::<Vec<_>>(),
+        );
+        let (grid_weights, effective_n) =
+            coordinate_search(&seed, &self.dataset.groups, &evaluator, &self.cancellation)?;
+        let grid_report = evaluator.evaluate(&grid_weights, &self.dataset.groups)?;
+        let (weights, train_report) = refine(
+            &grid_weights,
+            grid_report.objective_value(),
+            &self.dataset.groups,
+            &evaluator,
+        )?;
+        let fit = assemble_full_window_weights(
+            &self.seed_weights,
+            &weights,
+            train_report.rounded(),
+            &evaluator,
+            &self.dataset,
+            effective_n,
+            self.frozen_reference_quantiles.clone(),
+        )?;
+        let mut factor_head = self.seed_head.clone();
+        factor_head.alpha_weights = fit.alpha_weights;
+        let payload = WeightedFactorModelPayload {
+            factor_head,
+            input_contract: self.input_contract.clone(),
+            horizon_multipliers: self.horizon_multipliers.clone(),
+            substitution_confidence_rules: self.substitution_rules.clone(),
+            return_model: self.return_model.clone(),
+            factor_cross_section: self.factor_cross_section.clone(),
+            frozen_reference_quantiles: fit.frozen_reference_quantiles,
+        };
+        payload.validate_for_plane(&self.factor_plane)?;
+        let input_transform_hash = payload.input_transform_hash()?;
+        payload.model_payload_hash()?;
+        Ok(WeightedModelTrainingOutput {
+            payload,
+            training_input_hash: self.training_input_hash,
+            input_contract_hash: self.input_contract_hash,
+            input_transform_hash,
+            in_sample_metrics: fit.objective_report,
+            validation_metrics: fit.validation,
+        })
+    }
+}
+
 /// Trains a family payload without constructing its serving contract or outer artifact.
 #[async_trait]
 pub trait ModelTrainer: Send + Sync {
@@ -275,6 +356,58 @@ impl ModelTrainer for WeightedFactorTrainer {
 }
 
 impl TrainModelRequest {
+    /// Prepare the objective-independent matrix for a purged CPCV fold.
+    pub fn prepare_fold(self) -> QuantResult<PreparedWeightedFold> {
+        if self.validation.folds != 1 {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "prepared weighted fold requires validation.folds=1, got {}",
+                    self.validation.folds
+                ),
+            }
+            .into());
+        }
+        self.cancellation.check("prepared fold transform")?;
+        self.seed_head.validate(&self.factor_plane)?;
+        let seed_weights = self
+            .seed_head
+            .alpha_weights
+            .iter()
+            .map(OptimizerFactorWeight::from)
+            .collect::<Vec<_>>();
+        let reference_factors = cross_sectional_factor_names(&self.factor_plane);
+        let factors = estimator_factor_names(&self.factor_plane);
+        let frozen_reference_quantiles = fit_frozen_reference_quantiles(
+            &self.examples,
+            &self.label,
+            &reference_factors,
+            Some(&self.factor_cross_section),
+        )?;
+        let prepared = apply_reference_quantiles(
+            &self.examples,
+            &frozen_reference_quantiles,
+            Some(&self.factor_cross_section),
+        )?;
+        let dataset = TrainingDataset::build(&prepared, &self.label, &factors)?;
+        let training_input_hash = prepared_training_hash(&prepared, &self.label, &dataset)?;
+        let input_contract_hash = model_input_contract_hash(&self.input_contract)?;
+        Ok(PreparedWeightedFold {
+            cancellation: self.cancellation,
+            factor_plane: self.factor_plane,
+            seed_head: self.seed_head,
+            seed_weights,
+            dataset,
+            frozen_reference_quantiles,
+            training_input_hash,
+            input_contract: self.input_contract,
+            input_contract_hash,
+            horizon_multipliers: self.horizon_multipliers,
+            substitution_rules: self.substitution_rules,
+            return_model: self.return_model,
+            factor_cross_section: self.factor_cross_section,
+        })
+    }
+
     /// The pure training routine (CPU-bound, deterministic).
     fn train_weighted(&self) -> QuantResult<WeightedModelTrainingOutput> {
         self.seed_head.validate(&self.factor_plane)?;
@@ -424,6 +557,14 @@ pub fn weighted_training_input_hash(
 ) -> QuantResult<ContentHash> {
     let prepared = apply_reference_quantiles(examples, references, cross_section)?;
     let dataset = TrainingDataset::build(&prepared, label, factors)?;
+    prepared_training_hash(&prepared, label, &dataset)
+}
+
+fn prepared_training_hash(
+    prepared: &[TrainingExample],
+    label: &LabelSelector,
+    dataset: &TrainingDataset,
+) -> QuantResult<ContentHash> {
     let mut labelled = prepared
         .iter()
         .filter(|example| {
@@ -1315,11 +1456,7 @@ fn push_group(
         return Ok(());
     };
     if rows.len() >= 2 {
-        groups.push(CrossSectionGroup {
-            decision_at,
-            label_horizon_end,
-            rows,
-        });
+        groups.push(CrossSectionGroup::new(decision_at, label_horizon_end, rows));
         return Ok(());
     }
     if rows.is_empty() {
@@ -1430,7 +1567,7 @@ mod tests {
             factor::FactorFamily,
             quant::{DataQualityStatus, FactorDirection},
         },
-        runtime_config::{FactorCrossSectionConfig, SmallCrossSectionPolicy},
+        runtime_config::{FactorCrossSectionConfig, RankLossKind, SmallCrossSectionPolicy},
         types::{
             MarketId, ModelInputContract, Probability, SchemaVersion, TokenId, TrainingExampleId,
             TrainingSampleSource,
@@ -1677,6 +1814,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prepared_fold_matches_direct() {
+        let mut direct_request = request(momentum_dataset());
+        direct_request.validation.folds = 1;
+        let objective = direct_request.objective.clone();
+        let prepared_request = direct_request.clone();
+
+        let direct = direct_request
+            .train_weighted()
+            .expect("direct full-window fold fit");
+        let prepared = prepared_request
+            .prepare_fold()
+            .expect("prepare exact fold matrix")
+            .train(&objective)
+            .expect("fit prepared fold objective");
+
+        assert_eq!(prepared.training_input_hash, direct.training_input_hash);
+        assert_eq!(prepared.input_contract_hash, direct.input_contract_hash);
+        assert_eq!(prepared.input_transform_hash, direct.input_transform_hash);
+        assert_eq!(prepared.in_sample_metrics, direct.in_sample_metrics);
+        assert_eq!(prepared.validation_metrics, direct.validation_metrics);
+        assert_eq!(
+            prepared
+                .payload
+                .model_payload_hash()
+                .expect("prepared payload hash"),
+            direct
+                .payload
+                .model_payload_hash()
+                .expect("direct payload hash")
+        );
+    }
+
+    #[test]
+    fn prepared_rejects_inner_cv() {
+        match request(momentum_dataset()).prepare_fold() {
+            Err(QuantError::Research(ResearchError::ValidationMethodology { .. })) => {}
+            Err(error) => panic!("unexpected prepared-fold error: {error}"),
+            Ok(_) => panic!("prepared folds must not replace inner validation"),
+        }
+    }
+
     #[tokio::test]
     async fn weighted_trainer_before_build() {
         let mut request = request(momentum_dataset());
@@ -1810,40 +1989,44 @@ mod tests {
         // Momentum predicts the label; the optimizer should give momentum more
         // weight than the 0.5 seed.
         let factor_trainer = WeightedFactorTrainer::new();
-        let outcome = factor_trainer
-            .train(request(momentum_dataset()))
-            .await
-            .expect("train");
-        let momentum = outcome
-            .payload
-            .factor_head
-            .alpha_weights
-            .iter()
-            .find(|w| w.factor == MOMENTUM_ROC)
-            .expect("momentum weight");
-        assert!(
-            momentum.weight > dec!(0.5),
-            "momentum weight {} should exceed the 0.5 seed",
-            momentum.weight
-        );
-        let report = &outcome.in_sample_metrics;
-        assert_eq!(
-            report.objective_value,
-            outcome.in_sample_metrics.objective_value
-        );
-        assert_eq!(report.objective_value, -report.components.total_loss);
-        assert!(report.components.rank_loss > Decimal::ZERO);
-        assert!(report.components.pair_count > 0);
-        let diagnostics = report.diagnostics.as_ref().expect("diagnostics");
-        assert!(diagnostics.group_count > 0);
-        assert_eq!(diagnostics.ndcg_k, 20);
-        assert!(outcome.validation_metrics.held_out_diagnostics.is_some());
-        assert_eq!(
-            outcome.validation_metrics.fold_objectives.len(),
-            2,
-            "three time blocks must produce two independently fitted walk-forward OOS folds"
-        );
-        assert_eq!(outcome.validation_metrics.fold_components.len(), 2);
+        for rank_loss in [
+            RankLossKind::RankIcWeightedRanknet,
+            RankLossKind::PairwiseRanknet,
+        ] {
+            let mut request = request(momentum_dataset());
+            request.objective.rank_loss = rank_loss;
+            let outcome = factor_trainer.train(request).await.expect("train");
+            let momentum = outcome
+                .payload
+                .factor_head
+                .alpha_weights
+                .iter()
+                .find(|w| w.factor == MOMENTUM_ROC)
+                .expect("momentum weight");
+            assert!(
+                momentum.weight > dec!(0.5),
+                "{rank_loss:?} momentum weight {} should exceed the 0.5 seed",
+                momentum.weight
+            );
+            let report = &outcome.in_sample_metrics;
+            assert_eq!(
+                report.objective_value,
+                outcome.in_sample_metrics.objective_value
+            );
+            assert_eq!(report.objective_value, -report.components.total_loss);
+            assert!(report.components.rank_loss > Decimal::ZERO);
+            assert!(report.components.pair_count > 0);
+            let diagnostics = report.diagnostics.as_ref().expect("diagnostics");
+            assert!(diagnostics.group_count > 0);
+            assert_eq!(diagnostics.ndcg_k, 20);
+            assert!(outcome.validation_metrics.held_out_diagnostics.is_some());
+            assert_eq!(
+                outcome.validation_metrics.fold_objectives.len(),
+                2,
+                "three time blocks must produce two independently fitted walk-forward OOS folds"
+            );
+            assert_eq!(outcome.validation_metrics.fold_components.len(), 2);
+        }
     }
 
     #[test]
@@ -1920,10 +2103,11 @@ mod tests {
     #[test]
     fn lambda_tail_changes_negative() {
         // Two-row group: selecting the high-score name yields a large loss.
-        let group = CrossSectionGroup {
-            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            rows: vec![
+        let decision_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let group = CrossSectionGroup::new(
+            decision_at,
+            decision_at,
+            vec![
                 SampleRow {
                     allocation_key: "m:a".to_owned(),
                     signed: vec![dec!(1), dec!(0)],
@@ -1935,7 +2119,7 @@ mod tests {
                     label: dec!(100),
                 },
             ],
-        };
+        );
         let weights = [dec!(1), dec!(0)]; // selects m:a into Top1
         let zero_tail = ObjectiveEvaluator::new(TrainingObjectiveSpec {
             lambda_tail: Decimal::ZERO,
@@ -2050,10 +2234,11 @@ mod tests {
 
     #[test]
     fn coordinate_search_effective_seed() {
-        let groups = vec![CrossSectionGroup {
-            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            rows: vec![
+        let decision_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let groups = vec![CrossSectionGroup::new(
+            decision_at,
+            decision_at,
+            vec![
                 SampleRow {
                     allocation_key: "m:a".to_owned(),
                     signed: vec![dec!(1), dec!(0)],
@@ -2065,7 +2250,7 @@ mod tests {
                     label: dec!(0),
                 },
             ],
-        }];
+        )];
         let evaluator = ObjectiveEvaluator::new(TrainingObjectiveSpec {
             lambda_tail: Decimal::ZERO,
             lambda_turnover: Decimal::ZERO,
@@ -2126,11 +2311,8 @@ mod optimize_tests {
                 }
             })
             .collect();
-        vec![CrossSectionGroup {
-            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            rows,
-        }]
+        let decision_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        vec![CrossSectionGroup::new(decision_at, decision_at, rows)]
     }
 
     fn uniform(n: usize) -> Vec<Decimal> {

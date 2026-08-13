@@ -8,9 +8,8 @@ use clickhouse::Client;
 use prometheus::IntCounter;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, ChBps, ChDecimal64, ChDigest, ChPrice, ChProbability, ChSchemaVersion,
-        ChShares, ChUsd, CryptoPriceReportRow, DomainEventRow, QuantReportRecommendationFactRow,
-        TradeTapeRow,
+        BookL2LedgerRow, ChBps, ChDecimal64, ChDigest, ChPrice, ChSchemaVersion, ChShares, ChUsd,
+        CryptoPriceReportRow, DomainEventRow, QuantReportRecommendationFactRow, TradeTapeRow,
     },
     config::ClickHouseConfig,
     domain::data_plane::trade_tape_coverage::{
@@ -22,8 +21,8 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, DomainInstrumentKey, DomainSourceId, MarketId, Price, RecommendationId,
-        RecommendationReportId, Shares, TokenId, Usd,
+        ContentHash, DomainInstrumentKey, DomainSourceId, EconomicTierId, MarketId, Price,
+        RecommendationId, RecommendationReportId, ReportRouteRunId, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_storage::{
@@ -580,14 +579,21 @@ pub async fn report_fact_accepts_snapshot() {
         event_time: now,
         recommendation_report_id: report_id,
         recommendation_id,
+        report_route_run_id: ReportRouteRunId::from_v7(),
+        economic_tier_id: EconomicTierId::from_v7(),
+        route: "pooled".to_owned(),
         rank: 1,
         market_id: MarketId::new("report-fact-schema-market"),
         token_id: TokenId::new("report-fact-schema-token"),
         side: ChOutcomeSide::Yes,
-        score: ChProbability::from(dec!(0.72)),
-        risk_adjusted_score: ChProbability::from(dec!(0.68)),
-        trade_plan_available: true,
-        suggested_usd: Some(ChUsd::from(Usd::new(dec!(25)))),
+        profit_probability_bps: 7_200,
+        nominal_expected_net_usd: ChUsd::from(Usd::new(dec!(18))),
+        robust_expected_net_usd: ChUsd::from(Usd::new(dec!(12))),
+        max_loss_usd: ChUsd::from(Usd::new(dec!(25))),
+        cvar_contribution_usd: ChUsd::from(Usd::new(dec!(10))),
+        capital_occupancy_usd_hours: ChUsd::from(Usd::new(dec!(25))),
+        marginal_portfolio_value_usd: ChUsd::from(Usd::new(dec!(11))),
+        suggested_usd: ChUsd::from(Usd::new(dec!(25))),
         valid_until: now + 60_000,
     };
     let mut decision_insert = client

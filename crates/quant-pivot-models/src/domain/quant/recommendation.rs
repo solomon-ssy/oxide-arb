@@ -4,45 +4,45 @@
 //! serialized into the existing JSONB columns — never a bare `serde_json::Value`.
 
 use chrono::{DateTime, Utc};
-use sea_orm::DeriveIntoActiveModel;
+use sea_orm::{ActiveValue::Set, DeriveIntoActiveModel, IntoActiveModel};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     entities::{
-        quant_recommendation, quant_recommendation::Model as RecommendationModel,
-        quant_recommendation_report, quant_recommendation_report::Model,
+        quant_recommendation,
+        quant_recommendation::Model as RecommendationModel,
+        quant_recommendation_report::{ActiveModel as RecommendationReportActiveModel, Model},
     },
     enums::quant::{
         AccountSource, OutcomeSide, QuantRuntimeMode, RecommendationReportStatus,
         RecommendationStatus, ReportKind,
     },
+    runtime_config::BuyModelRoute,
     types::{
-        AccountSnapshotId, Bps, DecisionPolicySnapshotId, EquitySnapshotId, EventId, EvidenceRefs,
-        ExecutionEligibility, MarketContext, MarketId, MarketSelectionId, ModelRunId,
-        ModelVersionId, PortfolioPlanId, Probability, RecommendationFactorBreakdown,
+        AccountSnapshotId, ContentHash, DecisionPolicySnapshotId, EconomicTierId, EquitySnapshotId,
+        EventId, EvidenceRefs, ExecutionEligibility, MarketContext, MarketId, MarketSelectionId,
+        PortfolioPlanId, PortfolioScenarioArtifactId, RecommendationFactorBreakdown,
         RecommendationId, RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
-        ReportDataQualitySnapshotId, ReportSummary, ResearchProfileArtifactId, ResearchProfileId,
-        ResearchProfileRef, TokenId, Usd,
+        ReportDataQualitySnapshotId, ReportRouteRunId, ReportRunId, ReportSummary, TokenId, Usd,
     },
 };
+
+use super::{ExecutableEconomicTier, RecommendationEconomics, RepresentedRouteSet};
 
 /// Immutable `TopN` recommendation report row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecommendationReportInfo {
     pub recommendation_report_id: RecommendationReportId,
-    pub profile_id: ResearchProfileId,
-    pub profile_ref: ResearchProfileRef,
+    pub report_run_id: ReportRunId,
     pub report_kind: ReportKind,
     pub decision_at: DateTime<Utc>,
-    pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    /// Exact serving run that produced this report. Empty reports that stop
-    /// before model inference carry `None`.
-    pub model_run_id: Option<ModelRunId>,
-    pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,
     pub portfolio_plan_id: PortfolioPlanId,
+    pub represented_routes_json: RepresentedRouteSet,
+    pub scenario_artifact_id: Option<PortfolioScenarioArtifactId>,
+    pub scenario_artifact_hash: Option<ContentHash>,
     pub top_n: i32,
     pub status: RecommendationReportStatus,
     pub account_source: AccountSource,
@@ -59,25 +59,24 @@ pub struct RecommendationReportInfo {
     pub revoked_at: Option<DateTime<Utc>>,
     pub expired_at: Option<DateTime<Utc>>,
     pub status_reason: Option<String>,
+    /// Immutable availability clock committed with the report and its parity proof.
     pub created_at: DateTime<Utc>,
 }
 
 impl From<Model> for RecommendationReportInfo {
     fn from(model: Model) -> Self {
-        let profile_ref = model.research_profile_artifact_id.profile_ref();
         Self {
             recommendation_report_id: model.recommendation_report_id,
-            profile_id: profile_ref.id.clone(),
-            profile_ref,
+            report_run_id: model.report_run_id,
             report_kind: model.report_kind,
             decision_at: model.decision_at,
-            horizon_secs: model.horizon_secs,
             runtime_mode: model.runtime_mode,
             decision_policy_snapshot_id: model.decision_policy_snapshot_id,
-            model_run_id: model.model_run_id,
-            model_version_id: model.model_version_id,
             market_selection_id: model.market_selection_id,
             portfolio_plan_id: model.portfolio_plan_id,
+            represented_routes_json: model.represented_routes_json,
+            scenario_artifact_id: model.scenario_artifact_id,
+            scenario_artifact_hash: model.scenario_artifact_hash,
             top_n: model.top_n,
             status: model.status,
             account_source: model.account_source,
@@ -100,20 +99,19 @@ impl From<Model> for RecommendationReportInfo {
 }
 
 /// Insert payload for `quant_recommendation_report`.
-#[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "quant_recommendation_report::ActiveModel")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewRecommendationReport {
     pub recommendation_report_id: RecommendationReportId,
-    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub report_run_id: ReportRunId,
     pub report_kind: ReportKind,
     pub decision_at: DateTime<Utc>,
-    pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    pub model_run_id: Option<ModelRunId>,
-    pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,
     pub portfolio_plan_id: PortfolioPlanId,
+    pub represented_routes_json: RepresentedRouteSet,
+    pub scenario_artifact_id: Option<PortfolioScenarioArtifactId>,
+    pub scenario_artifact_hash: Option<ContentHash>,
     pub top_n: i32,
     pub status: RecommendationReportStatus,
     pub account_source: AccountSource,
@@ -130,30 +128,93 @@ pub struct NewRecommendationReport {
     pub revoked_at: Option<DateTime<Utc>>,
     pub expired_at: Option<DateTime<Utc>>,
     pub status_reason: Option<String>,
+    /// Immutable availability clock committed with the report and its parity proof.
+    pub created_at: DateTime<Utc>,
+}
+
+impl IntoActiveModel<RecommendationReportActiveModel> for NewRecommendationReport {
+    fn into_active_model(self) -> RecommendationReportActiveModel {
+        let Self {
+            recommendation_report_id,
+            report_run_id,
+            report_kind,
+            decision_at,
+            runtime_mode,
+            decision_policy_snapshot_id,
+            market_selection_id,
+            portfolio_plan_id,
+            represented_routes_json,
+            scenario_artifact_id,
+            scenario_artifact_hash,
+            top_n,
+            status,
+            account_source,
+            capital_base_usd,
+            account_snapshot_ref,
+            equity_snapshot_ref,
+            data_quality_snapshot_ref,
+            summary_json,
+            published_at,
+            successor_report_id,
+            superseded_at,
+            obsoleted_at,
+            valid_until,
+            revoked_at,
+            expired_at,
+            status_reason,
+            created_at,
+        } = self;
+        RecommendationReportActiveModel {
+            recommendation_report_id: Set(recommendation_report_id),
+            report_run_id: Set(report_run_id),
+            report_kind: Set(report_kind),
+            decision_at: Set(decision_at),
+            runtime_mode: Set(runtime_mode),
+            decision_policy_snapshot_id: Set(decision_policy_snapshot_id),
+            market_selection_id: Set(market_selection_id),
+            portfolio_plan_id: Set(portfolio_plan_id),
+            represented_routes_json: Set(represented_routes_json),
+            scenario_artifact_id: Set(scenario_artifact_id),
+            scenario_artifact_hash: Set(scenario_artifact_hash),
+            top_n: Set(top_n),
+            status: Set(status),
+            account_source: Set(account_source),
+            capital_base_usd: Set(capital_base_usd),
+            account_snapshot_ref: Set(account_snapshot_ref),
+            equity_snapshot_ref: Set(equity_snapshot_ref),
+            data_quality_snapshot_ref: Set(data_quality_snapshot_ref),
+            summary_json: Set(summary_json),
+            published_at: Set(published_at),
+            successor_report_id: Set(successor_report_id),
+            superseded_at: Set(superseded_at),
+            obsoleted_at: Set(obsoleted_at),
+            valid_until: Set(valid_until),
+            revoked_at: Set(revoked_at),
+            expired_at: Set(expired_at),
+            status_reason: Set(status_reason),
+            created_at: Set(created_at),
+        }
+    }
 }
 
 /// Single actionable recommendation row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecommendationInfo {
     pub recommendation_id: RecommendationId,
-    pub profile_ref: ResearchProfileRef,
     pub recommendation_report_id: RecommendationReportId,
+    pub report_route_run_id: ReportRouteRunId,
+    pub portfolio_plan_id: PortfolioPlanId,
+    pub economic_tier_id: EconomicTierId,
     pub rank: i32,
+    pub route: BuyModelRoute,
     pub market_id: MarketId,
     pub event_id: EventId,
     pub token_id: TokenId,
     pub outcome_side: OutcomeSide,
-    pub composite_score: Probability,
-    pub risk_adjusted_score: Probability,
-    pub confidence: Probability,
-    pub expected_return_bps: Bps,
-    pub downside_bps: Bps,
+    pub economics_json: RecommendationEconomics,
+    pub economic_tier_json: ExecutableEconomicTier,
     pub identity: RecommendationIdentity,
     pub market_context: MarketContext,
-    pub rank_before_portfolio: i32,
-    pub liquidity_score: Probability,
-    pub data_quality_score: Probability,
-    pub model_score_percentile: Probability,
     pub trade_plan: RecommendationTradePlan,
     pub factor_breakdown: RecommendationFactorBreakdown,
     pub evidence_refs: EvidenceRefs,
@@ -169,24 +230,20 @@ impl From<RecommendationModel> for RecommendationInfo {
     fn from(model: RecommendationModel) -> Self {
         Self {
             recommendation_id: model.recommendation_id,
-            profile_ref: model.research_profile_artifact_id.profile_ref(),
             recommendation_report_id: model.recommendation_report_id,
+            report_route_run_id: model.report_route_run_id,
+            portfolio_plan_id: model.portfolio_plan_id,
+            economic_tier_id: model.economic_tier_id,
             rank: model.rank,
+            route: model.route,
             market_id: model.market_id,
             event_id: model.event_id,
             token_id: model.token_id,
             outcome_side: model.outcome_side,
-            composite_score: model.composite_score,
-            risk_adjusted_score: model.risk_adjusted_score,
-            confidence: model.confidence,
-            expected_return_bps: model.expected_return_bps,
-            downside_bps: model.downside_bps,
+            economics_json: model.economics_json,
+            economic_tier_json: model.economic_tier_json,
             identity: model.identity,
             market_context: model.market_context,
-            rank_before_portfolio: model.rank_before_portfolio,
-            liquidity_score: model.liquidity_score,
-            data_quality_score: model.data_quality_score,
-            model_score_percentile: model.model_score_percentile,
             trade_plan: model.trade_plan,
             factor_breakdown: model.factor_breakdown,
             evidence_refs: model.evidence_refs,
@@ -205,24 +262,20 @@ impl From<RecommendationModel> for RecommendationInfo {
 #[sea_orm(active_model = "quant_recommendation::ActiveModel")]
 pub struct NewRecommendation {
     pub recommendation_id: RecommendationId,
-    pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub recommendation_report_id: RecommendationReportId,
+    pub report_route_run_id: ReportRouteRunId,
+    pub portfolio_plan_id: PortfolioPlanId,
+    pub economic_tier_id: EconomicTierId,
     pub rank: i32,
+    pub route: BuyModelRoute,
     pub market_id: MarketId,
     pub event_id: EventId,
     pub token_id: TokenId,
     pub outcome_side: OutcomeSide,
-    pub composite_score: Probability,
-    pub risk_adjusted_score: Probability,
-    pub confidence: Probability,
-    pub expected_return_bps: Bps,
-    pub downside_bps: Bps,
+    pub economics_json: RecommendationEconomics,
+    pub economic_tier_json: ExecutableEconomicTier,
     pub identity: RecommendationIdentity,
     pub market_context: MarketContext,
-    pub rank_before_portfolio: i32,
-    pub liquidity_score: Probability,
-    pub data_quality_score: Probability,
-    pub model_score_percentile: Probability,
     pub trade_plan: RecommendationTradePlan,
     pub factor_breakdown: RecommendationFactorBreakdown,
     pub evidence_refs: EvidenceRefs,
@@ -230,4 +283,6 @@ pub struct NewRecommendation {
     pub valid_from: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
     pub status: RecommendationStatus,
+    /// Immutable availability clock used by point-in-time feedback queries.
+    pub created_at: DateTime<Utc>,
 }

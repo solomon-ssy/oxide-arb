@@ -19,20 +19,22 @@ use super::{
 };
 use crate::{
     observability::{
-        book_fact_writer::{BookFactWriter, MarketWsTradeFact, MicrostructureAccumulator},
+        book_fact_writer::{
+            BookFactWriter, CANONICAL_WRITE_TIMEOUT, MarketWsTradeFact, MicrostructureAccumulator,
+        },
         ledger_persistence::{LEDGER_PARTITION_COUNT, PartitionLedgerClient},
         metrics_hub::MetricsHub,
     },
     service::system_status_nudge::SystemStatusNudge,
 };
 use ahash::AHashMap;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use flume::{Receiver, Sender as FlumeSender};
 use parking_lot::Mutex;
 use quant_pivot_api::ws::{NormalizedIngressBatch, TransportRetirement, estimated_event_bytes};
-use quant_pivot_error::{QuantError, infra::InfraError};
+use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, storage::StorageError};
 use quant_pivot_models::{
-    clickhouse::{BookL2LedgerRow, BookStreamSessionRow, ChSchemaVersion},
+    clickhouse::{BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChSchemaVersion},
     domain::{
         data_plane::{
             BookSnapshotCmd, PriceDeltaCmd,
@@ -45,6 +47,7 @@ use quant_pivot_models::{
         clickhouse::{ChBookEventType, ChStreamSessionEndReason, ChStreamSessionState},
         system::ShardConnectionStatus,
     },
+    hashing::CanonicalDigest,
     types::{ContentHash, PartitionBatchId, PartitionId, Shares, TokenId, TokenKey},
 };
 use tokio::{
@@ -53,6 +56,7 @@ use tokio::{
         mpsc::{
             self, OwnedPermit as MpscOwnedPermit, Receiver as MpscReceiver, Sender as MpscSender,
         },
+        oneshot::{self, Sender as OneshotSender},
     },
     task::JoinSet,
     time::{MissedTickBehavior, interval, timeout},
@@ -67,6 +71,20 @@ const BOOK_CHANNEL_TIMEOUT: Duration = Duration::from_millis(250);
 const SHUTDOWN_DRAIN_QUIET_PERIOD: Duration = Duration::from_millis(250);
 const BACKPRESSURE_WARN_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CANONICAL_MICRO_BATCH_SIZE: usize = 256;
+const MICROSTRUCTURE_COMMIT_CAPACITY: usize = 16;
+
+/// Report/replay port proving that every live microstructure bucket visible at
+/// `source_cutoff` has crossed the durable `ClickHouse` acknowledgement boundary.
+#[async_trait::async_trait]
+pub trait MicrostructureCommitBarrier: Send + Sync {
+    /// Persist every partition's eligible rows before a report reads features.
+    async fn commit_through(&self, source_cutoff: DateTime<Utc>) -> QuantResult<()>;
+}
+
+struct MicrostructureCommitRequest {
+    source_cutoff_ms: i64,
+    response: OneshotSender<QuantResult<()>>,
+}
 
 /// Market-data publication kind observed after the durable ledger cursor has
 /// acknowledged the canonical row and the fresh `BookStore` slot is visible.
@@ -236,6 +254,8 @@ pub struct DataPipeline {
     last_book_apply_warn: Mutex<Option<Instant>>,
     sessions: Arc<SessionDirectory>,
     retirement_rx: Receiver<TransportRetirement>,
+    microstructure_commit_tx: FlumeSender<MicrostructureCommitRequest>,
+    microstructure_commit_rx: Receiver<MicrostructureCommitRequest>,
     durable_publish_observer: Option<DurableBookPublishObserver>,
 }
 
@@ -250,10 +270,16 @@ enum BackpressureScope {
         session: StreamSessionTicket,
         token_ids: Arc<[TokenId]>,
     },
-    Received {
+    Closed {
         session: StreamSessionTicket,
+        token_ids: Arc<[TokenId]>,
         sequences: Arc<[(TokenKey, u64)]>,
     },
+}
+
+struct InvalidationOutcome {
+    affected_tokens: usize,
+    transport_restart_requested: bool,
 }
 
 impl BackpressureScope {
@@ -269,10 +295,12 @@ impl BackpressureScope {
             }),
             PipelineEvent::StreamSessionClosed {
                 session,
+                subscription_tokens,
                 received_sequences,
                 ..
-            } => Some(Self::Received {
+            } => Some(Self::Closed {
                 session: *session,
+                token_ids: Arc::clone(subscription_tokens),
                 sequences: Arc::clone(received_sequences),
             }),
             _ => None,
@@ -308,9 +336,12 @@ impl BackpressureScope {
         book_store: &BookStore,
         registry: &MarketRegistry,
         sessions: &SessionDirectory,
-    ) -> usize {
+    ) -> InvalidationOutcome {
         match self {
-            Self::None => 0,
+            Self::None => InvalidationOutcome {
+                affected_tokens: 0,
+                transport_restart_requested: false,
+            },
             Self::Tokens {
                 sessions: tickets,
                 tokens,
@@ -330,7 +361,10 @@ impl BackpressureScope {
                 invalidated_token_ids.dedup_by(|a, b| a.as_str() == b.as_str());
                 book_store.invalidate_ids(&invalidated_token_ids);
                 event_source.invalidate_tokens(&invalidated_token_ids);
-                invalidated_token_ids.len().max(tokens.len())
+                InvalidationOutcome {
+                    affected_tokens: invalidated_token_ids.len().max(tokens.len()),
+                    transport_restart_requested: true,
+                }
             }
             Self::Subscription { session, token_ids } => {
                 let token_ids = sessions
@@ -338,22 +372,35 @@ impl BackpressureScope {
                     .unwrap_or_else(|| Arc::clone(token_ids));
                 book_store.invalidate_ids(&token_ids);
                 event_source.invalidate_tokens(&token_ids);
-                token_ids.len()
+                InvalidationOutcome {
+                    affected_tokens: token_ids.len(),
+                    transport_restart_requested: true,
+                }
             }
-            Self::Received { session, sequences } => {
+            Self::Closed {
+                session,
+                token_ids,
+                sequences,
+            } => {
                 let session_token_ids = sessions.poison(*session);
                 let tokens = sequences
                     .iter()
                     .map(|(token, _)| *token)
                     .collect::<Vec<_>>();
                 book_store.invalidate_tokens(&tokens);
-                let mut token_ids = session_token_ids.map_or_else(Vec::new, |ids| ids.to_vec());
-                token_ids.extend(tokens.iter().filter_map(|token| registry.token_id(*token)));
-                token_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-                token_ids.dedup_by(|a, b| a.as_str() == b.as_str());
-                book_store.invalidate_ids(&token_ids);
-                event_source.invalidate_tokens(&token_ids);
-                token_ids.len().max(tokens.len())
+                let mut invalidated_ids =
+                    session_token_ids.map_or_else(Vec::new, |ids| ids.to_vec());
+                invalidated_ids.extend(token_ids.iter().cloned());
+                invalidated_ids.extend(tokens.iter().filter_map(|token| registry.token_id(*token)));
+                invalidated_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                invalidated_ids.dedup_by(|a, b| a.as_str() == b.as_str());
+                book_store.invalidate_ids(&invalidated_ids);
+                InvalidationOutcome {
+                    affected_tokens: invalidated_ids.len().max(tokens.len()),
+                    // The socket that produced a close batch has already ended;
+                    // its shard loop is the sole reconnect owner.
+                    transport_restart_requested: false,
+                }
             }
         }
     }
@@ -362,7 +409,14 @@ impl BackpressureScope {
         match self {
             Self::Tokens { tokens, .. } => registry.token_id(*tokens.first()?),
             Self::Subscription { token_ids, .. } => token_ids.first().cloned(),
-            Self::Received { sequences, .. } => registry.token_id(sequences.first()?.0),
+            Self::Closed {
+                token_ids,
+                sequences,
+                ..
+            } => token_ids
+                .first()
+                .cloned()
+                .or_else(|| registry.token_id(sequences.first()?.0)),
             Self::None => None,
         }
     }
@@ -374,9 +428,56 @@ struct PreparedPartitionBatch {
     batch: PartitionIngressBatch,
 }
 
+#[async_trait::async_trait]
+impl MicrostructureCommitBarrier for DataPipeline {
+    async fn commit_through(&self, source_cutoff: DateTime<Utc>) -> QuantResult<()> {
+        let (response, receive_response) = oneshot::channel();
+        let request = MicrostructureCommitRequest {
+            source_cutoff_ms: source_cutoff.timestamp_millis(),
+            response,
+        };
+        match timeout(
+            BOOK_CHANNEL_TIMEOUT,
+            self.microstructure_commit_tx.send_async(request),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                return Err(InfraError::ChannelClosed {
+                    name: "microstructure_commit",
+                }
+                .into());
+            }
+            Err(_) => {
+                return Err(InfraError::ChannelTimeout {
+                    name: "microstructure_commit",
+                }
+                .into());
+            }
+        }
+        let response_timeout = CANONICAL_WRITE_TIMEOUT
+            .saturating_add(BOOK_CHANNEL_TIMEOUT)
+            .saturating_add(BOOK_CHANNEL_TIMEOUT);
+        match timeout(response_timeout, receive_response).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(InfraError::ChannelClosed {
+                name: "microstructure_commit_response",
+            }
+            .into()),
+            Err(_) => Err(InfraError::ChannelTimeout {
+                name: "microstructure_commit_response",
+            }
+            .into()),
+        }
+    }
+}
+
 impl DataPipeline {
     pub fn new(deps: DataPipelineDeps) -> Self {
         let sessions = deps.book_store.session_directory();
+        let (microstructure_commit_tx, microstructure_commit_rx) =
+            flume::bounded(MICROSTRUCTURE_COMMIT_CAPACITY);
         Self {
             event_source: deps.event_source,
             book_store: deps.book_store,
@@ -390,6 +491,8 @@ impl DataPipeline {
             last_book_apply_warn: Mutex::new(None),
             sessions,
             retirement_rx: deps.retirement_rx,
+            microstructure_commit_tx,
+            microstructure_commit_rx,
             durable_publish_observer: deps.durable_publish_observer,
         }
     }
@@ -429,6 +532,7 @@ impl DataPipeline {
                 sessions: Arc::clone(&self.sessions),
                 durable_publish_observer: self.durable_publish_observer.clone(),
                 books: AHashMap::new(),
+                microstructure_outbox: Vec::new(),
                 delta_command_order: Vec::new(),
                 delta_scratch: BookDeltaScratch::default(),
                 delta_commands: Vec::new(),
@@ -472,6 +576,19 @@ impl DataPipeline {
                     }
                 }
 
+                request = self.microstructure_commit_rx.recv_async() => {
+                    let Ok(request) = request else {
+                        tracing::error!("microstructure commit control queue closed unexpectedly");
+                        break Some(InfraError::ChannelClosed {
+                            name: "microstructure_commit",
+                        }.into());
+                    };
+                    let result = self
+                        .commit_microstructure(request.source_cutoff_ms, &partition_senders)
+                        .await;
+                    let _ = request.response.send(result);
+                }
+
                 batch = self.event_source.events().recv_async() => {
                     let Ok(batch) = batch else {
                         tracing::error!("Pipeline event channel closed unexpectedly");
@@ -510,6 +627,46 @@ impl DataPipeline {
             }
         }
         failure.map_or(Ok(()), Err)
+    }
+
+    async fn commit_microstructure(
+        &self,
+        source_cutoff_ms: i64,
+        partition_senders: &[MpscSender<PartitionMessage>],
+    ) -> QuantResult<()> {
+        let barrier = Arc::new(PartitionCommitBarrier::new(
+            u8::try_from(partition_senders.len()).unwrap_or(u8::MAX),
+        ));
+        let commit = async {
+            for sender in partition_senders {
+                sender
+                    .send(PartitionMessage::CommitMicrostructure {
+                        source_cutoff_ms,
+                        barrier: Arc::clone(&barrier),
+                    })
+                    .await
+                    .map_err(|_| {
+                        QuantError::from(InfraError::ChannelClosed {
+                            name: "partition_microstructure_commit",
+                        })
+                    })?;
+            }
+            Ok::<bool, QuantError>(barrier.wait().await)
+        };
+        let deadline = CANONICAL_WRITE_TIMEOUT.saturating_add(BOOK_CHANNEL_TIMEOUT);
+        match timeout(deadline, commit).await {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) => Err(StorageError::InvariantViolation {
+                entity: Some("book_microstructure_1s"),
+                detail: "one or more partitions failed the durable feature-fact commit".to_owned(),
+            }
+            .into()),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(InfraError::ChannelTimeout {
+                name: "partition_microstructure_commit",
+            }
+            .into()),
+        }
     }
 
     async fn drain_ingress(
@@ -878,7 +1035,7 @@ impl DataPipeline {
     ) {
         self.book_store.mark_gap();
         let diagnostic_token = scope.diagnostic_token(&self.market_registry);
-        let affected_tokens = scope.invalidate(
+        let outcome = scope.invalidate(
             self.event_source.as_ref(),
             &self.book_store,
             &self.market_registry,
@@ -886,7 +1043,7 @@ impl DataPipeline {
         );
         self.metrics
             .book_apply_backpressure_invalidations
-            .inc_by(u64::try_from(affected_tokens.max(1)).unwrap_or(u64::MAX));
+            .inc_by(u64::try_from(outcome.affected_tokens.max(1)).unwrap_or(u64::MAX));
         self.book_apply_timeouts_since_warn
             .fetch_add(1, Ordering::Relaxed);
 
@@ -904,11 +1061,12 @@ impl DataPipeline {
             event_kind,
             queue_depth,
             channel_capacity = PARTITION_MAILBOX_CAPACITY,
-            affected_tokens,
+            affected_tokens = outcome.affected_tokens,
+            transport_restart_requested = outcome.transport_restart_requested,
             token_id = diagnostic_token.as_ref().map(TokenId::as_str),
             timeouts_since_last,
             reason,
-            "Partition queue rejected a batch; continuity invalidated and owning WS shards restarted"
+            "Partition queue rejected a batch; continuity invalidated"
         );
     }
 }
@@ -941,10 +1099,49 @@ struct PartitionIngressBatch {
 enum PartitionMessage {
     Events(PartitionIngressBatch),
     Barrier(Arc<PartitionBarrier>),
+    CommitMicrostructure {
+        source_cutoff_ms: i64,
+        barrier: Arc<PartitionCommitBarrier>,
+    },
     Retire {
         tokens: Vec<RetireToken>,
         barrier: Arc<PartitionBarrier>,
     },
+}
+
+struct PartitionCommitBarrier {
+    remaining: AtomicU8,
+    failed: AtomicBool,
+    completed: Notify,
+}
+
+impl PartitionCommitBarrier {
+    const fn new(partitions: u8) -> Self {
+        Self {
+            remaining: AtomicU8::new(partitions),
+            failed: AtomicBool::new(false),
+            completed: Notify::const_new(),
+        }
+    }
+
+    fn arrive(&self, persisted: bool) {
+        if !persisted {
+            self.failed.store(true, Ordering::Release);
+        }
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.completed.notify_one();
+        }
+    }
+
+    async fn wait(&self) -> bool {
+        loop {
+            let completed = self.completed.notified();
+            if self.remaining.load(Ordering::Acquire) == 0 {
+                return !self.failed.load(Ordering::Acquire);
+            }
+            completed.await;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -987,11 +1184,17 @@ impl PartitionBarrier {
 mod tests {
     use std::{
         collections::HashMap,
-        sync::Arc,
+        slice,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
         time::{Duration, Instant},
     };
 
     use ahash::AHashMap;
+    use flume::Receiver;
+    use quant_pivot_api::ws::NormalizedIngressBatch;
     use quant_pivot_models::{
         domain::data_plane::pipeline::{IngressTrace, PipelineEvent, StreamSessionTicket},
         enums::system::ShardConnectionStatus,
@@ -1004,16 +1207,52 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        MAX_PARTITION_BATCH_BYTES, MAX_PARTITION_BATCH_EVENTS, MutableBookState, PARTITION_COUNT,
-        PARTITION_MAILBOX_CAPACITY, PartitionBarrier, PartitionIngressBatch, PartitionMessage,
-        PreparedPartitionBatch, RetireToken, TokenStreamState, accept_token_sequence,
-        partition_batch_would_overflow, partition_index, reserve_partition_mailboxes,
-        split_events_by_session, take_retired_mutable_book,
+        BackpressureScope, MAX_PARTITION_BATCH_BYTES, MAX_PARTITION_BATCH_EVENTS, MutableBookState,
+        PARTITION_COUNT, PARTITION_MAILBOX_CAPACITY, PartitionBarrier, PartitionCommitBarrier,
+        PartitionIngressBatch, PartitionMessage, PreparedPartitionBatch, RetireToken,
+        TokenStreamState, accept_token_sequence, partition_batch_would_overflow, partition_index,
+        reserve_partition_mailboxes, split_events_by_session, take_retired_mutable_book,
     };
     use crate::{
-        ingest::{book_store::BookStore, data_plane_index::DataPlane},
+        ingest::{
+            book_store::BookStore, data_plane_index::DataPlane, event_source::PipelineEventSource,
+            market_registry::MarketRegistry,
+        },
         observability::metrics_hub::MetricsHub,
     };
+
+    struct RecordingEventSource {
+        events: Receiver<NormalizedIngressBatch>,
+        restarts: AtomicU64,
+    }
+
+    impl Default for RecordingEventSource {
+        fn default() -> Self {
+            let (_tx, events) = flume::bounded(1);
+            Self {
+                events,
+                restarts: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl PipelineEventSource for RecordingEventSource {
+        fn events(&self) -> &Receiver<NormalizedIngressBatch> {
+            &self.events
+        }
+
+        fn owns_all_tokens(&self, _token_ids: &[TokenId]) -> bool {
+            true
+        }
+
+        fn invalidate_token(&self, _token_id: &TokenId) {
+            self.restarts.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn invalidate_tokens(&self, _token_ids: &[TokenId]) {
+            self.restarts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     #[test]
     fn token_partition_fixed_affine() {
@@ -1151,6 +1390,35 @@ mod tests {
         assert_eq!(groups[2].len(), 1);
     }
 
+    #[test]
+    fn closed_scope_no_restart() {
+        let token_id = TokenId::new("1");
+        let data_plane = Arc::new(DataPlane::new());
+        data_plane.register_test_tokens(slice::from_ref(&token_id));
+        let metrics = Arc::new(MetricsHub::new());
+        let book_store = BookStore::new(Arc::clone(&data_plane), metrics);
+        let registry = MarketRegistry::new(data_plane);
+        let token = book_store.resolve(&token_id).expect("registered token");
+        let session = StreamSessionTicket::new(Uuid::new_v4(), 1).expect("valid session ticket");
+        let sessions = book_store.session_directory();
+        let token_ids: Arc<[TokenId]> = Arc::from([token_id]);
+        assert!(sessions.open(session, Arc::clone(&token_ids)));
+        let source = RecordingEventSource::default();
+        let scope = BackpressureScope::Closed {
+            session,
+            token_ids,
+            sequences: Arc::from([(token, 7)]),
+        };
+
+        let outcome = scope.invalidate(&source, &book_store, &registry, &sessions);
+
+        assert_eq!(outcome.affected_tokens, 1);
+        assert!(!outcome.transport_restart_requested);
+        assert_eq!(source.restarts.load(Ordering::Relaxed), 0);
+        drop(source);
+        assert!(!sessions.is_active(session));
+    }
+
     #[tokio::test]
     async fn session_barrier_waits_partition() {
         let barrier = Arc::new(PartitionBarrier::new(2));
@@ -1162,6 +1430,19 @@ mod tests {
         assert!(!waiter.is_finished());
         barrier.arrive();
         waiter.await.expect("barrier waiter");
+    }
+
+    #[tokio::test]
+    async fn commit_barrier_reports_failure() {
+        let barrier = Arc::new(PartitionCommitBarrier::new(2));
+        barrier.arrive(true);
+        let waiter = {
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move { barrier.wait().await })
+        };
+        assert!(!waiter.is_finished());
+        barrier.arrive(false);
+        assert!(!waiter.await.expect("commit barrier waiter"));
     }
 
     #[tokio::test]
@@ -1277,6 +1558,7 @@ struct PartitionActor {
     sessions: Arc<SessionDirectory>,
     durable_publish_observer: Option<DurableBookPublishObserver>,
     books: AHashMap<TokenKey, MutableBookState>,
+    microstructure_outbox: Vec<BookMicrostructureRow>,
     delta_command_order: Vec<usize>,
     delta_scratch: BookDeltaScratch,
     delta_commands: Vec<PriceDeltaCmd>,
@@ -1328,6 +1610,7 @@ struct SessionClose {
     shard_id: u32,
     subscription_token_hash: ContentHash,
     subscription_token_count: u32,
+    subscription_tokens: Arc<[TokenId]>,
     received_sequences: Arc<[(TokenKey, u64)]>,
     opened_at_ms: i64,
     closed_at_ms: i64,
@@ -1347,7 +1630,7 @@ impl PartitionActor {
             let Some(message) = (tokio::select! {
                 message = rx.recv() => message,
                 _ = telemetry_flush.tick() => {
-                    self.flush_elapsed_microstructure();
+                    self.flush_elapsed_microstructure().await;
                     continue;
                 }
             }) else {
@@ -1362,8 +1645,16 @@ impl PartitionActor {
                     barrier.arrive();
                     continue;
                 }
+                PartitionMessage::CommitMicrostructure {
+                    source_cutoff_ms,
+                    barrier,
+                } => {
+                    let persisted = self.commit_microstructure(source_cutoff_ms).await;
+                    barrier.arrive(persisted);
+                    continue;
+                }
                 PartitionMessage::Retire { tokens, barrier } => {
-                    self.retire_tokens(&tokens);
+                    self.retire_tokens(&tokens).await;
                     barrier.arrive();
                     continue;
                 }
@@ -1398,24 +1689,26 @@ impl PartitionActor {
         }
         for state in self.books.values_mut() {
             if let Some(row) = state.microstructure.flush() {
-                self.book_fact_writer.write_microstructure_row(row);
+                self.microstructure_outbox.push(row);
             }
         }
+        let _ = self.persist_microstructure().await;
         self.metrics
             .mutable_book_count
             .sub(i64::try_from(self.books.len()).unwrap_or(i64::MAX));
     }
 
-    fn flush_elapsed_microstructure(&mut self) {
+    async fn flush_elapsed_microstructure(&mut self) {
         let now_ms = Utc::now().timestamp_millis();
         for state in self.books.values_mut() {
             if let Some(row) = state.microstructure.flush_elapsed(now_ms) {
-                self.book_fact_writer.write_microstructure_row(row);
+                self.microstructure_outbox.push(row);
             }
         }
+        let _ = self.persist_microstructure().await;
     }
 
-    fn retire_tokens(&mut self, tokens: &[RetireToken]) {
+    async fn retire_tokens(&mut self, tokens: &[RetireToken]) {
         for command in tokens {
             if let Some(mut state) = take_retired_mutable_book(
                 &self.book_store,
@@ -1425,10 +1718,44 @@ impl PartitionActor {
             ) {
                 self.metrics.mutable_book_count.dec();
                 if let Some(row) = state.microstructure.flush() {
-                    self.book_fact_writer.write_microstructure_row(row);
+                    self.microstructure_outbox.push(row);
                 }
             }
         }
+        let _ = self.persist_microstructure().await;
+    }
+
+    async fn commit_microstructure(&mut self, source_cutoff_ms: i64) -> bool {
+        for state in self.books.values_mut() {
+            if let Some(row) = state.microstructure.flush_elapsed(source_cutoff_ms) {
+                self.microstructure_outbox.push(row);
+            }
+        }
+        self.persist_microstructure().await
+    }
+
+    async fn persist_microstructure(&mut self) -> bool {
+        if self.microstructure_outbox.is_empty() {
+            return true;
+        }
+        let rows = mem::take(&mut self.microstructure_outbox);
+        let affected_tokens = rows
+            .iter()
+            .filter_map(|row| self.market_registry.data_plane().token_key(&row.token_id))
+            .collect::<HashSet<_>>();
+        if let Err(error) = self.book_fact_writer.write_microstructure_rows(rows).await {
+            tracing::error!(
+                partition_id = self.partition_id.get(),
+                ?error,
+                "microstructure feature-fact persistence failed"
+            );
+            self.book_store.mark_gap();
+            for token in affected_tokens {
+                self.invalidate_token(token);
+            }
+            return false;
+        }
+        true
     }
 
     #[inline]
@@ -1512,6 +1839,7 @@ impl PartitionActor {
                 shard_id,
                 subscription_token_hash,
                 subscription_token_count,
+                subscription_tokens,
                 received_sequences,
                 opened_at_ms,
                 closed_at_ms,
@@ -1522,6 +1850,7 @@ impl PartitionActor {
                     shard_id,
                     subscription_token_hash,
                     subscription_token_count,
+                    subscription_tokens,
                     received_sequences,
                     opened_at_ms,
                     closed_at_ms,
@@ -1555,7 +1884,7 @@ impl PartitionActor {
                 {
                     tracing::error!(?error, ?token, "gap ledger persistence failed");
                 }
-                self.poison_session(session);
+                self.invalidate_closed_token(token);
             }
         }
     }
@@ -1833,7 +2162,7 @@ impl PartitionActor {
             cmd.trace.mono,
         );
         if let Some(row) = stale_microstructure {
-            self.book_fact_writer.write_microstructure_row(row);
+            self.microstructure_outbox.push(row);
         }
         if let Some(state) = self.stream_state.get_mut(&cmd.token) {
             state.has_fresh_snapshot = true;
@@ -1917,7 +2246,7 @@ impl PartitionActor {
                 last_command.trace.mono,
             );
             if let Some(row) = stale_microstructure {
-                self.book_fact_writer.write_microstructure_row(row);
+                self.microstructure_outbox.push(row);
             }
             start = end;
         }
@@ -1994,6 +2323,26 @@ impl PartitionActor {
         }
     }
 
+    fn invalidate_closed_token(&mut self, token: TokenKey) {
+        if let Some(state) = self.stream_state.get_mut(&token) {
+            state.has_fresh_snapshot = false;
+        }
+        self.book_store.invalidate_tokens(slice::from_ref(&token));
+        self.book_store.mark_gap();
+    }
+
+    fn invalidate_closed_scope(&mut self, token_ids: &[TokenId]) {
+        self.book_store.invalidate_ids(token_ids);
+        self.book_store.mark_gap();
+        for token_id in token_ids {
+            if let Some(token) = self.market_registry.data_plane().token_key(token_id)
+                && let Some(state) = self.stream_state.get_mut(&token)
+            {
+                state.has_fresh_snapshot = false;
+            }
+        }
+    }
+
     fn poison_session(&mut self, session: StreamSessionTicket) {
         let Some(token_ids) = self.sessions.poison(session) else {
             return;
@@ -2013,25 +2362,52 @@ impl PartitionActor {
     async fn handle_session_close(&mut self, close: SessionClose) {
         let expected_generation = close.session.epoch;
         let session_poisoned = !self.sessions.is_active(close.session);
-        let continuity_invalid = close.received_sequences.iter().any(|(token, sequence)| {
-            self.book_store.freshness(*token).is_none_or(|freshness| {
-                freshness.state != TokenSlotState::Fresh
-                    || freshness.session_generation != expected_generation
-                    || freshness.sequence != *sequence
-            })
-        });
+        // Non-normal closes invalidate BookStore synchronously at the transport
+        // boundary, so slot freshness cannot classify their already-drained
+        // durable prefix. An apparently normal seal must still prove exact
+        // generation/sequence continuity after the partition barrier.
+        let continuity_invalid = close.reason == StreamSessionEndReason::Normal
+            && close.received_sequences.iter().any(|(token, sequence)| {
+                self.book_store.freshness(*token).is_none_or(|freshness| {
+                    freshness.state != TokenSlotState::Fresh
+                        || freshness.session_generation != expected_generation
+                        || freshness.sequence != *sequence
+                })
+            });
         let mut sequences = BTreeMap::new();
+        let mut sequence_scope_valid = true;
         for (token, sequence) in close.received_sequences.iter() {
             let Some(token_id) = self.market_registry.token_id(*token) else {
-                self.book_store.mark_gap();
-                return;
+                sequence_scope_valid = false;
+                continue;
             };
             sequences.insert(token_id, *sequence);
         }
-        let Ok(sequence_json) = serde_json::to_string(&sequences) else {
-            self.book_store.mark_gap();
-            return;
+        let sequence_json = match serde_json::to_string(&sequences) {
+            Ok(sequence_json) => sequence_json,
+            Err(error) => {
+                tracing::error!(%error, "stream-session sequence ledger encoding failed");
+                sequence_scope_valid = false;
+                "{}".to_owned()
+            }
         };
+        let token_ids = close
+            .subscription_tokens
+            .iter()
+            .map(TokenId::as_str)
+            .collect::<Vec<_>>();
+        let scope_hash_valid = CanonicalDigest::content_hash_json(&token_ids)
+            .is_ok_and(|hash| hash == close.subscription_token_hash);
+        let scope_count_valid = u32::try_from(close.subscription_tokens.len())
+            .is_ok_and(|count| count == close.subscription_token_count);
+        let session_scope_valid = self
+            .sessions
+            .tokens(close.session)
+            .is_some_and(|tokens| tokens.as_ref() == close.subscription_tokens.as_ref());
+        let scope_invalid = !sequence_scope_valid
+            || !scope_hash_valid
+            || !scope_count_valid
+            || !session_scope_valid;
         let (mut state, mut end_reason) = match close.reason {
             StreamSessionEndReason::Normal => (
                 ChStreamSessionState::Sealed,
@@ -2054,7 +2430,7 @@ impl PartitionActor {
                 ChStreamSessionEndReason::Shutdown,
             ),
         };
-        if session_poisoned || continuity_invalid {
+        if session_poisoned || continuity_invalid || scope_invalid {
             state = ChStreamSessionState::Invalidated;
             end_reason = ChStreamSessionEndReason::Overflow;
         }
@@ -2075,10 +2451,11 @@ impl PartitionActor {
                 schema_version: ChSchemaVersion(2),
             })
             .await;
-        if !persisted || state == ChStreamSessionState::Invalidated {
-            for (token, _) in close.received_sequences.iter() {
-                self.invalidate_token(*token);
-            }
+        if !persisted
+            || close.reason != StreamSessionEndReason::Normal
+            || state == ChStreamSessionState::Invalidated
+        {
+            self.invalidate_closed_scope(&close.subscription_tokens);
         }
         self.sessions.close(close.session);
     }

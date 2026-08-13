@@ -83,6 +83,11 @@ pub async fn two_coordinators_claim_run() {
         .collect::<Vec<_>>();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].status, ReportRunStatus::Running);
+    let decision_at = claimed[0]
+        .decision_at
+        .expect("claimed report has a decision time");
+    assert_eq!(decision_at.timestamp_subsec_nanos() % 1_000_000, 0);
+    assert_eq!(claimed[0].started_at, Some(decision_at));
 }
 
 pub async fn restart_coalesces_latest_gap() {

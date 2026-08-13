@@ -1,13 +1,14 @@
 //! Database configuration (`[db]`, deploy): Postgres OLTP + `ClickHouse` OLAP.
 
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use url::{ParseError, Url};
 
 use super::secret::SecretText;
 
 /// Postgres + `ClickHouse` connections.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {
     /// Postgres (system of record: trades, positions, governance, RBAC).
     pub postgres: PostgresConfig,
@@ -16,17 +17,18 @@ pub struct DatabaseConfig {
 }
 
 /// Postgres connection + pool + per-session GUC parameters.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PostgresConfig {
     /// Server host. Default: `localhost`.
     pub host: String,
-    /// Server port. Default: `5432`.
+    /// `PostgreSQL` TCP port used by every transactional repository pool. Default: `5432`.
     pub port: u16,
     /// Database role used by both runtime and explicit schema commands.
     /// Default: `quant_pivot`.
     pub user: String,
-    /// Database password.
+    /// Zeroizing `PostgreSQL` authentication secret; safe projections expose only configured state.
+    #[serde(serialize_with = "super::secret::serialize_empty")]
     pub password: SecretText,
     /// Database name. Default: `quant_pivot`.
     pub database: String,
@@ -35,7 +37,7 @@ pub struct PostgresConfig {
     /// Pool upper bound. Size for worst-case concurrent repository access.
     /// Default: `10`.
     pub max_connections: u32,
-    /// Pool warm floor. Default: `2`.
+    /// Minimum number of `PostgreSQL` connections kept warm by the process pool. Default: `2`.
     pub min_connections: u32,
     /// TCP connect timeout (seconds). Default: `10`.
     pub connect_timeout_secs: u64,
@@ -215,8 +217,8 @@ fn default_application_name() -> String {
 }
 
 /// `ClickHouse` connection + batched-write tuning.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ClickHouseConfig {
     /// Stable deployment identity included in signed research evidence.
     pub deployment_id: String,
@@ -226,9 +228,10 @@ pub struct ClickHouseConfig {
     pub url: String,
     /// Database name. Default: `quant_pivot`.
     pub database: String,
-    /// User name. Default: `default`.
+    /// `ClickHouse` service identity authenticated by ingestion and analytical query clients. Default: `default`.
     pub user: String,
-    /// Database password.
+    /// Zeroizing `ClickHouse` authentication secret; safe projections expose only configured state.
+    #[serde(serialize_with = "super::secret::serialize_empty")]
     pub password: SecretText,
     /// Max age (seconds) of a partial batch before it is flushed. Lower =
     /// fresher analytics, more insert requests. Default: `5`.

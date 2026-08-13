@@ -190,7 +190,7 @@ fn publish(ledger: &RouterLedger, dirty: &HashSet<usize>) {
 mod tests {
     use std::{
         sync::{Arc, atomic::AtomicU64},
-        time::{Duration, Instant},
+        time::Instant,
     };
 
     use polymarket_client_sdk_v2::types::U256;
@@ -218,8 +218,6 @@ mod tests {
                 on_book_level_rejected: None,
                 ingress_enqueue_observer: None,
                 reconnect_policy: ReconnectPolicy::default(),
-                sdk_initial_backoff: Duration::from_secs(1),
-                sdk_max_backoff: Duration::from_secs(30),
                 connect_limiter: Arc::new(Semaphore::new(4)),
                 health: Arc::new(ShardHealthBoard::default()),
             },

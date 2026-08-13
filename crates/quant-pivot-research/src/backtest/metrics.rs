@@ -128,10 +128,11 @@ pub fn max_drawdown(pnl_curve: &[PnlCurvePoint], budget: Decimal) -> Decimal {
         .round_dp(RESEARCH_DECIMAL_SCALE)
 }
 
-/// Mean per-tick portfolio turnover: the average L1 change in per-market
-/// allocation weights between consecutive ticks, halved (one-sided turnover).
+/// Allocation-target churn: the average one-sided L1 change between adjacent
+/// desired weight vectors. This is a model-objective stability diagnostic, not
+/// executed financial turnover.
 #[must_use]
-pub fn turnover(tick_weights: &[BTreeMap<String, Decimal>]) -> Decimal {
+pub fn allocation_churn(tick_weights: &[BTreeMap<String, Decimal>]) -> Decimal {
     if tick_weights.len() < 2 {
         return Decimal::ZERO;
     }
@@ -150,6 +151,30 @@ pub fn turnover(tick_weights: &[BTreeMap<String, Decimal>]) -> Decimal {
         total += l1 / Decimal::from(2);
     }
     (total / Decimal::from((tick_weights.len() - 1) as u64)).round_dp(RESEARCH_DECIMAL_SCALE)
+}
+
+/// Mean executed buy cash divided by the frozen capital base per decision
+/// period. Prediction-market settlement/redemption is a cash release, not a
+/// second trade, so it does not inflate this one-sided transaction measure.
+pub fn executed_cash_turnover(period_turnover: &[Decimal]) -> QuantResult<Decimal> {
+    if period_turnover.is_empty() {
+        return Ok(Decimal::ZERO);
+    }
+    let period_count = u64::try_from(period_turnover.len()).map_err(|error| {
+        ResearchError::ValidationMethodology {
+            detail: format!("executed-turnover period count does not fit u64: {error}"),
+        }
+    })?;
+    let mut total = Decimal::ZERO;
+    for turnover in period_turnover {
+        total =
+            total
+                .checked_add(*turnover)
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "executed cash turnover overflowed Decimal".to_owned(),
+                })?;
+    }
+    Ok((total / Decimal::from(period_count)).round_dp(RESEARCH_DECIMAL_SCALE))
 }
 
 /// Sharpe ratio of a per-period return series: `mean/stddev · sqrt(periods_per_year)`.

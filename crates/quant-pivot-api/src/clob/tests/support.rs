@@ -55,6 +55,14 @@ pub async fn mount_derive_api_key(server: &MockServer) {
 }
 
 pub async fn mount_clob_requirements(server: &MockServer, token_id: &TokenId) {
+    mount_clob_balance_requirements(server, token_id, "10000").await;
+}
+
+pub async fn mount_clob_balance_requirements(
+    server: &MockServer,
+    token_id: &TokenId,
+    balance: &str,
+) {
     Mock::given(method("GET"))
         .and(path("/version"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "version": 2 })))
@@ -74,6 +82,15 @@ pub async fn mount_clob_requirements(server: &MockServer, token_id: &TokenId) {
         .respond_with(
             ResponseTemplate::new(200).set_body_json(serde_json::json!({ "base_fee": 0 })),
         )
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/balance-allowance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "balance": balance,
+            "allowances": {}
+        })))
         .mount(server)
         .await;
 
@@ -188,6 +205,7 @@ pub fn test_order_request(order_type: OrderType) -> OrderRequest {
                 VenueOrderAmount::Shares(Shares::new(dec!(100)))
             }
         },
+        expected_fee: Usd::new(dec!(1)),
         price: Price::new(dec!(0.92)),
         order_type,
         post_only: matches!(order_type, OrderType::Gtc | OrderType::Gtd { .. }),

@@ -19,7 +19,7 @@ pub fn model_spec_lineage_fixture(name: &str) -> (ModelSpecThesis, ContentHash) 
         ModelFamily::WeightedFactor,
         86_400,
         ModelInputContract::single_required("book.mid"),
-        ModelTrainingContract::settlement_default(),
+        ModelTrainingContract::outcome_default(),
     );
     (spec.thesis, spec.definition_hash)
 }

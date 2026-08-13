@@ -34,6 +34,7 @@ pub fn map_snapshot_to_model(
         decision_at: snapshot.decision_at,
         decision_policy_snapshot_id: snapshot.decision_policy_snapshot_id,
         selector_hash: snapshot.selector_hash,
+        selector_evidence: snapshot.selector_evidence,
         market_count: i32::try_from(snapshot.included.len()).map_err(|err| {
             ReportError::NumericOverflow {
                 field: "market_selection.market_count",
@@ -88,7 +89,7 @@ mod tests {
         enums::{common::MarketCategory, market::MarketStatus},
         types::{
             ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId, Price,
-            SelectionExclusionSummary, TokenId, Usd,
+            SelectionExclusionSummary, SelectorHashEvidence, TokenId, Usd,
         },
     };
     use quant_pivot_research::selection::{
@@ -126,14 +127,40 @@ mod tests {
         }
     }
 
+    struct SelectorFixture;
+
+    impl SelectorFixture {
+        fn evidence(selector_hash: ContentHash) -> SelectorHashEvidence {
+            SelectorHashEvidence {
+                selector_hash,
+                contract_hash: ContentHash::from_bytes([1; 32]),
+                boundary_hash: ContentHash::from_bytes([2; 32]),
+                selection_policy_hash: ContentHash::from_bytes([3; 32]),
+                data_quality_policy_hash: ContentHash::from_bytes([4; 32]),
+                feature_schema_hash: ContentHash::from_bytes([5; 32]),
+                model_requirements_hash: ContentHash::from_bytes([6; 32]),
+                candidates_hash: ContentHash::from_bytes([7; 32]),
+                candidate_catalog_hash: ContentHash::from_bytes([8; 32]),
+                candidate_book_hash: ContentHash::from_bytes([9; 32]),
+                candidate_domain_hash: ContentHash::from_bytes([10; 32]),
+                candidate_decision_hash: ContentHash::from_bytes([11; 32]),
+                included_hash: ContentHash::from_bytes([12; 32]),
+                excluded_hash: ContentHash::from_bytes([13; 32]),
+                exclusion_summary_hash: ContentHash::from_bytes([14; 32]),
+            }
+        }
+    }
+
     #[test]
     fn map_snapshot_projects_summary() {
+        let selector_hash =
+            ContentHash::parse(&format!("blake3:{}", "b".repeat(64))).expect("valid hash");
         let snapshot = MarketSelectionSnapshot {
             market_selection_id: MarketSelectionId::from_v7(),
             decision_at: as_of(),
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            selector_hash: ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
-                .expect("valid hash"),
+            selector_hash,
+            selector_evidence: SelectorFixture::evidence(selector_hash),
             included: vec![SelectedMarket {
                 market_id: MarketId::new("0xok"),
                 event_id: EventId::new("evt-1"),

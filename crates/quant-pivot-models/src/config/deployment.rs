@@ -1,15 +1,17 @@
 //! Process deployment environment declaration.
 
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::types::DeploymentEnvironment;
 
 /// Environment identity used only for environment-specific operational safety.
 ///
 /// It is intentionally not a release, schema, build, or policy authority.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeploymentConfig {
+    /// Exact environment identity that must match the mandatory CLI expectation at startup.
     pub environment: DeploymentEnvironment,
 }
 

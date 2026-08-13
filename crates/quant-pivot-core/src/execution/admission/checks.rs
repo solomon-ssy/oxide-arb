@@ -69,9 +69,7 @@ impl AdmissionCheck for RecommendationFreshnessCheck {
                 .with_threshold(rec.valid_until.to_rfc3339())
                 .with_actual(input.now.to_rfc3339());
         }
-        let Some((_, entry, _, _, _)) = rec.trade_plan.frozen() else {
-            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
-        };
+        let entry = &rec.trade_plan.entry;
         if input.now < entry.valid_from {
             return AdmissionCheckTrace::defer(self.id(), "entry window not open yet")
                 .with_threshold(entry.valid_from.to_rfc3339())
@@ -250,9 +248,7 @@ impl AdmissionCheck for BookFreshnessCheck {
             )
             .with_actual(book.timestamp_ms.to_string());
         };
-        let Some((_, entry, _, _, _)) = input.recommendation.trade_plan.frozen() else {
-            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
-        };
+        let entry = &input.recommendation.trade_plan.entry;
         let max = entry.max_book_age_ms;
         if age_ms > max {
             return AdmissionCheckTrace::defer(self.id(), "book snapshot stale")
@@ -348,9 +344,7 @@ impl AdmissionCheck for RiskEnvelopeHashCheck {
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
-        let Some((_, _, _, _, risk_envelope)) = input.recommendation.trade_plan.frozen() else {
-            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
-        };
+        let risk_envelope = &input.recommendation.trade_plan.risk_envelope;
         match risk_envelope.canonical_hash() {
             Ok(recomputed) => {
                 if recomputed == input.intent.risk_envelope_hash {
@@ -421,10 +415,10 @@ impl AdmissionCheck for CapitalBudgetCheck {
 // 10a ────────────────────────────────────────────────────────────────────────
 /// Concurrently open (non-terminal) order intents stay within the governed cap.
 ///
-/// `execution.capital.max_open_intents` bounds how many intents may hold capital
-/// in flight at once. `0` disables the cap. The intent under admission is already
-/// counted in `open_intent_count` (it is `Approved` / `ApprovedByPolicy`), so the
-/// check is `open_intent_count <= cap` — no off-by-one add-back.
+/// `portfolio.exposure_limits.max_open_recommendations` bounds how many intents
+/// may hold capital in flight at once. The intent under admission is already
+/// counted in `open_intent_count` (it is `Approved` / `ApprovedByPolicy`), so
+/// the check is `open_intent_count <= cap` — no off-by-one add-back.
 pub(super) struct MaxOpenIntentsCheck;
 
 impl AdmissionCheck for MaxOpenIntentsCheck {
@@ -433,9 +427,6 @@ impl AdmissionCheck for MaxOpenIntentsCheck {
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
-        if input.max_open_intents == 0 {
-            return AdmissionCheckTrace::pass(self.id(), "open-intent cap disabled");
-        }
         let cap = u64::from(input.max_open_intents);
         if input.open_intent_count > cap {
             return AdmissionCheckTrace::deny(self.id(), "open intent count exceeds cap")
@@ -451,10 +442,10 @@ impl AdmissionCheck for MaxOpenIntentsCheck {
 // 10b ────────────────────────────────────────────────────────────────────────
 /// Total capital reserved by open intents stays within the governed cap.
 ///
-/// `execution.capital.max_reserved_usd` bounds the aggregate reserved capital;
-/// `0` disables it. `account.reserved_usd` already includes this intent's
-/// `Allocated` reservation, so the check compares the current total reservation
-/// directly against the cap.
+/// `portfolio.budget.max_open_capital_usd` bounds aggregate reserved capital.
+/// `account.reserved_usd` already includes this intent's `Allocated`
+/// reservation, so the check compares the current total directly against the
+/// cap.
 pub(super) struct MaxReservedCapitalCheck;
 
 impl AdmissionCheck for MaxReservedCapitalCheck {
@@ -463,9 +454,6 @@ impl AdmissionCheck for MaxReservedCapitalCheck {
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
-        if input.max_reserved_usd == Usd::ZERO {
-            return AdmissionCheckTrace::pass(self.id(), "reserved-capital cap disabled");
-        }
         let reserved = input.account.reserved_usd;
         if reserved > input.max_reserved_usd {
             return AdmissionCheckTrace::deny(self.id(), "reserved capital exceeds cap")
@@ -495,9 +483,7 @@ impl AdmissionCheck for MarketExposureCheck {
             .get(&input.recommendation.market_id)
             .copied()
             .unwrap_or(Usd::ZERO);
-        let Some((_, _, _, _, risk_envelope)) = input.recommendation.trade_plan.frozen() else {
-            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
-        };
+        let risk_envelope = &input.recommendation.trade_plan.risk_envelope;
         let cap = risk_envelope.max_market_exposure_usd;
         exposure_trace(self.id(), "market", current, input.order_notional(), cap)
     }
@@ -520,9 +506,7 @@ impl AdmissionCheck for EventExposureCheck {
             .get(&input.recommendation.event_id)
             .copied()
             .unwrap_or(Usd::ZERO);
-        let Some((_, _, _, _, risk_envelope)) = input.recommendation.trade_plan.frozen() else {
-            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
-        };
+        let risk_envelope = &input.recommendation.trade_plan.risk_envelope;
         let cap = risk_envelope.max_event_exposure_usd;
         exposure_trace(self.id(), "event", current, input.order_notional(), cap)
     }
@@ -545,9 +529,7 @@ impl AdmissionCheck for CategoryExposureCheck {
             .get(&input.recommendation.identity.category)
             .copied()
             .unwrap_or(Usd::ZERO);
-        let Some((_, _, _, _, risk_envelope)) = input.recommendation.trade_plan.frozen() else {
-            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
-        };
+        let risk_envelope = &input.recommendation.trade_plan.risk_envelope;
         let cap = risk_envelope.max_category_exposure_usd;
         exposure_trace(self.id(), "category", current, input.order_notional(), cap)
     }
@@ -608,9 +590,7 @@ impl AdmissionCheck for LiquidityDepthCheck {
                 );
             }
         }
-        let Some((_, entry, _, _, _)) = input.recommendation.trade_plan.frozen() else {
-            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
-        };
+        let entry = &input.recommendation.trade_plan.entry;
         let min_depth = entry.min_depth_usd;
         let visible = walk_buy_cash_budget(
             &book.asks,

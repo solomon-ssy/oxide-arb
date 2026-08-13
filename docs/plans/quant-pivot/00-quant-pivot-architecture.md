@@ -5,14 +5,19 @@
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
 > - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `post_deployment_behavior`: 本次实现只交付唯一终态 clean-install contract；不设计升级、降级、旧版本共存或历史数据转换。
+> - `rollback_and_data_verification`: 仅在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置需要操作者另行授权。
 
 > 状态：生产级目标架构
 >
 > 范围：Polymarket-only quant-pivot
 >
 > 取代：Endgame detector、ScoredOpportunity、FOK-first execution hot path、hold-to-resolution settlement loop
+
+> **Global portfolio contract**：`RecommendationReport` 不绑定 category 或单一 Buy Route。Route 内独立
+> 预测、校准与 Trade Policy evaluation，Route 间只通过 `ExecutableEconomicTier` 的贴现 USD 联合场景
+> 现金流比较。任一 represented Route readiness 不完整则整份报告失败；唯一全局 MILP 非最优或 exact
+> verification 失败时不发布报告。
 
 ## 0. 一句话目标
 
@@ -173,9 +178,10 @@ flowchart TD
 
 职责：
 
-- 根据 runtime config v3 构造本次报告的候选市场集合。
+- 根据 frozen `RecommendationPolicy` clean-install contract 构造本次报告的候选市场集合。
 - 支持 category、event、liquidity、volume、expiry、market status、manual include/exclude。
 - 生成不可变 `MarketSelection` snapshot（`quant_market_selection` + members）。
+- 在模型相关过滤前从 eligible market 形成有序 `RepresentedRouteSet`；空 category filter 表示全部受支持分类。
 
 Selection 不是交易白名单，而是报告输入集合。执行侧还会有单独的 admission gate。
 
@@ -403,7 +409,7 @@ Recommendation
 - 不做多交易所。
 - 不做泛化 venue abstraction。
 - 不保留旧 Endgame compatibility。
-- 不保留旧 runtime-config v2 compatibility。
+- 不保留旧 runtime-config compatibility、converter 或版本分派。
 - 不保留旧 `ExecutionMode` 语义别名。
 - 不把 TopN report 做成简单 PnL 报表扩展。
 - 不把执行作为默认主路径。
@@ -490,13 +496,13 @@ pub trait ModelRunner {
 ### 9.3 组合、报告、执行
 
 ```rust
-/// Converts raw model candidates into portfolio-aware recommendations.
-pub trait PortfolioPlanner {
-    /// Apply budgets, exposure, liquidity, and correlation constraints.
-    fn plan(
+/// Selects one globally robust portfolio from executable cross-route tiers.
+pub trait GlobalPortfolioPlanner {
+    /// Solve the canonical MILP and verify every amount and hard constraint exactly.
+    fn solve_and_verify(
         &self,
-        input: PortfolioPlanInput,
-    ) -> QuantResult<PortfolioPlan>;
+        input: GlobalPortfolioInput,
+    ) -> QuantResult<GlobalPortfolioPlan>;
 }
 
 /// Builds and persists the immutable TopN report.

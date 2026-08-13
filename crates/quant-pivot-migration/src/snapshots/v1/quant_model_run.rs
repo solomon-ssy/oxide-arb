@@ -53,9 +53,7 @@ pub struct Model {
     )]
     pub quant_model_version: BelongsTo<Option<super::quant_model_version::Entity>>,
     #[sea_orm(has_many)]
-    pub quant_portfolio_plans: HasMany<super::quant_portfolio_plan::Entity>,
-    #[sea_orm(has_many)]
-    pub quant_recommendation_reports: HasMany<super::quant_recommendation_report::Entity>,
+    pub quant_report_route_runs: HasMany<super::quant_report_route_run::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

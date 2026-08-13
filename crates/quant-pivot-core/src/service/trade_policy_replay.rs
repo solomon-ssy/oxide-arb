@@ -164,7 +164,7 @@ pub(super) async fn reinfer_frozen_policy_signals(
                     entry.insert(candidate);
                 }
                 Entry::Occupied(mut entry) => {
-                    if candidate.rank_before_portfolio < entry.get().rank_before_portfolio {
+                    if candidate.route_rank < entry.get().route_rank {
                         entry.insert(candidate);
                     }
                 }
@@ -1016,7 +1016,7 @@ fn fitted_cohort(request: FittedCohortRequest<'_>) -> QuantResult<TradePolicyCoh
         trailing_stop: candidate.exit.trailing_stop.clone(),
         min_score_retention: candidate.exit.min_score_retention,
         min_expected_return_bps: candidate.exit.min_expected_return_bps,
-        require_execution_eligibility: candidate.exit.require_execution_eligibility,
+        require_route_gate_eligibility: candidate.exit.require_route_gate_eligibility,
         opportunistic_exit: candidate.exit.opportunistic_exit.clone(),
         settlement_mode: candidate.exit.settlement_mode,
         redeem_policy: candidate.exit.redeem_policy,
@@ -1357,7 +1357,7 @@ fn policy_signal(candidate: &SignalCandidate) -> PolicyReplaySignal {
         outcome_side: candidate.outcome_side,
         composite_score: candidate.composite_score.inner(),
         expected_return_bps: candidate.expected_return_bps,
-        execution_eligible: true,
+        route_gate_eligible: true,
         opportunistic_confidence: None,
         opportunistic_expected_alpha_bps: None,
         opportunistic_p_exit_better: None,

@@ -51,7 +51,7 @@ async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
             ModelFamily::WeightedFactor,
             model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
-            ModelTrainingContract::settlement_default(),
+            ModelTrainingContract::outcome_default(),
         ))
         .await
         .expect("model spec");
@@ -79,7 +79,7 @@ async fn new_fixture(
         ModelFamily::WeightedFactor,
         model_spec_fixtures::pooled_horizon_secs(),
         ModelInputContract::single_required("book.mid"),
-        ModelTrainingContract::settlement_default(),
+        ModelTrainingContract::outcome_default(),
     )
     .definition_hash;
     let source_lineage = seed_dataset_source(

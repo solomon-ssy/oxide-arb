@@ -9,8 +9,8 @@ use quant_pivot_models::{
     enums::quant::ReportFactDeliveryStatus,
     hashing::CanonicalDigest,
     types::{
-        REPORT_FACT_BUNDLE_FORMAT_VERSION, RecommendationReportId, ReportFactBundleV1,
-        ReportFactNotificationRecommendationV1, ReportFactNotificationV1,
+        REPORT_FACT_BUNDLE_FORMAT_VERSION, RecommendationReportId, ReportFactBundleV2,
+        ReportFactNotificationRecommendationV2, ReportFactNotificationV2,
         ReportFactTableCommitment,
     },
 };
@@ -41,13 +41,13 @@ pub async fn prepare_report_fact_bundle(
     ensure_report_binding(&report_id, &recommendation_rows, &funnel_rows)?;
     let recommendation_hash = CanonicalDigest::content_hash_json(&recommendation_rows)?;
     let funnel_hash = CanonicalDigest::content_hash_json(&funnel_rows)?;
-    let bundle = ReportFactBundleV1 {
+    let bundle = ReportFactBundleV2 {
         format_version: REPORT_FACT_BUNDLE_FORMAT_VERSION,
         recommendation_report_id: report_id,
         created_at: composed.transaction.report.decision_at,
         delivery_policy: composed.delivery_policy,
         notify_operators: composed.notify_operators,
-        notification: ReportFactNotificationV1 {
+        notification: ReportFactNotificationV2 {
             kind: composed.notification.kind,
             status: composed.notification.status.clone(),
             runtime_mode: composed.notification.runtime_mode,
@@ -57,10 +57,13 @@ pub async fn prepare_report_fact_bundle(
                 .notification
                 .top3
                 .iter()
-                .map(|recommendation| ReportFactNotificationRecommendationV1 {
+                .map(|recommendation| ReportFactNotificationRecommendationV2 {
                     market_id: recommendation.market_id.clone(),
                     outcome_side: recommendation.outcome_side,
-                    score: recommendation.score,
+                    route: recommendation.route,
+                    profit_probability_bps: recommendation.profit_probability_bps,
+                    robust_expected_net_usd: recommendation.robust_expected_net_usd,
+                    marginal_portfolio_value_usd: recommendation.marginal_portfolio_value_usd,
                     suggested_usd: recommendation.suggested_usd,
                 })
                 .collect(),

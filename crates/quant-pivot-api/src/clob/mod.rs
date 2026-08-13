@@ -609,9 +609,23 @@ impl ClobClient {
         auth_signer.set_chain_id(Some(config.chain_id));
 
         let sdk_config = SdkConfig::builder().use_server_time(true).build();
-        let builder = SdkClient::new(&config.clob_base_url, sdk_config)
-            .map_err(|e| ApiError::from(SdkClobError(&e)))?
-            .authentication_builder(&auth_signer);
+        let sdk = SdkClient::new(&config.clob_base_url, sdk_config)
+            .map_err(|error| ApiError::from(SdkClobError(&error)))?;
+        let protocol_version = sdk
+            .version()
+            .await
+            .map_err(|error| ApiError::from(SdkClobError(&error)))?;
+        if protocol_version != 2 {
+            return Err(ApiError::Clob {
+                endpoint: "GET /version".to_owned(),
+                code: "unsupported_protocol_version".to_owned(),
+                message: format!(
+                    "quant-pivot requires CLOB V2 but the endpoint reported version {protocol_version}"
+                ),
+                retryable: false,
+            });
+        }
+        let builder = sdk.authentication_builder(&auth_signer);
         // EOA is the SDK default; only Proxy / Safe attach an explicit funder +
         // signature type (the SDK rejects a funder paired with the EOA type).
         let builder = if topology.is_eoa() {
@@ -744,6 +758,32 @@ impl ClobClient {
         }
     }
 
+    async fn verify_buy_balance(&self, req: &OrderRequest) -> Result<(), OrderSubmissionError> {
+        if req.side != Side::Buy {
+            return Ok(());
+        }
+        let principal = match req.amount {
+            VenueOrderAmount::GrossUsd(gross) => gross,
+            VenueOrderAmount::Shares(shares) => Usd::new(shares.inner() * req.price.inner()),
+        };
+        let required = principal + req.expected_fee;
+        let available = self
+            .collateral_balance()
+            .await
+            .map_err(OrderSubmissionError::prepare)?;
+        if available < required {
+            return Err(OrderSubmissionError::prepare(ApiError::Clob {
+                endpoint: "GET /balance-allowance".to_owned(),
+                code: "insufficient_pusd_balance".to_owned(),
+                message: format!(
+                    "live pUSD collateral {available} is below exact admitted cash requirement {required}"
+                ),
+                retryable: false,
+            }));
+        }
+        Ok(())
+    }
+
     /// Place an order on the CLOB.
     #[tracing::instrument(skip(self, req), fields(market_id = %req.market_id, side = %req.side))]
     pub async fn place_order(
@@ -763,6 +803,7 @@ impl ClobClient {
         let post_only = req.post_only;
         Self::validate_order_semantics(order_type, post_only)
             .map_err(OrderSubmissionError::prepare)?;
+        self.verify_buy_balance(req).await?;
 
         let submitted_at = Utc::now();
         let unsigned = self.build_unsigned_order(req, token_id, order_side).await?;
@@ -924,7 +965,7 @@ impl ClobClient {
         })
     }
 
-    /// Query current USDC.e collateral balance.
+    /// Query current pUSD collateral balance.
     ///
     /// Uses the CLOB `balance-allowance` endpoint with `AssetType::Collateral`.
     /// Returns the raw on-exchange balance (before subtracting reservations).

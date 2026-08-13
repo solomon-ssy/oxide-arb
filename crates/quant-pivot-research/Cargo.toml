@@ -17,6 +17,8 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 rust_decimal = { workspace = true }
 uuid = { workspace = true, features = ["v5"] }
 # Deterministic Tier-1 linkage template parsing (11.2.2).
@@ -43,15 +45,14 @@ argmin = { workspace = true, optional = true }
 argmin-math = { workspace = true, optional = true }
 smartcore = { workspace = true, optional = true, features = ["serde"] }
 bincode = { workspace = true, optional = true }
-good_lp = { workspace = true, features = ["microlp"] }
+highs = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 rust_decimal_macros = { workspace = true }
 
 [features]
-# The pure-Rust microlp backend is the sole baseline allocator and is therefore
-# a normal dependency. Heavy and native-adjacent stacks stay opt-in.
+# The global portfolio solver is an unconditional runtime dependency.
 default = []
 # Offline jobs: remote artifact storage plus dataframe/Parquet materialization.
 research-jobs = [
@@ -65,9 +66,6 @@ research-jobs = [
 optimize = ["dep:argmin", "dep:argmin-math"]
 # Classical ML (tree / ensemble / linear) for shadow candidates.
 ml-classical = ["dep:smartcore", "dep:bincode"]
-# Optional native HiGHS backend for large-scale MILP (never a report_only hard
-# dependency; only linked when this feature is explicitly enabled).
-lp-solver-highs = ["good_lp/highs"]
 
 [lints]
 workspace = true

@@ -4,15 +4,15 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::app::ports::feedback_mutation::FeedbackCycleFreezePlan;
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
         data_plane::DecisionClock,
         ports::FeedbackDatasetBuildRequest,
         quant::{
             FeedbackCohortWindow, FeedbackCycleInfo, FeedbackCycleKey, FeedbackCycleKeyInput,
-            FeedbackStageEventInput, NewBacktestReport, NewFeedbackCycle, NewFeedbackStageEvent,
-            NewModelRun,
+            FeedbackStageEventInput, ModelSpecInfo, ModelVersionInfo, NewBacktestReport,
+            NewFeedbackCycle, NewFeedbackStageEvent, NewModelRun,
         },
     },
     enums::{
@@ -32,10 +32,11 @@ use quant_pivot_models::{
         ResearchEvaluationTrack, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
         TrainingSampleSource, TrainingSampleSources, Usd,
         backtest::{
-            CategoryMetric, CategoryMetrics, ExpectedVsRealized, PnlCurvePoint, PnlSimulation,
+            BacktestPortfolioFunnel, CategoryMetric, CategoryMetrics, ExpectedVsRealized,
+            PnlCurvePoint, PnlSimulation,
         },
         factor::{FactorExplanation, FactorServingPlane},
-        stable_name::FactorName,
+        model_serving::ModelServingTradePolicyBinding,
     },
 };
 use quant_pivot_repository::{
@@ -60,8 +61,8 @@ use quant_pivot_research::{
     hashing::ResearchHasher,
     selection::SelectedMarket,
     training::{
-        DatasetHashContract, DatasetParquetCodec, TOKEN_PAYOUT_RATIO, TrainingDatasetArtifact,
-        TrainingExample, TrainingLabel, dataset_source_fingerprint, label_names_for_sources,
+        DatasetHashContract, DatasetParquetCodec, TrainingDatasetArtifact, TrainingExample,
+        dataset_source_fingerprint, label_names_for_sources,
     },
 };
 use rust_decimal::Decimal;
@@ -73,7 +74,7 @@ use super::{
         CalibratedModelHead, CalibratedModelSeed, SharedDemoInfra, fixture_profile_ref,
         seed_calibrated_model,
     },
-    model_serving_fixtures::ModelVersionFixture,
+    model_serving_fixtures::{ModelDatasetLedgerFixture, ModelVersionFixture},
     model_spec_fixtures::new_model_spec_fixture,
     research_fixtures::{
         DatasetLedgerFixture, DatasetLedgerSeed, ReplayableSourceSliceFixture,
@@ -160,6 +161,7 @@ struct DatasetSeed {
     examples: Vec<TrainingExample>,
     feature_schema_hash: ContentHash,
     label_schema_hash: ContentHash,
+    trade_policy: Option<ModelServingTradePolicyBinding>,
 }
 
 struct BrowserEvaluationSeed<'a> {
@@ -174,6 +176,7 @@ struct BrowserEvaluationSeed<'a> {
     observed_at: DateTime<Utc>,
     feature_schema_hash: ContentHash,
     label_schema_hash: ContentHash,
+    trade_policy: Option<ModelServingTradePolicyBinding>,
 }
 
 #[derive(Clone, Copy)]
@@ -182,34 +185,52 @@ enum BrowserModelTarget {
     Active(ModelVersionId),
 }
 
-impl BrowserModelTarget {
-    fn head(self, source: FeedbackSourceSeed) -> QuantResult<CalibratedModelHead> {
-        if matches!(
-            (self, source),
-            (Self::Active(_), FeedbackSourceSeed::Production)
-        ) {
-            // The production closure champion is a governed control from the
-            // same stable factor family as the learned challenger. It omits
-            // mean reversion deliberately, preserving high shadow agreement
-            // while leaving one measurable source of OOS challenger uplift.
-            return CalibratedModelHead::alpha_simplex([
-                (FactorName::new("momentum_ema_slope"), dec!(0.03)),
-                (FactorName::new("momentum_macd"), dec!(0.15)),
-                (FactorName::new("momentum_roc"), dec!(0.03)),
-                (FactorName::new("momentum_vol_adjusted"), dec!(0.18)),
-                (
-                    FactorName::new("struct.resolution_proximity_regime"),
-                    dec!(0.17),
-                ),
-                (FactorName::new("struct.reversal_after_shock"), dec!(0.44)),
-            ])
-            .map_err(|error| {
-                QuantError::from(ResearchError::DatasetBuild {
-                    detail: format!("invalid closure champion alpha simplex: {error}"),
+struct BrowserModelSpec {
+    id: ModelSpecId,
+    definition_hash: ContentHash,
+}
+
+impl BrowserModelSpec {
+    async fn resolve(
+        registry: &PgModelRegistryRepository,
+        template: &ModelVersionInfo,
+        source: &ModelSpecInfo,
+        target: BrowserModelTarget,
+    ) -> QuantResult<Self> {
+        match target {
+            BrowserModelTarget::Candidate => {
+                let id = ModelSpecId::from_v7();
+                let spec = new_model_spec_fixture(
+                    id,
+                    "browser-research-model",
+                    source.model_family,
+                    source.prediction_horizon_secs,
+                    source.input_contract.clone(),
+                    ModelTrainingContract::outcome_default(),
+                );
+                let definition_hash = spec.definition_hash;
+                registry.create_model_spec(spec).await?;
+                Ok(Self {
+                    id,
+                    definition_hash,
                 })
-            });
+            }
+            BrowserModelTarget::Active(model_version_id) => {
+                if template.model_version_id != model_version_id {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "active browser research model {model_version_id} differs from complete template {}",
+                            template.model_version_id
+                        ),
+                    }
+                    .into());
+                }
+                Ok(Self {
+                    id: template.model_spec_id,
+                    definition_hash: source.definition_hash,
+                })
+            }
         }
-        Ok(CalibratedModelHead::Policy)
     }
 }
 
@@ -217,6 +238,12 @@ impl BrowserModelTarget {
 enum FeedbackSourceSeed {
     Fixture,
     Production,
+}
+
+#[derive(Clone, Copy)]
+enum FeedbackCycleFixture {
+    HistoricalOnly,
+    GovernedCancellation,
 }
 
 struct BrowserModelSeed<'a> {
@@ -238,6 +265,7 @@ struct FeedbackTriggerSourceSeed<'a> {
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     runtime_config_hash: ContentHash,
     factor_serving_plane: &'a FactorServingPlane,
+    include_trade_policy_labels: bool,
 }
 
 impl BrowserModelSeed<'_> {
@@ -282,7 +310,7 @@ impl BrowserModelSeed<'_> {
 impl BrowserEvaluationSeed<'_> {
     async fn persist(
         &self,
-        model_target: BrowserModelTarget,
+        feedback_cycle_fixture: FeedbackCycleFixture,
     ) -> QuantResult<(PersistedDataset, Option<PersistedDataset>)> {
         let evaluation = persist_dataset(
             self.db,
@@ -300,15 +328,17 @@ impl BrowserEvaluationSeed<'_> {
                     "evaluation",
                     self.observed_at - Duration::days(30),
                     self.factor_serving_plane,
+                    self.trade_policy.is_some(),
                 )?,
                 feature_schema_hash: self.feature_schema_hash,
                 label_schema_hash: self.label_schema_hash,
+                trade_policy: self.trade_policy.clone(),
             },
         )
         .await?;
-        let cancellation_evaluation = match model_target {
-            BrowserModelTarget::Candidate => None,
-            BrowserModelTarget::Active(_) => Some(
+        let cancellation_evaluation = match feedback_cycle_fixture {
+            FeedbackCycleFixture::HistoricalOnly => None,
+            FeedbackCycleFixture::GovernedCancellation => Some(
                 persist_dataset(
                     self.db,
                     self.store,
@@ -325,9 +355,11 @@ impl BrowserEvaluationSeed<'_> {
                             "cancellation-evaluation",
                             self.observed_at - Duration::days(45),
                             self.factor_serving_plane,
+                            self.trade_policy.is_some(),
                         )?,
                         feature_schema_hash: self.feature_schema_hash,
                         label_schema_hash: self.label_schema_hash,
+                        trade_policy: self.trade_policy.clone(),
                     },
                 )
                 .await?,
@@ -357,6 +389,7 @@ impl FeedbackTriggerSourceSeed<'_> {
             "governed-feedback-trigger",
             plan.source_start(),
             self.factor_serving_plane,
+            self.include_trade_policy_labels,
         )?;
         let stored = persist_replayable_source_slice(
             self.store,
@@ -410,6 +443,7 @@ pub async fn seed_browser_research(
         infra,
         BrowserModelTarget::Candidate,
         FeedbackSourceSeed::Production,
+        FeedbackCycleFixture::HistoricalOnly,
     ))
     .await
 }
@@ -428,6 +462,7 @@ pub async fn seed_governed_feedback_research(
         infra,
         BrowserModelTarget::Active(champion_model_version_id),
         FeedbackSourceSeed::Fixture,
+        FeedbackCycleFixture::GovernedCancellation,
     ))
     .await
 }
@@ -446,6 +481,7 @@ pub async fn seed_closure_feedback_research(
         infra,
         BrowserModelTarget::Active(champion_model_version_id),
         FeedbackSourceSeed::Production,
+        FeedbackCycleFixture::HistoricalOnly,
     ))
     .await
 }
@@ -456,6 +492,7 @@ async fn seed_research(
     infra: &SharedDemoInfra,
     model_target: BrowserModelTarget,
     feedback_source_seed: FeedbackSourceSeed,
+    feedback_cycle_fixture: FeedbackCycleFixture,
 ) -> QuantResult<BrowserResearchFixture> {
     let registry = PgModelRegistryRepository::new(db.clone());
     let template = registry
@@ -476,23 +513,22 @@ async fn seed_research(
                 template.model_spec_id
             ),
         })?;
-    let browser_model_spec_id = ModelSpecId::from_v7();
-    let browser_model_spec = new_model_spec_fixture(
-        browser_model_spec_id,
-        "browser-research-model",
-        model_spec.model_family,
-        model_spec.prediction_horizon_secs,
-        model_spec.input_contract.clone(),
-        ModelTrainingContract::settlement_default(),
-    );
-    let browser_model_spec_definition_hash = browser_model_spec.definition_hash;
-    registry.create_model_spec(browser_model_spec).await?;
+    let browser_spec =
+        BrowserModelSpec::resolve(&registry, &template, &model_spec, model_target).await?;
+    let browser_model_spec_id = browser_spec.id;
+    let browser_model_spec_definition_hash = browser_spec.definition_hash;
     let template_bindings = template.serving_contract.bindings();
     let feature_schema_hash = template_bindings.schemas.feature_schema_hash;
     let factor_serving_plane = template_bindings.factors.plane.clone();
+    let trade_policy = match model_target {
+        BrowserModelTarget::Candidate => None,
+        BrowserModelTarget::Active(_) => template_bindings.trade_policy.clone(),
+    };
     let sample_sources = TrainingSampleSources::default();
-    let label_schema_hash =
-        ResearchHasher::label_schema(&label_names_for_sources(sample_sources.as_slice(), false))?;
+    let label_schema_hash = ResearchHasher::label_schema(&label_names_for_sources(
+        sample_sources.as_slice(),
+        trade_policy.is_some(),
+    ))?;
     let observed_at = Utc::now();
     let now = DateTime::from_timestamp_millis(observed_at.timestamp_millis()).ok_or_else(|| {
         ResearchError::DatasetBuild {
@@ -500,38 +536,49 @@ async fn seed_research(
         }
     })?;
     let policy_snapshot_hash = template_bindings.policy_snapshot.snapshot_hash;
-    let training = persist_dataset(
-        db,
-        store,
-        DatasetSeed {
-            scope: "browser-research-training".to_owned(),
-            model_spec_id: browser_model_spec_id,
-            model_family: model_spec.model_family,
-            model_spec_definition_hash: browser_model_spec_definition_hash,
-            factor_serving_plane: factor_serving_plane.clone(),
-            decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
-            runtime_config_hash: policy_snapshot_hash,
-            purpose: DatasetPurpose::Training,
-            examples: model_examples("training", now - Duration::days(120), &factor_serving_plane)?,
-            feature_schema_hash,
-            label_schema_hash,
-        },
-    )
-    .await?;
-    let model_version_id = Box::pin(
-        BrowserModelSeed {
-            db,
-            store,
-            registry: &registry,
-            model_spec_id: browser_model_spec_id,
-            model_spec_definition_hash: browser_model_spec_definition_hash,
-            training: &training,
-            target: model_target,
-            head: model_target.head(feedback_source_seed)?,
+    let model_version_id = match model_target {
+        BrowserModelTarget::Candidate => {
+            let training = persist_dataset(
+                db,
+                store,
+                DatasetSeed {
+                    scope: "browser-research-training".to_owned(),
+                    model_spec_id: browser_model_spec_id,
+                    model_family: model_spec.model_family,
+                    model_spec_definition_hash: browser_model_spec_definition_hash,
+                    factor_serving_plane: factor_serving_plane.clone(),
+                    decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
+                    runtime_config_hash: policy_snapshot_hash,
+                    purpose: DatasetPurpose::Training,
+                    examples: model_examples(
+                        "training",
+                        now - Duration::days(120),
+                        &factor_serving_plane,
+                        false,
+                    )?,
+                    feature_schema_hash,
+                    label_schema_hash,
+                    trade_policy: None,
+                },
+            )
+            .await?;
+            Box::pin(
+                BrowserModelSeed {
+                    db,
+                    store,
+                    registry: &registry,
+                    model_spec_id: browser_model_spec_id,
+                    model_spec_definition_hash: browser_model_spec_definition_hash,
+                    training: &training,
+                    target: model_target,
+                    head: CalibratedModelHead::Policy,
+                }
+                .persist(),
+            )
+            .await?
         }
-        .persist(),
-    )
-    .await?;
+        BrowserModelTarget::Active(model_version_id) => model_version_id,
+    };
     FeedbackTriggerSourceSeed {
         db,
         store,
@@ -540,6 +587,7 @@ async fn seed_research(
         decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
         runtime_config_hash: policy_snapshot_hash,
         factor_serving_plane: &factor_serving_plane,
+        include_trade_policy_labels: trade_policy.is_some(),
     }
     .persist_for(model_target, feedback_source_seed)
     .await?;
@@ -555,8 +603,9 @@ async fn seed_research(
         observed_at: now,
         feature_schema_hash,
         label_schema_hash,
+        trade_policy,
     }
-    .persist(model_target)
+    .persist(feedback_cycle_fixture)
     .await?;
     let report = seed_backtest_report(
         db,
@@ -580,7 +629,7 @@ async fn seed_research(
         champion_serving_contract_hash: candidate.serving_contract_hash,
         observed_at: now,
     }
-    .persist(db, model_target)
+    .persist(db, feedback_cycle_fixture)
     .await?;
     Ok(BrowserResearchFixture {
         evaluation_dataset_id: evaluation.id,
@@ -666,7 +715,7 @@ impl FeedbackCycleSeed<'_> {
     async fn persist(
         self,
         db: &DatabaseConnection,
-        model_target: BrowserModelTarget,
+        feedback_cycle_fixture: FeedbackCycleFixture,
     ) -> QuantResult<PersistedFeedbackCycles> {
         let profile_ref = fixture_profile_ref();
         let profile = profile_ref
@@ -725,9 +774,9 @@ impl FeedbackCycleSeed<'_> {
             }
             .into());
         }
-        let governed_cancellation_cycle_id = match model_target {
-            BrowserModelTarget::Candidate => None,
-            BrowserModelTarget::Active(_) => {
+        let governed_cancellation_cycle_id = match feedback_cycle_fixture {
+            FeedbackCycleFixture::HistoricalOnly => None,
+            FeedbackCycleFixture::GovernedCancellation => {
                 let cancellation_evaluation =
                     self.cancellation_evaluation
                         .ok_or_else(|| ResearchError::DatasetBuild {
@@ -758,6 +807,7 @@ fn model_examples(
     scope: &str,
     window_start: DateTime<Utc>,
     factor_serving_plane: &FactorServingPlane,
+    include_trade_policy_labels: bool,
 ) -> QuantResult<Vec<TrainingExample>> {
     let mut examples = Vec::with_capacity(
         usize::try_from(TICK_COUNT).map_err(|error| ResearchError::DatasetBuild {
@@ -773,6 +823,7 @@ fn model_examples(
                 ordinal,
                 decision_at,
                 factor_serving_plane,
+                include_trade_policy_labels,
             )?);
         }
     }
@@ -785,6 +836,7 @@ fn model_example(
     ordinal: usize,
     decision_at: DateTime<Utc>,
     factor_serving_plane: &FactorServingPlane,
+    include_trade_policy_labels: bool,
 ) -> QuantResult<TrainingExample> {
     let strength = Decimal::from(u64::try_from(ordinal % 9 + 1).map_err(|error| {
         ResearchError::DatasetBuild {
@@ -880,17 +932,11 @@ fn model_example(
         sample_source: TrainingSampleSource::HistoricalPit,
         feature_vector,
         factor_values,
-        labels: vec![TrainingLabel {
-            label_name: TOKEN_PAYOUT_RATIO,
-            horizon_secs: 0,
-            value: if strength > dec!(0.5) {
-                Decimal::ONE
-            } else {
-                Decimal::ZERO
-            },
-            is_resolved: true,
-            matured_at: decision_at + Duration::seconds(1),
-        }],
+        labels: ModelDatasetLedgerFixture::labels(
+            strength,
+            decision_at + Duration::seconds(1),
+            include_trade_policy_labels,
+        ),
         source_refs: Vec::new(),
         decision_capture: None,
         lot_context: None,
@@ -987,7 +1033,7 @@ async fn persist_dataset(
         None
     };
     let dataset_id = TrainingDatasetId::from_v7();
-    let fixture = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
+    let mut fixture = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
         training_dataset_id: dataset_id,
         model_spec_id: seed.model_spec_id,
         model_family: seed.model_family,
@@ -1013,6 +1059,7 @@ async fn persist_dataset(
         source_fingerprint: dataset_source_fingerprint(&seed.examples)?,
         sample_count,
     })?;
+    ModelDatasetLedgerFixture::bind_trade_policy(&mut fixture, seed.trade_policy)?;
     fixture
         .manifest
         .validate()
@@ -1084,7 +1131,7 @@ async fn seed_backtest_report(
         decision_policy_snapshot_id,
         window_start,
         window_end,
-        coverage: dec!(0.975),
+        coverage: dec!(0.975609756098),
         sample_count: 80,
         missing_feature_count: 0,
         rank_ic: dec!(0.143),
@@ -1113,6 +1160,23 @@ async fn seed_backtest_report(
             gross_return: dec!(0.047),
             pnl_curve: curve,
         },
+        portfolio_funnel: BacktestPortfolioFunnel {
+            schema_version: 1,
+            decision_tick_count: 4,
+            emitted_candidate_count: 82,
+            candidate_without_executable_tier_count: 0,
+            executable_tier_count: 82,
+            admission_rejected_tier_count: 0,
+            admitted_tier_count: 82,
+            selected_tier_count: 82,
+            executed_entry_count: 82,
+            resolved_allocation_count: 80,
+            no_candidate_tick_count: 0,
+            no_executable_tier_tick_count: 0,
+            no_selection_tick_count: 0,
+            selected_tick_count: 4,
+            tier_exclusion_reasons: Vec::new(),
+        },
         report_hash: ContentHash::from_bytes([0; 32]),
         parquet_uri: None,
     };
@@ -1140,19 +1204,19 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use super::{
-        BrowserModelTarget, CalibratedModelHead, FactorName, FactorServingPlane,
-        FeedbackSourceSeed, ModelVersionId, model_example,
-    };
+    use super::{FactorServingPlane, model_example};
+    use crate::support::execution_pg_seed::CalibratedModelHead;
     use quant_pivot_models::{
         clickhouse::{MarketResolutionFactInput, MarketResolutionRow},
-        types::{ContentHash, EvmBlockHash, EvmTransactionHash, PayoutRatio},
+        types::{
+            ContentHash, EvmBlockHash, EvmTransactionHash, PayoutRatio, stable_name::FactorName,
+        },
     };
 
     #[test]
     fn resolution_tokens_are_canonical() {
         let factor_serving_plane = FactorServingPlane::try_empty().expect("empty factor plane");
-        let example = model_example("contract", 0, 0, Utc::now(), &factor_serving_plane)
+        let example = model_example("contract", 0, 0, Utc::now(), &factor_serving_plane, false)
             .expect("browser research example");
         let secondary_token_id = example
             .selected_market
@@ -1178,10 +1242,8 @@ mod tests {
 
     #[test]
     fn production_control_is_constrained() {
-        let head = BrowserModelTarget::Active(ModelVersionId::from_v7())
-            .head(FeedbackSourceSeed::Production)
-            .expect("production control head");
-        let CalibratedModelHead::AlphaSimplex(weights) = head else {
+        let CalibratedModelHead::AlphaSimplex(weights) = CalibratedModelHead::feedback_control()
+        else {
             panic!("production control must freeze an explicit alpha simplex");
         };
         let expected = BTreeMap::from([

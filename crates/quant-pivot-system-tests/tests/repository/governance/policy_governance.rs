@@ -135,7 +135,7 @@ fn assert_first_concurrent_bundle(
     bundle: &ActivePolicyBundle,
     winner: ConfigResourceKind,
     expected_book_age: u64,
-    expected_open_intents: u32,
+    expected_open_recommendations: u32,
 ) {
     assert_eq!(
         bundle.generation,
@@ -150,11 +150,20 @@ fn assert_first_concurrent_bundle(
         }
     );
     assert_eq!(
-        bundle.snapshot.execution_risk.capital.max_open_intents,
+        bundle
+            .snapshot
+            .execution_risk
+            .portfolio
+            .exposure_limits
+            .max_open_recommendations,
         if winner == ConfigResourceKind::ExecutionRiskPolicy {
-            expected_open_intents
+            expected_open_recommendations
         } else {
-            base.snapshot.execution_risk.capital.max_open_intents
+            base.snapshot
+                .execution_risk
+                .portfolio
+                .exposure_limits
+                .max_open_recommendations
         }
     );
 }
@@ -163,7 +172,7 @@ fn assert_merged_concurrent_bundle(
     commit: &PolicyActivationCommit,
     previous: &ActivePolicyBundle,
     expected_book_age: u64,
-    expected_open_intents: u32,
+    expected_open_recommendations: u32,
 ) {
     assert_eq!(commit.outcome, PolicyActivationOutcome::Committed);
     assert_eq!(
@@ -187,9 +196,10 @@ fn assert_merged_concurrent_bundle(
             .bundle
             .snapshot
             .execution_risk
-            .capital
-            .max_open_intents,
-        expected_open_intents
+            .portfolio
+            .exposure_limits
+            .max_open_recommendations,
+        expected_open_recommendations
     );
 }
 
@@ -564,7 +574,13 @@ pub async fn concurrent_rebase_preserves_updates() {
         .await
         .expect("load base activations");
     let expected_book_age = base.snapshot.recommendation.data_quality.max_book_age_ms + 17;
-    let expected_open_intents = base.snapshot.execution_risk.capital.max_open_intents + 1;
+    let expected_open_recommendations = base
+        .snapshot
+        .execution_risk
+        .portfolio
+        .exposure_limits
+        .max_open_recommendations
+        + 1;
 
     let recommendation = prepare_candidate(
         &repo,
@@ -586,7 +602,11 @@ pub async fn concurrent_rebase_preserves_updates() {
         None,
         "execution-concurrent",
         |candidate| {
-            candidate.execution_risk.capital.max_open_intents = expected_open_intents;
+            candidate
+                .execution_risk
+                .portfolio
+                .exposure_limits
+                .max_open_recommendations = expected_open_recommendations;
         },
     )
     .await;
@@ -616,7 +636,7 @@ pub async fn concurrent_rebase_preserves_updates() {
         &after_first,
         winner.0,
         expected_book_age,
-        expected_open_intents,
+        expected_open_recommendations,
     );
     assert!(
         repo.count_valid_approvals()
@@ -647,7 +667,11 @@ pub async fn concurrent_rebase_preserves_updates() {
                 candidate.recommendation.data_quality.max_book_age_ms = expected_book_age;
             }
             ConfigResourceKind::ExecutionRiskPolicy => {
-                candidate.execution_risk.capital.max_open_intents = expected_open_intents;
+                candidate
+                    .execution_risk
+                    .portfolio
+                    .exposure_limits
+                    .max_open_recommendations = expected_open_recommendations;
             }
             other => panic!("unexpected concurrent candidate kind: {other:?}"),
         },
@@ -678,7 +702,7 @@ pub async fn concurrent_rebase_preserves_updates() {
         &second,
         &after_first,
         expected_book_age,
-        expected_open_intents,
+        expected_open_recommendations,
     );
 }
 
@@ -842,13 +866,13 @@ fn persisted_snapshot(snapshot: &DecisionPolicySnapshot) -> NewDecisionPolicySna
             snapshot,
             ConfigResourceKind::ReportSchedule,
         ),
-        operational_control_revision_id: required_revision(
+        operations_policy_revision_id: required_revision(
             snapshot,
-            ConfigResourceKind::OperationalControl,
+            ConfigResourceKind::OperationsPolicy,
         ),
-        execution_authorization_revision_id: required_revision(
+        execution_automation_policy_revision_id: required_revision(
             snapshot,
-            ConfigResourceKind::ExecutionAuthorization,
+            ConfigResourceKind::ExecutionAutomationPolicy,
         ),
         snapshot: snapshot_document,
         source: DecisionPolicySnapshotSource::Activation,

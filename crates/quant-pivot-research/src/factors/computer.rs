@@ -23,7 +23,7 @@ use quant_pivot_models::{
         factor::{FactorIndeterminateReason, NormalizationSource},
     },
     runtime_config::{
-        DomainConfig, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
+        DomainConfig, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig,
         SmallCrossSectionPolicy,
     },
     types::{
@@ -280,9 +280,9 @@ impl FactorEngine {
     /// [`SmallCrossSectionPolicy::FrozenReferenceQuantile`] fallback.
     ///
     /// Cross-sectional normalization is resolved across the batch column; the
-    /// confidence floor and `missing_factor_policy` are applied per market to
-    /// derive each [`ScoredFactor`]'s contribution flag and the market-level
-    /// [`FactorEligibility`].
+    /// confidence floor and each frozen factor definition's requiredness are
+    /// applied per market to derive each [`ScoredFactor`]'s contribution flag
+    /// and the market-level [`FactorEligibility`].
     ///
     /// # Errors
     ///
@@ -346,7 +346,6 @@ impl FactorEngine {
         parallel: bool,
     ) -> QuantResult<Vec<MarketFactorOutcome>> {
         let floor = config.min_factor_confidence.value;
-        let policy = config.missing_factor_policy;
         let factors = self.registry.factors();
         let definitions: Vec<&FactorDefinitionRef> = factors
             .iter()
@@ -376,7 +375,6 @@ impl FactorEngine {
             &raw_by_market,
             &norm_grid,
             floor,
-            policy,
             parallel,
         ))
     }
@@ -528,7 +526,6 @@ fn assemble_outcomes(
     raw_by_market: &[Vec<RawFactor>],
     norm_grid: &[Vec<NormalizedFactor>],
     floor: Decimal,
-    policy: MissingFactorPolicy,
     parallel: bool,
 ) -> Vec<MarketFactorOutcome> {
     let assemble_one = |market: usize, vector: &FeatureVector| -> MarketFactorOutcome {
@@ -539,7 +536,6 @@ fn assemble_outcomes(
             norm_grid,
             market,
             floor,
-            policy,
         )
     };
     if parallel {
@@ -555,8 +551,8 @@ fn assemble_outcomes(
 
 /// Assemble one market's outcome from its raw row and the normalized columns,
 /// deriving each factor's transient scoring eligibility and the market-level
-/// verdict (the first required factor that is missing / indeterminate / below
-/// the floor rejects the market under `RejectCandidate`).
+/// verdict. The first required factor that is missing, indeterminate, or below
+/// the confidence floor rejects the market before model inference.
 fn assemble_market(
     vector: &FeatureVector,
     definitions: &[&FactorDefinitionRef],
@@ -564,7 +560,6 @@ fn assemble_market(
     norm_grid: &[Vec<NormalizedFactor>],
     market: usize,
     floor: Decimal,
-    policy: MissingFactorPolicy,
 ) -> MarketFactorOutcome {
     let mut scored = Vec::with_capacity(definitions.len());
     let mut reject: Option<FactorEligibility> = None;
@@ -573,11 +568,7 @@ fn assemble_market(
         let raw = &raw_row[index];
         let normalized = norm_grid[index][market].clone();
         let scored_factor = assemble(revision, raw, normalized, floor);
-        if reject.is_none()
-            && spec.is_required()
-            && policy == MissingFactorPolicy::RejectCandidate
-            && !scored_factor.contributes
-        {
+        if reject.is_none() && spec.is_required() && !scored_factor.contributes {
             reject = Some(reject_verdict(&scored_factor, floor));
         }
         scored.push(scored_factor);

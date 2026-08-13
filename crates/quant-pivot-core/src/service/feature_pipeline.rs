@@ -7,9 +7,9 @@
 //! vectors are built in parallel from those frozen inputs. Vectors whose data
 //! quality is [`DataQualityStatus::Insufficient`] are durably retained as audit
 //! evidence but partitioned out before the factor/model plane. The serving
-//! completion commits every selected vector and separately binds the admitted
-//! model-input subset, so parity can replay rejections without treating them as
-//! inference inputs.
+//! completion commits every selected vector; its encoded-input rows commit the
+//! exact post-factor subset that actually reached inference, including the
+//! legitimate empty subset.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -34,8 +34,8 @@ use quant_pivot_models::{
     enums::{domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig},
     types::{
-        DecisionPolicySnapshotId, DomainInstrumentKey, MarketId, NullReason, TokenId, Usd,
-        stable_name::FeatureName,
+        DecisionPolicySnapshotId, DomainInstrumentKey, MarketId, NullReason, TokenId,
+        TradeTapeSourceEvidence, Usd, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -57,10 +57,7 @@ use quant_pivot_research::{
 };
 
 use crate::{
-    ingest::{
-        market_registry::MarketRegistry,
-        trade_tape_health::{cursors_by_contract_address, market_tape_available},
-    },
+    ingest::trade_tape_health::{cursors_by_contract_address, market_tape_available},
     observability::{
         feature_fact_writer::FeatureEventWriter, serving_evidence::FeatureEvidenceCommitment,
     },
@@ -133,7 +130,6 @@ pub struct FeaturePipelineService {
     window_provider: FeatureWindowProvider,
     feature_repo: Arc<dyn FeatureRepository>,
     event_writer: Arc<FeatureEventWriter>,
-    market_registry: Arc<MarketRegistry>,
     block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     basis_alert_repo: Arc<dyn BasisAlertRepository>,
@@ -147,7 +143,6 @@ pub struct FeaturePipelineDeps {
     pub window_provider: FeatureWindowProvider,
     pub feature_repo: Arc<dyn FeatureRepository>,
     pub event_writer: Arc<FeatureEventWriter>,
-    pub market_registry: Arc<MarketRegistry>,
     pub block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
     pub linkage_repo: Arc<dyn MarketLinkageRepository>,
     pub basis_alert_repo: Arc<dyn BasisAlertRepository>,
@@ -164,7 +159,6 @@ impl FeaturePipelineService {
             window_provider: deps.window_provider,
             feature_repo: deps.feature_repo,
             event_writer: deps.event_writer,
-            market_registry: deps.market_registry,
             block_cursor_repo: deps.block_cursor_repo,
             linkage_repo: deps.linkage_repo,
             basis_alert_repo: deps.basis_alert_repo,
@@ -270,8 +264,8 @@ impl FeaturePipelineService {
     }
 
     /// Persist every resolved vector and commit every selected market's feature
-    /// cells as serving evidence. The commitment separately binds the subset
-    /// admitted to model input, so rejected vectors remain replayable without
+    /// cells as serving evidence. The model-run completion later binds the exact
+    /// encoded-input subset, so rejected vectors remain replayable without
     /// pretending that they reached inference.
     async fn persist_vectors(
         &self,
@@ -342,27 +336,20 @@ impl FeaturePipelineService {
             })
             .collect::<QuantResult<Vec<_>>>()?;
         let mut accepted = Vec::new();
-        let mut admitted_vector_ids = Vec::new();
         let mut all_events = Vec::new();
         for ((vector, info), events) in vectors.iter().zip(&all_persisted).zip(projected) {
             if vector.data_quality != DataQualityStatus::Insufficient {
                 accepted.push(info.clone());
-                admitted_vector_ids.push(info.feature_vector_id);
             }
             all_events.extend(events);
         }
-        let evidence = if admitted_vector_ids.is_empty() {
+        let evidence = if accepted.is_empty() {
             if !all_events.is_empty() {
                 self.event_writer.write_batch(all_events).await?;
             }
             None
         } else {
-            Some(
-                self.event_writer
-                    .write_batch(all_events)
-                    .await?
-                    .bind_model_vectors(&admitted_vector_ids)?,
-            )
+            Some(self.event_writer.write_batch(all_events).await?)
         };
         Ok(PersistedFeatureVectors {
             accepted,
@@ -434,12 +421,21 @@ impl FeaturePipelineService {
         } else {
             empty_windows(request.included, &request.boundary)
         };
-        let trade_tape = if builder.needs_trade_tape() && self.trade_tape_on_chain.enabled {
+        let trade_tape = if !builder.needs_trade_tape() {
+            empty_trade_tape_windows(request.included, &request.boundary)
+        } else if self.trade_tape_on_chain.enabled {
             let cursors = self
                 .block_cursor_repo
                 .list_by_source(TradeTapeSourceKind::OnChain)
                 .await?;
             let cursors_by_address = cursors_by_contract_address(&cursors);
+            let source_evidence =
+                TradeTapeSourceEvidence::runtime(true, cursors.clone()).map_err(|detail| {
+                    ReportError::InvariantViolation {
+                        stage: "feature_pipeline",
+                        detail,
+                    }
+                })?;
             let trade_lookback =
                 Duration::from_secs(request.features.structural.trade_tape_window_secs);
             let mut windows = self
@@ -447,21 +443,52 @@ impl FeaturePipelineService {
                 .load_trade_tape_windows(request.included, &request.boundary, trade_lookback)
                 .await?;
             for market in request.included {
-                let neg_risk = self
-                    .market_registry
-                    .get_market(&market.market_id)
-                    .is_some_and(|info| info.neg_risk);
+                let neg_risk = request
+                    .pit
+                    .market_snapshot_at(&market.market_id, &request.boundary)
+                    .await?
+                    .ok_or_else(|| ReportError::InvariantViolation {
+                        stage: "feature_pipeline",
+                        detail: format!(
+                            "selected market {} has no PIT snapshot at the decision boundary",
+                            market.market_id
+                        ),
+                    })?
+                    .market
+                    .neg_risk;
                 let available =
                     market_tape_available(&self.trade_tape_on_chain, &cursors_by_address, neg_risk);
-                if let Some(window) = windows.get_mut(&market.market_id)
-                    && !available
-                {
-                    *window = window.clone().with_source_available(false);
-                }
+                let window = windows.get_mut(&market.market_id).ok_or_else(|| {
+                    ReportError::InvariantViolation {
+                        stage: "feature_pipeline",
+                        detail: format!(
+                            "trade-tape prefetch omitted selected market {}",
+                            market.market_id
+                        ),
+                    }
+                })?;
+                *window = window
+                    .clone()
+                    .with_source_evidence(source_evidence.clone(), available);
             }
             windows
         } else {
+            let source_evidence =
+                TradeTapeSourceEvidence::runtime(false, Vec::new()).map_err(|detail| {
+                    ReportError::InvariantViolation {
+                        stage: "feature_pipeline",
+                        detail,
+                    }
+                })?;
             empty_trade_tape_windows(request.included, &request.boundary)
+                .into_iter()
+                .map(|(market_id, window)| {
+                    (
+                        market_id,
+                        window.with_source_evidence(source_evidence.clone(), false),
+                    )
+                })
+                .collect()
         };
         let domain = if builder.needs_domain() {
             self.load_domain_inputs(request).await?
@@ -746,8 +773,8 @@ struct PersistedFeatureVectors {
     /// Every selected vector, including DQ-rejected rows, in deterministic
     /// selection order. The report DQ snapshot freezes these exact ids.
     all: Vec<FeatureVectorInfo>,
-    /// Serving commitment over all selected vectors, bound to the accepted
-    /// model-input subset.
+    /// Serving commitment over all selected vectors. The completion marker
+    /// separately commits the actual encoded-input subset.
     evidence: Option<FeatureEvidenceCommitment>,
 }
 
@@ -979,7 +1006,7 @@ mod tests {
             CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, DecisionCaptureEvidence,
             DecisionSnapshotEvidence, EventId, FeatureSourceRefs, FeatureVectorId,
             FeatureVectorPayload, MarketContext, MarketId, Probability, RecommendationIdentity,
-            SchemaVersion, SelectionMemberEvidence, TokenId, Usd,
+            SchemaVersion, SelectionMemberEvidence, TokenId, TradeTapeSourceEvidence, Usd,
         },
     };
     use quant_pivot_research::hashing::ResearchHasher;
@@ -1043,6 +1070,7 @@ mod tests {
                     source_refs: Vec::new(),
                 },
             },
+            trade_tape_source: TradeTapeSourceEvidence::not_required(),
             identity: RecommendationIdentity {
                 category: MarketCategory::Other,
                 question: format!("question-{suffix}"),

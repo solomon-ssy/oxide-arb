@@ -41,7 +41,7 @@ harness = false
 required-features = ["online"]
 
 [[bench]]
-name = "portfolio_lp"
+name = "global_portfolio"
 harness = false
 
 [[bench]]
@@ -49,9 +49,13 @@ name = "training_matrix"
 harness = false
 
 [[bin]]
-name = "report_compute_gate"
-path = "src/bin/report_compute_gate.rs"
+name = "report_funnel_gate"
+path = "src/bin/report_funnel_gate.rs"
 required-features = ["online"]
+
+[[bin]]
+name = "portfolio_compute_gate"
+path = "src/bin/portfolio_compute_gate.rs"
 
 [[bin]]
 name = "model_train_replay_gate"

@@ -5,14 +5,14 @@
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
 > - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `post_deployment_behavior`: 本次重构只交付并验证唯一终态 schema；不设计旧版本共存、升级或降级路径。
+> - `rollback_and_data_verification`: 仅在 disposable 空数据库执行 fresh-install 验证；任何真实数据库重置需要操作者另行授权。
 
 > 状态：生产级破坏式重构设计
 >
 > 范围：仅限 Polymarket 的 quant-pivot，彻底替换当前 Endgame arbitrage 系统
 >
-> 兼容策略：零兼容。删除旧 Endgame、DryRun/Paper/Live、runtime-config v2、旧命名和 re-export。
+> 兼容策略：零兼容。删除旧 Endgame、DryRun/Paper/Live、旧 runtime-config shape、旧命名和 re-export。
 
 ## 0. 决策摘要
 
@@ -27,9 +27,13 @@ book update -> endgame detection -> risk gate -> FOK order -> post-trade -> sett
 新产品闭环是：
 
 ```text
-Polymarket facts -> features -> factors/models -> portfolio plan
+Polymarket facts -> represented routes -> route-specific model/calibration/trade policy
+ -> executable USD scenario tiers -> global robust portfolio plan
  -> TopN recommendation report -> report_only / semi_auto / auto_execution
 ```
+
+一份报告允许跨 category/Route。Category 只作为 filter、risk bucket 与解释维度；任一 represented Route
+缺少完整 artifact binding 或唯一 MILP 未得到 exact-verified optimal result 时，整份报告 fail closed。
 
 ## 1. 阅读顺序
 
@@ -42,11 +46,12 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 5. [`04-topn-report-and-recommendation.md`](04-topn-report-and-recommendation.md)：TopN 报告 payload，明确买什么、什么时候买、买多少、什么时候卖、卖多少、入场触发、止盈、止损、出场节点。
 6. [`05-execution-risk-and-governance.md`](05-execution-risk-and-governance.md)：`report_only`、`semi_auto`、`auto_execution` 的语义、审批、OrderIntent、组合风险、审计规则。
 7. [`06-config-deploy-and-ops.md`](06-config-deploy-and-ops.md)：Deploy Config、六类 boot typed policy、CI、migration、Docker、observability、runbook 调整。
-8. [`08-third-party-crates-and-ml-stack.md`](08-third-party-crates-and-ml-stack.md)：第三方 crate、模型训练、推理、优化、依赖引入顺序和 MSRV/native 风险。
-9. [`09-account-capital-position-reconciliation.md`](09-account-capital-position-reconciliation.md)：账户/资本/持仓/对账平面——`AccountSnapshot`、planner 资金感知签名、资金状态机、对账证据链、Polymarket 余额/持仓数据源（设计先行，实现分相位到 Phase 4/5/6）。
-10. [`08-cold-start-production-closeout.md`](08-cold-start-production-closeout.md)：冷启动、schema、catalog、bootstrap、parity、认证和 UI 的生产收尾契约与验收矩阵。
-11. [`08-extreme-performance-design.md`](08-extreme-performance-design.md)：数据面、统一 L2 ledger、订单簿和 WebSocket fanout 的极致性能设计。
-12. [`09-extreme-performance-ledger.md`](09-extreme-performance-ledger.md)：性能重构执行状态、决策和中断恢复台账。
+8. [`phase-05/05.8-portfolio-optimization-highs.md`](phase-05/05.8-portfolio-optimization-highs.md)：跨 Route 统一经济层级、联合场景、唯一 MILP 与 exact verification。
+9. [`08-third-party-crates-and-ml-stack.md`](08-third-party-crates-and-ml-stack.md)：第三方 crate、模型训练、推理、优化、依赖引入顺序和 MSRV/native 风险。
+10. [`09-account-capital-position-reconciliation.md`](09-account-capital-position-reconciliation.md)：账户/资本/持仓/对账平面——`AccountSnapshot`、planner 资金感知签名、资金状态机、对账证据链、Polymarket 余额/持仓数据源（设计先行，实现分相位到 Phase 4/5/6）。
+11. [`08-cold-start-production-closeout.md`](08-cold-start-production-closeout.md)：冷启动、schema、catalog、bootstrap、parity、认证和 UI 的生产收尾契约与验收矩阵。
+12. [`08-extreme-performance-design.md`](08-extreme-performance-design.md)：数据面、统一 L2 ledger、订单簿和 WebSocket fanout 的极致性能设计。
+13. [`09-extreme-performance-ledger.md`](09-extreme-performance-ledger.md)：性能重构执行状态、决策和中断恢复台账。
 
 **子phase实施目录（按 Phase 推进时读）：**
 
@@ -64,7 +69,7 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 - 运行模式重建为 `report_only`、`semi_auto`、`auto_execution`。
 - `report_only` 是默认、最安全、最先上线的模式。
 - 旧 `ExecutionMode::DryRun`、`ExecutionMode::Paper`、`ExecutionMode::Live` 必须删除，不做 alias。
-- runtime-config 只有 system-owned schema v1；删除或迁移后的旧 JSON 路径不提供 parser、alias 或 shim。
+- Runtime Config 只有六类 system-owned clean-install 资源；固定 schema discriminator 为 `1`，旧 JSON 路径不提供 parser、alias、converter 或 shim。
 - 旧 Endgame 文档只能作为删除盘点资料，不能作为活跃实现依据。
 - 禁止 compatibility re-export。公开 API 必须显式、收敛、语义精准。
 - 不追求最小变更、最小侵入、最小工作量；优先追求正确领域模型、清晰边界和生产可维护性。

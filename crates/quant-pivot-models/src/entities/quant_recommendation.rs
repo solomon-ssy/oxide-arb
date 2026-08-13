@@ -5,16 +5,18 @@ use sea_orm::entity::prelude::*;
 
 use super::{
     event, market, quant_execution_rollup_reconciliation_task, quant_order_intent,
-    quant_recommendation_execution_rollup, quant_recommendation_report,
-    quant_recommendation_resolution_outcome, quant_resolution_outcome_reconciliation_task,
-    research_profile_artifact,
+    quant_portfolio_plan, quant_recommendation_execution_rollup, quant_recommendation_report,
+    quant_recommendation_resolution_outcome, quant_report_route_run,
+    quant_resolution_outcome_reconciliation_task,
 };
 use crate::{
+    domain::quant::{ExecutableEconomicTier, RecommendationEconomics},
     enums::quant::{OutcomeSide, RecommendationStatus},
+    runtime_config::BuyModelRoute,
     types::{
-        Bps, EventId, EvidenceRefs, ExecutionEligibility, MarketContext, MarketId, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, RecommendationTradePlan, ResearchProfileArtifactId, TokenId,
+        EconomicTierId, EventId, EvidenceRefs, ExecutionEligibility, MarketContext, MarketId,
+        PortfolioPlanId, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, RecommendationTradePlan, ReportRouteRunId, TokenId,
     },
 };
 
@@ -24,26 +26,25 @@ use crate::{
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_id: RecommendationId,
-    pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub recommendation_report_id: RecommendationReportId,
+    pub report_route_run_id: ReportRouteRunId,
+    pub portfolio_plan_id: PortfolioPlanId,
+    pub economic_tier_id: EconomicTierId,
     pub rank: i32,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub route: BuyModelRoute,
     pub market_id: MarketId,
     pub event_id: EventId,
     pub token_id: TokenId,
     pub outcome_side: OutcomeSide,
-    pub composite_score: Probability,
-    pub risk_adjusted_score: Probability,
-    pub confidence: Probability,
-    pub expected_return_bps: Bps,
-    pub downside_bps: Bps,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub economics_json: RecommendationEconomics,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub economic_tier_json: ExecutableEconomicTier,
     #[sea_orm(column_type = "JsonBinary")]
     pub identity: RecommendationIdentity,
     #[sea_orm(column_type = "JsonBinary")]
     pub market_context: MarketContext,
-    pub rank_before_portfolio: i32,
-    pub liquidity_score: Probability,
-    pub data_quality_score: Probability,
-    pub model_score_percentile: Probability,
     #[sea_orm(column_type = "JsonBinary")]
     pub trade_plan: RecommendationTradePlan,
     #[sea_orm(column_type = "JsonBinary")]
@@ -60,19 +61,25 @@ pub struct Model {
 
     #[sea_orm(
         belongs_to,
-        relation_enum = "ResearchProfileArtifact",
-        from = "research_profile_artifact_id",
-        to = "research_profile_artifact_id"
-    )]
-    pub research_profile_artifact: BelongsTo<research_profile_artifact::Entity>,
-
-    #[sea_orm(
-        belongs_to,
         relation_enum = "RecommendationReport",
         from = "recommendation_report_id",
         to = "recommendation_report_id"
     )]
     pub recommendation_report: BelongsTo<quant_recommendation_report::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "ReportRouteRun",
+        from = "report_route_run_id",
+        to = "report_route_run_id"
+    )]
+    pub report_route_run: BelongsTo<quant_report_route_run::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "PortfolioPlan",
+        from = "portfolio_plan_id",
+        to = "portfolio_plan_id"
+    )]
+    pub portfolio_plan: BelongsTo<quant_portfolio_plan::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "Market",

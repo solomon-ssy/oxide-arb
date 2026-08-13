@@ -15,7 +15,7 @@ use quant_pivot_models::{
     enums::quant::{RecommendationReportStatus, ReportFactDeliveryStatus},
     hashing::CanonicalDigest,
     types::{
-        ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV1,
+        ContentHash, REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV2,
         ReportFactTableCommitment, WorkerId,
     },
 };
@@ -242,7 +242,7 @@ impl ReportFactDeliveryWorker {
     async fn load_bundle(
         &self,
         delivery: &ReportFactDeliveryInfo,
-    ) -> QuantResult<ReportFactBundleV1> {
+    ) -> QuantResult<ReportFactBundleV2> {
         let bytes = self.deps.artifacts.get(&delivery.bundle_uri).await?;
         let byte_count =
             i64::try_from(bytes.len()).map_err(|error| ReportError::NumericOverflow {
@@ -257,7 +257,7 @@ impl ReportFactDeliveryWorker {
             }
             .into());
         }
-        let bundle: ReportFactBundleV1 =
+        let bundle: ReportFactBundleV2 =
             serde_json::from_slice(&bytes).map_err(|error| ReportError::InvariantViolation {
                 stage: "report_fact_delivery",
                 detail: format!("invalid report fact bundle: {error}"),
@@ -428,7 +428,7 @@ async fn run_poll_loop<Process, ProcessFuture, OnError>(
 
 fn validate_bundle(
     delivery: &ReportFactDeliveryInfo,
-    bundle: &ReportFactBundleV1,
+    bundle: &ReportFactBundleV2,
 ) -> QuantResult<()> {
     if bundle.format_version != REPORT_FACT_BUNDLE_FORMAT_VERSION
         || bundle.recommendation_report_id != delivery.recommendation_report_id
@@ -518,9 +518,11 @@ impl RowChainVerifier {
             self.hasher.update(b",");
         }
         self.first = false;
-        let bytes = serde_json::to_vec(row).map_err(|error| ReportError::InvariantViolation {
-            stage: "report_fact_delivery",
-            detail: format!("ClickHouse verification serialization failed: {error}"),
+        let bytes = CanonicalDigest::canonical_json_bytes(row).map_err(|error| {
+            ReportError::InvariantViolation {
+                stage: "report_fact_delivery",
+                detail: format!("ClickHouse canonical verification failed: {error}"),
+            }
         })?;
         self.hasher.update(&bytes);
         self.row_count =
@@ -555,7 +557,7 @@ impl RowChainVerifier {
     }
 }
 
-fn notification_payload(bundle: &ReportFactBundleV1) -> ReportNotificationPayload {
+fn notification_payload(bundle: &ReportFactBundleV2) -> ReportNotificationPayload {
     ReportNotificationPayload {
         report_id: bundle.recommendation_report_id,
         kind: bundle.notification.kind,
@@ -570,7 +572,10 @@ fn notification_payload(bundle: &ReportFactBundleV1) -> ReportNotificationPayloa
             .map(|recommendation| NotificationRecommendation {
                 market_id: recommendation.market_id.clone(),
                 outcome_side: recommendation.outcome_side,
-                score: recommendation.score,
+                route: recommendation.route,
+                profit_probability_bps: recommendation.profit_probability_bps,
+                robust_expected_net_usd: recommendation.robust_expected_net_usd,
+                marginal_portfolio_value_usd: recommendation.marginal_portfolio_value_usd,
                 suggested_usd: recommendation.suggested_usd,
             })
             .collect(),
@@ -591,9 +596,16 @@ mod tests {
 
     use quant_pivot_error::{QuantResult, report::ReportError};
     use quant_pivot_models::hashing::CanonicalDigest;
+    use serde::Serialize;
     use tokio_util::sync::CancellationToken;
 
     use super::{RowChainVerifier, run_poll_loop};
+
+    #[derive(Serialize)]
+    struct UnorderedFields {
+        zebra: u8,
+        alpha: &'static str,
+    }
 
     #[tokio::test]
     async fn report_fact_after_error() {
@@ -637,8 +649,14 @@ mod tests {
     #[test]
     fn streaming_row_matches_array() {
         let rows = vec![
-            serde_json::json!({"rank": 1, "market": "a"}),
-            serde_json::json!({"rank": 2, "market": "b"}),
+            UnorderedFields {
+                zebra: 1,
+                alpha: "a",
+            },
+            UnorderedFields {
+                zebra: 2,
+                alpha: "b",
+            },
         ];
         let expected = CanonicalDigest::content_hash_json(&rows).expect("row-chain hash");
         let mut verifier = RowChainVerifier::new();

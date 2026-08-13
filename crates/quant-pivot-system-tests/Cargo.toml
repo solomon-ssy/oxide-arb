@@ -19,6 +19,8 @@ quant-pivot-research = { workspace = true, default-features = false, features = 
 quant-pivot-storage = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }

@@ -5,16 +5,72 @@ expression: recommendation_limit_entry()
 {
   "recommendation_id": "f4910694-84c7-588f-a588-b768785d3c71",
   "recommendation_report_id": "f7a59e75-1560-57c2-abc0-972ac075aef0",
+  "report_route_run_id": "639686eb-df5e-577e-9b5d-72a4440d37ba",
+  "portfolio_plan_id": "e62df386-c19a-5c0d-9da3-02c7b4619335",
+  "economic_tier_id": "4141f916-1190-585e-8fbb-9231c82a0ca4",
   "rank": 1,
+  "route": "pooled",
   "market_id": "0xmarketA",
   "event_id": "evt-1",
   "token_id": "token-0xmarketA",
   "outcome_side": "yes",
-  "composite_score": "0.71",
-  "risk_adjusted_score": "0.66",
-  "confidence": "0.72",
-  "expected_return_bps": "150",
-  "downside_bps": "80",
+  "economics": {
+    "profit_probability_bps": "6200",
+    "nominal_expected_net_usd": "55",
+    "robust_expected_net_usd": "42",
+    "max_loss_usd": "120",
+    "cvar_contribution_usd": "40",
+    "capital_occupancy_usd_hours": "12000",
+    "marginal_portfolio_value_usd": "38"
+  },
+  "economic_tier": {
+    "economic_tier_id": "4141f916-1190-585e-8fbb-9231c82a0ca4",
+    "report_route_run_id": "639686eb-df5e-577e-9b5d-72a4440d37ba",
+    "candidate_id": "813c6707-68b0-5b0e-9abc-268571ea6262",
+    "tier_ordinal": 1,
+    "route": "pooled",
+    "market_id": "0xmarketA",
+    "event_id": "evt-1",
+    "category": "politics",
+    "token_id": "token-0xmarketA",
+    "outcome_side": "yes",
+    "shares": "500",
+    "entry": {
+      "notional_usd": "250",
+      "entry_vwap": "0.43",
+      "fee_usd": "1.25",
+      "slippage_usd": "2.50",
+      "visible_liquidity_usd": "5000"
+    },
+    "profit_probability_lower_bps": 5800,
+    "probability_interval_width_bps": 800,
+    "scenario_cashflows": [
+      {
+        "scenario_index": 0,
+        "discounted_net_usd": "90"
+      },
+      {
+        "scenario_index": 1,
+        "discounted_net_usd": "-120"
+      }
+    ],
+    "capital_occupancy": [
+      {
+        "end_secs": 86400,
+        "locked_usd": "250"
+      }
+    ],
+    "economics": {
+      "profit_probability_bps": "6200",
+      "nominal_expected_net_usd": "55",
+      "robust_expected_net_usd": "42",
+      "max_loss_usd": "120",
+      "cvar_contribution_usd": "40",
+      "capital_occupancy_usd_hours": "12000",
+      "marginal_portfolio_value_usd": "38"
+    },
+    "lineage_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+  },
   "identity": {
     "category": "politics",
     "question": "Will the event resolve Yes?",
@@ -34,12 +90,7 @@ expression: recommendation_limit_entry()
     "tick_size": "0.01",
     "fee_rate": null
   },
-  "rank_before_portfolio": 1,
-  "liquidity_score": "0.8",
-  "data_quality_score": "0.9",
-  "model_score_percentile": "0.75",
   "trade_plan": {
-    "kind": "frozen",
     "policy": {
       "artifact_id": "a8f80211-bf62-5e7b-acd9-54e24dfe89df",
       "artifact_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
@@ -48,7 +99,7 @@ expression: recommendation_limit_entry()
         "profile_ref": {
           "id": "pooled_1h_control",
           "version": 4,
-          "content_hash": "blake3:045ed413fb4ee177cbfa78eff3e934a0f580ffa942d260be6e4ed10b8083e9fb"
+          "content_hash": "blake3:5ead2ec431de352cce70974f7b86c33b6b4e2f5300e8c6a24e179db2285becd8"
         },
         "category": "politics",
         "horizon_secs": 86400,
@@ -87,27 +138,17 @@ expression: recommendation_limit_entry()
       "entry_reason": "limit entry at edge"
     },
     "sizing": {
+      "economic_tier_id": "c41cf043-099a-5ad9-ba89-8d152d27b9e8",
       "suggested_usd": "250",
       "suggested_shares": "500",
-      "max_usd": "500",
-      "min_usd": "10",
+      "entry_vwap": "0.43",
       "portfolio_weight_pct": "0.05",
       "market_exposure_after_usd": "250",
       "event_exposure_after_usd": "250",
       "category_exposure_after_usd": "250",
-      "binding_constraint": "kelly_cap",
-      "sizing_reason": "half-kelly capped",
-      "sizing_model": "kelly",
-      "edge_bps": "120",
-      "kelly_fraction_applied": "0.5",
-      "edge_uncertainty_shrink_applied": null,
-      "correlation_shrink_applied": null,
-      "f_star_applied": "1.0",
-      "kelly_fraction_config_applied": "0.5",
-      "confidence_shrink_applied": "1.0",
-      "drawdown_shrink_applied": "1.0",
-      "raw_fraction_applied": "0.5",
-      "position_cap_fraction_applied": "0.05"
+      "route_exposure_after_usd": "250",
+      "capital_occupancy_usd_hours": "12000",
+      "sizing_reason": "selected executable tier from the exact global MILP"
     },
     "exit": {
       "take_profit_price": "0.7",
@@ -121,7 +162,7 @@ expression: recommendation_limit_entry()
       "thesis_invalidation": {
         "min_score_retention": "0.6",
         "min_expected_return_bps": "0",
-        "require_execution_eligibility": true
+        "require_route_gate_eligibility": true
       },
       "opportunistic_exit": {
         "min_confidence": "0.65",
@@ -142,6 +183,10 @@ expression: recommendation_limit_entry()
       "max_market_exposure_usd": "500",
       "max_event_exposure_usd": "750",
       "max_category_exposure_usd": "1500",
+      "max_route_exposure_usd": "1500",
+      "cvar_contribution_usd": "40",
+      "portfolio_cvar_cap_usd": "500",
+      "maximum_scenario_loss_cap_usd": "750",
       "requires_approval": true,
       "auto_execution_allowed": false,
       "risk_notes": [
@@ -177,8 +222,7 @@ expression: recommendation_limit_entry()
       "report_only_mode"
     ],
     "approval_required": true,
-    "auto_policy_id": null,
-    "uncalibrated_watermark": false
+    "auto_policy_id": null
   },
   "valid_from": "2023-11-14T22:13:20Z",
   "valid_until": "2023-11-15T22:13:20Z",

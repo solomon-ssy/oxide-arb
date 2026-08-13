@@ -595,13 +595,13 @@ impl PgModelRouteShadowBindingRepository {
                 document.revisions.report_schedule,
                 ConfigResourceKind::ReportSchedule,
             )?,
-            operational_control_revision_id: required(
-                document.revisions.operational_control,
-                ConfigResourceKind::OperationalControl,
+            operations_policy_revision_id: required(
+                document.revisions.operations_policy,
+                ConfigResourceKind::OperationsPolicy,
             )?,
-            execution_authorization_revision_id: required(
-                document.revisions.execution_authorization,
-                ConfigResourceKind::ExecutionAuthorization,
+            execution_automation_policy_revision_id: required(
+                document.revisions.execution_automation_policy,
+                ConfigResourceKind::ExecutionAutomationPolicy,
             )?,
             snapshot: document,
             source: DecisionPolicySnapshotSource::Activation,

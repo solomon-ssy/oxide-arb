@@ -104,8 +104,8 @@ pub struct FactorPipelineRequest<'a> {
     pub factor_execution: &'a FactorExecutionPlane,
 }
 
-/// A market excluded by `RejectCandidate` (a required factor was missing or below
-/// the confidence floor). Observable, but it produces no factor rows.
+/// A market excluded because a required factor was missing, indeterminate, or
+/// below the confidence floor. Observable, but it produces no factor rows.
 pub struct RejectedFactorMarket {
     /// The excluded market.
     pub market_id: MarketId,
@@ -118,7 +118,8 @@ pub struct FactorPipelineResult {
     /// Per-market factor outcomes (eligible + rejected), with transient scoring
     /// flags — the input consumed by the model runtime.
     pub outcomes: Vec<MarketFactorOutcome>,
-    /// Markets excluded under `RejectCandidate` (not persisted, not emitted).
+    /// Markets excluded by the sealed required-factor contract (not persisted,
+    /// not emitted).
     pub rejected: Vec<RejectedFactorMarket>,
     /// Persisted factor-value rows for the eligible markets.
     pub persisted: Vec<FactorValueInfo>,

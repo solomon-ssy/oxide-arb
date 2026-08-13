@@ -6,7 +6,7 @@
 //! thesis baselines **frozen on the intent** (`ExitPolicySpec::entry_composite_score`).
 //! The thesis is invalidated when any of:
 //!
-//! 1. the market would no longer pass the auto-execution eligibility gate, or
+//! 1. the market would no longer pass its frozen Route-local model gate, or
 //! 2. the fresh composite score drops below `entry_score × invalidation_ratio`, or
 //! 3. the fresh expected return is non-positive (the edge is gone).
 //!
@@ -62,8 +62,8 @@ pub struct FreshSignal {
     pub composite_score: Probability,
     /// Fresh expected return (basis points).
     pub expected_return_bps: Bps,
-    /// Whether the market would still pass the auto-execution eligibility gate.
-    pub auto_exec_eligible: bool,
+    /// Whether the market would still pass its frozen Route-local model gate.
+    pub route_gate_eligible: bool,
 }
 
 /// Narrow, side-effect-free single-market re-inference seam.
@@ -150,9 +150,9 @@ pub fn degradation_verdict(
     fresh: &FreshSignal,
     policy: &ThesisInvalidationPolicy,
 ) -> ExitSignalVerdict {
-    if policy.require_execution_eligibility && !fresh.auto_exec_eligible {
+    if policy.require_route_gate_eligibility && !fresh.route_gate_eligible {
         return ExitSignalVerdict::ThesisInvalidated {
-            detail: "market no longer auto-execution eligible".to_owned(),
+            detail: "market no longer passes its frozen Route-local model gate".to_owned(),
         };
     }
     if fresh.expected_return_bps < policy.min_expected_return_bps {
@@ -259,7 +259,7 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
                     score: signal.composite_score,
                     score_retention: signal.composite_score.inner() / entry_score.inner(),
                     expected_return_bps: signal.expected_return_bps,
-                    execution_eligible: signal.auto_exec_eligible,
+                    route_gate_eligible: signal.route_gate_eligible,
                     verdict: verdict.reinference_verdict_kind(),
                     detail: verdict.reinference_verdict_detail(),
                     shadow: policy.signal_reinference.shadow_mode,
@@ -336,7 +336,7 @@ mod tests {
                 .expect("hash"),
             composite_score: Probability::new(score.parse().unwrap()),
             expected_return_bps: Bps::new(Decimal::from(ret_bps)),
-            auto_exec_eligible: eligible,
+            route_gate_eligible: eligible,
         }
     }
 
@@ -344,7 +344,7 @@ mod tests {
         ThesisInvalidationPolicy {
             min_score_retention: dec!(0.6),
             min_expected_return_bps: Bps::new(Decimal::ONE),
-            require_execution_eligibility: true,
+            require_route_gate_eligibility: true,
         }
     }
 

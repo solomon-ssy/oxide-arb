@@ -265,8 +265,6 @@ impl From<RouteBootstrapCommitError> for QuantError {
 
 #[cfg(test)]
 mod tests {
-    use rust_decimal_macros::dec;
-
     use super::{
         ApiError, ConfigError, ConfigValidationError, ConfigValidationReport, ControlError, DbErr,
         ExecutionError, FeedbackError, InfraError, MarketError, QuantError, QuantResult,
@@ -303,7 +301,10 @@ mod tests {
     #[test]
     fn config_error_propagates() {
         let cfg_err = ConfigError::from(ConfigValidationReport::single_error(
-            ConfigValidationError::InvalidKellyFraction(dec!(1.5)),
+            ConfigValidationError::InvalidValue {
+                field: "portfolio.admission.min_profit_probability_bps",
+                detail: "must be within 1..=9999".to_owned(),
+            },
         ));
         let oxide_err: QuantError = cfg_err.into();
         assert!(matches!(oxide_err, QuantError::Config(_)));

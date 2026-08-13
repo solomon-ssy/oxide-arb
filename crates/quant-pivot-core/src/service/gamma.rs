@@ -1,7 +1,7 @@
 //! Gamma market catalog sync — full and incremental refresh into registry, cache, and DB.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     mem,
     sync::Arc,
     time::Instant,
@@ -41,7 +41,7 @@ use quant_pivot_models::{
         MarketId,
     },
 };
-use quant_pivot_repository::traits::{CatalogLedgerRepository, MarketRepository};
+use quant_pivot_repository::traits::{CatalogLedgerRepository, EventRepository, MarketRepository};
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -71,6 +71,7 @@ pub struct GammaServiceDeps {
     pub market_registry: Arc<MarketRegistry>,
     pub market_cache: Arc<MarketCache>,
     pub market_filter: Arc<MarketFilter>,
+    pub event_repo: Arc<dyn EventRepository>,
     pub market_repo: Arc<dyn MarketRepository>,
     pub catalog_ledger_repo: Arc<dyn CatalogLedgerRepository>,
     pub cache: Arc<CacheManager>,
@@ -95,6 +96,7 @@ pub struct GammaService {
     market_registry: Arc<MarketRegistry>,
     market_cache: Arc<MarketCache>,
     market_filter: Arc<MarketFilter>,
+    event_repo: Arc<dyn EventRepository>,
     market_repo: Arc<dyn MarketRepository>,
     catalog_ledger_repo: Arc<dyn CatalogLedgerRepository>,
     cache: Arc<CacheManager>,
@@ -116,6 +118,7 @@ impl GammaService {
             market_registry: deps.market_registry,
             market_cache: deps.market_cache,
             market_filter: deps.market_filter,
+            event_repo: deps.event_repo,
             market_repo: deps.market_repo,
             catalog_ledger_repo: deps.catalog_ledger_repo,
             cache: deps.cache,
@@ -514,17 +517,43 @@ impl GammaService {
             .gamma_client
             .fetch_markets_bounded(&missing_ids, 8)
             .await;
+        let fetched_event_ids = results
+            .iter()
+            .filter_map(|(_, result)| {
+                result
+                    .as_ref()
+                    .ok()
+                    .map(|fetched| fetched.event.event_id.clone())
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let persisted_memberships = self
+            .event_repo
+            .find_by_ids(&fetched_event_ids)
+            .await?
+            .into_iter()
+            .map(|event| (event.event_id, event.catalog_market_ids))
+            .collect::<HashMap<_, _>>();
         let mut tombstoned = 0_usize;
         let boundary = DecisionClock::new(0).boundary(fetched_at)?;
         for (market_id, result) in results {
             match result {
                 Ok(mut fetched) => {
-                    if fetched.event.market_ids.is_empty()
-                        && let Some(previous_event) =
-                            self.market_registry.get_event(&fetched.event.event_id)
-                    {
-                        fetched.event.market_ids = previous_event.market_ids;
-                    }
+                    let previous_event = self.market_registry.get_event(&fetched.event.event_id);
+                    let fallback = previous_event
+                        .as_ref()
+                        .map(|event| event.market_ids.as_slice())
+                        .or_else(|| {
+                            persisted_memberships
+                                .get(&fetched.event.event_id)
+                                .map(CatalogMarketIds::as_slice)
+                        });
+                    require_event_membership(
+                        &mut fetched.event,
+                        &fetched.registry.market_id,
+                        fallback,
+                    )?;
                     batch.registry_events.push(fetched.event.clone());
                     batch.registry_markets.push(fetched.registry.clone());
                     batch.event_source_timestamps.insert(
@@ -631,6 +660,25 @@ impl GammaService {
                 .await;
         }
     }
+}
+
+fn require_event_membership(
+    event: &mut EventRegistryInfo,
+    market_id: &MarketId,
+    fallback: Option<&[MarketId]>,
+) -> Result<(), MarketError> {
+    if event.market_ids.is_empty()
+        && let Some(market_ids) = fallback
+    {
+        event.market_ids = market_ids.to_vec();
+    }
+    if !event.market_ids.contains(market_id) {
+        return Err(MarketError::MissingEventMembership {
+            market_id: market_id.to_string(),
+            event_id: event.event_id.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn decode_catalog_payload<T: DeserializeOwned>(
@@ -1152,12 +1200,59 @@ mod tests {
         enums::{
             catalog::CatalogFilterReasonSet,
             common::{CategorySet, TickSize},
+            market::EventStatus,
         },
         types::{EventId, TokenId},
     };
     use rust_decimal::Decimal;
 
     use super::*;
+
+    fn registry_event(market_ids: Vec<MarketId>) -> EventRegistryInfo {
+        EventRegistryInfo {
+            event_id: EventId::new("evt-1"),
+            title: "Test event".to_owned(),
+            slug: "test-event".to_owned(),
+            series_slug: None,
+            status: EventStatus::Active,
+            market_ids,
+            categories: CategorySet::EMPTY,
+            tags: Vec::new(),
+            neg_risk: false,
+            end_date: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn membership_restores_cold_start() {
+        let market_id = MarketId::new("m-1");
+        let fallback = vec![market_id.clone(), MarketId::new("m-2")];
+        let mut event = registry_event(Vec::new());
+
+        require_event_membership(&mut event, &market_id, Some(&fallback))
+            .expect("persisted membership must restore a cold registry");
+
+        assert_eq!(event.market_ids, fallback);
+    }
+
+    #[test]
+    fn membership_rejects_incomplete_event() {
+        let market_id = MarketId::new("m-1");
+        let mut event = registry_event(vec![MarketId::new("m-2")]);
+
+        let error = require_event_membership(&mut event, &market_id, None)
+            .expect_err("incomplete membership must fail closed");
+
+        assert_eq!(
+            error,
+            MarketError::MissingEventMembership {
+                market_id: market_id.to_string(),
+                event_id: event.event_id.to_string(),
+            }
+        );
+    }
 
     fn registry_market(
         id: &str,

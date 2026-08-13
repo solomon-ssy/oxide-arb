@@ -67,8 +67,13 @@ impl SelectionThresholds {
         selection: &SelectionConfig,
         data_quality: &DataQualityConfig,
     ) -> QuantResult<Self> {
+        let enabled_categories = if selection.enabled_categories.is_empty() {
+            MarketCategory::ALL_VARIANTS.into_iter().collect()
+        } else {
+            selection.enabled_categories.iter().copied().collect()
+        };
         Ok(Self {
-            enabled_categories: selection.enabled_categories.iter().copied().collect(),
+            enabled_categories,
             min_liquidity_usd: Usd::new(selection.min_liquidity_usd.value),
             min_volume_24h_usd: Usd::new(selection.min_volume_24h_usd.value),
             max_spread_bps: Decimal::from(selection.max_spread_bps),

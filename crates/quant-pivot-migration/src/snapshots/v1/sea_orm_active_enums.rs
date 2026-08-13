@@ -201,10 +201,10 @@ pub enum QpConfigResourceKind {
     ModelRouting,
     #[sea_orm(string_value = "report_schedule")]
     ReportSchedule,
-    #[sea_orm(string_value = "operational_control")]
-    OperationalControl,
-    #[sea_orm(string_value = "execution_authorization")]
-    ExecutionAuthorization,
+    #[sea_orm(string_value = "operations_policy")]
+    OperationsPolicy,
+    #[sea_orm(string_value = "execution_automation_policy")]
+    ExecutionAutomationPolicy,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(

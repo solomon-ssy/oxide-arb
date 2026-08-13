@@ -22,7 +22,7 @@ pub fn finalize_candidates(candidates: &mut [SignalCandidate]) -> QuantResult<()
             .then_with(|| left.outcome_side.as_str().cmp(right.outcome_side.as_str()))
     });
     for (index, candidate) in candidates.iter_mut().enumerate() {
-        candidate.rank_before_portfolio =
+        candidate.route_rank =
             u32::try_from(index + 1).map_err(|error| ResearchError::Inference {
                 detail: format!("global candidate rank does not fit u32: {error}"),
             })?;
@@ -83,7 +83,7 @@ mod tests {
             confidence: Probability::new(dec!(0.5)),
             expected_return_bps: dec!(100),
             downside_bps: dec!(50),
-            win_probability: None,
+            payout_distribution: None,
             entry_price_ref: Price::new(dec!(0.5)),
             suggested_horizon_secs: 3_600,
             factor_breakdown: Vec::new(),
@@ -93,7 +93,7 @@ mod tests {
                 top_negative: Vec::new(),
             },
             rejection_warnings: Vec::new(),
-            rank_before_portfolio: 1,
+            route_rank: 1,
             liquidity_score: Probability::ZERO,
             data_quality_score: Probability::ZERO,
             model_score_percentile: Probability::ZERO,
@@ -110,7 +110,7 @@ mod tests {
         ];
         finalize_candidates(&mut batch)?;
         assert_eq!(batch[0].market_id.as_str(), "b");
-        assert_eq!(batch[0].rank_before_portfolio, 1);
+        assert_eq!(batch[0].route_rank, 1);
         assert_eq!(batch[0].model_score_percentile.inner(), dec!(1));
         assert_eq!(
             batch[2].model_score_percentile.inner(),

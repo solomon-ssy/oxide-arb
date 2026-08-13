@@ -10,7 +10,7 @@ use quant_pivot_models::{
     },
     enums::quant::{DatasetPurpose, TradePolicyStatus, TrainingDatasetStatus},
     types::{
-        ContentHash, ResearchProfileArtifact, TradePolicyArtifactId,
+        ContentHash, DecisionPolicySnapshotId, ResearchProfileArtifact, TradePolicyArtifactId,
         model_serving::{ModelServingPolicySnapshotBinding, ModelServingTradePolicyBinding},
     },
 };
@@ -149,7 +149,8 @@ impl TradePolicyCrossBindings<'_> {
             != self.target.profile.profile_ref
             || source_lineage.research_program_hash != fit.research_program_hash
             || source_lineage.decision_policy_snapshot_id != fit.decision_policy_snapshot_id
-            || source_lineage.runtime_config_hash != self.target.policy_snapshot.snapshot_hash
+            || DecisionPolicySnapshotId::from_content_hash(&source_lineage.runtime_config_hash)
+                != fit.decision_policy_snapshot_id
             || self.source_dataset.window_start > fit.fit_window_start
             || self.source_dataset.window_end < fit.fit_window_end
             || self.source_dataset.pit_cutoff > fit.pit_cutoff
@@ -262,12 +263,13 @@ impl TradePolicyCrossBindings<'_> {
         let source_lineage = &source.manifest.source_lineage;
         if bindings.schemas.feature_schema_hash != *source.feature_schema_hash
             || bindings.factors.plane != *source.factor_serving_plane
-            || bindings.policy_snapshot != *self.target.policy_snapshot
+            || bindings.policy_snapshot.profile_artifacts
+                != self.target.policy_snapshot.profile_artifacts
             || bindings.capability_registry_hashes != source_lineage.capability_registry_hashes
         {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
-                    "trade-policy {} subject serving schema/factor/policy/capability preimage differs from the PolicyFit Dataset",
+                    "trade-policy {} subject serving schema/factor/profile/capability preimage differs from the PolicyFit Dataset or target training context",
                     self.policy.artifact_id
                 ),
             }
@@ -291,10 +293,12 @@ impl TradePolicyCrossBindings<'_> {
             || target_input_hash != *subject_input_hash
             || target.feature_schema_hash != source.feature_schema_hash
             || target.factor_serving_plane != source.factor_serving_plane
+            || target.manifest.source_lineage.capability_registry_hashes
+                != source.manifest.source_lineage.capability_registry_hashes
         {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
-                    "trade-policy {} target ModelSpec/Dataset family/horizon/schema/input differs from its fitted subject",
+                    "trade-policy {} target ModelSpec/Dataset family/horizon/schema/input/capability context differs from its fitted subject",
                     self.policy.artifact_id
                 ),
             }
@@ -348,7 +352,7 @@ impl TradePolicyPreimageVerifier {
                 || target
                     .model_spec
                     .training_contract
-                    .trade_policy_artifact_id
+                    .evaluation_trade_policy_artifact_id
                     .is_some()
             {
                 return Err(ResearchError::DatasetBuild {
@@ -444,7 +448,10 @@ impl TradePolicyPreimageVerifier {
         }
 
         let materialization = require_dataset_materialization(target.dataset)?;
-        let expected_contract_id = target.model_spec.training_contract.trade_policy_artifact_id;
+        let expected_contract_id = target
+            .model_spec
+            .training_contract
+            .evaluation_trade_policy_artifact_id;
         if expected_contract_id != Some(artifact_id)
             || materialization.manifest.trade_policy_artifact_id != Some(artifact_id)
             || materialization.manifest.trade_policy_hash != Some(expected_hash)
@@ -474,10 +481,12 @@ impl TradePolicyPreimageVerifier {
             }
             .into());
         }
-        if fit.decision_policy_snapshot_id != target.policy_snapshot.decision_policy_snapshot_id {
+        if DecisionPolicySnapshotId::from_content_hash(&target.policy_snapshot.snapshot_hash)
+            != target.policy_snapshot.decision_policy_snapshot_id
+        {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
-                    "trade-policy {artifact_id} policy snapshot differs from the training Dataset"
+                    "trade-policy {artifact_id} target training policy binding is not content-addressed"
                 ),
             }
             .into());

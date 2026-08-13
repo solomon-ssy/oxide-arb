@@ -42,14 +42,12 @@ pub struct Model {
         on_delete = "NoAction"
     )]
     pub decision_policy_snapshot: BelongsTo<Option<super::decision_policy_snapshot::Entity>>,
-    #[sea_orm(
-        belongs_to,
-        from = "output_report_id",
-        to = "recommendation_report_id",
-        on_update = "NoAction",
-        on_delete = "NoAction"
-    )]
-    pub quant_recommendation_report: BelongsTo<Option<super::quant_recommendation_report::Entity>>,
+    // The reverse run -> output edge closes a deliberate one-to-one cycle with
+    // quant_recommendation_report.report_run_id. The clean bootstrap adds this
+    // FK after Entity First has created every table so dependency sorting stays
+    // acyclic; the column remains part of this generated snapshot.
+    #[sea_orm(has_many)]
+    pub quant_report_route_runs: HasMany<super::quant_report_route_run::Entity>,
     #[sea_orm(
         self_ref,
         relation_enum = "SelfRef",

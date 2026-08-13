@@ -70,8 +70,10 @@ impl ReplayEngine for GateReplay {
                 Ok(GroupEvaluation {
                     group_index,
                     return_value: Decimal::new(bucket - 50, 6),
+                    scenario_residual: None,
                     rank_observations: Vec::new(),
-                    allocation_weights: None,
+                    executed_turnover: None,
+                    portfolio_replay: None,
                 })
             })
             .collect()

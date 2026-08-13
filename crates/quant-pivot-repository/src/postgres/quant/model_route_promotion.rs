@@ -461,6 +461,8 @@ impl PgModelRoutePromotionRepository {
             || document.training_dataset_id != constraints.candidate_training_dataset_id()
             || document.profile_ref != *constraints.profile_ref()
             || document.category != constraints.category()
+            || document.scenario_model_bindings_hash != constraints.scenario_model_bindings_hash()
+            || document.portfolio_scenario_model_bindings != constraints.scenario_model_bindings()
         {
             return Err(Self::conflict(
                 "candidate manifest differs from the frozen promotion preflight",
@@ -473,7 +475,7 @@ impl PgModelRoutePromotionRepository {
         transaction: &DatabaseTransaction,
         preflight: &PromotionPreflight,
     ) -> Result<(), PromotionCommitError> {
-        PgFeatureParityRepository::verify_clear_latch_generation(
+        PgFeatureParityRepository::verify_route_governance(
             transaction,
             &preflight.serving_constraints().feature_parity_state_id(),
         )
@@ -543,13 +545,13 @@ impl PgModelRoutePromotionRepository {
                 revisions.report_schedule,
                 ConfigResourceKind::ReportSchedule,
             )?,
-            operational_control_revision_id: required(
-                revisions.operational_control,
-                ConfigResourceKind::OperationalControl,
+            operations_policy_revision_id: required(
+                revisions.operations_policy,
+                ConfigResourceKind::OperationsPolicy,
             )?,
-            execution_authorization_revision_id: required(
-                revisions.execution_authorization,
-                ConfigResourceKind::ExecutionAuthorization,
+            execution_automation_policy_revision_id: required(
+                revisions.execution_automation_policy,
+                ConfigResourceKind::ExecutionAutomationPolicy,
             )?,
             snapshot: document,
             source: DecisionPolicySnapshotSource::Activation,
@@ -620,6 +622,8 @@ impl PgModelRoutePromotionRepository {
             candidate_artifact_hash: models.candidate.artifact_hash,
             candidate_serving_contract_hash: models.candidate.serving_contract_hash,
             consumed_candidate_model_version_id: models.candidate.model_version_id,
+            previous_scenario_model_bindings_hash: projection.previous_scenario_bindings_hash(),
+            candidate_scenario_model_bindings_hash: projection.candidate_scenario_bindings_hash(),
         };
         let record = ModelRoutePromotionRecord::try_seal(ModelRoutePromotionRecordInput {
             promotion_permit_id: permit.promotion_permit_id,
@@ -1266,6 +1270,11 @@ impl PgModelRoutePromotionRepository {
             &previous,
             record.route().category,
             record.route().candidate_model_version_id,
+            record
+                .preflight()
+                .serving_constraints()
+                .scenario_model_bindings()
+                .to_vec(),
         )?;
         projection.validate_candidate(&committed.snapshot, activation.activated_at)?;
         if previous
@@ -1441,6 +1450,10 @@ impl PgModelRoutePromotionRepository {
             &bundle,
             scope.category(),
             preflight.serving_constraints().candidate_model_version_id(),
+            preflight
+                .serving_constraints()
+                .scenario_model_bindings()
+                .to_vec(),
         )?;
         let route_generation_exact =
             projection.shadow_binding_generation() == scope.expected_route_generation();

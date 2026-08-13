@@ -12,6 +12,8 @@ pub struct Model {
     pub decision_policy_snapshot_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub selector_hash: String,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub selector_evidence: Json,
     pub market_count: i32,
     #[sea_orm(column_type = "JsonBinary")]
     pub exclusion_summary: Json,

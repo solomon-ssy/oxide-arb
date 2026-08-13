@@ -14,11 +14,11 @@ use crate::{
     },
     hashing::CanonicalDigest,
     types::{
-        CapitalAllocationId, ContentHash, DecisionPolicySnapshotId, EventId, ExecutionOrderId,
-        FeatureParityEventId, FeatureParityRunId, FeatureVectorId, MarketId, MarketSelectionId,
-        ModelRunId, ModelVersionId, OrderId, OrderIntentId, PositionId, RecommendationId,
-        RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
-        ResearchProfileId, ResearchProfileRef, SignalCandidateId, TokenId, TrainingDatasetId,
+        CapitalAllocationId, ContentHash, DecisionPolicySnapshotId, EconomicTierId, EventId,
+        ExecutionOrderId, FeatureParityEventId, FeatureParityRunId, FeatureVectorId, MarketId,
+        MarketSelectionId, ModelRunId, ModelVersionId, OrderId, OrderIntentId, PositionId,
+        RecommendationId, RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason,
+        ReportFunnelStage, ReportRouteRunId, SignalCandidateId, TokenId, TrainingDatasetId,
     },
 };
 
@@ -80,7 +80,6 @@ pub struct QuantModelInputEventRow {
     pub knowledge_cutoff: i64,
     pub model_run_id: ModelRunId,
     pub model_version_id: ModelVersionId,
-    pub recommendation_report_id: Option<RecommendationReportId>,
     pub market_id: MarketId,
     pub feature_vector_id: FeatureVectorId,
     pub model_family: String,
@@ -192,7 +191,7 @@ pub struct QuantSignalCandidateEventRow {
     pub entry_price: ChPrice,
     pub target_price: ChPrice,
     pub stop_price: ChPrice,
-    pub rank_before_portfolio: u32,
+    pub route_rank: u32,
     pub rejection_reason: String,
 }
 
@@ -206,14 +205,21 @@ pub struct QuantReportRecommendationFactRow {
     pub event_time: i64,
     pub recommendation_report_id: RecommendationReportId,
     pub recommendation_id: RecommendationId,
+    pub report_route_run_id: ReportRouteRunId,
+    pub economic_tier_id: EconomicTierId,
+    pub route: String,
     pub rank: u32,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: ChOutcomeSide,
-    pub score: ChProbability,
-    pub risk_adjusted_score: ChProbability,
-    pub trade_plan_available: bool,
-    pub suggested_usd: Option<ChUsd>,
+    pub profit_probability_bps: i64,
+    pub nominal_expected_net_usd: ChUsd,
+    pub robust_expected_net_usd: ChUsd,
+    pub max_loss_usd: ChUsd,
+    pub cvar_contribution_usd: ChUsd,
+    pub capital_occupancy_usd_hours: ChUsd,
+    pub marginal_portfolio_value_usd: ChUsd,
+    pub suggested_usd: ChUsd,
     pub valid_until: i64,
 }
 
@@ -227,11 +233,10 @@ pub struct ReportMarketFunnelRow {
     pub event_time: i64,
     pub recommendation_report_id: RecommendationReportId,
     pub market_selection_id: MarketSelectionId,
-    pub profile_id: String,
-    pub profile_version: u32,
-    pub profile_content_hash: String,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    pub model_version_id: ModelVersionId,
+    pub report_route_run_id: Option<ReportRouteRunId>,
+    pub route: Option<String>,
+    pub model_version_id: Option<ModelVersionId>,
     pub model_run_id: Option<ModelRunId>,
     pub market_id: MarketId,
     pub event_id: EventId,
@@ -261,9 +266,10 @@ struct ReportMarketFunnelHashInput<'a> {
     event_time: i64,
     recommendation_report_id: &'a RecommendationReportId,
     market_selection_id: &'a MarketSelectionId,
-    profile_ref: &'a ResearchProfileRef,
     decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
-    model_version_id: &'a ModelVersionId,
+    report_route_run_id: &'a Option<ReportRouteRunId>,
+    route: &'a Option<String>,
+    model_version_id: &'a Option<ModelVersionId>,
     model_run_id: &'a Option<ModelRunId>,
     market_id: &'a MarketId,
     event_id: &'a EventId,
@@ -282,19 +288,11 @@ impl ReportMarketFunnelRow {
         if self.ingestion_time < self.event_time {
             return Err(Self::invalid("ingestion time precedes event time"));
         }
-        let profile_content_hash = ContentHash::from_str(&self.profile_content_hash)
-            .map_err(|error| Self::invalid(format!("profile content hash: {error}")))?;
-        if profile_content_hash.to_string() != self.profile_content_hash {
-            return Err(Self::invalid("profile content hash is not canonical"));
+        if self.report_route_run_id.is_some() != self.route.is_some() {
+            return Err(Self::invalid(
+                "report Route run and Route label must be present together",
+            ));
         }
-        let profile_ref = ResearchProfileRef {
-            id: ResearchProfileId::new(&self.profile_id),
-            version: self.profile_version,
-            content_hash: profile_content_hash,
-        };
-        profile_ref
-            .validate()
-            .map_err(|error| Self::invalid(format!("profile reference: {error}")))?;
         let terminal_stage = ReportFunnelStage::from_str(&self.terminal_stage)
             .map_err(|error| Self::invalid(format!("terminal stage: {error}")))?;
         let primary_reason = ReportFunnelReason::from_str(&self.primary_reason)
@@ -314,8 +312,9 @@ impl ReportMarketFunnelRow {
             event_time: self.event_time,
             recommendation_report_id: &self.recommendation_report_id,
             market_selection_id: &self.market_selection_id,
-            profile_ref: &profile_ref,
             decision_policy_snapshot_id: &self.decision_policy_snapshot_id,
+            report_route_run_id: &self.report_route_run_id,
+            route: &self.route,
             model_version_id: &self.model_version_id,
             model_run_id: &self.model_run_id,
             market_id: &self.market_id,
@@ -458,8 +457,8 @@ mod report_market_funnel_tests {
 
     use super::ReportMarketFunnelRow;
     use crate::types::{
-        ContentHash, DecisionPolicySnapshotId, EventId, FeatureVectorId, MarketId,
-        MarketSelectionId, ModelRunId, ModelVersionId, RecommendationReportId, TokenId,
+        DecisionPolicySnapshotId, EventId, FeatureVectorId, MarketId, MarketSelectionId,
+        ModelRunId, ModelVersionId, RecommendationReportId, ReportRouteRunId, TokenId,
     };
 
     fn funnel_row(event_time: i64) -> ReportMarketFunnelRow {
@@ -467,11 +466,10 @@ mod report_market_funnel_tests {
             event_time,
             recommendation_report_id: RecommendationReportId::from_v7(),
             market_selection_id: MarketSelectionId::from_v7(),
-            profile_id: "pooled_binary_market".to_owned(),
-            profile_version: 1,
-            profile_content_hash: ContentHash::from_bytes([7; 32]).to_string(),
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            model_version_id: ModelVersionId::from_v7(),
+            report_route_run_id: Some(ReportRouteRunId::from_v7()),
+            route: Some("pooled".to_owned()),
+            model_version_id: Some(ModelVersionId::from_v7()),
             model_run_id: Some(ModelRunId::from_v7()),
             market_id: MarketId::new("market-1"),
             event_id: EventId::new("event-1"),

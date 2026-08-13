@@ -43,8 +43,6 @@ pub enum ConfigValidationError {
         field_high: &'static str,
         value_high: Decimal,
     },
-    #[error("kelly_fraction must be in (0, 1], got {0}")]
-    InvalidKellyFraction(Decimal),
     #[error("[{mode}] missing required credentials: {}", .missing.join(", "))]
     MissingCredentials {
         mode: String,
@@ -72,8 +70,6 @@ impl ConfigValidationError {
 /// Non-fatal configuration concern.
 #[derive(Debug, Clone, Error)]
 pub enum ConfigWarning {
-    #[error("kelly_fraction={0} is aggressive (>0.5); consider reducing")]
-    LargeKellyFraction(Decimal),
     #[error("web.jwt HS256 signing key is invalid or missing")]
     JwtSigningKeyUnconfigured,
 }

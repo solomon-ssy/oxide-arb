@@ -2,15 +2,16 @@
 //!
 //! Prometheus metrics are always-on and scraped through the web server's
 //! `GET /metrics` (no separate port). Channel bindings live here while
-//! hot-reloadable event routing lives in `OperationalControl.notifications`.
+//! hot-reloadable event routing lives in `OperationsPolicy.notifications`.
 
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use super::secret::SecretText;
 
 /// Logging level and output format.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     /// Default `tracing` filter directive (e.g. `info`,
     /// `info,quant_pivot_core=debug`). The `RUST_LOG` environment variable, when
@@ -36,29 +37,32 @@ fn default_log_level() -> String {
 
 /// External operator notification channels. Bindings and credential names are
 /// deployment concerns and therefore require a restart to apply.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NotificationChannelsConfig {
     pub telegram: TelegramChannelConfig,
     pub webhook: WebhookChannelConfig,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TelegramChannelConfig {
-    /// Telegram bot-token source.
+    /// Zeroizing Telegram bot token used only by the operator-notification adapter.
+    #[serde(serialize_with = "super::secret::serialize_empty")]
     pub bot_token: SecretText,
     /// Telegram chat identifier; this is a destination binding, not a secret.
     pub chat_id: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WebhookChannelConfig {
     /// HTTPS endpoint. Webhook paths commonly carry bearer material, so the
     /// complete endpoint is treated as a deploy secret even when a separate
     /// authorization header is configured.
+    #[serde(serialize_with = "super::secret::serialize_empty")]
     pub url: SecretText,
     /// Optional complete HTTP Authorization value.
+    #[serde(serialize_with = "super::secret::serialize_empty")]
     pub authorization: SecretText,
 }

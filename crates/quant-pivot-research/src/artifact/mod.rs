@@ -139,6 +139,10 @@ pub enum ArtifactNamespace {
     ReadinessEvidence,
     /// Immutable full-catalog Crypto/Weather capability audits.
     CapabilityAudit,
+    /// Promoted scenario-generation models for global portfolio optimization.
+    PortfolioScenarioModel,
+    /// Report-specific concrete joint scenarios.
+    PortfolioScenario,
 }
 
 impl ArtifactNamespace {
@@ -167,6 +171,8 @@ impl ArtifactNamespace {
             Self::ReportFacts => "report-facts",
             Self::ReadinessEvidence => "readiness-evidence",
             Self::CapabilityAudit => "capability-audits",
+            Self::PortfolioScenarioModel => "portfolio-scenario-models",
+            Self::PortfolioScenario => "portfolio-scenarios",
         }
     }
 }

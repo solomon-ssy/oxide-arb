@@ -161,12 +161,12 @@ impl GovernanceBundle {
         let reconciliation_repo: Arc<dyn ReconciliationRepository> =
             Arc::clone(&infra.repos.reconciliation) as Arc<dyn ReconciliationRepository>;
 
-        let OperationalControls {
+        let OperationsPolicys {
             kill_switch,
             execution_recovery,
             exit_monitor_health,
             runtime_control,
-        } = wire_operational_controls(&OperationalControlsDeps {
+        } = wire_operations_policys(&OperationsPolicysDeps {
             deploy,
             metrics,
             data,
@@ -317,14 +317,14 @@ fn build_health_checker(
     }))
 }
 
-struct OperationalControls {
+struct OperationsPolicys {
     kill_switch: Arc<dyn KillSwitchPort>,
     execution_recovery: Arc<ExecutionRecoveryCoordinator>,
     exit_monitor_health: ExitMonitorHealthHandle,
     runtime_control: Arc<dyn RuntimeControlPort>,
 }
 
-struct OperationalControlsDeps<'a> {
+struct OperationsPolicysDeps<'a> {
     deploy: &'a Arc<DeployConfig>,
     metrics: &'a Arc<MetricsHub>,
     data: &'a DataBundle,
@@ -336,7 +336,7 @@ struct OperationalControlsDeps<'a> {
     reconciliation_repo: &'a Arc<dyn ReconciliationRepository>,
 }
 
-fn wire_operational_controls(deps: &OperationalControlsDeps<'_>) -> OperationalControls {
+fn wire_operations_policys(deps: &OperationsPolicysDeps<'_>) -> OperationsPolicys {
     let deploy = deps.deploy;
     let metrics = deps.metrics;
     let infra = deps.infra;
@@ -382,7 +382,7 @@ fn wire_operational_controls(deps: &OperationalControlsDeps<'_>) -> OperationalC
     ));
     status_publisher.register(Arc::clone(&runtime_control) as Arc<dyn RuntimeControlPort>);
 
-    OperationalControls {
+    OperationsPolicys {
         kill_switch,
         execution_recovery,
         exit_monitor_health,

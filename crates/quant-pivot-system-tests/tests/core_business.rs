@@ -130,6 +130,15 @@ async fn report_route_stays_pinned() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn report_empty_selection() {
+    Box::pin(postgres::with_postgres_suite(
+        report_pipeline::empty_selection_publishes_report(),
+    ))
+    .await
+    .expect("start empty-selection report PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn domain_source_credential_readiness() {
     Box::pin(postgres::with_postgres_suite(
         domain_source_supervisor::credential_blocked_recovers(),

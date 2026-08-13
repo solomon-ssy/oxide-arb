@@ -43,11 +43,17 @@ use quant_pivot_models::{
     enums::{
         catalog::CatalogFilterReasonSet,
         common::{CategorySet, MarketCategory, TickSize},
-        factor::{FactorDefinitionScope, FactorFamily, FactorValueState, NormalizationSource},
+        factor::{
+            FactorDefinitionScope, FactorFamily, FactorNormalization, FactorValueState,
+            NormalizationSource,
+        },
         market::{EventStatus, MarketStatus},
         quant::{DataQualityStatus, FactorDirection, ModelRunErrorCode, ModelRunKind},
     },
-    runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
+    runtime_config::{
+        DataQualityConfig, DecimalValue, DomainConfig, FactorsConfig, FeaturesConfig,
+        PerFactorNormalization,
+    },
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FactorDefinitionId,
         FactorValueId, FeatureCell, FeatureStaleness, FeatureValue, FeatureVectorId, MarketId,
@@ -345,7 +351,7 @@ fn noop_feature_writer() -> Arc<FeatureEventWriter> {
 }
 
 fn factors_config() -> FactorsConfig {
-    FactorsConfig {
+    let mut config = FactorsConfig {
         enabled_factor_families: vec![
             FactorFamily::Liquidity,
             FactorFamily::Microstructure,
@@ -353,7 +359,27 @@ fn factors_config() -> FactorsConfig {
             FactorFamily::DataQuality,
         ],
         ..FactorsConfig::default()
+    };
+    // This persistence contract intentionally owns one market. Give the two
+    // required factors explicit semantic bounds so it exercises an eligible
+    // value write without fabricating a cross-section or weakening the live
+    // small-cross-section policy.
+    for (name, max) in [
+        ("liquidity_depth", Decimal::from(100_000)),
+        ("spread_efficiency", Decimal::from(10_000)),
+    ] {
+        config.normalization.per_factor.insert(
+            name.to_owned(),
+            PerFactorNormalization {
+                method: FactorNormalization::MinMax,
+                winsor_p: None,
+                clamp_sigma: None,
+                min: Some(DecimalValue::new(Decimal::ZERO)),
+                max: Some(DecimalValue::new(max)),
+            },
+        );
     }
+    config
 }
 
 fn selected_market() -> SelectedMarket {
@@ -384,7 +410,6 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
         window_provider,
         feature_repo,
         event_writer: noop_feature_writer(),
-        market_registry: Arc::clone(&registry),
         block_cursor_repo: live_tape_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
@@ -508,7 +533,13 @@ impl FactorPipelineScenario {
             .expect("factor pipeline");
         assert!(
             !result.persisted.is_empty(),
-            "an eligible market must persist factor values"
+            "an eligible market must persist factor values: outcomes={}, rejected={:?}",
+            result.outcomes.len(),
+            result
+                .rejected
+                .iter()
+                .map(|rejected| format!("{}: {}", rejected.market_id, rejected.reason))
+                .collect::<Vec<_>>()
         );
         assert!(result.rejected.is_empty(), "no market should be rejected");
 

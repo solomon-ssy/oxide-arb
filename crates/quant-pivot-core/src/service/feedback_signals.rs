@@ -26,7 +26,7 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     FactorRepository, FeatureRepository, FeedbackCohortRepository, FeedbackCycleRepository,
-    ModelRegistryRepository,
+    ModelRegistryRepository, PolicyRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -46,6 +46,7 @@ use uuid::Uuid;
 
 use crate::{
     app::ports::feedback_mutation::FeedbackCycleFreezePlan,
+    governance::policy_snapshot::VerifiedPolicySnapshotBinding,
     projection::inference_batch::build_frozen_runtime_input,
     service::{
         feedback_dataset::{
@@ -64,6 +65,7 @@ const DRIFT_RUN_NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17a
 pub struct FeedbackSignalServiceDeps {
     pub cycles: Arc<dyn FeedbackCycleRepository>,
     pub models: Arc<dyn ModelRegistryRepository>,
+    pub policies: Arc<dyn PolicyRepository>,
     pub preimages: Arc<ModelServingPreimageService>,
     pub cohort_repository: Arc<dyn FeedbackCohortRepository>,
     pub feature_repository: Arc<dyn FeatureRepository>,
@@ -75,6 +77,7 @@ pub struct FeedbackSignalServiceDeps {
 pub struct FeedbackSignalService {
     cycles: Arc<dyn FeedbackCycleRepository>,
     models: Arc<dyn ModelRegistryRepository>,
+    policies: Arc<dyn PolicyRepository>,
     preimages: Arc<ModelServingPreimageService>,
     materializer: FeedbackCohortMaterializer,
     artifact_store: Arc<dyn ArtifactStore>,
@@ -86,6 +89,7 @@ impl FeedbackSignalService {
         Self {
             cycles: deps.cycles,
             models: deps.models,
+            policies: deps.policies,
             preimages: deps.preimages,
             materializer: FeedbackCohortMaterializer::new(FeedbackCohortMaterializerDeps {
                 cohorts: deps.cohort_repository,
@@ -130,32 +134,59 @@ impl FeedbackSignalService {
                 StorageError::not_found("quant_model_version", cycle.champion_model_version_id)
             })?;
         let preimage = self.preimages.load(&version).await?;
-        let serving_contract = preimage.artifact().header().serving_contract();
-        let profile = preimage.profile();
-        let valid = preimage.artifact().header().model_version_id()
-            == cycle.champion_model_version_id
-            && serving_contract.contract_hash() == cycle.champion_serving_contract_hash
-            && profile.profile_ref == cycle.profile_ref
-            && profile
-                .spec
-                .feedback_policy
-                .content_hash()
-                .map_err(|error| {
-                    contract(format!("champion feedback policy hash failed: {error}"))
-                })?
-                == cycle.feedback_policy_hash
-            && preimage.model_spec().model_spec_id == cycle.champion_model_spec_id
-            && preimage.model_spec().definition_hash == cycle.champion_model_spec_definition_hash
-            && preimage.model_spec().model_family == cycle.champion_model_family
-            && preimage.policy_snapshot().decision_policy_snapshot_id
-                == cycle.decision_policy_snapshot_id
-            && preimage.policy_snapshot().snapshot_hash == cycle.decision_policy_snapshot_hash;
+        preimage.verify_feedback_cycle(cycle)?;
+        self.verify_cycle_policy(cycle, &preimage).await?;
+        Ok(preimage)
+    }
+
+    async fn verify_cycle_policy(
+        &self,
+        cycle: &FeedbackCycleInfo,
+        preimage: &VerifiedModelServingPreimage,
+    ) -> QuantResult<()> {
+        let policy = self
+            .policies
+            .load_snapshot(&cycle.decision_policy_snapshot_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found(
+                    "decision_policy_snapshot",
+                    cycle.decision_policy_snapshot_id,
+                )
+            })?;
+        let verified = VerifiedPolicySnapshotBinding::try_from(&policy)?;
+        let route = policy
+            .snapshot
+            .model_routing
+            .model
+            .route_binding(cycle.route)
+            .map_err(|error| contract(format!("feedback Route binding failed: {error}")))?;
+        let route_generation = i64::try_from(route.champion.generation).map_err(|error| {
+            contract(format!(
+                "feedback Route generation does not fit persistence type: {error}"
+            ))
+        })?;
+        let source_profiles = &preimage
+            .artifact()
+            .header()
+            .serving_contract()
+            .bindings()
+            .policy_snapshot
+            .profile_artifacts;
+        let valid = verified.binding().decision_policy_snapshot_id
+            == cycle.decision_policy_snapshot_id
+            && verified.binding().snapshot_hash == cycle.decision_policy_snapshot_hash
+            && &verified.binding().profile_artifacts == source_profiles
+            && route.champion.model_version_id == cycle.champion_model_version_id
+            && route.champion.config_revision == cycle.policy_bundle_generation
+            && route_generation == cycle.route_generation
+            && route.champion.bound_at <= cycle.created_at;
         if !valid {
             return Err(contract(
-                "champion preimage differs from the frozen feedback cycle",
+                "decision-time policy or Route generation differs from the frozen feedback cycle",
             ));
         }
-        Ok(preimage)
+        Ok(())
     }
 
     fn evaluation_window(

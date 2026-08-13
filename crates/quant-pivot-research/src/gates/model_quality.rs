@@ -170,7 +170,7 @@ impl ValidationGateThresholds {
             min_cpcv_paths: 21,
             rank_ic_min: Decimal::new(2, 2),
             dsr_significance: Decimal::new(5, 2),
-            max_pbo: Decimal::new(50, 2),
+            max_pbo: Decimal::new(5, 2),
             max_turnover: Decimal::new(50, 2),
             min_tail_loss_bps: Decimal::new(-500, 0),
         }
@@ -229,7 +229,7 @@ impl Default for SellQualityGateThresholds {
             min_sample_count: 200,
             min_label_coverage: Decimal::new(60, 2),
             rank_ic_min: Decimal::new(2, 2),
-            max_pbo: Decimal::new(50, 2),
+            max_pbo: Decimal::new(5, 2),
             min_l2_book_fidelity_ratio: Decimal::new(50, 2),
             max_fallback_ratio: Decimal::new(50, 2),
         }
@@ -1089,7 +1089,7 @@ mod tests {
         types::{
             BacktestReportId, ContentHash, DecisionPolicySnapshotId, MarketId, ModelVersionId,
             Probability, TokenId, TrainingDatasetId,
-            backtest::{ExpectedVsRealized, PnlSimulation},
+            backtest::{BacktestPortfolioFunnel, ExpectedVsRealized, PnlSimulation},
         },
     };
     use rust_decimal_macros::dec;
@@ -1142,6 +1142,7 @@ mod tests {
                     gross_return: dec!(0.05),
                     pnl_curve: Vec::new(),
                 },
+                portfolio_funnel: BacktestPortfolioFunnel::empty(),
                 report_hash: hash(),
             }
         }
@@ -1170,7 +1171,7 @@ mod tests {
                 combination_count: 56,
                 median_rank_ic: dec!(0.15),
                 deflated_sharpe: dec!(0.97),
-                pbo: dec!(0.20),
+                pbo: dec!(0.02),
                 min_track_record_length_secs: Some(86_400),
                 median_max_drawdown: Some(dec!(0.10)),
                 median_tail_loss: Some(dec!(-0.005)),

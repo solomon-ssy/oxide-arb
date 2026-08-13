@@ -4,15 +4,9 @@ expression: revoked_report()
 ---
 {
   "recommendation_report_id": "7a6bff3c-9dc0-5180-b349-bbdcfbf1d441",
-  "profile_id": "weather_forecast_24h",
-  "profile_ref": {
-    "id": "weather_forecast_24h",
-    "version": 4,
-    "content_hash": "blake3:c906d7676bb12b6a75a261c518224efd7391ffbc1bcbad471ec5ccf8baf90c10"
-  },
+  "report_run_id": "82ac65c4-f7b1-5195-a670-7378216815d6",
   "report_kind": "top_n",
   "decision_at": "2023-11-14T22:11:20Z",
-  "horizon_secs": 86400,
   "runtime_mode": "report_only",
   "top_n": 20,
   "status": "revoked",
@@ -20,26 +14,78 @@ expression: revoked_report()
   "capital_base_usd": "10000",
   "account_snapshot_ref": "6412901d-5f81-5835-8ada-63231d3ffc4f",
   "decision_policy_snapshot_id": "731ac405-b5b5-5dee-96b2-67c8d184c177",
-  "model_run_id": null,
-  "model_version_id": "45641765-a964-5c43-b586-8330968f4c8c",
   "market_selection_id": "5c8ad0ca-ddea-5da4-9b57-8bd80bd64365",
+  "portfolio_plan_id": "e62df386-c19a-5c0d-9da3-02c7b4619335",
+  "portfolio_decision": {
+    "outcome": "optimized",
+    "plan": {
+      "portfolio_plan_id": "e62df386-c19a-5c0d-9da3-02c7b4619335",
+      "selected_tier_ids": [
+        "879bd610-8944-5fbb-81f3-a564f2e86565",
+        "9f7f5a65-1c9f-5ef1-9184-df937800049a"
+      ],
+      "objectives": {
+        "robust_expected_net_usd": "18.25",
+        "nominal_expected_net_usd": "24.50",
+        "cvar_usd": "82.00",
+        "capital_occupancy_usd_hours": "9600",
+        "stable_tie_break_stages": 2
+      },
+      "constraints": {
+        "available_cash_used_usd": "500",
+        "open_capital_usd": "500",
+        "selected_recommendation_count": 2,
+        "maximum_scenario_loss_usd": "110",
+        "checked_constraint_count": 14,
+        "evidence_hash": "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "solver": {
+        "backend": "highs",
+        "lexicographic_model_build_count": 1,
+        "lexicographic_solve_count": 7,
+        "tie_break_proof_count": 1,
+        "lexicographic_warm_start_count": 6,
+        "marginal_model_build_count": 0,
+        "marginal_solve_count": 2,
+        "marginal_model_reuse_count": 2,
+        "configured_deadline_secs": 30,
+        "deterministic_threads": 1,
+        "coefficient_scale": 10000,
+        "bound_scale_exponent": 0,
+        "optimal": true
+      },
+      "exact_verification": {
+        "passed": true,
+        "selected_tier_digest": "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "recomputed_economics_hash": "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "content_hash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "represented_routes": {
+    "routes": [
+      "pooled"
+    ],
+    "digest": "blake3:c1aecf680ee0dae25ffd75f30bff5490ef714b711f9d6821079f1bfe8f987367"
+  },
+  "scenario_artifact_id": "9576afe4-9cb0-553d-80ed-e9781d2ff40c",
+  "scenario_artifact_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
   "summary": {
     "market_selection_count": 12,
+    "represented_route_count": 1,
     "candidate_count": 8,
-    "rejected_count": 3,
+    "rejected_tier_count": 3,
     "published_recommendation_count": 2,
     "total_suggested_usd": "500",
     "max_single_recommendation_usd": "300",
-    "aggregate_exposure_cap_usd": "2500",
+    "robust_expected_net_usd": "75",
+    "nominal_expected_net_usd": "95",
+    "cvar_usd": "120",
+    "maximum_scenario_loss_usd": "140",
+    "capital_occupancy_usd_hours": "12000",
     "category_allocation": {},
     "event_allocation": {},
-    "average_score": "0.7",
-    "min_score": "0.55",
-    "model_confidence_summary": {
-      "mean_confidence": "0.72",
-      "min_confidence": "0.6",
-      "max_confidence": "0.9"
-    },
+    "route_allocation": {},
     "data_quality_summary": {
       "fresh_count": 5,
       "acceptable_count": 2,

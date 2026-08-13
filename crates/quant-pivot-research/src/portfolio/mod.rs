@@ -1,38 +1,31 @@
-//! Portfolio plane: the governed "how much to buy" closed loop.
-//!
-//! Pure compute (no repo / no core / no live `BookStore`): the
-//! [`PortfolioPlanner`] consumes scored candidates, the real
-//! [`AccountSnapshot`] capital base, and the governed budget / constraints /
-//! sizing / optimizer config, then produces per-recommendation sizing + risk
-//! envelopes and a persistable plan row. Capital allocation is a single `good_lp`
-//! LP/MILP code path ([`LinearProgrammingPortfolioAllocator`]) shared with the
-//! backtest plane — there is no greedy allocator.
+//! Global portfolio plane over venue-executable discounted USD scenario cash flows.
 
 pub mod account;
-pub mod allocator;
-pub mod correlation;
-pub mod lp;
-pub mod optimizer;
-pub mod planner;
-pub mod sizing;
+mod capital_bucket_contract;
+mod economic;
+mod global;
+mod scenario;
+mod scenario_model;
+mod solver_boundary;
 
-pub use account::AccountSnapshot;
-pub use allocator::{
-    Allocation, AllocationInput, AllocationOutput, CandidateMeta, PortfolioAllocator,
+pub use account::{AccountDrawdown, AccountSnapshot};
+pub use capital_bucket_contract::{CapitalTimeBucketContract, CapitalTimeBucketContractError};
+pub use economic::{
+    EconomicTierFactory, ExecutableCashTierSeedFactory, ExecutableCashTierSeedInput,
+    ExecutableTierLadderSeedFactory, ExecutableTierLadderSeedInput, ExecutableTierSeed,
+    ExistingPortfolioFactory,
 };
-pub use correlation::{
-    CorrelationConstraint, CorrelationEstimator, CorrelationGroups, CorrelationInput,
-    CorrelationMarket, HistoricalCorrelationEstimator, ProxyCorrelationEstimator,
+pub use global::{
+    GlobalPortfolioInput, GlobalPortfolioPlanner, GlobalPortfolioResult, PlannedEconomicTier,
+    TierAdmissionRejection, TierAdmissionRejectionCode,
 };
-pub use lp::LinearProgrammingPortfolioAllocator;
-#[cfg(debug_assertions)]
-pub use lp::debug_test_hooks;
-pub use optimizer::{OptimizerConfig, OptimizerOutcome, backtest_optimizer, optimizer_from_config};
-pub use planner::{
-    DefaultPortfolioPlanner, PlanCandidate, PlannedRecommendation, PortfolioPlanInput,
-    PortfolioPlanOutput, PortfolioPlanner, RejectedCandidate,
+pub use scenario::{
+    PortfolioScenarioGenerationInput, PortfolioScenarioGenerator, PortfolioScenarioLegInput,
+    SealedPortfolioScenarioArtifact, VerifiedPortfolioScenarioModel,
 };
-pub use sizing::{
-    DrawdownState, ExecutableSizingTier, KellySizingModel, SizingInput, SizingModel, SizingOutcome,
-    SizingSuggestion, sizing_model_from_config,
+pub(crate) use scenario_model::scenario_economic_function_hash;
+pub use scenario_model::{
+    FittedPortfolioScenarioModel, PortfolioScenarioFoldFitInput, PortfolioScenarioMethodology,
+    PortfolioScenarioModelFitInput, PortfolioScenarioModelFitter,
+    PortfolioScenarioResidualObservation, PortfolioScenarioRouteFitInput,
 };

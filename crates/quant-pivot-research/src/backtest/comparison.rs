@@ -272,7 +272,10 @@ mod tests {
         types::{
             BacktestReportId, DecisionPolicySnapshotId, MarketId, ModelVersionId, PayoutRatio,
             Probability, Shares, TokenId, TrainingDatasetId, Usd,
-            backtest::{CategoryMetric, ExpectedVsRealized, PnlCurvePoint, PnlSimulation},
+            backtest::{
+                BacktestPortfolioFunnel, CategoryMetric, ExpectedVsRealized, PnlCurvePoint,
+                PnlSimulation,
+            },
         },
     };
     use rust_decimal::Decimal;
@@ -364,6 +367,7 @@ mod tests {
                     cumulative_realized_pnl_usd: realized_pnl,
                 }],
             },
+            portfolio_funnel: BacktestPortfolioFunnel::empty(),
             report_hash: hash(report_seed),
         };
         report.report_hash = report.recomputed_hash().expect("report hash");
@@ -373,7 +377,7 @@ mod tests {
             rank_outcomes: Vec::new(),
             sample_outcomes: samples,
             portfolio_returns: Vec::new(),
-            tick_weights: Vec::new(),
+            tick_cash_turnover: Vec::new(),
         }
     }
 

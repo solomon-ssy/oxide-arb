@@ -56,7 +56,8 @@ pub struct CreateModelSpecRequest {
     /// Ordered raw-input contract. This field is mandatory: an empty contract,
     /// unknown feature, duplicate, or encoded/synthetic name is rejected.
     pub input_contract: ModelInputContract,
-    /// Frozen target label/horizon and CV folds. Training cannot override it.
+    /// Frozen typed target, evaluation-policy binding, and CV folds.
+    /// Training cannot override these semantics.
     pub training_contract: ModelTrainingContract,
     /// Operator reason recorded on the operation log (UI should require non-empty).
     #[validate(length(min = 1, max = 512))]
@@ -156,8 +157,7 @@ mod tests {
             "model_family": "weighted_factor",
             "prediction_horizon_secs": 86_400,
             "training_contract": {
-                "target_label_name": "token_payout_ratio",
-                "target_label_horizon_secs": 0,
+                "target": { "kind": "outcome_payout" },
                 "validation_folds": 3
             },
             "thesis": {

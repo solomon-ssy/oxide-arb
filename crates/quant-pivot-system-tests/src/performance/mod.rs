@@ -1,7 +1,7 @@
 //! Reproducible production-stack performance verification.
 
 mod evidence;
-mod upstream;
+pub(crate) mod upstream;
 
 use std::{
     collections::HashMap,
@@ -436,7 +436,7 @@ impl PerformanceRuntime {
         let on_session_invalidated: WsSessionInvalidationHook = Arc::new(move |token_ids| {
             let invalidated = invalidation_books.invalidate_ids(token_ids);
             invalidation_metrics
-                .ws_session_backpressure_invalidations
+                .ws_session_invalidated_tokens
                 .inc_by(u64::try_from(invalidated).unwrap_or(u64::MAX));
         });
         let (retirement_tx, retirement_rx) = flume::bounded(1_024);
@@ -529,12 +529,15 @@ impl PerformanceRuntime {
                 .context("performance runner reported a critical failure")
         }
         .await;
-        clob.shutdown().await;
+        let clob_result = clob
+            .shutdown()
+            .await
+            .context("shutdown deterministic CLOB upstream");
         drop((manager, book_store, market_registry, infra));
         let stack_result = Box::pin(stack.shutdown())
             .await
             .context("shutdown performance infrastructure");
-        runner_result.and(stack_result)
+        runner_result.and(clob_result).and(stack_result)
     }
 
     async fn finish(
@@ -771,7 +774,7 @@ fn collect_correctness(
             .saturating_add(publication_excess),
         out_of_order: recorder.out_of_order.load(Ordering::Acquire),
         invalid_fresh_reads: load.invalid_fresh_reads,
-        ws_session_invalidations: runtime.metrics.ws_session_backpressure_invalidations.get(),
+        ws_session_invalidations: runtime.metrics.ws_session_invalidated_tokens.get(),
         book_apply_invalidations: runtime.metrics.book_apply_backpressure_invalidations.get(),
         writer_drops: prometheus_counter_sum(
             &prometheus,

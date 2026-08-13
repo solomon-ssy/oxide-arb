@@ -3,23 +3,26 @@
 //! This module validates only the current quant-pivot document. Unknown and
 //! superseded configuration paths are rejected by the typed schema.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use linkme::distributed_slice;
 use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
 use rust_decimal::Decimal;
 
 use super::{
-    BuyModelRoute, DecimalValue, DecisionPolicySnapshot, OutcomeReconciliationPolicy,
-    PolicyValidationConfig, ResearchValidationConfig, ResearchValidationTrialsConfig,
-    SizingModelConfig,
-    sections::{FeaturesConfig, KellySafetyConfig, MAX_REPORT_TOP_N},
+    DecimalValue, DecisionPolicySnapshot, OutcomeReconciliationPolicy, PolicyValidationConfig,
+    ResearchValidationConfig, ResearchValidationTrialsConfig,
+    sections::{FeaturesConfig, MAX_REPORT_TOP_N},
     validate_schedule_cadence,
 };
 use crate::{
     enums::factor::FactorNormalization,
     runtime_config::{FeatureFamily, PerFactorNormalization},
-    types::{CalibrationArtifactId, stable_name::FactorName},
+    types::{
+        CalibrationArtifactId,
+        backtest::{CSCV_MAX_BLOCK_COUNT, CSCV_MIN_BLOCK_COUNT},
+        stable_name::FactorName,
+    },
 };
 
 /// Extension hook for feature-config validation that requires research-plane schema knowledge.
@@ -75,6 +78,20 @@ fn validate_domain(config: &DecisionPolicySnapshot, report: &mut ConfigValidatio
 }
 
 fn validate_selection(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
+    let mut categories = HashSet::new();
+    if config
+        .recommendation
+        .selection
+        .enabled_categories
+        .iter()
+        .any(|category| !categories.insert(*category))
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "selection.enabled_categories",
+            detail: "must not contain duplicate categories; an empty list means all supported categories"
+                .to_owned(),
+        });
+    }
     non_negative_decimal(
         "selection.min_liquidity_usd",
         &config.recommendation.selection.min_liquidity_usd,
@@ -810,14 +827,6 @@ fn validate_factor_orthogonalize(
 }
 
 fn validate_model(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
-    let selection = &config.recommendation.selection;
-    let route = BuyModelRoute::try_from(selection);
-    if let Err(error) = &route {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "selection.enabled_categories",
-            detail: error.to_string(),
-        });
-    }
     for (buy_route, binding) in &config.model_routing.model.buy_routes {
         if binding.champion.generation == 0
             || binding.shadow.as_ref().is_some_and(|shadow| {
@@ -835,25 +844,50 @@ fn validate_model(config: &DecisionPolicySnapshot, report: &mut ConfigValidation
             });
         }
     }
-    if !selection.enabled_categories.is_empty()
-        && let Ok(route) = route
-        && config.model_routing.model.champion(route).is_err()
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "model.buy_routes",
-            detail: format!("enabled report route {route:?} requires its exact champion binding"),
-        });
-    }
-    unit_ratio(
-        "model.min_model_confidence",
-        &config.model_routing.model.min_model_confidence,
-        report,
-    );
     non_negative_decimal(
         "model.shadow_diff_threshold",
         &config.model_routing.model.shadow_diff_threshold,
         report,
     );
+    let mut route_set_digests = HashSet::new();
+    for binding in &config.model_routing.model.portfolio_scenario_model_bindings {
+        let canonical_routes = binding
+            .ordered_routes
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if binding.ordered_routes.is_empty() || binding.ordered_routes != canonical_routes {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "model.portfolio_scenario_model_bindings.ordered_routes",
+                detail: "must be a non-empty, sorted, duplicate-free Route set".to_owned(),
+            });
+        }
+        if !route_set_digests.insert(binding.route_set_digest) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "model.portfolio_scenario_model_bindings.route_set_digest",
+                detail: format!(
+                    "duplicate exact binding for Route-set digest {}",
+                    binding.route_set_digest
+                ),
+            });
+        }
+        if binding.scenario_model_schema_version.get() < 1
+            || binding
+                .model_content_hash
+                .as_bytes()
+                .iter()
+                .all(|byte| *byte == 0)
+        {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "model.portfolio_scenario_model_bindings",
+                detail:
+                    "scenario-model schema and artifact content hash must identify a promoted artifact"
+                        .to_owned(),
+            });
+        }
+    }
     if config.model_routing.model.calibration.min_samples_isotonic == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "model.calibration.min_samples_isotonic",
@@ -941,6 +975,12 @@ fn validate_quality_gate(config: &DecisionPolicySnapshot, report: &mut ConfigVal
         report,
     );
     unit_ratio("quality_gate.sell.max_pbo", &gate.sell.max_pbo, report);
+    if gate.sell.max_pbo.value > Decimal::new(5, 2) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quality_gate.sell.max_pbo",
+            detail: "cannot exceed the governed 0.05 CSCV rejection boundary".to_owned(),
+        });
+    }
 }
 
 fn validate_training(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
@@ -997,12 +1037,6 @@ fn validate_reports(config: &DecisionPolicySnapshot, report: &mut ConfigValidati
             detail: "must be in 1..=reports.max_top_n".to_owned(),
         });
     }
-    if config.recommendation.reports.fallback_horizon_secs == 0 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "reports.fallback_horizon_secs",
-            detail: "must be greater than zero".to_owned(),
-        });
-    }
     half_open_unit(
         "reports.entry_window_ratio",
         &config.recommendation.reports.entry_window_ratio,
@@ -1048,124 +1082,148 @@ fn validate_reports(config: &DecisionPolicySnapshot, report: &mut ConfigValidati
 
 fn validate_portfolio(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
     let budget = &config.execution_risk.portfolio.budget;
-    non_negative_decimal(
+    positive_decimal(
         "portfolio.budget.total_budget_usd",
         &budget.total_budget_usd,
         report,
     );
-    non_negative_decimal(
-        "portfolio.budget.min_recommendation_usd",
-        &budget.min_recommendation_usd,
+    positive_decimal(
+        "portfolio.budget.cash_reserve_usd",
+        &budget.cash_reserve_usd,
         report,
     );
-    non_negative_decimal(
-        "portfolio.budget.max_single_recommendation_usd",
-        &budget.max_single_recommendation_usd,
+    positive_decimal(
+        "portfolio.budget.max_open_capital_usd",
+        &budget.max_open_capital_usd,
         report,
     );
+    if budget.cash_reserve_usd.value + budget.max_open_capital_usd.value
+        > budget.total_budget_usd.value
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "portfolio.budget",
+            detail: "cash_reserve_usd + max_open_capital_usd must be <= total_budget_usd"
+                .to_owned(),
+        });
+    }
 
-    let constraints = &config.execution_risk.portfolio.constraints;
-    non_negative_decimal(
-        "portfolio.constraints.max_market_exposure_usd",
-        &constraints.max_market_exposure_usd,
+    let limits = &config.execution_risk.portfolio.exposure_limits;
+    positive_decimal(
+        "portfolio.exposure_limits.max_single_recommendation_usd",
+        &limits.max_single_recommendation_usd,
         report,
     );
-    non_negative_decimal(
-        "portfolio.constraints.max_event_exposure_usd",
-        &constraints.max_event_exposure_usd,
+    positive_decimal(
+        "portfolio.exposure_limits.max_market_exposure_usd",
+        &limits.max_market_exposure_usd,
         report,
     );
-    non_negative_decimal(
-        "portfolio.constraints.max_category_exposure_usd",
-        &constraints.max_category_exposure_usd,
+    positive_decimal(
+        "portfolio.exposure_limits.max_event_exposure_usd",
+        &limits.max_event_exposure_usd,
         report,
     );
-    non_negative_decimal(
-        "portfolio.constraints.max_correlated_exposure_usd",
-        &constraints.max_correlated_exposure_usd,
+    positive_decimal(
+        "portfolio.exposure_limits.max_category_exposure_usd",
+        &limits.max_category_exposure_usd,
         report,
     );
-    unit_ratio(
-        "portfolio.constraints.liquidity_usage_cap_pct",
-        &constraints.liquidity_usage_cap_pct,
+    positive_decimal(
+        "portfolio.exposure_limits.max_route_exposure_usd",
+        &limits.max_route_exposure_usd,
         report,
     );
-    unit_ratio(
-        "portfolio.constraints.correlation.cluster_threshold",
-        &constraints.correlation.cluster_threshold,
-        report,
-    );
+    if limits.max_open_recommendations == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "portfolio.exposure_limits.max_open_recommendations",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
 
-    validate_sizing(&config.execution_risk.portfolio.sizing, report);
-    validate_kelly_safety(&config.execution_risk.portfolio.kelly_safety, report);
-    validate_optimizer(config, report);
-}
+    let tail = &config.execution_risk.portfolio.tail_risk;
+    if !(1..10_000).contains(&tail.cvar_confidence_bps) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "portfolio.tail_risk.cvar_confidence_bps",
+            detail: "must be within 1..10000".to_owned(),
+        });
+    }
+    for (field, value) in [
+        ("portfolio.tail_risk.max_cvar_usd", &tail.max_cvar_usd),
+        (
+            "portfolio.tail_risk.max_scenario_loss_usd",
+            &tail.max_scenario_loss_usd,
+        ),
+        (
+            "portfolio.tail_risk.max_drawdown_usd",
+            &tail.max_drawdown_usd,
+        ),
+    ] {
+        positive_decimal(field, value, report);
+    }
+    let mut previous_end = 0;
+    if tail.capital_time_buckets.is_empty() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "portfolio.tail_risk.capital_time_buckets",
+            detail: "must contain at least one capital-lock bucket".to_owned(),
+        });
+    }
+    for bucket in &tail.capital_time_buckets {
+        if bucket.end_secs <= previous_end {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "portfolio.tail_risk.capital_time_buckets.end_secs",
+                detail: "must be strictly increasing and greater than zero".to_owned(),
+            });
+        }
+        previous_end = bucket.end_secs;
+        positive_decimal(
+            "portfolio.tail_risk.capital_time_buckets.max_capital_usd",
+            &bucket.max_capital_usd,
+            report,
+        );
+        if bucket.max_capital_usd.value > budget.max_open_capital_usd.value {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "portfolio.tail_risk.capital_time_buckets.max_capital_usd",
+                detail: "must be <= portfolio.budget.max_open_capital_usd".to_owned(),
+            });
+        }
+    }
 
-/// Highest sane `edge_uncertainty_k`.
-///
-/// The shrink rule is `clamp(1 - k·edge_std, floor, 1)`. `edge_std` is a
-/// Wilson-CI half-width in `[0, 0.5]`,
-/// so `k = 10` already drives `shrink` to `floor` for any half-width above
-/// `0.1` — an unbounded `k` has no further governance effect beyond making
-/// every calibrated candidate collapse to the floor, i.e. a de facto (and
-/// silent) disabling of edge-sensitivity rather than a deliberate one.
-const MAX_EDGE_UNCERTAINTY_K: Decimal = Decimal::TEN;
-
-/// Validate Kelly safety-layer parameters.
-fn validate_kelly_safety(kelly: &KellySafetyConfig, report: &mut ConfigValidationReport) {
-    bounded_decimal(
-        "portfolio.kelly_safety.edge_uncertainty_k",
-        &kelly.edge_uncertainty_k,
-        Decimal::ZERO,
-        MAX_EDGE_UNCERTAINTY_K,
-        report,
-    );
-    // Must be strictly positive: a `0` floor lets `shrink` collapse all the
-    // way to `0`, silently zeroing every calibrated candidate's Kelly size
-    // instead of the intended "shrink, never eliminate" governance.
-    half_open_unit(
-        "portfolio.kelly_safety.edge_uncertainty_floor",
-        &kelly.edge_uncertainty_floor,
-        report,
-    );
-    half_open_unit(
-        "portfolio.kelly_safety.max_aggregate_exposure_pct",
-        &kelly.max_aggregate_exposure_pct,
-        report,
-    );
-    half_open_unit(
-        "portfolio.kelly_safety.binding_materiality_threshold",
-        &kelly.binding_materiality_threshold,
-        report,
-    );
-}
-
-/// Validate the portfolio optimizer (`good_lp`) parameters.
-fn validate_optimizer(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
-    let optimizer = &config.execution_risk.portfolio.optimizer;
+    let admission = &config.execution_risk.portfolio.admission;
     non_negative_decimal(
-        "portfolio.optimizer.objective_return_weight",
-        &optimizer.objective_return_weight,
+        "portfolio.admission.min_nominal_expected_net_usd",
+        &admission.min_nominal_expected_net_usd,
         report,
     );
-}
-
-/// Validate the sizing model parameters.
-fn validate_sizing(sizing: &SizingModelConfig, report: &mut ConfigValidationReport) {
-    half_open_unit(
-        "portfolio.sizing.kelly_fraction",
-        &sizing.kelly_fraction,
+    non_negative_decimal(
+        "portfolio.admission.min_robust_expected_net_usd",
+        &admission.min_robust_expected_net_usd,
         report,
     );
-    half_open_unit(
-        "portfolio.sizing.max_position_pct",
-        &sizing.max_position_pct,
-        report,
-    );
+    for (field, value) in [
+        (
+            "portfolio.admission.min_profit_probability_bps",
+            admission.min_profit_probability_bps,
+        ),
+        (
+            "portfolio.admission.max_probability_interval_width_bps",
+            admission.max_probability_interval_width_bps,
+        ),
+        (
+            "portfolio.admission.liquidity_buffer_bps",
+            admission.liquidity_buffer_bps,
+        ),
+    ] {
+        if value > 10_000 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field,
+                detail: "must be <= 10000 basis points".to_owned(),
+            });
+        }
+    }
 }
 
 fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
-    let condition = &config.operational_control.entry_condition;
+    let condition = &config.operations_policy.entry_condition;
     if condition.backstop_interval_ms == 0
         || condition.next_evaluation_delay_ms == 0
         || condition.lease_duration_secs == 0
@@ -1184,10 +1242,10 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
             detail: "must be less than lease_duration_secs".to_owned(),
         });
     }
-    let outcome_reconciliation = &config.operational_control.outcome_reconciliation;
+    let outcome_reconciliation = &config.operations_policy.outcome_reconciliation;
     if outcome_reconciliation.sweep_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "operational_control.outcome_reconciliation.sweep_secs",
+            field: "operations_policy.outcome_reconciliation.sweep_secs",
             detail: "must be greater than zero".to_owned(),
         });
     }
@@ -1196,7 +1254,7 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
             > OutcomeReconciliationPolicy::MAX_CANDIDATE_BATCH_SIZE
     {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "operational_control.outcome_reconciliation.candidate_batch_size",
+            field: "operations_policy.outcome_reconciliation.candidate_batch_size",
             detail: format!(
                 "must be in 1..={}",
                 OutcomeReconciliationPolicy::MAX_CANDIDATE_BATCH_SIZE
@@ -1208,14 +1266,19 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
             > OutcomeReconciliationPolicy::MAX_SOURCE_BLOCK_SPAN
     {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "operational_control.outcome_reconciliation.source_block_span",
+            field: "operations_policy.outcome_reconciliation.source_block_span",
             detail: format!(
                 "must be in 1..={}",
                 OutcomeReconciliationPolicy::MAX_SOURCE_BLOCK_SPAN
             ),
         });
     }
-    if config.execution_authorization.semi_auto.approval_ttl_secs == 0 {
+    if config
+        .execution_automation_policy
+        .semi_auto
+        .approval_ttl_secs
+        == 0
+    {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.approval_ttl_secs",
             detail: "must be greater than zero".to_owned(),
@@ -1224,22 +1287,12 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
     non_negative_decimal(
         "execution.auto_execution.max_total_usd_per_report",
         &config
-            .execution_authorization
+            .execution_automation_policy
             .auto_execution
             .max_total_usd_per_report,
         report,
     );
-    unit_ratio(
-        "execution.auto_execution.min_confidence",
-        &config.execution_authorization.auto_execution.min_confidence,
-        report,
-    );
-    non_negative_decimal(
-        "execution.capital.max_reserved_usd",
-        &config.execution_risk.capital.max_reserved_usd,
-        report,
-    );
-    non_negative_decimal(
+    positive_decimal(
         "execution.entry_order_policy.min_entry_book_depth_usd",
         &config
             .execution_risk
@@ -1249,7 +1302,7 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
     );
     validate_execution_breaker(config, report);
     if config
-        .operational_control
+        .operations_policy
         .kill_switch
         .emergency_exit
         .max_slippage_bps
@@ -1303,7 +1356,7 @@ fn validate_execution_breaker(
             });
         }
     }
-    non_negative_decimal(
+    positive_decimal(
         "execution.breaker.daily_realized_loss_cap_usd",
         &breaker.daily_realized_loss_cap_usd,
         report,
@@ -1439,6 +1492,19 @@ fn validate_cpcv_purge(validation: &ResearchValidationConfig, report: &mut Confi
             detail: "must be in 1..n_groups".to_owned(),
         });
     }
+    if cpcv.nested_estimator_holdout_bps == 0 || cpcv.nested_estimator_holdout_bps >= 10_000 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.cpcv.nested_estimator_holdout_bps",
+            detail: "must be in 1..10000 basis points".to_owned(),
+        });
+    }
+    if cpcv.nested_estimator_min_groups < 4 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.cpcv.nested_estimator_min_groups",
+            detail: "must be >= 4 so calibration and scenario fit each start with at least two independent decision-time groups; every fold separately proves the post-purge model/calibration/scenario floors"
+                .to_owned(),
+        });
+    }
     if validation.gates.min_cpcv_paths < 21 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "research.validation.gates.min_cpcv_paths",
@@ -1525,10 +1591,14 @@ fn validate_research_validation_trials(
 }
 
 fn validate_pbo_gates(validation: &ResearchValidationConfig, report: &mut ConfigValidationReport) {
-    if validation.pbo.block_count < 4 || !validation.pbo.block_count.is_multiple_of(2) {
+    if !(CSCV_MIN_BLOCK_COUNT..=CSCV_MAX_BLOCK_COUNT).contains(&validation.pbo.block_count)
+        || !validation.pbo.block_count.is_multiple_of(2)
+    {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "research.validation.pbo.block_count",
-            detail: "must be even and >= 4".to_owned(),
+            detail: format!(
+                "must be even and within {CSCV_MIN_BLOCK_COUNT}..={CSCV_MAX_BLOCK_COUNT}"
+            ),
         });
     }
 
@@ -1544,6 +1614,12 @@ fn validate_pbo_gates(validation: &ResearchValidationConfig, report: &mut Config
         report,
     );
     unit_ratio("research.validation.gates.max_pbo", &gates.max_pbo, report);
+    if gates.max_pbo.value > Decimal::new(5, 2) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.gates.max_pbo",
+            detail: "cannot exceed the governed 0.05 CSCV rejection boundary".to_owned(),
+        });
+    }
     non_negative_decimal(
         "research.validation.gates.max_turnover",
         &gates.max_turnover,
@@ -1561,22 +1637,6 @@ fn non_negative_decimal(
         report.errors.push(ConfigValidationError::InvalidValue {
             field,
             detail: format!("`{}` must be >= 0", value.value),
-        });
-    }
-}
-
-/// Validate a decimal within an explicit inclusive `[min, max]` range.
-fn bounded_decimal(
-    field: &'static str,
-    value: &DecimalValue,
-    min: Decimal,
-    max: Decimal,
-    report: &mut ConfigValidationReport,
-) {
-    if !(min..=max).contains(&value.value) {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field,
-            detail: format!("`{}` must be within [{min}, {max}]", value.value),
         });
     }
 }
@@ -1645,14 +1705,15 @@ mod tests {
     use std::collections::BTreeMap;
 
     use chrono::Utc;
+    use rust_decimal_macros::dec;
 
-    use super::{BuyModelRoute, ConfigValidationError, DecisionPolicySnapshot};
+    use super::{ConfigValidationError, DecisionPolicySnapshot};
     use crate::{
         enums::{common::MarketCategory, factor::FactorFamily},
         runtime_config::{
-            BuyRouteBinding, DecimalValue, FeatureFamily, MAX_REPORT_TOP_N, ModelBinding,
-            ModelBindingSource, OutcomeReconciliationPolicy, POLICY_RESOURCE_SCHEMA_VERSION,
-            ReportScheduleConfig, ScheduleCadence,
+            BuyModelRoute, BuyRouteBinding, DecimalValue, FeatureFamily, MAX_REPORT_TOP_N,
+            ModelBinding, ModelBindingSource, OutcomeReconciliationPolicy,
+            POLICY_RESOURCE_SCHEMA_VERSION, ReportScheduleConfig, ScheduleCadence,
         },
         types::{CalibrationArtifactId, ModelVersionId, PolicyBundleGeneration},
     };
@@ -1679,6 +1740,44 @@ mod tests {
     }
 
     #[test]
+    fn research_pbo_above_rejected() {
+        let mut config = DecisionPolicySnapshot::default();
+        config
+            .profile_artifacts
+            .research_method
+            .research
+            .validation
+            .gates
+            .max_pbo = DecimalValue::new(dec!(0.0501));
+
+        let report = config.validate_runtime_config();
+        assert!(report.errors.iter().any(|error| matches!(
+            error,
+            ConfigValidationError::InvalidValue { field, detail }
+                if *field == "research.validation.gates.max_pbo"
+                    && detail.contains("0.05")
+        )));
+    }
+
+    #[test]
+    fn sell_pbo_above_rejected() {
+        let mut config = DecisionPolicySnapshot::default();
+        config
+            .profile_artifacts
+            .research_method
+            .model_promotion
+            .sell
+            .max_pbo = DecimalValue::new(dec!(0.0501));
+
+        let report = config.validate_runtime_config();
+        assert!(report.errors.iter().any(|error| matches!(
+            error,
+            ConfigValidationError::InvalidValue { field, detail }
+                if *field == "quality_gate.sell.max_pbo" && detail.contains("0.05")
+        )));
+    }
+
+    #[test]
     fn default_cpcv_reconstructs_paths() {
         let validation = &DecisionPolicySnapshot::default()
             .profile_artifacts
@@ -1699,6 +1798,27 @@ mod tests {
                 .expect("default CPCV combination count"),
             56
         );
+    }
+
+    #[test]
+    fn nested_estimator_requires_groups() {
+        let mut config = DecisionPolicySnapshot::default();
+        config
+            .profile_artifacts
+            .research_method
+            .research
+            .validation
+            .cpcv
+            .nested_estimator_min_groups = 3;
+
+        let report = config.validate_runtime_config();
+        assert!(report.errors.iter().any(|error| matches!(
+            error,
+            ConfigValidationError::InvalidValue {
+                field: "research.validation.cpcv.nested_estimator_min_groups",
+                detail,
+            } if detail.contains("at least two independent decision-time groups")
+        )));
     }
 
     #[test]
@@ -1753,32 +1873,10 @@ mod tests {
     }
 
     #[test]
-    fn model_routes_fail_closed() {
+    fn routes_support_global_reports() {
         let generic = ModelVersionId::from_v7();
         let weather = ModelVersionId::from_v7();
         assert!(BuyModelRoute::try_from(Some(MarketCategory::Sports)).is_err());
-
-        let mut missing = DecisionPolicySnapshot::default();
-        missing.recommendation.selection.enabled_categories = vec![MarketCategory::Weather];
-        missing.model_routing.model.buy_routes.insert(
-            BuyModelRoute::Pooled,
-            BuyRouteBinding::bootstrap_fixture(generic),
-        );
-        assert!(
-            missing
-                .validate_runtime_config()
-                .errors
-                .iter()
-                .any(|error| {
-                    matches!(
-                        error,
-                        ConfigValidationError::InvalidValue {
-                            field: "model.buy_routes",
-                            ..
-                        }
-                    )
-                })
-        );
 
         let mut mixed = DecisionPolicySnapshot::default();
         mixed.recommendation.selection.enabled_categories =
@@ -1793,15 +1891,7 @@ mod tests {
                 BuyRouteBinding::bootstrap_fixture(weather),
             ),
         ]);
-        assert!(mixed.validate_runtime_config().errors.iter().any(|error| {
-            matches!(
-                error,
-                ConfigValidationError::InvalidValue {
-                    field: "selection.enabled_categories",
-                    ..
-                }
-            )
-        }));
+        assert!(!mixed.validate_runtime_config().has_errors());
 
         let mut invalid_generation = DecisionPolicySnapshot::default();
         invalid_generation
@@ -1934,18 +2024,18 @@ mod tests {
     #[test]
     fn outcome_reconciliation_policy_bounded() {
         let mut zero = DecisionPolicySnapshot::default();
-        zero.operational_control.outcome_reconciliation.sweep_secs = 0;
-        zero.operational_control
+        zero.operations_policy.outcome_reconciliation.sweep_secs = 0;
+        zero.operations_policy
             .outcome_reconciliation
             .candidate_batch_size = 0;
-        zero.operational_control
+        zero.operations_policy
             .outcome_reconciliation
             .source_block_span = 0;
         let zero_report = zero.validate_runtime_config();
         for field in [
-            "operational_control.outcome_reconciliation.sweep_secs",
-            "operational_control.outcome_reconciliation.candidate_batch_size",
-            "operational_control.outcome_reconciliation.source_block_span",
+            "operations_policy.outcome_reconciliation.sweep_secs",
+            "operations_policy.outcome_reconciliation.candidate_batch_size",
+            "operations_policy.outcome_reconciliation.source_block_span",
         ] {
             assert!(zero_report.errors.iter().any(|error| matches!(
                 error,
@@ -1958,11 +2048,11 @@ mod tests {
 
         let mut oversized = DecisionPolicySnapshot::default();
         oversized
-            .operational_control
+            .operations_policy
             .outcome_reconciliation
             .candidate_batch_size = OutcomeReconciliationPolicy::MAX_CANDIDATE_BATCH_SIZE + 1;
         oversized
-            .operational_control
+            .operations_policy
             .outcome_reconciliation
             .source_block_span = OutcomeReconciliationPolicy::MAX_SOURCE_BLOCK_SPAN + 1;
         let oversized_report = oversized.validate_runtime_config();
@@ -1973,8 +2063,8 @@ mod tests {
                 .filter(|error| matches!(
                     error,
                     ConfigValidationError::InvalidValue {
-                        field: "operational_control.outcome_reconciliation.candidate_batch_size"
-                            | "operational_control.outcome_reconciliation.source_block_span",
+                        field: "operations_policy.outcome_reconciliation.candidate_batch_size"
+                            | "operations_policy.outcome_reconciliation.source_block_span",
                         ..
                     }
                 ))
@@ -2009,7 +2099,7 @@ mod tests {
     fn kill_switch_emergency_positive() {
         let mut config = DecisionPolicySnapshot::default();
         config
-            .operational_control
+            .operations_policy
             .kill_switch
             .emergency_exit
             .max_slippage_bps = 0;
@@ -2128,42 +2218,27 @@ mod tests {
     }
 
     #[test]
-    fn runtime_rejects_unbounded_k() {
+    fn rejects_incoherent_capital_budget() {
         let mut config = DecisionPolicySnapshot::default();
-        config
-            .execution_risk
-            .portfolio
-            .kelly_safety
-            .edge_uncertainty_k = DecimalValue::new(rust_decimal_macros::dec!(10.01));
+        config.execution_risk.portfolio.budget.cash_reserve_usd =
+            DecimalValue::new(rust_decimal_macros::dec!(2000));
+        config.execution_risk.portfolio.budget.max_open_capital_usd =
+            DecimalValue::new(rust_decimal_macros::dec!(9000));
         let report = config.validate_runtime_config();
-        assert!(
-            report.has_errors(),
-            "an unbounded k silently collapses every calibrated candidate's shrink to the floor"
-        );
-
-        let mut config = DecisionPolicySnapshot::default();
-        config
-            .execution_risk
-            .portfolio
-            .kelly_safety
-            .edge_uncertainty_k = DecimalValue::new(rust_decimal_macros::dec!(10));
-        let report = config.validate_runtime_config();
-        assert!(!report.has_errors(), "10 is the inclusive upper bound");
+        assert!(report.has_errors());
     }
 
     #[test]
-    fn runtime_rejects_zero_floor() {
+    fn rejects_unordered_capital_buckets() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .execution_risk
             .portfolio
-            .kelly_safety
-            .edge_uncertainty_floor = DecimalValue::new(rust_decimal_macros::dec!(0));
+            .tail_risk
+            .capital_time_buckets[1]
+            .end_secs = 3_600;
         let report = config.validate_runtime_config();
-        assert!(
-            report.has_errors(),
-            "a zero floor lets edge-uncertainty shrink zero out Kelly sizing entirely"
-        );
+        assert!(report.has_errors());
     }
 
     #[test]

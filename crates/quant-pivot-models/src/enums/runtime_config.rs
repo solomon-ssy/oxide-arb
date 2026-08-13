@@ -38,7 +38,7 @@ wire_enum! {
         ModelEvaluationClaim => "model_evaluation_claim",
         FutureReportRunReconcile => "future_report_run_reconcile",
         OperationalAdmission => "operational_admission",
-        ExecutionAuthorizationAdmission => "execution_authorization_admission",
+        ExecutionAutomationAdmission => "execution_automation_policy_admission",
     }
 }
 
@@ -129,88 +129,6 @@ wire_enum! {
     }
 }
 
-wire_enum! {
-    @derive(schemars::JsonSchema, PartialOrd, Ord)
-    pub enum CredentialKind {
-        PostgresRuntime => "postgres_runtime",
-        ClickhouseRuntime => "clickhouse_runtime",
-        RedisRuntime => "redis_runtime",
-        JwtSigning => "jwt_signing",
-        PolymarketPrivateKey => "polymarket_private_key",
-        TelegramBotToken => "telegram_bot_token",
-        WebhookAuthorization => "webhook_authorization",
-        EvidenceAttestation => "evidence_attestation",
-        PolymarketRelayer => "polymarket_relayer",
-        ChainlinkDataStreamsApiKey => "chainlink_data_streams_api_key",
-        ChainlinkDataStreamsApiSecret => "chainlink_data_streams_api_secret",
-    }
-}
-
-wire_enum! {
-    @derive(schemars::JsonSchema)
-    pub enum CredentialHealthStatus {
-        Available => "available",
-        Missing => "missing",
-        NotConfigured => "not_configured",
-    }
-}
-
-wire_enum! {
-    @derive(schemars::JsonSchema, PartialOrd, Ord)
-    pub enum DeploymentEndpointKind {
-        WebBind => "web_bind",
-        Postgres => "postgres",
-        Clickhouse => "clickhouse",
-        Redis => "redis",
-        GammaApi => "gamma_api",
-        ClobApi => "clob_api",
-        DataApi => "data_api",
-        ArtifactStore => "artifact_store",
-        DomainProvider => "domain_provider",
-    }
-}
-
-wire_enum! {
-    @derive(schemars::JsonSchema, PartialOrd, Ord)
-    pub enum ResourceBudgetKind {
-        Database => "database",
-        ClickhouseWriter => "clickhouse_writer",
-        MarketDataIngest => "market_data_ingest",
-        Cache => "cache",
-        ResearchJobs => "research_jobs",
-        ReportExecution => "report_execution",
-        Web => "web",
-    }
-}
-
-wire_enum! {
-    @derive(schemars::JsonSchema)
-    pub enum ResourceBudgetMetric {
-        MaxConcurrency => "max_concurrency",
-        MinConcurrency => "min_concurrency",
-        QueueCapacity => "queue_capacity",
-        BatchRows => "batch_rows",
-        OperationTimeout => "operation_timeout",
-        LeaseDuration => "lease_duration",
-        HeartbeatInterval => "heartbeat_interval",
-        CacheEntries => "cache_entries",
-        SubscriptionCapacity => "subscription_capacity",
-        ConfiguredOrigins => "configured_origins",
-    }
-}
-
-wire_enum! {
-    @derive(schemars::JsonSchema)
-    pub enum ResourceBudgetUnit {
-        Count => "count",
-        Rows => "rows",
-        Milliseconds => "milliseconds",
-        Seconds => "seconds",
-        Entries => "entries",
-        Tokens => "tokens",
-    }
-}
-
 pg_enum! {
     type_name = "qp_config_resource_kind",
     @derive(Default, schemars::JsonSchema, PartialOrd, Ord)
@@ -220,8 +138,8 @@ pg_enum! {
         ExecutionRiskPolicy => "execution_risk_policy",
         ModelRouting => "model_routing",
         ReportSchedule => "report_schedule",
-        OperationalControl => "operational_control",
-        ExecutionAuthorization => "execution_authorization",
+        OperationsPolicy => "operations_policy",
+        ExecutionAutomationPolicy => "execution_automation_policy",
     }
 }
 
@@ -232,8 +150,8 @@ impl ConfigResourceKind {
         Self::ExecutionRiskPolicy,
         Self::ModelRouting,
         Self::ReportSchedule,
-        Self::OperationalControl,
-        Self::ExecutionAuthorization,
+        Self::OperationsPolicy,
+        Self::ExecutionAutomationPolicy,
     ];
 }
 

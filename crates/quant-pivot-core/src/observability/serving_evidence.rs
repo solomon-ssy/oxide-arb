@@ -28,7 +28,6 @@ pub struct FeatureEvidenceCommitment {
     knowledge_cutoff: i64,
     feature_vector_ids: Vec<FeatureVectorId>,
     vector_markets: HashMap<FeatureVectorId, MarketId>,
-    model_vector_markets: HashMap<FeatureVectorId, MarketId>,
     expected_row_count: u64,
     rows_hash: ContentHash,
 }
@@ -52,29 +51,6 @@ impl FeatureEvidenceCommitment {
     #[must_use]
     pub const fn rows_hash(&self) -> &ContentHash {
         &self.rows_hash
-    }
-
-    /// Bind the all-vector feature commitment to the subset that was admitted
-    /// into model input. Rejected vectors remain committed as serving evidence
-    /// but are not required to appear in the encoded-input rows.
-    pub fn bind_model_vectors(mut self, admitted: &[FeatureVectorId]) -> QuantResult<Self> {
-        let mut seen = HashSet::with_capacity(admitted.len());
-        let mut model_vector_markets = HashMap::with_capacity(admitted.len());
-        for vector_id in admitted {
-            if !seen.insert(*vector_id) {
-                return Err(determinism(format!(
-                    "model-admitted feature vector list contains duplicate {vector_id}"
-                )));
-            }
-            let market_id = self.vector_markets.get(vector_id).cloned().ok_or_else(|| {
-                determinism(format!(
-                    "model-admitted feature vector {vector_id} is absent from the serving feature commitment"
-                ))
-            })?;
-            model_vector_markets.insert(*vector_id, market_id);
-        }
-        self.model_vector_markets = model_vector_markets;
-        Ok(self)
     }
 }
 
@@ -190,7 +166,6 @@ impl<'a> ModelInputEvidenceBatch<'a> {
                     knowledge_cutoff: boundary.knowledge_cutoff().timestamp_millis(),
                     model_run_id: *model_run_id,
                     model_version_id: row.model_version_id,
-                    recommendation_report_id: None,
                     market_id: row.market_id.clone(),
                     feature_vector_id: *feature_vector_id,
                     model_family,
@@ -313,7 +288,6 @@ pub fn feature_commitment(rows: &[QuantFeatureEventRow]) -> QuantResult<FeatureE
         decision_at: first.decision_at,
         knowledge_cutoff: first.knowledge_cutoff,
         feature_vector_ids,
-        model_vector_markets: vector_markets.clone(),
         vector_markets,
         expected_row_count,
         rows_hash: ResearchHasher::canonical(&EvidenceBatch { entries: &entries })?,
@@ -340,9 +314,12 @@ pub fn completion_marker(
     }
     let (vector_markets, expected_model_input_row_count, model_input_rows_hash) =
         model_input_commitment(model_run_id, decision_at, knowledge_cutoff, model_inputs)?;
-    if vector_markets != features.model_vector_markets {
+    if vector_markets
+        .iter()
+        .any(|(vector_id, market_id)| features.vector_markets.get(vector_id) != Some(market_id))
+    {
         return Err(determinism(format!(
-            "model-input vector binding for run {model_run_id} does not match the admitted serving-feature subset"
+            "model-input vector binding for run {model_run_id} is not a subset of the committed serving features"
         )));
     }
     let completion_hash = ResearchHasher::canonical(&CompletionDigest {
@@ -495,11 +472,6 @@ fn model_input_commitment(
     knowledge_cutoff: i64,
     rows: &[QuantModelInputEventRow],
 ) -> QuantResult<(HashMap<FeatureVectorId, MarketId>, u64, ContentHash)> {
-    rows.first().ok_or_else(|| {
-        determinism(format!(
-            "model run {model_run_id} emitted no input evidence"
-        ))
-    })?;
     let mut keys = BTreeSet::new();
     let mut vector_markets = HashMap::new();
     let mut market_vectors = HashMap::new();
@@ -692,7 +664,6 @@ mod tests {
             knowledge_cutoff: decision_at,
             model_run_id: *run_id,
             model_version_id: ModelVersionId::new(Uuid::from_u128(2)),
-            recommendation_report_id: None,
             market_id: market_id.clone(),
             feature_vector_id: *vector_id,
             model_family: "classical_logistic".to_owned(),
@@ -809,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_rejected_without_inputs() {
+    fn completion_tracks_subset() {
         let decision_at = Utc::now();
         let boundary = DecisionClock::new(0)
             .boundary(decision_at)
@@ -837,10 +808,7 @@ mod tests {
             &admitted_market,
             decision_at.timestamp_millis(),
         )];
-        let features = feature_commitment(&feature_rows)
-            .expect("feature commitment")
-            .bind_model_vectors(slice::from_ref(&admitted_id))
-            .expect("admission binding");
+        let features = feature_commitment(&feature_rows).expect("feature commitment");
         let marker = completion_marker(&run_id, &boundary, &features, &input_rows, 100)
             .expect("completion marker");
 
@@ -851,6 +819,45 @@ mod tests {
         assert_eq!(vector_ids.len(), 2);
         assert!(vector_ids.contains(&admitted_id));
         assert!(vector_ids.contains(&rejected_id));
+    }
+
+    #[test]
+    fn completion_all_rejected() {
+        let decision_at = Utc::now();
+        let boundary = DecisionClock::new(0)
+            .boundary(decision_at)
+            .expect("boundary");
+        let vector_id = FeatureVectorId::from_v7();
+        let market_id = MarketId::new("0xall-rejected");
+        let run_id = ModelRunId::from_v7();
+        let feature_rows = vec![feature_row(
+            &vector_id,
+            &market_id,
+            decision_at.timestamp_millis(),
+        )];
+        let features = feature_commitment(&feature_rows).expect("feature commitment");
+        let marker = completion_marker(&run_id, &boundary, &features, &[], 100)
+            .expect("empty model-input completion");
+
+        assert_eq!(marker.expected_feature_row_count, 1);
+        assert_eq!(marker.expected_model_input_row_count, 0);
+        assert_eq!(
+            verify_completion(&marker, &feature_rows, &[]).expect("verify empty model inputs"),
+            vec![vector_id]
+        );
+
+        let stray_vector_id = FeatureVectorId::from_v7();
+        let stray_market_id = MarketId::new("0xstray");
+        let stray_input = input_row(
+            &run_id,
+            &stray_vector_id,
+            &stray_market_id,
+            decision_at.timestamp_millis(),
+        );
+        assert!(
+            completion_marker(&run_id, &boundary, &features, &[stray_input], 100).is_err(),
+            "model inputs outside the committed feature set must fail closed"
+        );
     }
 
     #[tokio::test]

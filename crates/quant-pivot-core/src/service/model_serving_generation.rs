@@ -15,7 +15,10 @@ use futures_util::future::join_all;
 use parking_lot::Mutex;
 use quant_pivot_error::{QuantError, QuantResult, control::ControlError, research::ResearchError};
 use quant_pivot_models::{
-    domain::{governance::DecisionPolicySnapshotInfo, quant::ModelVersionInfo},
+    domain::{
+        governance::DecisionPolicySnapshotInfo,
+        quant::{ModelVersionInfo, RepresentedRouteSet},
+    },
     enums::{common::MarketCategory, model::ModelFamily},
     runtime_config::{
         ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, ModelBinding,
@@ -55,8 +58,6 @@ impl<'a> From<&'a DecisionPolicySnapshotInfo> for ModelServingGenerationRequest<
 
 #[derive(Clone, Copy)]
 struct ModelInferencePolicy {
-    min_model_confidence: Decimal,
-    candidate_score_floor: Decimal,
     shadow_diff_threshold: Decimal,
     minimum_shadow_decision_overlap: Probability,
     required_shadow_window_secs: u64,
@@ -331,8 +332,17 @@ impl ModelServingRouteSnapshot {
         let required = self.active_runtime().runtime().required_features();
         match self.route {
             BuyModelRoute::Pooled => ModelFeatureRequirements {
-                generic: required,
-                by_category: BTreeMap::new(),
+                generic: Vec::new(),
+                by_category: BTreeMap::from([
+                    (MarketCategory::Geopolitics, required.clone()),
+                    (MarketCategory::Sports, required.clone()),
+                    (MarketCategory::Politics, required.clone()),
+                    (MarketCategory::Finance, required.clone()),
+                    (MarketCategory::Tech, required.clone()),
+                    (MarketCategory::Culture, required.clone()),
+                    (MarketCategory::Economics, required.clone()),
+                    (MarketCategory::Other, required),
+                ]),
             },
             BuyModelRoute::Crypto => ModelFeatureRequirements {
                 generic: Vec::new(),
@@ -343,16 +353,6 @@ impl ModelServingRouteSnapshot {
                 by_category: BTreeMap::from([(MarketCategory::Weather, required)]),
             },
         }
-    }
-
-    #[must_use]
-    pub(crate) fn min_model_confidence(&self) -> Decimal {
-        self.generation.inference_policy.min_model_confidence
-    }
-
-    #[must_use]
-    pub(crate) fn candidate_score_floor(&self) -> Decimal {
-        self.generation.inference_policy.candidate_score_floor
     }
 
     #[must_use]
@@ -570,7 +570,7 @@ impl ModelServingGenerationStore {
         })
     }
 
-    /// Resolve and pin the exact route from a frozen durable policy snapshot.
+    /// Resolve and pin one explicit Route from a frozen durable policy snapshot.
     ///
     /// The current generation is reused only on exact ID+hash equality.
     /// Historical report recovery builds an owned immutable generation through
@@ -583,7 +583,59 @@ impl ModelServingGenerationStore {
     pub async fn resolve_route(
         &self,
         request: ModelServingGenerationRequest<'_>,
+        route: BuyModelRoute,
     ) -> QuantResult<ModelServingRouteSnapshot> {
+        let generation = self.resolve_generation(request).await?;
+        let generation_id = generation.decision_policy_snapshot_id;
+        ModelServingGeneration::route_snapshot(generation, route).ok_or_else(|| {
+            ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "serving generation {generation_id} has no exact active route {route:?}"
+                ),
+            }
+            .into()
+        })
+    }
+
+    /// Resolve every represented Route from one owned immutable generation.
+    ///
+    /// The generation is resolved exactly once. Consequently every returned
+    /// Route snapshot shares the same policy identity, serving preimage, and
+    /// publication authority even when a policy activation races this call.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unresolved represented Route or any invalid policy snapshot.
+    pub async fn resolve_routes(
+        &self,
+        request: ModelServingGenerationRequest<'_>,
+        routes: &RepresentedRouteSet,
+    ) -> QuantResult<Vec<ModelServingRouteSnapshot>> {
+        let generation = self.resolve_generation(request).await?;
+        let generation_id = generation.decision_policy_snapshot_id;
+        routes
+            .routes
+            .iter()
+            .copied()
+            .map(|route| {
+                ModelServingGeneration::route_snapshot(Arc::clone(&generation), route).ok_or_else(
+                    || {
+                        ResearchError::InvalidModelArtifact {
+                            detail: format!(
+                                "serving generation {generation_id} has no exact represented Route {route:?}"
+                            ),
+                        }
+                        .into()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    async fn resolve_generation(
+        &self,
+        request: ModelServingGenerationRequest<'_>,
+    ) -> QuantResult<Arc<ModelServingGeneration>> {
         let actual_hash = request
             .snapshot
             .persistence_hash()
@@ -622,17 +674,7 @@ impl ModelServingGenerationStore {
                     .map_err(QuantError::from)?,
             )
         };
-        let route = BuyModelRoute::try_from(&request.snapshot.recommendation.selection)
-            .map_err(|error| QuantError::config(error.to_string()))?;
-        let generation_id = generation.decision_policy_snapshot_id;
-        ModelServingGeneration::route_snapshot(generation, route).ok_or_else(|| {
-            ResearchError::InvalidModelArtifact {
-                detail: format!(
-                    "serving generation {generation_id} has no exact active route {route:?}"
-                ),
-            }
-            .into()
-        })
+        Ok(generation)
     }
 
     /// Owned current generation for readiness and tests.
@@ -661,27 +703,6 @@ impl ModelServingGenerationStore {
         let snapshot_hash = snapshot
             .persistence_hash()
             .map_err(|error| ControlError::Precondition(error.to_string()))?;
-        let selected_route = if snapshot
-            .recommendation
-            .selection
-            .enabled_categories
-            .is_empty()
-        {
-            None
-        } else {
-            Some(
-                BuyModelRoute::try_from(&snapshot.recommendation.selection)
-                    .map_err(|error| ControlError::Precondition(error.to_string()))?,
-            )
-        };
-        if let Some(route) = selected_route {
-            snapshot
-                .model_routing
-                .model
-                .champion(route)
-                .map_err(|error| ControlError::Precondition(error.to_string()))?;
-        }
-
         let model = &snapshot.model_routing.model;
         let mut pointers = Vec::with_capacity(model.buy_routes.len().saturating_mul(2));
         for (route, binding) in &model.buy_routes {
@@ -736,14 +757,6 @@ impl ModelServingGenerationStore {
             validate_policy_profiles(snapshot, *route, &shadow_model.loaded)?;
         }
 
-        if let Some(route) = selected_route {
-            active.get(&route).ok_or_else(|| {
-                ControlError::Precondition(format!(
-                    "selected report route {route:?} has no loaded active model"
-                ))
-            })?;
-        }
-
         Ok(PreparedModelServingGeneration {
             snapshot_hash,
             active,
@@ -785,11 +798,8 @@ impl ModelServingGenerationStore {
 }
 
 const fn inference_policy(snapshot: &DecisionPolicySnapshot) -> ModelInferencePolicy {
-    let model = &snapshot.model_routing.model;
     ModelInferencePolicy {
-        min_model_confidence: model.min_model_confidence.value(),
-        candidate_score_floor: model.candidate_score_floor.value(),
-        shadow_diff_threshold: model.shadow_diff_threshold.value(),
+        shadow_diff_threshold: snapshot.model_routing.model.shadow_diff_threshold.value(),
         minimum_shadow_decision_overlap: Probability::new(
             snapshot
                 .profile_artifacts
@@ -1363,11 +1373,14 @@ mod tests {
         .await
         .expect("complete serving generation");
         let result = store
-            .resolve_route(ModelServingGenerationRequest {
-                decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-                snapshot_hash: active.snapshot_hash,
-                snapshot: &active.snapshot,
-            })
+            .resolve_route(
+                ModelServingGenerationRequest {
+                    decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+                    snapshot_hash: active.snapshot_hash,
+                    snapshot: &active.snapshot,
+                },
+                BuyModelRoute::Pooled,
+            )
             .await;
 
         assert!(
@@ -1396,11 +1409,14 @@ mod tests {
         .await
         .expect("Weather generation");
         let route = store
-            .resolve_route(ModelServingGenerationRequest {
-                decision_policy_snapshot_id: active.decision_policy_snapshot_id,
-                snapshot_hash: active.snapshot_hash,
-                snapshot: &active.snapshot,
-            })
+            .resolve_route(
+                ModelServingGenerationRequest {
+                    decision_policy_snapshot_id: active.decision_policy_snapshot_id,
+                    snapshot_hash: active.snapshot_hash,
+                    snapshot: &active.snapshot,
+                },
+                BuyModelRoute::Weather,
+            )
             .await
             .expect("resolve exact Weather route");
 
@@ -1447,11 +1463,14 @@ mod tests {
             PolicyBundleIdentity::from(&old_bundle),
         );
         let old_route = store
-            .resolve_route(ModelServingGenerationRequest {
-                decision_policy_snapshot_id: old_bundle.decision_policy_snapshot_id,
-                snapshot_hash: old_bundle.snapshot_hash,
-                snapshot: &old_bundle.snapshot,
-            })
+            .resolve_route(
+                ModelServingGenerationRequest {
+                    decision_policy_snapshot_id: old_bundle.decision_policy_snapshot_id,
+                    snapshot_hash: old_bundle.snapshot_hash,
+                    snapshot: &old_bundle.snapshot,
+                },
+                BuyModelRoute::Pooled,
+            )
             .await
             .expect("pin old route");
         let new_bundle = bundle(

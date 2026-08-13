@@ -27,6 +27,7 @@ use std::{
 };
 
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use sea_orm::{
     ActiveValue, ColIdx, DbErr, DeriveValueType, IntoActiveValue, QueryResult, TryGetError,
     TryGetable,
@@ -49,6 +50,7 @@ macro_rules! decimal_newtype {
             Hash,
             Serialize,
             Deserialize,
+            JsonSchema,
             DeriveValueType,
         )]
         #[serde(transparent)]
@@ -171,7 +173,7 @@ macro_rules! decimal_newtype {
 }
 
 decimal_newtype!(
-    /// USD-denominated monetary amount (`USDC.e` on Polygon).
+    /// USD-denominated monetary amount (Polymarket V2 pUSD on Polygon).
     Usd,
     precision = (28, 8)
 );
@@ -198,6 +200,12 @@ decimal_newtype!(
     /// Statistical probability, confidence, or model weight stored losslessly.
     Probability,
     precision = (20, 18)
+);
+
+decimal_newtype!(
+    /// Time-weighted capital occupancy in USD-hours.
+    UsdHours,
+    precision = (38, 8)
 );
 
 /// Redemption value of one resolved outcome token, in collateral units.

@@ -73,20 +73,43 @@ cargo run --release -p quant-pivot-bench \
 macOS 2026-07-22 统一 smoke 使用 100K rows：train 79.965s、replay 0.443s、total
 80.464s，prediction checksum 50,000。它不外推或签收 1M-row Linux SLO。
 
-2K market report pure-compute 门禁反复执行 5 次 warm-up + 100 次测量。输入包含每个
-market 的 feature/model decision，前 100 个进入 optimizer/TopN recommendation，其余由
-planner 以 `BeyondTopN` 拒绝；early-terminal 输入会直接使 gate 失败：
+完整 global-portfolio finance gate 从 promoted joint-scenario contract 开始，依次执行 concrete
+scenario materialization、可执行 L2 tier ladder、逐场景 Decimal economics、直接 HiGHS MILP、exact
+post-check 与全部 leave-one-out marginal re-optimization。发布路径只上传一个矩阵：objective lock
+通过固定 relaxation column 生效，进入 marginal 阶段后解除；历史 replay 不执行 marginal explanations。
 
 ```bash
-cargo build --release -p quant-pivot-bench --bin report_compute_gate
-/usr/bin/time -l target/release/report_compute_gate   # macOS
-/usr/bin/time -v target/release/report_compute_gate   # Linux
+cargo build --release -p quant-pivot-bench --no-default-features --bin portfolio_compute_gate
+/usr/bin/time -l target/release/portfolio_compute_gate 10000 400 20 180   # macOS
+/usr/bin/time -v target/release/portfolio_compute_gate 10000 400 20 180   # Linux
 ```
 
-单 sample p99 门禁为 2s。macOS 2026-07-22 当前 full-compute 统一 release smoke：median
+阻断 workload tuple 固定为 10,000 executable tiers、400 promoted joint scenarios、Top20、180 秒
+full-path bootstrap ceiling；Linux 进程 RSS ceiling 为 8GiB。四个维度是一个不可拆分的资格合同，
+不能把独立字段上限的笛卡尔积伪称为已验证。400 scenarios 来自当前 promoted template（320 PIT
+bootstrap + 40 calibration uncertainty + 40 structural stress），不是 CVaR/SAA 的普适黄金样本数；
+场景数只能由 tail assumptions、误差目标、实际覆盖和重新取得的容量证据改变。
+
+macOS 2026-08-10 两次已构建 binary 的同输入结果为 77.910s / 78.350s，plan hash 均为
+`blake3:efa064ebbae3faae5ba7033787a23034d45b14dbb7c64ae61af206bea421d298`，外部 RSS
+约 2.17GiB。该证据只证明功能、确定性和本机容量；最终 production p95/p99 仍须由固定 Linux
+runner 的十次 release artifact 签收。默认 180 秒是依据当前 300 秒 report cadence 和这组本机
+workload 建立的有限 bootstrap liveness ceiling，不是金融/统计常数或已签收 latency SLO。
+
+2K market report-funnel gate 反复执行 5 次 warm-up + 100 次测量。它只物化已冻结的
+feature/model/tier/recommendation funnel rows，不执行 feature inference、scenario、optimizer 或 TopN
+选择；early-terminal/缺 lineage 输入会直接使 gate 失败：
+
+```bash
+cargo build --release -p quant-pivot-bench --bin report_funnel_gate
+/usr/bin/time -l target/release/report_funnel_gate   # macOS
+/usr/bin/time -v target/release/report_funnel_gate   # Linux
+```
+
+单 sample p99 门禁为 2s。macOS 2026-07-22 当前 funnel 统一 release smoke：median
 13.819ms、p99 14.408ms；该结果只用于回归预警。旧 early-terminal 数值已 superseded，
-不得用于签收。warm-cache 端到端 5s 仍由 Linux fixed runner 的真实
-PostgreSQL/ClickHouse 套件验收，不以纯计算数值替代。
+不得用于签收，也不得再将该 gate 描述为 full report compute。warm-cache 端到端 5s 仍由 Linux
+fixed runner 的真实 PostgreSQL/ClickHouse 套件验收，不以 funnel 数值替代。
 
 ## 在线热路径门禁
 
@@ -125,7 +148,7 @@ model/governor、allocator、ClickHouse version/settings、RTT、fixture/seed ha
 正确性计数、吞吐、CPU/event、encoded bytes/event、jemalloc net allocated/event 和 RSS。
 warm-up 在打开 histogram 前必须跨越 durable publication barrier，禁止 backlog 污染样本。
 kernel evidence 另保存每次 stdout/stderr、输出 SHA-256 与 `peak_rss_bytes`；Linux matrix、
-CPCV、model gate 在 binary 内执行 RSS ceiling，不能通过省略外部采集绕过。
+CPCV、portfolio、model gate 在 binary 内执行 RSS ceiling，不能通过省略外部采集绕过。
 
 `.github/workflows/performance.yml` 只使用 `[self-hosted,
 quant-pivot-perf-8c16g]`；main relevant-path 运行 `full`，nightly 运行 `soak`，manual 可显式

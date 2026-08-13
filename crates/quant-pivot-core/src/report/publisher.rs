@@ -246,7 +246,7 @@ impl ReportPublisher {
             if let Some(published_at) = current.published_at {
                 self.metrics
                     .report_current_age_seconds
-                    .with_label_values(&[current.profile_id.as_str(), current.report_kind.as_str()])
+                    .with_label_values(&["global", current.report_kind.as_str()])
                     .set((health.observed_at - published_at).num_seconds().max(0));
             }
         }
@@ -263,7 +263,7 @@ impl ReportPublisher {
                     AlertCategory::TradingSafety,
                     AlertSource::Scheduler,
                     "No current recommendation report",
-                    "No profile/report-kind scope has a current Published authority; new entry is unavailable.",
+                    "No global current Published authority exists; new entry is unavailable.",
                     health.observed_at,
                 )
                 .with_affects_trading(true)
@@ -279,8 +279,7 @@ impl ReportPublisher {
                 self.alerts.dispatch_background(
                     Alert::new(
                         format!(
-                            "quant-report-health:expired-current:{}:{}",
-                            current.profile_id,
+                            "quant-report-health:expired-current:{}",
                             current.report_kind.as_str()
                         ),
                         AlertLevel::Critical,
@@ -288,9 +287,8 @@ impl ReportPublisher {
                         AlertSource::Scheduler,
                         "Current recommendation report is past validity",
                         format!(
-                            "Current report {} for {}:{} is past valid_until and must fail closed for new entry.",
+                            "Current global report {} ({}) is past valid_until and must fail closed for new entry.",
                             current.recommendation_report_id,
-                            current.profile_id,
                             current.report_kind.as_str()
                         ),
                         health.observed_at,
@@ -526,14 +524,15 @@ fn notification_body(report: &RecommendationReportInfo, n: &ReportNotificationPa
     for (idx, rec) in n.top3.iter().enumerate() {
         let _ = write!(
             body,
-            "\n  #{rank} {market} {side} score={score} usd={usd}",
+            "\n  #{rank} {market} {side} route={route} profit_probability_bps={probability} robust_net_usd={robust} marginal_value_usd={marginal} usd={usd}",
             rank = idx + 1,
             market = rec.market_id,
             side = rec.outcome_side.as_str(),
-            score = rec.score,
-            usd = rec
-                .suggested_usd
-                .map_or_else(|| "unavailable".to_owned(), |value| value.to_string()),
+            route = rec.route.as_str(),
+            probability = rec.profit_probability_bps,
+            robust = rec.robust_expected_net_usd,
+            marginal = rec.marginal_portfolio_value_usd,
+            usd = rec.suggested_usd,
         );
     }
     for warning in &n.warnings {
@@ -547,7 +546,8 @@ fn notification_body(report: &RecommendationReportInfo, n: &ReportNotificationPa
 mod tests {
     use quant_pivot_models::{
         enums::quant::{OutcomeSide, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
-        types::{Probability, RecommendationReportId, Usd},
+        runtime_config::BuyModelRoute,
+        types::{Bps, RecommendationReportId, Usd},
     };
     use rust_decimal_macros::dec;
 
@@ -572,14 +572,20 @@ mod tests {
                 NotificationRecommendation {
                     market_id: "0xA".to_owned(),
                     outcome_side: OutcomeSide::Yes,
-                    score: Probability::new(dec!(0.71)),
-                    suggested_usd: Some(Usd::new(dec!(300))),
+                    route: BuyModelRoute::Crypto,
+                    profit_probability_bps: Bps::new(dec!(7100)),
+                    robust_expected_net_usd: Usd::new(dec!(25)),
+                    marginal_portfolio_value_usd: Usd::new(dec!(20)),
+                    suggested_usd: Usd::new(dec!(300)),
                 },
                 NotificationRecommendation {
                     market_id: "0xB".to_owned(),
                     outcome_side: OutcomeSide::No,
-                    score: Probability::new(dec!(0.66)),
-                    suggested_usd: Some(Usd::new(dec!(200))),
+                    route: BuyModelRoute::Weather,
+                    profit_probability_bps: Bps::new(dec!(6600)),
+                    robust_expected_net_usd: Usd::new(dec!(15)),
+                    marginal_portfolio_value_usd: Usd::new(dec!(12)),
+                    suggested_usd: Usd::new(dec!(200)),
                 },
             ],
             warnings: vec!["thin book".to_owned()],

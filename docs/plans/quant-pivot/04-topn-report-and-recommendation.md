@@ -5,8 +5,8 @@
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
 > - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `post_deployment_behavior`: 本次实现只交付唯一终态 clean-install contract；不设计升级、降级、旧版本共存或历史数据转换。
+> - `rollback_and_data_verification`: 仅在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置需要操作者另行授权。
 
 > 状态：生产级目标设计
 >
@@ -16,6 +16,12 @@
 > current scope、scheduler、API/WS 和 operator workflow 已由
 > [`phase-11/11.8-report-lifecycle-fsm-completion.md`](phase-11/11.8-report-lifecycle-fsm-completion.md)
 > 破坏式取代。冲突处以 11.8 为唯一权威，本文后半的旧 scheduler 调研仅作历史记录。
+
+> **Cross-Route clean-break**：一份报告可以同时包含多个 category/Buy Route。每个 Route 独立完成
+> model/calibration/Trade Policy evaluation，只有转换为 `ExecutableEconomicTier` 的统一贴现 USD 场景
+> 现金流后才进入一个全局组合。本文中任何单模型 report header、raw-score 排序、Kelly sizing、
+> correlation proxy 或 optimizer fallback 语义均已由本次 clean break 删除；唯一 optimizer 规格见
+> [`05.8-cross-route robust portfolio`](phase-05/05.8-portfolio-optimization-highs.md)。
 
 ## 0. 报告职责
 
@@ -70,10 +76,11 @@ flowchart TD
 | `recommendation_report_id` | UUID v7 |
 | `report_kind` | `top_n`, `shadow_top_n`, `post_run_audit` |
 | `as_of` | 报告决策时间 |
-| `horizon` | 建议持有/评估时间窗 |
+| `route_set_digest` | represented Route 有序集合的 canonical digest |
+| `portfolio_scenario_model_artifact_id` | 本报告使用的长期、已晋升场景生成模型 |
+| `portfolio_scenario_artifact_id` | 从冻结市场/L2/candidate 输入生成的本报告 concrete 联合场景 |
 | `runtime_mode` | `report_only`, `semi_auto`, `auto_execution` |
 | `decision_policy_snapshot_id` | 配置版本 |
-| `model_version_id` | 模型版本 |
 | `market_selection_id` | 输入 market selection |
 | `portfolio_plan_id` | 组合规划 |
 | `top_n` | 报告目标数量 |
@@ -85,6 +92,14 @@ flowchart TD
 | `account_snapshot_ref` | 指向 `quant_account_snapshot` 的决策时刻资金/持仓快照（可回放 sizing） |
 | `equity_snapshot_ref` | 指向 `quant_equity_snapshot` 的权益历史快照（可回放 high-water mark / drawdown） |
 
+报告不得持有单数 `model_version_id`、`model_run_id` 或 `research_profile_artifact_id`。每个 Route 的
+model/calibration/Trade Policy/Research Profile lineage 位于 `ReportRouteRun`，每条 recommendation 引用
+自己的 route run。
+
+场景必须分层：`PortfolioScenarioModelArtifact` 是可独立验证、晋升和回滚的长期生成模型；
+`PortfolioScenarioArtifact` 是 report-time materialization，只覆盖本报告冻结的 concrete market/token。
+禁止把包含当前 market outcome 的 artifact 长期存入 `ModelRouting`，也禁止跨不同 report universe 复用。
+
 ## 3. Report Summary
 
 `summary` 必须包含：
@@ -95,11 +110,12 @@ flowchart TD
 - published recommendation count。
 - total suggested capital。
 - max single recommendation capital。
-- category allocation。
+- Route/category allocation（只作为敞口与解释维度，不是报告分区）。
 - event allocation。
-- average score。
-- min score。
-- model confidence summary。
+- nominal/robust expected net USD。
+- portfolio profit probability、maximum scenario loss 与 CVaR。
+- capital occupancy by time bucket。
+- represented/zero-candidate/failed Route summary。
 - data quality summary。
 - top rejection reasons。
 - execution eligibility summary。
@@ -158,25 +174,25 @@ Recommendation
 标签。买卖动作（`Buy`/`Sell`）是**执行层**概念（`quant_execution_order.side: common::Side`，
 入场 = Buy、出场 = Sell）；**卖出计划完全由 `exit_plan` 表达**，绝不用 `outcome_side` 编码 sell。
 
-## 6. Rank and Score
+## 6. Global Rank and Economics
 
 字段：
 
-- `composite_score`
-- `risk_adjusted_score`
-- `confidence`
-- `expected_return_bps`
-- `downside_bps`
-- `liquidity_score`
-- `data_quality_score`
-- `model_score_percentile`
+- `profit_probability_bps`
+- `nominal_expected_net_usd`
+- `robust_expected_net_usd`
+- `max_loss_usd`
+- `cvar_contribution_usd`
+- `capital_occupancy_usd_hours`
+- `marginal_portfolio_value_usd`
+- `binding_constraints`
 
 解释规则：
 
-- `composite_score` 是模型原始排序分。
-- `risk_adjusted_score` 是组合约束后排序分。
-- TopN 排序使用 `risk_adjusted_score`。
-- score 不允许脱离 factor breakdown 单独出现。
+- raw model score/confidence 只保留在 Route-specific model evidence，不参与跨 Route 排序。
+- 排名使用相同 frozen input 下的 leave-one-out robust optimum 差值。
+- 同 marginal value 时依次使用 robust net USD、nominal net USD、canonical Route/market/tier identity。
+- 所有金额由 exact Decimal verifier 计算，不能直接使用 solver 浮点输出。
 
 ## 7. Market Context
 
@@ -246,15 +262,14 @@ Trigger 类型：
 - `market_exposure_after_usd`
 - `event_exposure_after_usd`
 - `category_exposure_after_usd`
+- `route_exposure_after_usd`
 - `binding_constraint`
 - `sizing_reason`
-- `sizing_model`（`kelly`）
-- `edge_bps`（Kelly provenance）
-- `kelly_fraction_applied`（实际施加的分数乘子 = `kelly_fraction · confidence_shrink · drawdown_scale`）
+- `economic_tier_id`
+- `capital_occupancy`
 
-Sizing 模型：默认 **fractional Kelly**（详见 [04.1 §5.2](phase-04/04.1-portfolio-planner-and-sizing.md)）。
-胜率 `q` 由期望均值 `E[r]`、止损 `l`、目标倍数 `R` 反解（`q=(E[r]+l)/(R·l+l)`），`confidence`
-作 Kelly 分数的**估计不确定性收缩**（非胜率）。Kelly 是唯一 production sizing model。
+Sizing 由全局 MILP 在真实 L2 生成的离散 `ExecutableEconomicTier` 中选择。不存在 per-candidate Kelly、
+confidence curve、连续金额取整或 planner fallback。
 
 Binding constraints：
 
@@ -264,11 +279,13 @@ Binding constraints：
 - `single_market_cap`
 - `event_cap`
 - `category_cap`
+- `route_cap`
 - `liquidity_cap`
 - `drawdown_cap`
-- `confidence_cap`
+- `cvar_cap`
+- `scenario_loss_cap`
+- `capital_time_bucket_cap`
 - `manual_cap`
-- `kelly_cap`
 - `none`
 
 Sizing 不是展示值。执行模式启用时，`OrderIntent` 只能在 sizing plan 边界内创建。
@@ -380,11 +397,13 @@ Sizing 不是展示值。执行模式启用时，`OrderIntent` 只能在 sizing 
 字段：
 
 - `feature_vector_id`
-- `model_run_id`
+- `report_route_run_id`
 - `market_selection_id`
 - `book_snapshot_ref`
 - `decision_policy_snapshot_id`
-- `model_version_id`
+- `route_lineage`
+- `portfolio_scenario_artifact_id`
+- `economic_tier_id`
 - `factor_definition_versions`
 - `data_quality_report_ref`
 
@@ -545,48 +564,31 @@ pub async fn build_report(
     request: BuildReportRequest,
     deps: &ReportPipelineDeps,
 ) -> QuantResult<RecommendationReport> {
-    let config = deps.runtime_config.load_version(request.decision_policy_snapshot_id)?;
-    let model = deps.model_registry.active_model(config.model.active_model_version_id).await?;
-
-    let selection = deps.market_selector
-        .build_snapshot(MarketSelectionBuildRequest {
-            as_of: request.as_of,
-            config: config.selection.clone(),
-            model_requirements: model.requirements.clone(),
-        })
+    let frozen = deps.report_inputs.freeze(request).await?;
+    let discovery = deps.market_selector.discover(&frozen).await?;
+    let represented_routes = RepresentedRouteSet::from_discovery(&discovery)?;
+    let readiness = deps.route_readiness
+        .resolve_all(&represented_routes, &frozen)
         .await?;
 
-    if selection.members.is_empty() {
-        return deps.report_store.create_empty_report(request, selection, EmptyReason::SelectionEmpty).await;
-    }
-
-    let features = deps.feature_pipeline
-        .build_for_selection(&selection, request.as_of, &config)
+    let route_runs = deps.route_pipeline
+        .evaluate_all(&represented_routes, &readiness, &discovery, &frozen)
         .await?;
-
-    let factor_values = deps.factor_engine.compute_all(&features, &config.factors)?;
-
-    let candidates = deps.model_runner
-        .infer(ModelInferenceRequest {
-            model,
-            selection: selection.clone(),
-            features,
-            factor_values,
-            as_of: request.as_of,
-        })
-        .await?;
-
-    let plan = deps.portfolio_planner.plan(PortfolioPlanInput {
-        candidates,
-        budget: config.portfolio.budget(),
-        constraints: config.portfolio.constraints(),
-    })?;
+    let tiers = deps.economic_tiers.build(&route_runs, &frozen).await?;
+    let plan = deps.global_portfolio
+        .solve_and_verify(GlobalPortfolioInput {
+            tiers,
+            scenario_artifact: readiness.scenario_artifact(),
+            account: frozen.account_snapshot(),
+            risk: frozen.execution_risk_policy(),
+            top_n: frozen.top_n(),
+        })?;
 
     let draft = deps.composer.compose(ComposeRecommendationInput {
         request,
-        selection,
-        portfolio_plan: plan,
-        mode: config.execution.runtime_mode,
+        frozen,
+        route_runs,
+        global_portfolio_plan: plan,
     })?;
 
     let report = deps.report_store.create_report(draft).await?;
@@ -600,6 +602,7 @@ pub async fn build_report(
 一个报告生成事务必须一次性写入：
 
 - `quant_recommendation_report`
+- `quant_report_route_run`
 - `quant_recommendation`
 - `quant_portfolio_plan`
 - rejected candidate summary
@@ -639,10 +642,20 @@ fn empty_report(reason: EmptyReason, context: EmptyReportContext) -> Recommendat
 ```rust
 fn sort_recommendations(items: &mut [RecommendationDraft]) {
     items.sort_by(|a, b| {
-        b.risk_adjusted_score
-            .cmp(&a.risk_adjusted_score)
-            .then_with(|| b.composite_score.cmp(&a.composite_score))
-            .then_with(|| b.liquidity_score.cmp(&a.liquidity_score))
+        b.economics
+            .marginal_portfolio_value_usd
+            .cmp(&a.economics.marginal_portfolio_value_usd)
+            .then_with(|| {
+                b.economics
+                    .robust_expected_net_usd
+                    .cmp(&a.economics.robust_expected_net_usd)
+            })
+            .then_with(|| {
+                b.economics
+                    .nominal_expected_net_usd
+                    .cmp(&a.economics.nominal_expected_net_usd)
+            })
+            .then_with(|| a.route.cmp(&b.route))
             .then_with(|| a.market_id.cmp(&b.market_id))
             .then_with(|| a.token_id.cmp(&b.token_id))
     });

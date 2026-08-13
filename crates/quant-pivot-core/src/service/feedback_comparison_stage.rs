@@ -407,18 +407,48 @@ impl FeedbackComparisonStageAdapter {
         champion: &ModelVersionInfo,
     ) -> QuantResult<()> {
         let evaluation = family.shared_evaluation();
-        let bindings = champion.serving_contract.bindings();
-        if champion.model_version_id != cycle.champion_model_version_id
-            || champion.serving_contract_hash != cycle.champion_serving_contract_hash
-            || champion.model_spec_id != evaluation.model_spec_id
-            || champion.model_spec_definition_hash != evaluation.model_spec_definition_hash
-            || champion.profile_ref != cycle.profile_ref
-            || bindings.policy_snapshot.decision_policy_snapshot_id
-                != evaluation.source_lineage.decision_policy_snapshot_id
+        let mut mismatches = Vec::new();
+        if champion.model_version_id != cycle.champion_model_version_id {
+            mismatches.push("champion_model_version_id");
+        }
+        if champion.serving_contract_hash != cycle.champion_serving_contract_hash {
+            mismatches.push("champion_serving_contract_hash");
+        }
+        if champion.model_spec_id != cycle.champion_model_spec_id
+            || evaluation.model_spec_id != cycle.champion_model_spec_id
         {
-            return Err(Self::invalid(
-                "champion model differs from the cycle, profile, policy, or model specification",
-            ));
+            mismatches.push("champion_model_spec_id");
+        }
+        if champion.model_spec_definition_hash != cycle.champion_model_spec_definition_hash
+            || evaluation.model_spec_definition_hash != cycle.champion_model_spec_definition_hash
+        {
+            mismatches.push("champion_model_spec_definition_hash");
+        }
+        if champion.model_family != cycle.champion_model_family {
+            mismatches.push("champion_model_family");
+        }
+        if champion.profile_ref != cycle.profile_ref {
+            mismatches.push("champion_profile_ref");
+        }
+        if champion.category_scope != cycle.route.category() {
+            mismatches.push("champion_route_scope");
+        }
+        if evaluation.source_lineage.decision_policy_snapshot_id
+            != cycle.decision_policy_snapshot_id
+            || evaluation.source_lineage.runtime_config_hash != cycle.decision_policy_snapshot_hash
+        {
+            mismatches.push("decision_policy_snapshot");
+        }
+        // The serving contract commits the Champion's immutable build-time
+        // policy preimage. The cycle and evaluation lineage commit the distinct
+        // decision-time policy generation that published that model. A governed
+        // Route/scenario activation may change only the latter; conflating both
+        // identities would invalidate every unchanged Champion after activation.
+        if !mismatches.is_empty() {
+            return Err(Self::invalid(format!(
+                "champion model differs from frozen Comparison lineage: {}",
+                mismatches.join(",")
+            )));
         }
         Ok(())
     }

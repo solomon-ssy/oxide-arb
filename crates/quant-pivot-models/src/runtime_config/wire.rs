@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{enums::quant::PortfolioSolverKind, types::ModelVersionId};
+use crate::types::ModelVersionId;
 
 /// Placeholder substituted for sensitive values on read surfaces.
 pub const MASKED_SECRET: &str = "***";
@@ -66,14 +66,6 @@ impl Default for DecimalValue {
 pub enum FeatureStalenessPolicy {
     RejectStaleRequired,
     AllowDegraded,
-}
-
-/// Missing factor handling policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum MissingFactorPolicy {
-    ZeroWeight,
-    RejectCandidate,
 }
 
 /// How a cross-sectional factor is normalized when the present same-`as_of`
@@ -145,124 +137,6 @@ pub enum NeutralizeDimension {
 pub enum ReportDeliveryPolicy {
     StoreAndNotify,
     StoreOnly,
-}
-
-/// Confidence-to-size curve policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ConfidenceSizeCurve {
-    Linear,
-    Step,
-}
-
-/// Drawdown multiplier policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DrawdownMultiplierPolicy {
-    Fixed,
-    Conservative,
-}
-
-/// Fractional-Kelly position-sizing parameters for the portfolio planner.
-///
-/// Kelly is the **only** sizing model: it is the single edge-driven optimal-growth
-/// sizer, and an edge-free confidence-to-size curve has no place in a capital
-/// system (it would deploy capital regardless of expected value). `confidence`
-/// is an evidence-quality measure, **not** a calibrated win probability, so it
-/// never stands in for `q`: for a `Calibrated` return
-/// model, `q` is the calibrator's `P(win)` directly (`f* = (q - p) / (1 - p)`,
-/// `p` = market price) — never re-derived from a second, TP/SL-shaped bet
-/// structure. `confidence` enters only as an estimation-uncertainty shrinkage
-/// on the Kelly fraction (`confidence_weighting`) — the production-standard
-/// mitigation for Kelly's sensitivity to edge mis-estimation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct SizingModelConfig {
-    /// Fraction of full Kelly to apply, in `(0, 1]` (half-Kelly ≈ `0.5`).
-    pub kelly_fraction: DecimalValue,
-    /// Maximum single-position size as a fraction of equity (`(0, 1]`).
-    pub max_position_pct: DecimalValue,
-    /// Confidence-driven shrinkage of the Kelly fraction (estimation
-    /// uncertainty): `confidence` high → near fractional Kelly, low → compressed.
-    pub confidence_weighting: ConfidenceSizeCurve,
-    /// Drawdown-driven scaling policy.
-    pub drawdown_scaling: DrawdownMultiplierPolicy,
-}
-
-impl Default for SizingModelConfig {
-    fn default() -> Self {
-        Self {
-            kelly_fraction: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
-            max_position_pct: DecimalValue::new(rust_decimal_macros::dec!(0.1)),
-            confidence_weighting: ConfidenceSizeCurve::Linear,
-            drawdown_scaling: DrawdownMultiplierPolicy::Conservative,
-        }
-    }
-}
-
-/// Portfolio optimizer (`good_lp` LP/MILP) configuration.
-///
-/// The optimizer is the **single** allocation path (greedy has been removed):
-/// the production primary is an exact binary-inclusion MILP, and on any solver
-/// failure it falls back to the continuous LP relaxation with deterministic
-/// integer recovery, then ultimately to an empty plan — so a report is always
-/// produced. `microlp` (pure Rust) is the default backend and ships in every
-/// build; `HiGHS` is an optional native performance backend gated behind the
-/// `lp-solver-highs` feature.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct PortfolioOptimizerConfig {
-    /// LP solver backend. `highs` requires the `lp-solver-highs` build feature;
-    /// when that feature is absent the planner transparently downgrades to
-    /// `microlp` (recorded in the plan's optimizer metadata).
-    pub solver: PortfolioSolverKind,
-    /// `true` ⇒ solve the exact binary-inclusion MILP (production primary);
-    /// `false` ⇒ solve the continuous LP relaxation with deterministic integer
-    /// recovery (cheaper, fully deterministic — also the fallback / backtest mode).
-    pub integer_inclusion: bool,
-    /// `λ ≥ 0`: weight on normalized expected return in the per-dollar objective
-    /// weight `wᵢ = scoreᵢ · (1 + λ · ret_normᵢ)`. `0` ⇒ pure conviction weighting
-    /// (semantically equivalent to the former greedy fill order).
-    pub objective_return_weight: DecimalValue,
-}
-
-impl Default for PortfolioOptimizerConfig {
-    fn default() -> Self {
-        Self {
-            solver: PortfolioSolverKind::Microlp,
-            integer_inclusion: true,
-            objective_return_weight: DecimalValue::new(rust_decimal_macros::dec!(0)),
-        }
-    }
-}
-
-/// Correlation-cluster estimation configuration for the correlated-exposure cap.
-///
-/// Drives whether `portfolio.constraints.max_correlated_exposure_usd` actually
-/// binds. When disabled, the cap is snapshot-only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct CorrelationConfig {
-    /// Whether the correlated-exposure cap is enforced. `false` ⇒ no clustering.
-    pub enabled: bool,
-    /// Historical mid-price lookback window for co-movement estimation, in days.
-    pub lookback_days: u32,
-    /// Minimum paired observations before historical estimation is trusted;
-    /// below this the estimator falls back to event/category proxy clusters.
-    pub min_observations: u32,
-    /// Absolute Pearson correlation at or above which two markets are clustered.
-    pub cluster_threshold: DecimalValue,
-}
-
-impl Default for CorrelationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            lookback_days: 30,
-            min_observations: 20,
-            cluster_threshold: DecimalValue::new(rust_decimal_macros::dec!(0.7)),
-        }
-    }
 }
 
 /// How often a report schedule fires.
@@ -346,7 +220,7 @@ impl FeatureFamily {
 
 /// Entry order policy for recommendations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct EntryOrderPolicy {
     /// Maximum allowed entry-order slippage in basis points.
     pub max_slippage_bps: u32,
@@ -354,7 +228,8 @@ pub struct EntryOrderPolicy {
     /// recommendation's `EntryPlan.min_depth_usd` at report build and enforced
     /// by execution admission (`LiquidityDepthCheck`): an intent is deferred
     /// when the fillable ask notional up to the limit price is below this
-    /// floor. `0` disables the depth floor.
+    /// floor. The value must be strictly positive; there is no disabled or
+    /// unlimited sentinel.
     pub min_entry_book_depth_usd: DecimalValue,
 }
 
@@ -362,7 +237,7 @@ impl Default for EntryOrderPolicy {
     fn default() -> Self {
         Self {
             max_slippage_bps: 50,
-            min_entry_book_depth_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
+            min_entry_book_depth_usd: DecimalValue::new(rust_decimal_macros::dec!(100)),
         }
     }
 }
@@ -378,7 +253,7 @@ impl Default for EntryOrderPolicy {
 /// baseline. `shadow_mode` runs the full pipeline but suppresses
 /// `ThesisInvalidated` exits (metrics + logs only) until operators disable it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ExitSignalReinferencePolicy {
     /// Whether model-backed signal re-inference is active.
     pub enabled: bool,
@@ -407,7 +282,7 @@ impl Default for ExitSignalReinferencePolicy {
 /// immutable policy and intent. Runtime may only disable or shadow an already
 /// frozen rule; it cannot change that rule's decision boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct OpportunisticSellPolicy {
     /// Whether opportunistic-Sell evaluation is active at all.
     pub enabled: bool,
@@ -431,7 +306,7 @@ impl Default for OpportunisticSellPolicy {
 /// at most every `signal_recheck_secs` per lot. Invalidation thresholds are
 /// frozen in the intent's published trade-policy artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ExitMonitorPolicy {
     /// Whether the exit-monitor worker actively evaluates open lots.
     pub enabled: bool,
@@ -470,7 +345,7 @@ pub enum EmergencyExitKind {
 
 /// Default emergency-exit policy consumed by the operational kill-switch plane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct EmergencyExitPolicy {
     /// Emergency-exit behavior.
     pub kind: EmergencyExitKind,
@@ -492,40 +367,15 @@ impl Default for EmergencyExitPolicy {
 /// Operational state lives in the `system_runtime_control` singleton. Runtime
 /// config only carries the policy to apply when that state escalates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct KillSwitchPolicy {
     /// Emergency-exit behavior for kill-switch escalation.
     pub emergency_exit: EmergencyExitPolicy,
 }
 
-/// Capital policy for execution admission.
-///
-/// Both caps gate order-intent admission (checks `#21` / `#22`). A value of
-/// `0` **disables** that dimension (no cap) — matching the other opt-in USD
-/// governance knobs. When `> 0` the cap is enforced hard (`Deny`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct CapitalPolicy {
-    /// Maximum USD that may be reserved across all open execution intents.
-    /// `0` disables the reserved-capital cap. Enforced by admission `#22`.
-    pub max_reserved_usd: DecimalValue,
-    /// Maximum number of concurrently open execution intents. `0` disables the
-    /// open-intent count cap. Enforced by admission `#21`.
-    pub max_open_intents: u32,
-}
-
-impl Default for CapitalPolicy {
-    fn default() -> Self {
-        Self {
-            max_reserved_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
-            max_open_intents: 0,
-        }
-    }
-}
-
 /// Execution reconciliation policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ReconciliationPolicy {
     /// Whether execution reconciliation is enabled.
     pub enabled: bool,
@@ -540,7 +390,7 @@ pub struct ReconciliationPolicy {
 
 /// Runtime cadence and bounded work budget for outcome reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct OutcomeReconciliationPolicy {
     /// Whether the outcome reconciliation worker is enabled.
     pub enabled: bool,
@@ -586,7 +436,7 @@ impl Default for ReconciliationPolicy {
 /// degradation defers (admission retries); sustained failure halts and latches
 /// the kill-switch (`execution_halted`, operator ack required to clear).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionBreakerConfig {
     /// Consecutive venue failures that move the breaker to `Degraded` (admission defers).
     pub venue_consecutive_failures_to_degrade: u32,
@@ -602,8 +452,8 @@ pub struct ExecutionBreakerConfig {
     pub cooldown_secs: u64,
     /// Daily realized-loss cap in USD (UTC day). Cumulative same-day realized
     /// loss `≥ 80%` of the cap degrades venue health (admission `#18` defers);
-    /// `≥` the cap trips the kill-switch (`execution_halted`, latched). `0`
-    /// disables the daily-realized-loss dimension.
+    /// `≥` the cap trips the kill-switch (`execution_halted`, latched). The
+    /// cap must be strictly positive; there is no disabled sentinel.
     pub daily_realized_loss_cap_usd: DecimalValue,
 }
 
@@ -616,14 +466,14 @@ impl Default for ExecutionBreakerConfig {
             venue_min_window_samples: 10,
             venue_window_secs: 60,
             cooldown_secs: 30,
-            daily_realized_loss_cap_usd: DecimalValue::new(rust_decimal_macros::dec!(0)),
+            daily_realized_loss_cap_usd: DecimalValue::new(rust_decimal_macros::dec!(1_000)),
         }
     }
 }
 
 /// Notification routing policy flags.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct NotificationPolicies {
     /// Notify operators when a recommendation report is published.
     pub report_published: bool,

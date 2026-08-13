@@ -534,6 +534,7 @@ fn build_claimed_request(run: &ReportRunInfo) -> QuantResult<(BuildReportRequest
         },
     };
     let request = BuildReportRequest {
+        report_run_id: run.report_run_id,
         trigger,
         trigger_time: decision_at,
         top_n_override: Some(u32::try_from(top_n).map_err(|error| {

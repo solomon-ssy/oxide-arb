@@ -5,8 +5,8 @@
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
 > - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `post_deployment_behavior`: 本次重构只交付唯一终态 bootstrap；不存在旧版本共存、升级、降级或历史数据转换。
+> - `rollback_and_data_verification`: 仅在 disposable 空数据库执行 fresh-install 验证；任何真实数据库重置需要操作者另行授权。
 
 > 状态：生产级目标设计
 >
@@ -59,7 +59,7 @@
 
 删除或废弃：
 
-- `OpportunityId`：旧 opportunity 语义删除。若历史归档需要，只保留在 archived 表或 JSON evidence，不进入新主路径。
+- `OpportunityId`：旧 opportunity 语义及类型直接删除，不进入 bootstrap、持久化或 API。
 - `TradeId`：旧 `trade` lifecycle 删除。新执行路径使用 `OrderIntentId` + `ExecutionOrderId`。
 - `ReservationId`：旧资本预留体系删除。新系统使用 `CapitalAllocationId` 或 `RiskEnvelopeId`。
 
@@ -266,20 +266,28 @@ config revision rollback 由唯一 `ModelRouteGovernanceService` 管理。
 
 #### `quant_portfolio_plan`
 
-用途：组合规划结果，解释候选信号如何被裁剪成 TopN。
+用途：跨 Route global MILP 的不可变结果与 exact verification evidence。
 
 关键列：
 
 - `portfolio_plan_id uuid pk`
-- `model_run_id uuid not null`
-- `market_selection_id uuid not null`
+- `report_run_id uuid not null`
 - `as_of timestamptz not null`
-- `budget_usd numeric(28,8) not null`
-- `allocated_usd numeric(28,8) not null`
-- `risk_budget_json jsonb not null`
-- `constraints_json jsonb not null`
-- `rejected_summary jsonb not null`
+- `route_set_digest bytea not null`
+- `portfolio_scenario_artifact_id uuid not null`
+- `decision_policy_snapshot_id uuid not null`
+- `account_snapshot_id uuid not null`
+- `model_serving_generation_id uuid not null`
+- `input_digest bytea not null`
+- `selected_tier_ids jsonb not null`（typed ordered identity list）
+- `lexicographic_objectives jsonb not null`（typed objective evidence）
+- `constraint_evidence jsonb not null`（typed hard-constraint evidence）
+- `solver_evidence jsonb not null`（HiGHS status/settings/timing；不含不稳定 raw dump）
+- `exact_verification jsonb not null`（typed Decimal recomputation result）
+- `content_hash bytea not null`
 - `created_at timestamptz not null`
+
+唯一约束：`report_run_id`、`content_hash`。
 
 #### `quant_recommendation_report`
 
@@ -288,14 +296,17 @@ config revision rollback 由唯一 `ModelRouteGovernanceService` 管理。
 关键列：
 
 - `recommendation_report_id uuid pk`
+- `report_run_id uuid not null unique`
 - `report_kind qp_report_kind not null`
 - `as_of timestamptz not null`
-- `horizon_secs bigint not null`
 - `runtime_mode qp_quant_runtime_mode not null`
 - `decision_policy_snapshot_id uuid not null`
-- `model_version_id uuid not null`
+- `account_snapshot_id uuid not null`
+- `model_serving_generation_id uuid not null`
 - `market_selection_id uuid not null`
 - `portfolio_plan_id uuid not null`
+- `route_set_digest bytea not null`
+- `portfolio_scenario_artifact_id uuid not null`
 - `top_n int not null`
 - `status qp_publication_status not null`
 - `summary_json jsonb not null`
@@ -307,7 +318,32 @@ config revision rollback 由唯一 `ModelRouteGovernanceService` 管理。
 
 - `(report_kind, as_of desc)`
 - `(status, as_of desc)`
-- `(model_version_id, as_of desc)`
+- `(portfolio_scenario_artifact_id, as_of desc)`
+
+#### `quant_report_route_run`
+
+用途：冻结每个 represented Route 的 Champion、Calibration、Trade Policy、Research Profile、serving
+contract、候选漏斗和成功/zero-candidate/failure evidence。报告不得再用单数 model/profile/run 列表达
+多 Route lineage。
+
+关键列：
+
+- `report_route_run_id uuid pk`
+- `report_run_id uuid not null`
+- `recommendation_report_id uuid null`（只在 publication transaction 成功后绑定）
+- `route qp_buy_model_route not null`
+- `model_version_id uuid not null`
+- `model_run_id uuid null`
+- `calibration_artifact_id uuid not null`
+- `trade_policy_artifact_id uuid not null`
+- `research_profile_artifact_id uuid not null`
+- `serving_contract_hash bytea not null`
+- `status qp_report_route_run_status not null`
+- `candidate_count int not null`
+- `accepted_count int not null`
+- `diagnostics_json jsonb not null`
+
+唯一约束：`(report_run_id, route)`。failed run 的 route diagnostics 不依赖 published report row。
 
 #### `quant_recommendation`
 
@@ -317,16 +353,20 @@ config revision rollback 由唯一 `ModelRouteGovernanceService` 管理。
 
 - `recommendation_id uuid pk`
 - `recommendation_report_id uuid not null`
+- `report_route_run_id uuid not null`
 - `rank int not null`
 - `market_id varchar(66) not null`
 - `event_id text not null`
 - `token_id text not null`
 - `outcome_side qp_outcome_side not null`（`OutcomeSide`：`yes` / `no`；买卖方向属执行层）
-- `composite_score numeric(20,18) not null`
-- `risk_adjusted_score numeric(20,18) not null`
-- `confidence numeric(20,18) not null`
-- `expected_return_bps numeric(10,4) not null`（模型原始 `E[r]`，可审计/可训练）
-- `downside_bps numeric(10,4) not null`（模型原始止损幅度 `l`）
+- `economic_tier_id uuid not null`
+- `profit_probability_bps int not null`
+- `nominal_expected_net_usd numeric(38,18) not null`
+- `robust_expected_net_usd numeric(38,18) not null`
+- `max_loss_usd numeric(38,18) not null`
+- `cvar_contribution_usd numeric(38,18) not null`
+- `capital_occupancy_usd_hours numeric(38,18) not null`
+- `marginal_portfolio_value_usd numeric(38,18) not null`
 - `entry_plan jsonb not null`
 - `sizing_plan jsonb not null`
 - `exit_plan jsonb not null`
@@ -342,6 +382,7 @@ config revision rollback 由唯一 `ModelRouteGovernanceService` 管理。
 
 - `(recommendation_report_id, rank)`
 - `(recommendation_report_id, market_id, token_id)`
+- FK `report_route_run_id -> quant_report_route_run`
 
 ### 2.5 Execution Intent
 
@@ -507,13 +548,13 @@ config revision rollback 由唯一 `ModelRouteGovernanceService` 管理。
 - `entry_price Decimal128`
 - `target_price Decimal128`
 - `stop_price Decimal128`
-- `rank_before_portfolio UInt32`
+- `route_rank UInt32`（只表示 Route 内模型排序，禁止跨 Route 比较）
 - `rejection_reason LowCardinality(String)`
 
 排序：
 
 ```text
-(model_run_id, rank_before_portfolio, market_id)
+(model_run_id, route_rank, market_id)
 ```
 
 #### `quant_report_recommendation_fact`
@@ -530,8 +571,9 @@ config revision rollback 由唯一 `ModelRouteGovernanceService` 管理。
 - `market_id String`
 - `token_id String`
 - `side Enum8`
-- `score Decimal128`
-- `risk_adjusted_score Decimal128`
+- `route LowCardinality(String)`
+- `robust_expected_net_usd Decimal128`
+- `marginal_portfolio_value_usd Decimal128`
 - `trade_plan_available Bool`
 - `suggested_usd Decimal128`
 - `valid_until DateTime64`
@@ -722,20 +764,19 @@ crates/quant-pivot-models/src/domain/
 
 - `ExecutionMode`
 - `EntryTriggerKind`、`ExitTriggerKind`
-- Endgame-only calibration enums as active model enums: `PriceZone`, `DurationBucket` 只可作为 archived evidence 类型保留，不进入新主路径。
+- Endgame-only calibration enums `PriceZone`、`DurationBucket` 直接删除，不进入终态类型图。
 -旧 `TradeState`、`TradeBusinessOutcome`、`TradeReconcileResolution`。
 
-## 8. Migration 原则
+## 8. Clean-bootstrap 原则
 
-这是破坏式重构，迁移原则如下：
+项目从未生产运行，本次破坏式重构只维护一个终态 bootstrap：
 
-1. 新 schema 以新表名创建，不在旧表上逐字段演化。
-2. 旧表进入 drop plan；如果需要保留历史，先导出到 archive schema 或对象存储。
-3. 不创建兼容 view。
-4. 不创建旧表到新表的 trigger。
-5. 六类 runtime policy 与系统自有 artifact 当前均为 boot schema `1`；不保留旧 parser、alias、版本映射或双读路径。
-6. 所有旧 API 路径删除或 410，不转发到新 API。
-7. 所有新表必须有 schema catalog、entity、domain DTO、repository、migration test。
+1. 唯一 bootstrap snapshot 直接创建终态表、enum、constraint、index 和 seed；不先创建旧表再 drop/rename。
+2. 不创建 upgrade/downgrade migration、archive schema/table、历史 payload converter 或导入脚本。
+3. 不创建兼容 view、旧表到新表 trigger、dual read/write 或 feature flag。
+4. 六类 runtime policy 与系统自有 artifact 均只接受 boot schema `1`；不保留旧 parser、alias 或版本映射。
+5. 所有旧 API 路径直接不存在，不返回兼容 payload，也不转发到新 API。
+6. 所有终态表必须有 schema catalog、entity、domain DTO、repository 与 fresh-boot test。
 
 ## 9. Schema 验收标准
 
@@ -743,7 +784,7 @@ crates/quant-pivot-models/src/domain/
 - Postgres migration test 覆盖新表创建、索引、外键、seed。
 - ClickHouse row serialization snapshot 覆盖所有新 fact。
 - DTO tests 覆盖 sensitive stripping、query normalization、status transition request。
-- 删除清单中每个旧 entity 都有明确命运：drop、rename、archive、keep。
+- 删除清单中每个旧 entity 都必须从终态 bootstrap、entity registry、API 与消费者中消失或被明确的终态 owner 取代。
 
 ## 10. 核心 Rust 类型草图
 

@@ -34,12 +34,11 @@ const DECISION_INTERVENTION_DOMAIN: &str = "quant-pivot/decision-intervention-po
 const DECISION_GRAPH_CONTRACT_DOMAIN: &str = "quant-pivot/decision-computation-graph-contract";
 const DECISION_GRAPH_DOMAIN: &str = "quant-pivot/decision-computation-graph";
 const DECISION_GRAPH_NODE_DOMAIN: &str = "quant-pivot/decision-computation-node";
-const DECISION_UNIVERSE_DOMAIN: &str = "quant-pivot/decision-candidate-universe";
-const DECISION_VERSION: u32 = 3;
+const DECISION_VERSION: u32 = 4;
 const DECISION_INTERVENTION_POLICY: &str =
-    "feature_specific_domain_admissible_in_support_intervention_replay_v3";
+    "feature_specific_domain_admissible_route_model_intervention_replay_v4";
 const DECISION_GRAPH_CONTRACT: &str =
-    "feature_transform_model_output_calibration_composite_rank_top_n_decision_v1";
+    "feature_transform_route_model_output_global_economic_reoptimization_boundary_v1";
 
 fn invalid(detail: impl Into<String>) -> QuantError {
     ResearchError::InvalidModelArtifact {
@@ -402,15 +401,6 @@ pub struct DecisionCandidateKey {
     pub token_id: TokenId,
 }
 
-/// Candidate score used by deterministic rank/TopN replay.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DecisionCandidateScore {
-    pub key: DecisionCandidateKey,
-    pub score: Decimal,
-    pub confidence: Decimal,
-}
-
 /// Semantic role of one node in the persisted decision computation graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -418,10 +408,7 @@ pub enum DecisionGraphNodeKind {
     FeatureInput,
     Transform,
     ModelOutput,
-    CalibrationComposite,
-    Rank,
-    TopN,
-    Decision,
+    EconomicReoptimizationBoundary,
 }
 
 /// One content-bound node in the exact computation graph.
@@ -449,7 +436,8 @@ pub struct DecisionGraphPath {
     pub node_ids: Vec<String>,
 }
 
-/// Persisted directed graph from governed feature input to final decision.
+/// Persisted directed graph from governed feature input to the boundary where
+/// calibrated economics and the global MILP must be recomputed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionComputationGraph {
@@ -492,8 +480,8 @@ impl DecisionComputationGraph {
             ));
         }
         let contract_hash = DecisionReplayPolicy::graph_contract_hash()?;
-        let mut nodes = Vec::with_capacity(names.len().saturating_mul(2).saturating_add(5));
-        let mut edges = Vec::with_capacity(names.len().saturating_mul(2).saturating_add(4));
+        let mut nodes = Vec::with_capacity(names.len().saturating_mul(2).saturating_add(2));
+        let mut edges = Vec::with_capacity(names.len().saturating_mul(2).saturating_add(1));
         for input_name in &names {
             let feature_id = Self::feature_id(input_name);
             let transform_id = Self::transform_id(input_name);
@@ -526,48 +514,16 @@ impl DecisionComputationGraph {
                 &[model_artifact_hash],
             )?,
             Self::node(
-                "calibration_composite".to_owned(),
-                DecisionGraphNodeKind::CalibrationComposite,
+                "global_economic_reoptimization".to_owned(),
+                DecisionGraphNodeKind::EconomicReoptimizationBoundary,
                 None,
                 &[model_artifact_hash, policy.policy_hash],
             )?,
-            Self::node(
-                "rank".to_owned(),
-                DecisionGraphNodeKind::Rank,
-                None,
-                &[policy.policy_hash, policy.candidate_universe_hash],
-            )?,
-            Self::node(
-                "top_n".to_owned(),
-                DecisionGraphNodeKind::TopN,
-                None,
-                &[policy.policy_hash, policy.candidate_universe_hash],
-            )?,
-            Self::node(
-                "decision".to_owned(),
-                DecisionGraphNodeKind::Decision,
-                None,
-                &[policy.policy_hash, policy.candidate_universe_hash],
-            )?,
         ]);
-        edges.extend([
-            DecisionGraphEdge {
-                from_node_id: "model_output".to_owned(),
-                to_node_id: "calibration_composite".to_owned(),
-            },
-            DecisionGraphEdge {
-                from_node_id: "calibration_composite".to_owned(),
-                to_node_id: "rank".to_owned(),
-            },
-            DecisionGraphEdge {
-                from_node_id: "rank".to_owned(),
-                to_node_id: "top_n".to_owned(),
-            },
-            DecisionGraphEdge {
-                from_node_id: "top_n".to_owned(),
-                to_node_id: "decision".to_owned(),
-            },
-        ]);
+        edges.push(DecisionGraphEdge {
+            from_node_id: "model_output".to_owned(),
+            to_node_id: "global_economic_reoptimization".to_owned(),
+        });
         nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
         edges.sort();
         let graph_hash = CanonicalDigest::content_hash_typed(
@@ -616,10 +572,7 @@ impl DecisionComputationGraph {
                 Self::feature_id(input_name),
                 Self::transform_id(input_name),
                 "model_output".to_owned(),
-                "calibration_composite".to_owned(),
-                "rank".to_owned(),
-                "top_n".to_owned(),
-                "decision".to_owned(),
+                "global_economic_reoptimization".to_owned(),
             ],
         }
     }
@@ -633,17 +586,17 @@ impl DecisionComputationGraph {
     }
 }
 
-/// Versioned rank and selection policy.
+/// Versioned policy binding for route-local model interventions.
+///
+/// It deliberately carries no score floors, confidence gates, or `TopN` knobs:
+/// final selection belongs exclusively to calibrated economics and the global
+/// portfolio optimizer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionReplayPolicy {
     pub policy_hash: ContentHash,
     pub admissible_intervention_policy_hash: ContentHash,
     pub computation_graph_contract_hash: ContentHash,
-    pub candidate_universe_hash: ContentHash,
-    pub candidate_score_floor: Decimal,
-    pub minimum_confidence: Decimal,
-    pub top_n: u32,
 }
 
 impl DecisionReplayPolicy {
@@ -656,29 +609,7 @@ impl DecisionReplayPolicy {
         .map_err(Into::into)
     }
 
-    pub fn try_new(
-        policy_hash: ContentHash,
-        universe: &[DecisionCandidateScore],
-        candidate_score_floor: Decimal,
-        minimum_confidence: Decimal,
-        top_n: u32,
-    ) -> QuantResult<Self> {
-        let mut canonical_universe = universe.to_vec();
-        canonical_universe.sort_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| left.key.cmp(&right.key))
-        });
-        if canonical_universe.is_empty()
-            || canonical_universe
-                .windows(2)
-                .any(|pair| pair[0].key == pair[1].key)
-        {
-            return Err(invalid_method(
-                "decision replay universe must be non-empty with unique candidate keys",
-            ));
-        }
+    pub fn try_new(policy_hash: ContentHash) -> QuantResult<Self> {
         let policy = Self {
             policy_hash,
             admissible_intervention_policy_hash: CanonicalDigest::content_hash_typed(
@@ -687,50 +618,36 @@ impl DecisionReplayPolicy {
                 &DECISION_INTERVENTION_POLICY,
             )?,
             computation_graph_contract_hash: Self::graph_contract_hash()?,
-            candidate_universe_hash: CanonicalDigest::content_hash_typed(
-                DECISION_UNIVERSE_DOMAIN,
-                DECISION_VERSION,
-                &canonical_universe,
-            )?,
-            candidate_score_floor,
-            minimum_confidence,
-            top_n,
         };
         policy.validate()?;
         Ok(policy)
     }
 
     fn validate(&self) -> QuantResult<()> {
-        if self.top_n == 0
-            || !(Decimal::ZERO..=Decimal::ONE).contains(&self.candidate_score_floor)
-            || !(Decimal::ZERO..=Decimal::ONE).contains(&self.minimum_confidence)
-            || self.computation_graph_contract_hash != Self::graph_contract_hash()?
-        {
+        if self.computation_graph_contract_hash != Self::graph_contract_hash()? {
             return Err(invalid_method(
-                "decision replay policy has invalid floors, top_n, or computation graph contract",
+                "decision replay policy has an invalid computation graph contract",
             ));
         }
         Ok(())
     }
 }
 
-/// Scope of the deterministic replay. This is not the portfolio allocator,
-/// execution policy, or a real-world causal intervention.
+/// Scope of the deterministic replay. The boundary is explicit: an
+/// intervention never claims a changed recommendation until calibration,
+/// executable cashflows, scenarios, and the global MILP are rerun.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionReplayScope {
-    ModelOutputThroughDecision,
+    RouteModelOutputToEconomicBoundary,
 }
 
-/// Result of replaying composite score, rank, `TopN`, and the final gate.
+/// Route-local model result at the global economic reoptimization boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionReplay {
     pub model_output: Decimal,
-    pub composite_score: Decimal,
-    pub rank: u32,
-    pub top_n_selected: bool,
-    pub decision_selected: bool,
+    pub global_economic_reoptimization_required: bool,
 }
 
 /// Frozen admissible interval for one model-ready feature input.
@@ -766,11 +683,11 @@ pub enum DecisionInterventionNotEvaluableReason {
     ObservedValueOutOfSupport,
     ProposedValueOutOfSupport,
     NoMaterialInputChange,
-    DeadbandWouldSuppressDecision,
+    DeadbandWouldSuppressSignal,
     OutcomeSideFlipNotAdmissible,
     ProjectionNotAdmissible,
     TokenSideFlipNotAdmissible,
-    NoMaterialDecisionChange,
+    NoMaterialModelOutputChange,
 }
 
 /// Materializer result used to construct one immutable intervention outcome.
@@ -778,7 +695,6 @@ pub enum DecisionInterventionNotEvaluableReason {
 pub enum DecisionInterventionEvaluation {
     Evaluated {
         intervened_model_output: Decimal,
-        intervened_composite_score: Decimal,
     },
     NotEvaluable {
         reason: DecisionInterventionNotEvaluableReason,
@@ -821,8 +737,9 @@ pub struct DecisionIntervention {
     pub outcome: DecisionInterventionOutcome,
 }
 
-/// Immutable model-to-decision intervention replay. This is deliberately not
-/// represented as a causal effect on the real world.
+/// Immutable model intervention replay up to the global economic
+/// reoptimization boundary. It is neither a causal effect nor a shortcut for
+/// recalibrating probabilities and rerunning the portfolio MILP.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionInterventionReplayArtifact {
@@ -836,7 +753,6 @@ pub struct DecisionInterventionReplayArtifact {
     pub input_transform_hash: ContentHash,
     pub scope: DecisionReplayScope,
     pub policy: DecisionReplayPolicy,
-    pub candidate_universe: Vec<DecisionCandidateScore>,
     pub computation_graph: DecisionComputationGraph,
     pub baseline: DecisionReplay,
     pub interventions: Vec<DecisionIntervention>,
@@ -856,31 +772,11 @@ pub struct DecisionInterventionReplayInput {
     pub policy: DecisionReplayPolicy,
     pub interventions: Vec<DecisionInterventionAttempt>,
     pub baseline_model_output: Decimal,
-    pub baseline_score: Decimal,
-    pub target_confidence: Decimal,
-    pub peer_scores: Vec<DecisionCandidateScore>,
 }
 
 impl DecisionInterventionReplayArtifact {
     pub fn replay(input: DecisionInterventionReplayInput) -> QuantResult<Self> {
         input.policy.validate()?;
-        let mut universe = input.peer_scores.clone();
-        universe.push(DecisionCandidateScore {
-            key: input.target_key.clone(),
-            score: input.baseline_score,
-            confidence: input.target_confidence,
-        });
-        universe.sort_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| left.key.cmp(&right.key))
-        });
-        let expected_universe = CanonicalDigest::content_hash_typed(
-            DECISION_UNIVERSE_DOMAIN,
-            DECISION_VERSION,
-            &universe,
-        )?;
         let expected_intervention = CanonicalDigest::content_hash_typed(
             DECISION_INTERVENTION_DOMAIN,
             DECISION_VERSION,
@@ -895,10 +791,8 @@ impl DecisionInterventionReplayArtifact {
             input.policy.policy_hash,
             input.policy.admissible_intervention_policy_hash,
             input.policy.computation_graph_contract_hash,
-            input.policy.candidate_universe_hash,
         ];
-        if input.policy.candidate_universe_hash != expected_universe
-            || input.policy.admissible_intervention_policy_hash != expected_intervention
+        if input.policy.admissible_intervention_policy_hash != expected_intervention
             || input.policy.computation_graph_contract_hash != expected_graph_contract
             || required_lineage.iter().any(|hash| {
                 input
@@ -909,7 +803,7 @@ impl DecisionInterventionReplayArtifact {
             })
         {
             return Err(invalid_method(
-                "decision replay policy, universe, computation graph, or lineage is inconsistent",
+                "model intervention policy, computation graph, or lineage is inconsistent",
             ));
         }
         let mut attempts = input.interventions;
@@ -925,31 +819,16 @@ impl DecisionInterventionReplayArtifact {
             input.input_transform_hash,
             &input.policy,
         )?;
-        let baseline = replay_decision(
-            &input.target_key,
-            input.baseline_model_output,
-            input.baseline_score,
-            input.target_confidence,
-            &input.peer_scores,
-            &input.policy,
-        )?;
+        let baseline = replay_model_output(input.baseline_model_output);
         let interventions = attempts
             .into_iter()
             .map(|attempt| {
                 let outcome = match attempt.evaluation {
                     DecisionInterventionEvaluation::Evaluated {
                         intervened_model_output,
-                        intervened_composite_score,
                     } => DecisionInterventionOutcome::Evaluated {
                         affected_paths: vec![DecisionComputationGraph::path(&attempt.input_name)],
-                        replay: replay_decision(
-                            &input.target_key,
-                            intervened_model_output,
-                            intervened_composite_score,
-                            input.target_confidence,
-                            &input.peer_scores,
-                            &input.policy,
-                        )?,
+                        replay: replay_model_output(intervened_model_output),
                     },
                     DecisionInterventionEvaluation::NotEvaluable { reason } => {
                         DecisionInterventionOutcome::NotEvaluable { reason }
@@ -974,9 +853,8 @@ impl DecisionInterventionReplayArtifact {
             model_artifact_hash: input.model_artifact_hash,
             input_contract_hash: input.input_contract_hash,
             input_transform_hash: input.input_transform_hash,
-            scope: DecisionReplayScope::ModelOutputThroughDecision,
+            scope: DecisionReplayScope::RouteModelOutputToEconomicBoundary,
             policy: input.policy,
-            candidate_universe: universe,
             computation_graph,
             baseline,
             interventions,
@@ -988,37 +866,16 @@ impl DecisionInterventionReplayArtifact {
     pub fn validate(&self) -> QuantResult<()> {
         self.lineage.validate()?;
         self.policy.validate()?;
-        if self.scope != DecisionReplayScope::ModelOutputThroughDecision
+        if self.scope != DecisionReplayScope::RouteModelOutputToEconomicBoundary
             || self.interventions.is_empty()
         {
             return Err(invalid_method(
                 "decision intervention replay requires at least one feature attempt",
             ));
         }
-        self.validate_universe()?;
-        let target = self
-            .candidate_universe
-            .iter()
-            .find(|candidate| candidate.key == self.target_key)
-            .ok_or_else(|| invalid_method("decision replay universe omitted its target"))?;
-        let peers = self
-            .candidate_universe
-            .iter()
-            .filter(|candidate| candidate.key != self.target_key)
-            .cloned()
-            .collect::<Vec<_>>();
-        if self.baseline
-            != replay_decision(
-                &self.target_key,
-                self.baseline.model_output,
-                target.score,
-                target.confidence,
-                &peers,
-                &self.policy,
-            )?
-        {
+        if self.baseline != replay_model_output(self.baseline.model_output) {
             return Err(invalid_method(
-                "decision replay baseline differs from its candidate universe",
+                "model intervention baseline does not stop at the economic boundary",
             ));
         }
         self.validate_lineage()?;
@@ -1044,15 +901,7 @@ impl DecisionInterventionReplayArtifact {
                         || intervention.observed_value == intervention.proposed_value
                         || affected_paths
                             != &[DecisionComputationGraph::path(&intervention.input_name)]
-                        || replay
-                            != &replay_decision(
-                                &self.target_key,
-                                replay.model_output,
-                                replay.composite_score,
-                                target.confidence,
-                                &peers,
-                                &self.policy,
-                            )?
+                        || replay != &replay_model_output(replay.model_output)
                     {
                         return Err(invalid_method(
                             "evaluated intervention is not domain-admissible or replay-exact",
@@ -1077,11 +926,11 @@ impl DecisionInterventionReplayArtifact {
                             intervention.observed_value.is_some()
                                 && intervention.observed_value == intervention.proposed_value
                         }
-                        DecisionInterventionNotEvaluableReason::DeadbandWouldSuppressDecision
+                        DecisionInterventionNotEvaluableReason::DeadbandWouldSuppressSignal
                         | DecisionInterventionNotEvaluableReason::OutcomeSideFlipNotAdmissible
                         | DecisionInterventionNotEvaluableReason::ProjectionNotAdmissible
                         | DecisionInterventionNotEvaluableReason::TokenSideFlipNotAdmissible
-                        | DecisionInterventionNotEvaluableReason::NoMaterialDecisionChange => {
+                        | DecisionInterventionNotEvaluableReason::NoMaterialModelOutputChange => {
                             !intervention.model_contribution.is_zero()
                                 && observed_in_support
                                 && proposed_in_support
@@ -1104,34 +953,6 @@ impl DecisionInterventionReplayArtifact {
         Ok(())
     }
 
-    fn validate_universe(&self) -> QuantResult<()> {
-        if self.candidate_universe.is_empty()
-            || self.candidate_universe.windows(2).any(|pair| {
-                pair[0].score < pair[1].score
-                    || (pair[0].score == pair[1].score && pair[0].key >= pair[1].key)
-            })
-            || self.candidate_universe.iter().any(|candidate| {
-                !(Decimal::ZERO..=Decimal::ONE).contains(&candidate.score)
-                    || !(Decimal::ZERO..=Decimal::ONE).contains(&candidate.confidence)
-            })
-        {
-            return Err(invalid_method(
-                "decision replay candidate universe must be unique and canonically ranked",
-            ));
-        }
-        let expected = CanonicalDigest::content_hash_typed(
-            DECISION_UNIVERSE_DOMAIN,
-            DECISION_VERSION,
-            &self.candidate_universe,
-        )?;
-        if self.policy.candidate_universe_hash != expected {
-            return Err(invalid_method(
-                "decision replay candidate universe differs from its policy binding",
-            ));
-        }
-        Ok(())
-    }
-
     fn validate_lineage(&self) -> QuantResult<()> {
         let required = [
             self.prediction_explanation_hash,
@@ -1141,7 +962,6 @@ impl DecisionInterventionReplayArtifact {
             self.policy.policy_hash,
             self.policy.admissible_intervention_policy_hash,
             self.policy.computation_graph_contract_hash,
-            self.policy.candidate_universe_hash,
         ];
         if required.iter().any(|hash| {
             self.lineage
@@ -2241,78 +2061,11 @@ impl AttributionArtifactCodec {
     }
 }
 
-fn replay_decision(
-    target_key: &DecisionCandidateKey,
-    model_output: Decimal,
-    score: Decimal,
-    confidence: Decimal,
-    peer_scores: &[DecisionCandidateScore],
-    policy: &DecisionReplayPolicy,
-) -> QuantResult<DecisionReplay> {
-    policy.validate()?;
-    if !(Decimal::ZERO..=Decimal::ONE).contains(&score)
-        || !(Decimal::ZERO..=Decimal::ONE).contains(&confidence)
-        || peer_scores.iter().any(|candidate| {
-            !(Decimal::ZERO..=Decimal::ONE).contains(&candidate.score)
-                || !(Decimal::ZERO..=Decimal::ONE).contains(&candidate.confidence)
-        })
-    {
-        return Err(invalid_method(
-            "decision replay scores and confidence must remain in [0, 1]",
-        ));
-    }
-    if peer_scores
-        .iter()
-        .any(|candidate| &candidate.key == target_key)
-    {
-        return Err(invalid_method(
-            "decision replay peers contain the target candidate",
-        ));
-    }
-    let unique = peer_scores
-        .iter()
-        .map(|candidate| &candidate.key)
-        .collect::<BTreeSet<_>>();
-    if unique.len() != peer_scores.len() {
-        return Err(invalid_method(
-            "decision replay peer candidates are duplicated",
-        ));
-    }
-    let mut candidates = peer_scores
-        .iter()
-        .filter(|candidate| {
-            candidate.score >= policy.candidate_score_floor
-                && candidate.confidence >= policy.minimum_confidence
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    candidates.push(DecisionCandidateScore {
-        key: target_key.clone(),
-        score,
-        confidence,
-    });
-    candidates.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| left.key.cmp(&right.key))
-    });
-    let position = candidates
-        .iter()
-        .position(|candidate| &candidate.key == target_key)
-        .ok_or_else(|| invalid_method("decision replay lost the target recommendation"))?;
-    let rank = u32::try_from(position + 1)
-        .map_err(|error| invalid_method(format!("decision replay rank overflow: {error}")))?;
-    let top_n_selected = rank <= policy.top_n;
-    Ok(DecisionReplay {
+const fn replay_model_output(model_output: Decimal) -> DecisionReplay {
+    DecisionReplay {
         model_output,
-        composite_score: score,
-        rank,
-        top_n_selected,
-        decision_selected: top_n_selected
-            && score >= policy.candidate_score_floor
-            && confidence >= policy.minimum_confidence,
-    })
+        global_economic_reoptimization_required: true,
+    }
 }
 
 fn validate_contributions(contributions: &[PredictionContribution]) -> QuantResult<()> {
@@ -2628,7 +2381,7 @@ mod tests {
         ASSOCIATION_COHORT_DOMAIN, ASSOCIATION_ESTIMATOR_DOMAIN, ASSOCIATION_EXPLANATIONS_DOMAIN,
         ASSOCIATION_RESOLUTIONS_DOMAIN, ASSOCIATION_VERSION, ActualExecutionBaseline,
         AlternativeExitPolicy, AssociationInterpretation, AttributionArtifact,
-        AttributionArtifactCodec, AttributionLineage, DecisionCandidateKey, DecisionCandidateScore,
+        AttributionArtifactCodec, AttributionLineage, DecisionCandidateKey,
         DecisionInterventionAttempt, DecisionInterventionEvaluation,
         DecisionInterventionNotEvaluableReason, DecisionInterventionOutcome,
         DecisionInterventionReplayArtifact, DecisionInterventionReplayInput,
@@ -2835,36 +2588,13 @@ mod tests {
     }
 
     #[test]
-    fn decision_replay_is_scoped() {
+    fn model_intervention_stops_economics() {
         let target_key = DecisionCandidateKey {
             market_id: MarketId::new("target-market"),
             token_id: TokenId::new("target-token"),
         };
-        let peer = DecisionCandidateScore {
-            key: DecisionCandidateKey {
-                market_id: MarketId::new("peer-market"),
-                token_id: TokenId::new("peer-token"),
-            },
-            score: dec!(0.7),
-            confidence: dec!(0.9),
-        };
-        let mut universe = vec![
-            peer.clone(),
-            DecisionCandidateScore {
-                key: target_key.clone(),
-                score: dec!(0.8),
-                confidence: dec!(0.9),
-            },
-        ];
-        universe.sort_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| left.key.cmp(&right.key))
-        });
         let policy_hash = hash("policy");
-        let policy = DecisionReplayPolicy::try_new(policy_hash, &universe, dec!(0.5), dec!(0.5), 1)
-            .expect("decision policy");
+        let policy = DecisionReplayPolicy::try_new(policy_hash).expect("intervention policy");
         let prediction_explanation_hash = hash("prediction");
         let model_artifact_hash = hash("model-artifact");
         let input_contract_hash = hash("input-contract");
@@ -2883,7 +2613,6 @@ mod tests {
                 policy_hash,
                 policy.admissible_intervention_policy_hash,
                 policy.computation_graph_contract_hash,
-                policy.candidate_universe_hash,
             ],
         )
         .expect("decision lineage");
@@ -2907,17 +2636,12 @@ mod tests {
                         .expect("support"),
                     evaluation: DecisionInterventionEvaluation::Evaluated {
                         intervened_model_output: dec!(0.4),
-                        intervened_composite_score: dec!(0.4),
                     },
                 }],
                 baseline_model_output: dec!(0.8),
-                baseline_score: dec!(0.8),
-                target_confidence: dec!(0.9),
-                peer_scores: vec![peer],
             })
             .expect("decision replay");
-        assert!(artifact.baseline.top_n_selected);
-        assert!(artifact.baseline.decision_selected);
+        assert!(artifact.baseline.global_economic_reoptimization_required);
         let DecisionInterventionOutcome::Evaluated {
             affected_paths,
             replay,
@@ -2925,18 +2649,14 @@ mod tests {
         else {
             panic!("fixture intervention must be evaluated");
         };
-        assert!(!replay.top_n_selected);
-        assert!(!replay.decision_selected);
+        assert!(replay.global_economic_reoptimization_required);
         assert_eq!(
             affected_paths[0].node_ids,
             [
                 "feature:canonical_alpha",
                 "transform:canonical_alpha",
                 "model_output",
-                "calibration_composite",
-                "rank",
-                "top_n",
-                "decision",
+                "global_economic_reoptimization",
             ]
         );
 
@@ -2959,7 +2679,7 @@ mod tests {
             .first_mut()
             .expect("fixture intervention")
             .outcome = DecisionInterventionOutcome::NotEvaluable {
-            reason: DecisionInterventionNotEvaluableReason::NoMaterialDecisionChange,
+            reason: DecisionInterventionNotEvaluableReason::NoMaterialModelOutputChange,
         };
         assert!(contradictory.validate().is_err());
 
@@ -2969,7 +2689,7 @@ mod tests {
             .edges
             .first_mut()
             .expect("fixture graph edge")
-            .to_node_id = "decision".to_owned();
+            .to_node_id = "unbound_decision".to_owned();
         assert!(tampered_graph.validate().is_err());
     }
 

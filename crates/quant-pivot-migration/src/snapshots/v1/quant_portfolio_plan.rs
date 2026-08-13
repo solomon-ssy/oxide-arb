@@ -8,20 +8,39 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub portfolio_plan_id: Uuid,
-    pub model_run_id: Option<Uuid>,
+    pub account_snapshot_id: Uuid,
+    pub decision_policy_snapshot_id: Uuid,
     pub market_selection_id: Uuid,
     pub decision_at: DateTimeWithTimeZone,
-    pub budget_usd: Decimal,
-    pub allocated_usd: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
-    pub risk_budget_json: Json,
+    pub represented_routes_json: Json,
+    pub scenario_artifact_id: Option<Uuid>,
+    pub scenario_artifact_hash: Option<String>,
     #[sea_orm(column_type = "JsonBinary")]
-    pub constraints_json: Json,
+    pub scenario_artifact_json: Option<Json>,
     #[sea_orm(column_type = "JsonBinary")]
-    pub rejected_summary: Json,
+    pub portfolio_policy_json: Json,
     #[sea_orm(column_type = "JsonBinary")]
-    pub optimizer_meta_json: Json,
+    pub existing_state_json: Json,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub decision_json: Json,
     pub created_at: DateTimeWithTimeZone,
+    #[sea_orm(
+        belongs_to,
+        from = "account_snapshot_id",
+        to = "account_snapshot_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_account_snapshot: BelongsTo<super::quant_account_snapshot::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
     #[sea_orm(
         belongs_to,
         from = "market_selection_id",
@@ -30,16 +49,10 @@ pub struct Model {
         on_delete = "NoAction"
     )]
     pub quant_market_selection: BelongsTo<super::quant_market_selection::Entity>,
-    #[sea_orm(
-        belongs_to,
-        from = "model_run_id",
-        to = "model_run_id",
-        on_update = "NoAction",
-        on_delete = "NoAction"
-    )]
-    pub quant_model_run: BelongsTo<Option<super::quant_model_run::Entity>>,
     #[sea_orm(has_many)]
     pub quant_recommendation_reports: HasMany<super::quant_recommendation_report::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_recommendations: HasMany<super::quant_recommendation::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

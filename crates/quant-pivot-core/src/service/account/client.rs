@@ -16,7 +16,7 @@ use quant_pivot_models::types::Usd;
 /// Read-only venue account façade for report sizing.
 #[async_trait]
 pub trait PolymarketAccountClient: Send + Sync {
-    /// On-exchange USDC collateral (CLOB, private-key L2 read credential).
+    /// On-exchange pUSD collateral (CLOB, private-key L2 read credential).
     async fn available_collateral(&self) -> QuantResult<Usd>;
     /// Open positions for a proxy/funder address (Data API, keyless).
     async fn positions(&self, funder: &str) -> QuantResult<Vec<VenuePosition>>;

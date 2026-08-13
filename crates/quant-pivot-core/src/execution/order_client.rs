@@ -311,6 +311,7 @@ impl PolymarketOrderClient for ClobOrderClient {
             token_id: order.token_id.clone(),
             side: order.side,
             amount: order.amount,
+            expected_fee: order.expected_fee,
             price: order.price,
             order_type: order.order_type,
             post_only: order.post_only,

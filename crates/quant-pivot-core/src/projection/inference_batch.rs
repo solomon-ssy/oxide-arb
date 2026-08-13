@@ -292,7 +292,10 @@ mod tests {
         },
     };
     use quant_pivot_research::{
-        factors::{FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH},
+        factors::{
+            FactorEligibility, FactorValue, MarketFactorOutcome, NormalizedFactor,
+            names::LIQUIDITY_DEPTH,
+        },
         features::{
             FeatureVector,
             names::book::{BEST_ASK, MID, SECONDARY_BEST_ASK},
@@ -303,7 +306,7 @@ mod tests {
     };
     use rust_decimal_macros::dec;
 
-    use super::{build_feature_matrix, build_frozen_runtime_input};
+    use super::{build_factor_row, build_feature_matrix, build_frozen_runtime_input};
 
     const FEATURE: &str = "domain.crypto.distance_to_strike";
 
@@ -360,6 +363,25 @@ mod tests {
             volume_24h_usd: None,
             source_refs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn rejected_factor_omitted() {
+        let vector = vector(None);
+        let market = market();
+        let outcome = MarketFactorOutcome {
+            market_id: vector.market_id.clone(),
+            decision_at: vector.decision_at,
+            eligibility: FactorEligibility::RejectCandidate {
+                reason: "required factor missing".to_owned(),
+            },
+            factors: Vec::new(),
+        };
+
+        assert!(
+            build_factor_row(&market, &vector, &outcome).is_none(),
+            "required-factor rejects must be removed before model inference"
+        );
     }
 
     #[test]

@@ -213,7 +213,7 @@ impl ModelSpecSeed {
                 ModelFamily::WeightedFactor,
                 persisted_horizon,
                 self.input_contract,
-                ModelTrainingContract::settlement_default(),
+                ModelTrainingContract::outcome_default(),
             ))
             .await
             .expect("create spec");
@@ -1207,6 +1207,7 @@ fn service_selection_linkage(
                 max_feature_bucket_age_secs: 120,
                 ..DataQualityConfig::default()
             },
+            liquidity_cap_usd: Usd::new(Decimal::from(1_000)),
             training: TrainingConfig::default(),
             // The point-in-time selection funnel replayed during the build uses
             // this frozen selection policy.

@@ -1,5 +1,7 @@
 //! Deploy-only `SeaORM` `PostgreSQL` migrator with immutable artifact checksums.
 
+#![recursion_limit = "256"]
+
 use quant_pivot_allocator as _;
 
 mod audit;

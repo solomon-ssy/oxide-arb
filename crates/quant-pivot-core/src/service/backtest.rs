@@ -10,7 +10,7 @@
 //! Evaluation is read-only with respect to model artifacts.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     iter,
     sync::Arc,
 };
@@ -22,12 +22,15 @@ use quant_pivot_error::{
     storage::StorageError,
 };
 use quant_pivot_models::{
+    config::PortfolioSolverDeployConfig,
     domain::{
+        data_plane::{DecisionBoundary, DecisionSource},
         governance::DecisionPolicySnapshotInfo,
         ports::{FeedbackComparisonCandidateRef, FeedbackComparisonJobParams},
         quant::{
             BacktestReportInfo, JobProgressSink, ModelComparisonReportInfo, ModelVersionInfo,
-            NewBacktestReport, NewModelComparisonReport, NewModelRun, TrainingDatasetInfo,
+            NewBacktestReport, NewModelComparisonReport, NewModelRun, PortfolioScenarioVisibility,
+            TrainingDatasetInfo,
         },
         query::TimeWindow,
     },
@@ -49,13 +52,15 @@ use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::{
         BacktestDownsidePoint, BacktestDownsideTrajectory, BacktestExecutionSnapshot,
-        BacktestInputs, BacktestMarketMeta, BacktestRankTarget, BacktestReport, BacktestRequest,
-        BacktestRunResult, BacktestTick, Backtester, MarketOutcome, ModelCalibrationOutcome,
-        ModelComparisonReport, PortfolioCaps, PortfolioReplayBacktester,
-        PortfolioReturnObservation,
+        BacktestInputs, BacktestLiquidationSnapshot, BacktestMarketMeta, BacktestPortfolioContext,
+        BacktestRankTarget, BacktestReport, BacktestRequest, BacktestRunResult,
+        BacktestScenarioContext, BacktestTick, Backtester, CalibrationReplayTick, MarketOutcome,
+        ModelCalibrationOutcome, ModelCalibrationReplay, ModelComparisonReport,
+        PortfolioReplayBacktester, PortfolioReturnObservation,
     },
     execution_semantics::{PitFeeSchedule, aggressive_buy_limit},
     model::{LabelSelector, ModelRankTarget, QuantModelRuntime},
+    pit::BookSnapshotAt,
     training::{LabelName, TrainingExample},
 };
 use rust_decimal::Decimal;
@@ -73,6 +78,7 @@ use crate::{
         model_serving_preimage::{
             ModelServingPreimageService, VerifiedModelServingPreimage, VerifiedReplayDataset,
         },
+        portfolio_context::{PreparedBacktestPortfolio, PromotedPortfolioContextLoader},
         training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
     },
 };
@@ -95,6 +101,8 @@ pub struct BacktestServiceDeps {
     pub comparison_report_repo: Arc<dyn ModelComparisonReportRepository>,
     /// Canonical full-graph model and replay-Dataset preimage verifier.
     pub serving_preimages: Arc<ModelServingPreimageService>,
+    /// Unique deterministic production/backtest MILP boundary.
+    pub portfolio_solver: PortfolioSolverDeployConfig,
 }
 
 /// A backtest request resolved by the admin port.
@@ -157,7 +165,8 @@ pub(crate) struct CalibrationReplayEvidence {
 pub struct BacktestService {
     deps: BacktestServiceDeps,
     policy_binding: ModelServingPolicySnapshotBinding,
-    caps: PortfolioCaps,
+    portfolio_contexts: PromotedPortfolioContextLoader,
+    evaluation_frozen_at: DateTime<Utc>,
     entry_max_slippage_bps: Bps,
 }
 
@@ -176,7 +185,6 @@ impl BacktestService {
         let policy_binding = ModelServingPolicySnapshotBinding::from(
             VerifiedPolicySnapshotBinding::try_from(policy)?,
         );
-        let caps = PortfolioCaps::try_from(&policy.snapshot.execution_risk.portfolio)?;
         let entry_max_slippage_bps = Bps::new(Decimal::from(
             policy
                 .snapshot
@@ -184,10 +192,16 @@ impl BacktestService {
                 .entry_order_policy
                 .max_slippage_bps,
         ));
+        let portfolio_contexts = PromotedPortfolioContextLoader::new(
+            Arc::clone(&deps.artifact_store),
+            deps.portfolio_solver,
+            policy.snapshot.clone(),
+        );
         Ok(Self {
             deps,
             policy_binding,
-            caps,
+            portfolio_contexts,
+            evaluation_frozen_at: policy.created_at,
             entry_max_slippage_bps,
         })
     }
@@ -199,11 +213,10 @@ impl BacktestService {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<BacktestReportInfo> {
-        let prepared = Box::pin(self.prepare(
+        let prepared = Box::pin(self.prepare_evaluation(
             &input.model_version_id,
             &input.evaluation_dataset_id,
             input.decision_policy_snapshot_id,
-            DatasetPurpose::Evaluation,
         ))
         .await?;
         Ok(
@@ -243,6 +256,7 @@ impl BacktestService {
             &champion_source,
             &dataset,
             DatasetPurpose::Evaluation,
+            &self.policy_binding,
         ))
         .await?;
         let (examples, frozen_source) = self
@@ -250,7 +264,12 @@ impl BacktestService {
             .await?;
 
         let mut prepared = Vec::with_capacity(params.candidates.len() + 1);
-        prepared.push(FeedbackPreparedModel::champion(params, &champion_source)?);
+        let champion_portfolio = self.portfolio_context(&champion_source, &dataset).await?;
+        prepared.push(FeedbackPreparedModel::champion(
+            params,
+            &champion_source,
+            champion_portfolio,
+        )?);
         for candidate in &params.candidates {
             let version = self.find_version(&candidate.model_version_id).await?;
             let source = self.deps.serving_preimages.load(&version).await?;
@@ -263,16 +282,19 @@ impl BacktestService {
                 &source,
                 &dataset,
                 DatasetPurpose::Evaluation,
+                &self.policy_binding,
             ))
             .await?;
-            prepared.push(FeedbackPreparedModel::candidate(candidate, &source)?);
+            let portfolio = self.portfolio_context(&source, &dataset).await?;
+            prepared.push(FeedbackPreparedModel::candidate(
+                candidate, &source, portfolio,
+            )?);
         }
 
         let batch = FeedbackReplayBatch {
             prepared,
             examples,
             frozen_source,
-            caps: self.caps.clone(),
             entry_max_slippage_bps: self.entry_max_slippage_bps,
             evaluation_dataset_id: dataset.training_dataset_id,
             decision_policy_snapshot_id: params.decision_policy_snapshot_id,
@@ -301,11 +323,10 @@ impl BacktestService {
     /// Verify every canonical replay preimage without creating a run, report,
     /// comparison, or other evidence row.
     pub async fn verify(&self, input: &BacktestInput) -> QuantResult<()> {
-        let prepared = Box::pin(self.prepare(
+        let prepared = Box::pin(self.prepare_evaluation(
             &input.model_version_id,
             &input.evaluation_dataset_id,
             input.decision_policy_snapshot_id,
-            DatasetPurpose::Evaluation,
         ))
         .await?;
         drop(prepared);
@@ -319,18 +340,16 @@ impl BacktestService {
         input: &BacktestInput,
         baseline_version_id: ModelVersionId,
     ) -> QuantResult<()> {
-        let candidate = Box::pin(self.prepare(
+        let candidate = Box::pin(self.prepare_evaluation(
             &input.model_version_id,
             &input.evaluation_dataset_id,
             input.decision_policy_snapshot_id,
-            DatasetPurpose::Evaluation,
         ))
         .await?;
-        let baseline = Box::pin(self.prepare(
+        let baseline = Box::pin(self.prepare_evaluation(
             &baseline_version_id,
             &input.evaluation_dataset_id,
             input.decision_policy_snapshot_id,
-            DatasetPurpose::Evaluation,
         ))
         .await?;
         drop((candidate, baseline));
@@ -350,18 +369,16 @@ impl BacktestService {
     ) -> QuantResult<(BacktestReportInfo, ModelComparisonReportInfo)> {
         // Both exact contracts are resolved before the first candidate run is
         // created. A bad baseline can therefore never leave half a pair.
-        let candidate_prepared = Box::pin(self.prepare(
+        let candidate_prepared = Box::pin(self.prepare_evaluation(
             &input.model_version_id,
             &input.evaluation_dataset_id,
             input.decision_policy_snapshot_id,
-            DatasetPurpose::Evaluation,
         ))
         .await?;
-        let baseline_prepared = Box::pin(self.prepare(
+        let baseline_prepared = Box::pin(self.prepare_evaluation(
             &baseline_version_id,
             &input.evaluation_dataset_id,
             input.decision_policy_snapshot_id,
-            DatasetPurpose::Evaluation,
         ))
         .await?;
 
@@ -397,18 +414,13 @@ impl BacktestService {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<CalibrationReplayEvidence> {
-        let prepared = Box::pin(self.prepare(
+        let prepared = Box::pin(self.prepare_calibration(
             &input.source_model,
             &input.calibration_dataset,
             input.policy_snapshot,
-            DatasetPurpose::Calibration,
         ))
         .await?;
-        let fit_contract = prepared.calibration_contract.clone().ok_or_else(|| {
-            ResearchError::InvalidModelArtifact {
-                detail: "calibration replay did not resolve its exact fit contract".to_owned(),
-            }
-        })?;
+        let fit_contract = prepared.fit_contract.clone();
         let fit_window =
             TimeWindow::new(prepared.dataset.window_start, prepared.dataset.window_end);
         let model_run_id = input.model_run_id;
@@ -421,21 +433,12 @@ impl BacktestService {
         )
         .await?;
 
-        let replay = Box::pin(self.replay(
-            ReplayCtx {
-                backtest_report_id: BacktestReportId::from_v7(),
-                model_run_id,
-                prepared,
-                decision_policy_snapshot_id: input.policy_snapshot,
-            },
-            &progress,
-            &cancel,
-        ))
-        .await;
+        let replay =
+            Box::pin(self.replay_calibration(model_run_id, prepared, &progress, &cancel)).await;
         match replay {
-            Ok(result) => Ok(CalibrationReplayEvidence {
+            Ok(samples) => Ok(CalibrationReplayEvidence {
                 model_run_id,
-                samples: result.calibration_outcomes,
+                samples,
                 fit_window,
                 fit_contract,
             }),
@@ -472,15 +475,94 @@ impl BacktestService {
             })
     }
 
+    async fn portfolio_context(
+        &self,
+        source: &VerifiedModelServingPreimage,
+        dataset: &TrainingDatasetInfo,
+    ) -> QuantResult<PreparedBacktestPortfolio> {
+        self.portfolio_contexts
+            .load_evaluation_single(
+                source,
+                dataset.window_start,
+                self.evaluation_frozen_at,
+                self.portfolio_contexts
+                    .policy()
+                    .recommendation
+                    .reports
+                    .ad_hoc_default_top_n,
+            )
+            .await
+    }
+
     /// Resolve and verify every immutable preimage, then load the runtime.
     /// Nothing in this path creates evidence or mutates a repository.
-    async fn prepare(
+    async fn prepare_evaluation(
+        &self,
+        model_version_id: &ModelVersionId,
+        dataset_id: &TrainingDatasetId,
+        policy_id: DecisionPolicySnapshotId,
+    ) -> QuantResult<PreparedReplay> {
+        let prepared = Box::pin(self.prepare_source(
+            model_version_id,
+            dataset_id,
+            policy_id,
+            DatasetPurpose::Evaluation,
+        ))
+        .await?;
+        let portfolio = self
+            .portfolio_context(&prepared.source, &prepared.dataset)
+            .await?;
+        let model = prepared.source.buy_runtime()?;
+        let rank_target = prepared.source.replay_rank_target();
+        Ok(PreparedReplay {
+            version: prepared.version,
+            dataset: prepared.dataset,
+            model,
+            rank_target,
+            examples: prepared.examples,
+            frozen_source: prepared.frozen_source,
+            portfolio: portfolio.portfolio,
+            scenario: portfolio.scenario,
+            scenario_visibility: portfolio.scenario_visibility,
+        })
+    }
+
+    async fn prepare_calibration(
+        &self,
+        model_version_id: &ModelVersionId,
+        dataset_id: &TrainingDatasetId,
+        policy_id: DecisionPolicySnapshotId,
+    ) -> QuantResult<PreparedCalibrationReplay> {
+        let prepared = Box::pin(self.prepare_source(
+            model_version_id,
+            dataset_id,
+            policy_id,
+            DatasetPurpose::Calibration,
+        ))
+        .await?;
+        let fit_contract = Box::pin(
+            self.deps
+                .serving_preimages
+                .calibration_fit_contract(&prepared.source, &prepared.dataset),
+        )
+        .await?;
+        let model = prepared.source.buy_runtime()?;
+        Ok(PreparedCalibrationReplay {
+            dataset: prepared.dataset,
+            model,
+            examples: prepared.examples,
+            frozen_source: prepared.frozen_source,
+            fit_contract,
+        })
+    }
+
+    async fn prepare_source(
         &self,
         model_version_id: &ModelVersionId,
         dataset_id: &TrainingDatasetId,
         policy_id: DecisionPolicySnapshotId,
         purpose: DatasetPurpose,
-    ) -> QuantResult<PreparedReplay> {
+    ) -> QuantResult<PreparedReplaySource> {
         let version = self.find_version(model_version_id).await?;
         let source = self.deps.serving_preimages.load(&version).await?;
         let source_policy = &source
@@ -501,52 +583,22 @@ impl BacktestService {
             .into());
         }
         let dataset = self.find_dataset(dataset_id).await?;
-        let replay = Box::pin(
-            self.deps
-                .serving_preimages
-                .verify_replay_dataset(&source, &dataset, purpose),
-        )
+        let replay = Box::pin(self.deps.serving_preimages.verify_replay_dataset(
+            &source,
+            &dataset,
+            purpose,
+            &self.policy_binding,
+        ))
         .await?;
-        let calibration_contract = if purpose == DatasetPurpose::Calibration {
-            Some(
-                Box::pin(
-                    self.deps
-                        .serving_preimages
-                        .calibration_fit_contract(&source, &dataset),
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
         let (examples, frozen_source) = self
             .load_replay_artifacts(&replay, source.profile())
             .await?;
-
-        // Runtime construction is intentionally last and consumes only the
-        // already verified source retained above.
-        let model = source.buy_runtime()?;
-        let rank_target = LabelSelector {
-            name: LabelName::new(
-                source
-                    .model_spec()
-                    .training_contract
-                    .target_label_name
-                    .clone(),
-            ),
-            horizon_secs: source
-                .model_spec()
-                .training_contract
-                .target_label_horizon_secs,
-        };
-        Ok(PreparedReplay {
+        Ok(PreparedReplaySource {
             version,
             dataset,
-            model,
-            rank_target,
+            source,
             examples,
             frozen_source,
-            calibration_contract,
         })
     }
 
@@ -739,7 +791,9 @@ impl BacktestService {
             rank_target,
             examples,
             frozen_source,
-            calibration_contract: _,
+            portfolio,
+            scenario,
+            scenario_visibility,
         } = prepared;
 
         let request = BacktestRequest {
@@ -758,7 +812,9 @@ impl BacktestService {
             model,
             rank_target,
             examples,
-            caps: self.caps.clone(),
+            portfolio,
+            scenario,
+            scenario_visibility,
             request,
             model_run_id,
             sink: Arc::clone(progress),
@@ -783,6 +839,44 @@ impl BacktestService {
         };
 
         Ok(result)
+    }
+
+    /// Replay the complete calibration population without constructing a
+    /// portfolio contract. A newly trained challenger has no active Route or
+    /// promoted scenario authority yet; requiring either here would make the
+    /// promotion DAG cyclic and would incorrectly censor calibration through
+    /// downstream allocation.
+    async fn replay_calibration(
+        &self,
+        model_run_id: ModelRunId,
+        prepared: PreparedCalibrationReplay,
+        progress: &Arc<dyn JobProgressSink>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<Vec<ModelCalibrationOutcome>> {
+        let inputs = CalibrationReplayInputs {
+            model: prepared.model,
+            examples: prepared.examples,
+            model_run_id,
+            sink: Arc::clone(progress),
+            cancel: cancel.clone(),
+            frozen_source: prepared.frozen_source,
+            entry_max_slippage_bps: self.entry_max_slippage_bps,
+        };
+        let runtime = Handle::current();
+        let result = self
+            .deps
+            .compute
+            .run_offline_cancellable(OfflineMemory::try_gib(4)?, cancel, move || {
+                let _runtime = runtime.enter();
+                inputs.run_calibration_replay_blocking()
+            })
+            .await?;
+        result.ok_or_else(|| {
+            ResearchError::Cancelled {
+                detail: "calibration cancelled during allocation-independent replay".to_owned(),
+            }
+            .into()
+        })
     }
 
     /// Persist the backtest report ledger row.
@@ -827,6 +921,7 @@ impl BacktestService {
                 category_breakdown: report.category_breakdown.clone().into(),
                 tail_loss: report.tail_loss,
                 report_pnl_simulation: report.report_pnl_simulation.clone(),
+                portfolio_funnel: report.portfolio_funnel.clone(),
                 report_hash: report.report_hash,
                 parquet_uri: None,
             })
@@ -938,7 +1033,29 @@ struct PreparedReplay {
     rank_target: LabelSelector,
     examples: Vec<TrainingExample>,
     frozen_source: FrozenSourceSlice,
-    calibration_contract: Option<ModelScoreCalibrationFitContract>,
+    portfolio: BacktestPortfolioContext,
+    scenario: BacktestScenarioContext,
+    scenario_visibility: PortfolioScenarioVisibility,
+}
+
+/// Common, fully verified source graph before purpose-specific replay context
+/// is attached.
+struct PreparedReplaySource {
+    version: ModelVersionInfo,
+    dataset: TrainingDatasetInfo,
+    source: VerifiedModelServingPreimage,
+    examples: Vec<TrainingExample>,
+    frozen_source: FrozenSourceSlice,
+}
+
+/// Calibration replay state deliberately excludes portfolio and active Route
+/// authority so a challenger can be calibrated before promotion.
+struct PreparedCalibrationReplay {
+    dataset: TrainingDatasetInfo,
+    model: Arc<dyn QuantModelRuntime>,
+    examples: Vec<TrainingExample>,
+    frozen_source: FrozenSourceSlice,
+    fit_contract: ModelScoreCalibrationFitContract,
 }
 
 struct FeedbackPreparedModel {
@@ -948,12 +1065,16 @@ struct FeedbackPreparedModel {
     backtest_report_id: BacktestReportId,
     model: Arc<dyn QuantModelRuntime>,
     rank_target: LabelSelector,
+    portfolio: BacktestPortfolioContext,
+    scenario: BacktestScenarioContext,
+    scenario_visibility: PortfolioScenarioVisibility,
 }
 
 impl FeedbackPreparedModel {
     fn champion(
         params: &FeedbackComparisonJobParams,
         source: &VerifiedModelServingPreimage,
+        portfolio: PreparedBacktestPortfolio,
     ) -> QuantResult<Self> {
         Ok(Self {
             model_version_id: params.champion_model_version_id,
@@ -966,20 +1087,26 @@ impl FeedbackPreparedModel {
                     source
                         .model_spec()
                         .training_contract
-                        .target_label_name
-                        .clone(),
+                        .target
+                        .label_name()
+                        .to_owned(),
                 ),
                 horizon_secs: source
                     .model_spec()
                     .training_contract
-                    .target_label_horizon_secs,
+                    .target
+                    .label_horizon_secs(),
             },
+            portfolio: portfolio.portfolio,
+            scenario: portfolio.scenario,
+            scenario_visibility: portfolio.scenario_visibility,
         })
     }
 
     fn candidate(
         candidate: &FeedbackComparisonCandidateRef,
         source: &VerifiedModelServingPreimage,
+        portfolio: PreparedBacktestPortfolio,
     ) -> QuantResult<Self> {
         Ok(Self {
             model_version_id: candidate.model_version_id,
@@ -992,14 +1119,19 @@ impl FeedbackPreparedModel {
                     source
                         .model_spec()
                         .training_contract
-                        .target_label_name
-                        .clone(),
+                        .target
+                        .label_name()
+                        .to_owned(),
                 ),
                 horizon_secs: source
                     .model_spec()
                     .training_contract
-                    .target_label_horizon_secs,
+                    .target
+                    .label_horizon_secs(),
             },
+            portfolio: portfolio.portfolio,
+            scenario: portfolio.scenario,
+            scenario_visibility: portfolio.scenario_visibility,
         })
     }
 }
@@ -1008,7 +1140,6 @@ struct FeedbackReplayBatch {
     prepared: Vec<FeedbackPreparedModel>,
     examples: Vec<TrainingExample>,
     frozen_source: FrozenSourceSlice,
-    caps: PortfolioCaps,
     entry_max_slippage_bps: Bps,
     evaluation_dataset_id: TrainingDatasetId,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
@@ -1051,6 +1182,7 @@ impl FeedbackReplayBatch {
                 rank_target: &prepared.rank_target,
                 model: prepared.model.as_ref(),
                 model_run_id: &prepared.model_run_id,
+                portfolio: &prepared.portfolio,
                 cancel: &self.cancel,
                 sink: self.progress.as_ref(),
             })?
@@ -1068,8 +1200,9 @@ impl FeedbackReplayBatch {
                         window_end: self.window_end,
                     },
                     model: prepared.model.as_ref(),
+                    scenario: &prepared.scenario,
+                    scenario_visibility: prepared.scenario_visibility,
                     ticks,
-                    caps: self.caps.clone(),
                 })
                 .await?;
             outputs.push(FeedbackModelReplay {
@@ -1119,13 +1252,178 @@ struct BacktestReplayInputs {
     model: Arc<dyn QuantModelRuntime>,
     rank_target: LabelSelector,
     examples: Vec<TrainingExample>,
-    caps: PortfolioCaps,
+    portfolio: BacktestPortfolioContext,
+    scenario: BacktestScenarioContext,
+    scenario_visibility: PortfolioScenarioVisibility,
     request: BacktestRequest,
     model_run_id: ModelRunId,
     sink: Arc<dyn JobProgressSink>,
     cancel: CancellationToken,
     frozen_source: FrozenSourceSlice,
     entry_max_slippage_bps: Bps,
+}
+
+/// Owned inputs moved into the governed offline calibration replay.
+struct CalibrationReplayInputs {
+    model: Arc<dyn QuantModelRuntime>,
+    examples: Vec<TrainingExample>,
+    model_run_id: ModelRunId,
+    sink: Arc<dyn JobProgressSink>,
+    cancel: CancellationToken,
+    frozen_source: FrozenSourceSlice,
+    entry_max_slippage_bps: Bps,
+}
+
+impl CalibrationReplayInputs {
+    fn run_calibration_replay_blocking(self) -> QuantResult<Option<Vec<ModelCalibrationOutcome>>> {
+        Handle::current().block_on(self.run())
+    }
+
+    async fn run(self) -> QuantResult<Option<Vec<ModelCalibrationOutcome>>> {
+        let Some(ticks) = frozen_calibration_ticks(FrozenCalibrationBuild {
+            examples: &self.examples,
+            frozen_source: &self.frozen_source,
+            entry_max_slippage_bps: self.entry_max_slippage_bps,
+            model: self.model.as_ref(),
+            model_run_id: &self.model_run_id,
+            cancel: &self.cancel,
+            sink: self.sink.as_ref(),
+        })?
+        else {
+            return Ok(None);
+        };
+        let outcomes = ModelCalibrationReplay::new()
+            .run(self.model.as_ref(), ticks)
+            .await?;
+        if self.cancel.is_cancelled() {
+            return Ok(None);
+        }
+        Ok(Some(outcomes))
+    }
+}
+
+impl VerifiedModelServingPreimage {
+    fn replay_rank_target(&self) -> LabelSelector {
+        LabelSelector {
+            name: LabelName::new(
+                self.model_spec()
+                    .training_contract
+                    .target
+                    .label_name()
+                    .to_owned(),
+            ),
+            horizon_secs: self
+                .model_spec()
+                .training_contract
+                .target
+                .label_horizon_secs(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FrozenCalibrationBuild<'a> {
+    examples: &'a [TrainingExample],
+    frozen_source: &'a FrozenSourceSlice,
+    entry_max_slippage_bps: Bps,
+    model: &'a dyn QuantModelRuntime,
+    model_run_id: &'a ModelRunId,
+    cancel: &'a CancellationToken,
+    sink: &'a dyn JobProgressSink,
+}
+
+/// Assemble allocation-independent calibration ticks from the exact frozen
+/// Dataset and Source Slice. This runs before any Route activation and cannot
+/// consult portfolio admission, scenario selection, or account state.
+fn frozen_calibration_ticks(
+    input: FrozenCalibrationBuild<'_>,
+) -> QuantResult<Option<Vec<CalibrationReplayTick>>> {
+    let FrozenCalibrationBuild {
+        examples,
+        frozen_source,
+        entry_max_slippage_bps,
+        model,
+        model_run_id,
+        cancel,
+        sink,
+    } = input;
+    let pages = replay_pages_for_examples(examples, frozen_source)?;
+    let execution = frozen_execution_snapshots(examples, &pages, entry_max_slippage_bps)?;
+    let downside_trajectories = frozen_downside_trajectories(examples, frozen_source, &execution)?;
+    let mut by_decision: BTreeMap<DateTime<Utc>, Vec<&TrainingExample>> = BTreeMap::new();
+    for example in examples {
+        by_decision
+            .entry(example.decision_at())
+            .or_default()
+            .push(example);
+    }
+    let total_sections =
+        u64::try_from(by_decision.len()).map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("calibration cross-section count does not fit u64: {error}"),
+        })?;
+    let mut processed_sections = 0_u64;
+    let mut ticks = Vec::with_capacity(by_decision.len());
+    let settlement_label = LabelName::new("token_payout_ratio");
+    for (decision_at, group) in by_decision {
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
+        processed_sections =
+            processed_sections
+                .checked_add(1)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "calibration cross-section progress overflowed u64".to_owned(),
+                })?;
+        sink.report(ResearchJobProgress::with_total(
+            "frozen_calibration_input",
+            processed_sections,
+            total_sections,
+        ));
+        let model_input = build_frozen_runtime_input(model, model_run_id, &group)?;
+        let contexts = model_input
+            .market_contexts()
+            .into_iter()
+            .map(|(market_id, context)| (market_id.clone(), context))
+            .collect::<HashMap<_, _>>();
+        if contexts.is_empty() {
+            continue;
+        }
+        let mut outcomes = Vec::with_capacity(contexts.len());
+        let mut seen_markets = BTreeSet::new();
+        for example in group {
+            if !contexts.contains_key(&example.market_id) {
+                continue;
+            }
+            if !seen_markets.insert(example.market_id.as_str()) {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "calibration cross-section {decision_at} duplicates market {}",
+                        example.market_id
+                    ),
+                }
+                .into());
+            }
+            outcomes.push(settlement_outcome(
+                example,
+                &settlement_label,
+                frozen_source,
+            )?);
+        }
+        ticks.push(CalibrationReplayTick {
+            decision_at,
+            model_input,
+            outcomes,
+            downside_trajectories: downside_trajectories
+                .iter()
+                .filter(|trajectory| trajectory.anchor == decision_at)
+                .cloned()
+                .collect(),
+        });
+    }
+    if cancel.is_cancelled() {
+        return Ok(None);
+    }
+    Ok(Some(ticks))
 }
 
 impl BacktestReplayInputs {
@@ -1149,6 +1447,7 @@ impl BacktestReplayInputs {
             rank_target: &self.rank_target,
             model: self.model.as_ref(),
             model_run_id: &self.model_run_id,
+            portfolio: &self.portfolio,
             cancel: &self.cancel,
             sink: self.sink.as_ref(),
         })?
@@ -1164,8 +1463,9 @@ impl BacktestReplayInputs {
             .run(BacktestInputs {
                 request: self.request,
                 model: self.model.as_ref(),
+                scenario: &self.scenario,
+                scenario_visibility: self.scenario_visibility,
                 ticks,
-                caps: self.caps,
             })
             .await?;
         Ok(Some(result))
@@ -1189,6 +1489,7 @@ pub(crate) struct FrozenTickBuild<'a> {
     pub rank_target: &'a LabelSelector,
     pub model: &'a dyn QuantModelRuntime,
     pub model_run_id: &'a ModelRunId,
+    pub portfolio: &'a BacktestPortfolioContext,
     pub cancel: &'a CancellationToken,
     pub sink: &'a dyn JobProgressSink,
 }
@@ -1201,10 +1502,13 @@ pub(crate) fn frozen_ticks(input: FrozenTickBuild<'_>) -> QuantResult<Option<Vec
         rank_target,
         model,
         model_run_id,
+        portfolio,
         cancel,
         sink,
     } = input;
-    let execution = frozen_execution_snapshots(examples, frozen_source, entry_max_slippage_bps)?;
+    let pages = replay_pages_for_examples(examples, frozen_source)?;
+    let boundaries = canonical_decision_boundaries(examples)?;
+    let execution = frozen_execution_snapshots(examples, &pages, entry_max_slippage_bps)?;
     let downside_trajectories = frozen_downside_trajectories(examples, frozen_source, &execution)?;
     let mut by_decision: BTreeMap<DateTime<Utc>, Vec<&TrainingExample>> = BTreeMap::new();
     for example in examples {
@@ -1255,14 +1559,14 @@ pub(crate) fn frozen_ticks(input: FrozenTickBuild<'_>) -> QuantResult<Option<Vec
             market_meta.push(BacktestMarketMeta {
                 market_id: example.market_id.clone(),
                 category: example.selected_market.category,
-                event_id: Some(example.selected_market.event_id.clone()),
+                event_id: example.selected_market.event_id.clone(),
                 liquidity_usd: context.liquidity_usd,
             });
-            let yes_payout_ratio = settlement_payout(example, &settlement_label)?;
-            outcomes.push(MarketOutcome {
-                market_id: example.market_id.clone(),
-                yes_payout_ratio,
-            });
+            outcomes.push(settlement_outcome(
+                example,
+                &settlement_label,
+                frozen_source,
+            )?);
             if let Some(label) = example.labels.iter().find(|label| {
                 label.is_resolved
                     && label.label_name == rank_target.name
@@ -1304,17 +1608,42 @@ pub(crate) fn frozen_ticks(input: FrozenTickBuild<'_>) -> QuantResult<Option<Vec
             rank_targets,
             market_meta,
             execution: execution_snapshots,
+            liquidation: Vec::new(),
             downside_trajectories: downside_trajectories
                 .iter()
                 .filter(|trajectory| trajectory.anchor == decision_at)
                 .cloned()
                 .collect(),
+            portfolio_contract: portfolio.contract(decision_at)?,
         });
     }
     if cancel.is_cancelled() {
         return Ok(None);
     }
+    bind_liquidation_plane(&mut ticks, &boundaries, &pages)?;
     Ok(Some(ticks))
+}
+
+fn canonical_decision_boundaries(
+    examples: &[TrainingExample],
+) -> QuantResult<BTreeMap<DateTime<Utc>, DecisionBoundary>> {
+    let mut boundaries = BTreeMap::new();
+    for example in examples {
+        let decision_at = example.decision_at();
+        if let Some(existing) = boundaries.get(&decision_at) {
+            if existing != &example.decision_boundary {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "frozen cross-section at {decision_at} contains conflicting decision boundaries"
+                    ),
+                }
+                .into());
+            }
+        } else {
+            boundaries.insert(decision_at, example.decision_boundary.clone());
+        }
+    }
+    Ok(boundaries)
 }
 
 fn frozen_downside_trajectories(
@@ -1396,19 +1725,10 @@ fn frozen_downside_trajectories(
 
 fn frozen_execution_snapshots<'a>(
     examples: &'a [TrainingExample],
-    source: &FrozenSourceSlice,
+    pages: &[ReplayPage],
     max_slippage_bps: Bps,
 ) -> QuantResult<HashMap<(DateTime<Utc>, &'a str), BacktestExecutionSnapshot>> {
-    let pages = replay_pages_for_examples(examples, source)?;
-    let page_by_market = pages
-        .iter()
-        .enumerate()
-        .flat_map(|(index, page)| {
-            page.market_ids
-                .iter()
-                .map(move |market_id| (market_id.as_str(), index))
-        })
-        .collect::<HashMap<_, _>>();
+    let page_by_market = replay_page_indices(pages)?;
     let mut snapshots = HashMap::new();
     for example in examples {
         let page_index = page_by_market
@@ -1457,19 +1777,13 @@ fn frozen_execution_snapshots<'a>(
                         example.decision_at()
                     ),
                 })?;
-            let book_hash = CanonicalDigest::content_hash_json(&(
-                book.token_id.clone(),
-                book.timestamp_ms,
-                book.version,
-                book.sequence,
-                book.bids.as_ref(),
-                book.asks.as_ref(),
-            ))?;
+            let book_hash = replay_book_hash(&book)?;
             snapshots.insert(
                 (example.decision_at(), token_id.as_str()),
                 BacktestExecutionSnapshot {
                     market_id: example.market_id.clone(),
                     token_id: token_id.clone(),
+                    bids: book.bids.to_vec(),
                     asks: book.asks.to_vec(),
                     fee_schedule,
                     fill_at: example.decision_at(),
@@ -1480,6 +1794,223 @@ fn frozen_execution_snapshots<'a>(
         }
     }
     Ok(snapshots)
+}
+
+struct LiquidationRetention {
+    market_id: MarketId,
+    resolved_at: DateTime<Utc>,
+    mark_times: BTreeSet<DateTime<Utc>>,
+}
+
+fn bind_liquidation_plane(
+    ticks: &mut [BacktestTick],
+    boundaries: &BTreeMap<DateTime<Utc>, DecisionBoundary>,
+    pages: &[ReplayPage],
+) -> QuantResult<()> {
+    let requirements = liquidation_requirements(ticks)?;
+    let page_by_market = replay_page_indices(pages)?;
+    let mut by_decision = BTreeMap::<DateTime<Utc>, Vec<BacktestLiquidationSnapshot>>::new();
+    for (token_id, requirement) in requirements {
+        if requirement.mark_times.is_empty() {
+            continue;
+        }
+        let page_index = page_by_market
+            .get(requirement.market_id.as_str())
+            .copied()
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: format!(
+                    "Source Slice replay page is missing liquidation market {}",
+                    requirement.market_id
+                ),
+            })?;
+        let page = &pages[page_index];
+        let mark_boundaries = requirement
+            .mark_times
+            .iter()
+            .map(|at| {
+                boundaries
+                    .get(at)
+                    .cloned()
+                    .ok_or_else(|| ResearchError::DatasetBuild {
+                        detail: format!(
+                            "frozen liquidation plane has no decision boundary at {at}"
+                        ),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let books = replay_mark_books(page, &token_id, &mark_boundaries)?;
+        if books.len() != mark_boundaries.len() {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "liquidation replay for token {token_id} returned {} books for {} boundaries",
+                    books.len(),
+                    mark_boundaries.len()
+                ),
+            }
+            .into());
+        }
+        for (boundary, book) in mark_boundaries.iter().zip(books) {
+            let marked_at = boundary.decision_at();
+            let book = book.ok_or_else(|| ResearchError::DatasetBuild {
+                detail: format!(
+                    "Source Slice has no exact PIT liquidation book for token {token_id} at {marked_at}"
+                ),
+            })?;
+            let market_info = page
+                .market_info_at(&requirement.market_id, &token_id, boundary)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "Source Slice has no PIT liquidation fee schedule for token {token_id} at {marked_at}"
+                    ),
+                })?;
+            let fee_schedule = PitFeeSchedule::from_market_fee_schedule(
+                &market_info.fee_schedule(),
+            )
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: format!(
+                    "invalid PIT liquidation fee schedule for token {token_id}: {error:?}"
+                ),
+            })?;
+            by_decision
+                .entry(marked_at)
+                .or_default()
+                .push(BacktestLiquidationSnapshot {
+                    market_id: requirement.market_id.clone(),
+                    token_id: token_id.clone(),
+                    bids: book.bids.to_vec(),
+                    fee_schedule,
+                    marked_at,
+                    book_hash: replay_book_hash(&book)?,
+                });
+        }
+    }
+    for snapshots in by_decision.values_mut() {
+        snapshots.sort_by(|left, right| {
+            (left.market_id.as_str(), left.token_id.as_str())
+                .cmp(&(right.market_id.as_str(), right.token_id.as_str()))
+        });
+    }
+    for tick in ticks {
+        tick.liquidation = by_decision.remove(&tick.decision_at).unwrap_or_default();
+    }
+    if !by_decision.is_empty() {
+        return Err(ResearchError::DatasetBuild {
+            detail: "liquidation plane contains marks outside the frozen tick timeline".to_owned(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn liquidation_requirements(
+    ticks: &[BacktestTick],
+) -> QuantResult<BTreeMap<TokenId, LiquidationRetention>> {
+    if ticks
+        .windows(2)
+        .any(|pair| pair[0].decision_at >= pair[1].decision_at)
+    {
+        return Err(ResearchError::DatasetBuild {
+            detail: "frozen liquidation timeline is not strictly increasing".to_owned(),
+        }
+        .into());
+    }
+    let mut requirements = BTreeMap::<TokenId, LiquidationRetention>::new();
+    for (entry_index, tick) in ticks.iter().enumerate() {
+        for snapshot in &tick.execution {
+            let outcome = tick
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.market_id == snapshot.market_id)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "entry token {} has no settlement contract at {}",
+                        snapshot.token_id, tick.decision_at
+                    ),
+                })?;
+            let resolved_at = match (outcome.resolved_at, outcome.yes_payout_ratio) {
+                (Some(resolved_at), Some(_)) if resolved_at > tick.decision_at => resolved_at,
+                (None, None) => continue,
+                _ => {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "entry token {} has inconsistent or non-causal settlement truth at {}",
+                            snapshot.token_id, tick.decision_at
+                        ),
+                    }
+                    .into());
+                }
+            };
+            let requirement = requirements
+                .entry(snapshot.token_id.clone())
+                .or_insert_with(|| LiquidationRetention {
+                    market_id: snapshot.market_id.clone(),
+                    resolved_at,
+                    mark_times: BTreeSet::new(),
+                });
+            if requirement.market_id != snapshot.market_id || requirement.resolved_at != resolved_at
+            {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "token {} has conflicting market or resolution bindings across replay ticks",
+                        snapshot.token_id
+                    ),
+                }
+                .into());
+            }
+            requirement.mark_times.extend(
+                ticks
+                    .iter()
+                    .skip(entry_index + 1)
+                    .take_while(|later| later.decision_at < resolved_at)
+                    .map(|later| later.decision_at),
+            );
+        }
+    }
+    Ok(requirements)
+}
+
+fn replay_mark_books(
+    page: &ReplayPage,
+    token_id: &TokenId,
+    boundaries: &[DecisionBoundary],
+) -> QuantResult<Vec<Option<BookSnapshotAt>>> {
+    let strictly_monotonic = boundaries.windows(2).all(|pair| {
+        pair[0].decision_at() < pair[1].decision_at()
+            && pair[0].cutoff_for(DecisionSource::Book) < pair[1].cutoff_for(DecisionSource::Book)
+    });
+    if strictly_monotonic {
+        return page.books_at_boundaries(token_id, boundaries);
+    }
+    boundaries
+        .iter()
+        .map(|boundary| page.book_at_boundary(token_id, boundary))
+        .collect()
+}
+
+fn replay_book_hash(book: &BookSnapshotAt) -> QuantResult<ContentHash> {
+    Ok(CanonicalDigest::content_hash_json(&(
+        book.token_id.clone(),
+        book.timestamp_ms,
+        book.version,
+        book.sequence,
+        book.bids.as_ref(),
+        book.asks.as_ref(),
+    ))?)
+}
+
+fn replay_page_indices(pages: &[ReplayPage]) -> QuantResult<HashMap<&str, usize>> {
+    let mut indices = HashMap::new();
+    for (index, page) in pages.iter().enumerate() {
+        for market_id in &page.market_ids {
+            if indices.insert(market_id.as_str(), index).is_some() {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!("Source Slice replay pages duplicate market {market_id}"),
+                }
+                .into());
+            }
+        }
+    }
+    Ok(indices)
 }
 
 fn replay_pages_for_examples(
@@ -1540,5 +2071,88 @@ fn settlement_payout(
             ),
         }
         .into()
+    })
+}
+
+fn settlement_outcome(
+    example: &TrainingExample,
+    label: &LabelName,
+    source: &FrozenSourceSlice,
+) -> QuantResult<MarketOutcome> {
+    let label_payout = settlement_payout(example, label)?;
+    let Some(label_payout) = label_payout else {
+        return Ok(MarketOutcome {
+            market_id: example.market_id.clone(),
+            resolved_at: None,
+            yes_payout_ratio: None,
+        });
+    };
+    let rows = source
+        .prefetched
+        .resolutions
+        .get(&example.market_id)
+        .ok_or_else(|| ResearchError::LabelResolution {
+            detail: format!(
+                "resolved settlement label for market {} has no frozen resolution fact",
+                example.market_id
+            ),
+        })?;
+    let [resolution] = rows.as_slice() else {
+        return Err(ResearchError::LabelResolution {
+            detail: format!(
+                "resolved settlement label for market {} requires exactly one frozen resolution fact, got {}",
+                example.market_id,
+                rows.len()
+            ),
+        }
+        .into());
+    };
+    let token_payout = resolution.payout_for(&example.token_id).map_err(|error| {
+        ResearchError::LabelResolution {
+            detail: format!(
+                "resolution fact for market {} cannot resolve token {}: {error}",
+                example.market_id, example.token_id
+            ),
+        }
+    })?;
+    if token_payout != label_payout {
+        return Err(ResearchError::LabelResolution {
+            detail: format!(
+                "settlement label/fact payout differs for market {} token {}: label={}, fact={}",
+                example.market_id, example.token_id, label_payout, token_payout
+            ),
+        }
+        .into());
+    }
+    let yes_payout_ratio = resolution
+        .payout_for(&example.selected_market.primary_token_id)
+        .map_err(|error| ResearchError::LabelResolution {
+            detail: format!(
+                "resolution fact for market {} cannot resolve its primary token: {error}",
+                example.market_id
+            ),
+        })?;
+    let resolved_at = DateTime::from_timestamp_millis(resolution.resolved_at).ok_or_else(|| {
+        ResearchError::LabelResolution {
+            detail: format!(
+                "resolution timestamp {} for market {} is outside chrono range",
+                resolution.resolved_at, example.market_id
+            ),
+        }
+    })?;
+    if resolved_at <= example.decision_at() {
+        return Err(ResearchError::LabelResolution {
+            detail: format!(
+                "market {} resolved at {resolved_at} no later than replay decision {}",
+                example.market_id,
+                example.decision_at()
+            ),
+        }
+        .into());
+    }
+    Ok(MarketOutcome {
+        market_id: example.market_id.clone(),
+        resolved_at: Some(resolved_at),
+        yes_payout_ratio: Some(yes_payout_ratio),
     })
 }

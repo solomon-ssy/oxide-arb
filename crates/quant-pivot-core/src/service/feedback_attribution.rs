@@ -51,7 +51,7 @@ use quant_pivot_research::{
     attribution::{
         ActualBaselineNotEvaluableReason, ActualExecutionBaseline, AlternativeExitPolicy,
         AttributionArtifact, AttributionArtifactCodec, AttributionLineage, DecisionCandidateKey,
-        DecisionCandidateScore, DecisionInterventionAttempt, DecisionInterventionEvaluation,
+        DecisionInterventionAttempt, DecisionInterventionEvaluation,
         DecisionInterventionNotEvaluableReason, DecisionInterventionReplayArtifact,
         DecisionInterventionReplayInput, DecisionInterventionSupport, DecisionReplayPolicy,
         ExecutionOutcomeAssociationArtifact, ExecutionOutcomeAssociationInput,
@@ -72,7 +72,6 @@ use quant_pivot_research::{
         factor_heads::score_factor_heads,
         model_input_contract_hash,
     },
-    precision::RESEARCH_DECIMAL_SCALE,
     selection::SelectedMarket,
 };
 #[cfg(feature = "ml-classical")]
@@ -157,7 +156,6 @@ struct MaterializedPrediction {
 
 #[derive(Clone)]
 struct DecisionUniverse {
-    scores: Vec<DecisionCandidateScore>,
     policy: DecisionReplayPolicy,
     replay: DecisionReplayModel,
     model_artifact_hash: ContentHash,
@@ -175,7 +173,6 @@ enum DecisionReplayModel {
 #[derive(Clone)]
 struct WeightedReplayState {
     yes_alpha: Decimal,
-    score_multiplier: Decimal,
     alpha_deadband: Decimal,
 }
 
@@ -190,7 +187,7 @@ struct WeightedUniverseEvidence<'a> {
 }
 
 struct WeightedCandidateReplay {
-    score: DecisionCandidateScore,
+    key: DecisionCandidateKey,
     state: WeightedReplayState,
 }
 
@@ -221,7 +218,7 @@ struct TreeUniverseEvidence<'a> {
 
 #[cfg(feature = "ml-classical")]
 struct TreeCandidateReplay {
-    score: DecisionCandidateScore,
+    key: DecisionCandidateKey,
     state: TreeReplayState,
 }
 
@@ -235,25 +232,18 @@ impl DecisionUniverse {
             market_id: prediction.context.market_id().clone(),
             token_id: prediction.context.token_id().clone(),
         };
-        let baseline = self
-            .scores
-            .iter()
-            .find(|candidate| candidate.key == target_key)
-            .ok_or_else(|| {
-                FeedbackAttributionMaterializer::invalid(format!(
-                    "published recommendation {} is absent from its replayed model universe",
-                    prediction.context.recommendation_id()
-                ))
-            })?;
-        if baseline.score != prediction.context.composite_score().inner()
-            || baseline.confidence != prediction.context.confidence().inner()
-        {
+        let target_present = match &self.replay {
+            DecisionReplayModel::Weighted(states) => states.contains_key(&target_key),
+            #[cfg(feature = "ml-classical")]
+            DecisionReplayModel::Tree(model) => model.candidates.contains_key(&target_key),
+        };
+        if !target_present {
             return Err(FeedbackAttributionMaterializer::invalid(format!(
-                "published recommendation {} differs from its exact model replay",
+                "published recommendation {} is absent from its Route model replay",
                 prediction.context.recommendation_id()
             )));
         }
-        let interventions = self.interventions(prediction, &target_key, baseline.score)?;
+        let interventions = self.interventions(prediction, &target_key)?;
         let lineage = AttributionLineage::try_new(
             params.feedback_cycle_id,
             AttributionCohort::Evaluation,
@@ -268,14 +258,13 @@ impl DecisionUniverse {
                 self.policy.policy_hash,
                 self.policy.admissible_intervention_policy_hash,
                 self.policy.computation_graph_contract_hash,
-                self.policy.candidate_universe_hash,
             ],
         )?;
         DecisionInterventionReplayArtifact::replay(DecisionInterventionReplayInput {
             lineage,
             model_version_id: prediction.context.model_version_id(),
             recommendation_id: prediction.context.recommendation_id(),
-            target_key: target_key.clone(),
+            target_key,
             prediction_explanation_hash: prediction.explanation_hash,
             model_artifact_hash: self.model_artifact_hash,
             input_contract_hash: self.input_contract_hash,
@@ -283,14 +272,6 @@ impl DecisionUniverse {
             policy: self.policy.clone(),
             interventions,
             baseline_model_output: prediction.explanation.predicted_output,
-            baseline_score: baseline.score,
-            target_confidence: baseline.confidence,
-            peer_scores: self
-                .scores
-                .iter()
-                .filter(|candidate| candidate.key != target_key)
-                .cloned()
-                .collect(),
         })
     }
 
@@ -298,11 +279,10 @@ impl DecisionUniverse {
         &self,
         prediction: &MaterializedPrediction,
         target_key: &DecisionCandidateKey,
-        baseline_score: Decimal,
     ) -> QuantResult<Vec<DecisionInterventionAttempt>> {
         match &self.replay {
             DecisionReplayModel::Weighted(states) => {
-                Self::weighted_interventions(states, prediction, target_key, baseline_score)
+                Self::weighted_interventions(states, prediction, target_key)
             }
             #[cfg(feature = "ml-classical")]
             DecisionReplayModel::Tree(model) => {
@@ -394,21 +374,18 @@ impl DecisionUniverse {
                                                         TokenSideFlipNotAdmissible,
                                                 }
                                             }
-                                            Some(projected)
-                                                if projected.composite_score.inner()
-                                                    == baseline_score =>
+                                            Some(_)
+                                                if raw_prediction
+                                                    == prediction.explanation.predicted_output =>
                                             {
                                                 DecisionInterventionEvaluation::NotEvaluable {
                                                     reason: DecisionInterventionNotEvaluableReason::
-                                                        NoMaterialDecisionChange,
+                                                        NoMaterialModelOutputChange,
                                                 }
                                             }
-                                            Some(projected) => {
+                                            Some(_) => {
                                                 DecisionInterventionEvaluation::Evaluated {
                                                     intervened_model_output: raw_prediction,
-                                                    intervened_composite_score: projected
-                                                        .composite_score
-                                                        .inner(),
                                                 }
                                             }
                                         })
@@ -435,7 +412,6 @@ impl DecisionUniverse {
         states: &BTreeMap<DecisionCandidateKey, WeightedReplayState>,
         prediction: &MaterializedPrediction,
         target_key: &DecisionCandidateKey,
-        baseline_score: Decimal,
     ) -> QuantResult<Vec<DecisionInterventionAttempt>> {
         let state = states.get(target_key).ok_or_else(|| {
             FeedbackAttributionMaterializer::invalid(format!(
@@ -456,7 +432,7 @@ impl DecisionUniverse {
                             if counterfactual_alpha.abs() <= state.alpha_deadband {
                                 DecisionInterventionEvaluation::NotEvaluable {
                                     reason: DecisionInterventionNotEvaluableReason::
-                                        DeadbandWouldSuppressDecision,
+                                        DeadbandWouldSuppressSignal,
                                 }
                             } else if counterfactual_alpha.is_sign_positive()
                                 != state.yes_alpha.is_sign_positive()
@@ -465,20 +441,16 @@ impl DecisionUniverse {
                                     reason: DecisionInterventionNotEvaluableReason::
                                         OutcomeSideFlipNotAdmissible,
                                 }
+                            } else if counterfactual_alpha
+                                == prediction.explanation.predicted_output
+                            {
+                                DecisionInterventionEvaluation::NotEvaluable {
+                                    reason: DecisionInterventionNotEvaluableReason::
+                                        NoMaterialModelOutputChange,
+                                }
                             } else {
-                                let score = (counterfactual_alpha.abs() * state.score_multiplier)
-                                    .round_dp(RESEARCH_DECIMAL_SCALE)
-                                    .clamp(Decimal::ZERO, Decimal::ONE);
-                                if score == baseline_score {
-                                    DecisionInterventionEvaluation::NotEvaluable {
-                                        reason: DecisionInterventionNotEvaluableReason::
-                                            NoMaterialDecisionChange,
-                                    }
-                                } else {
-                                    DecisionInterventionEvaluation::Evaluated {
-                                        intervened_model_output: counterfactual_alpha,
-                                        intervened_composite_score: score,
-                                    }
+                                DecisionInterventionEvaluation::Evaluated {
+                                    intervened_model_output: counterfactual_alpha,
                                 }
                             }
                         },
@@ -1883,7 +1855,6 @@ impl FeedbackAttributionMaterializer {
                     context.decision_policy_snapshot_id()
                 ))
             })?;
-        let mut scores = Vec::new();
         let mut replay = BTreeMap::new();
         let evidence = WeightedUniverseEvidence {
             context,
@@ -1898,43 +1869,19 @@ impl FeedbackAttributionMaterializer {
             let Some(candidate) = Self::weighted_candidate(&evidence, &member)? else {
                 continue;
             };
-            if replay
-                .insert(candidate.score.key.clone(), candidate.state)
-                .is_some()
-            {
+            if replay.insert(candidate.key, candidate.state).is_some() {
                 return Err(Self::invalid(format!(
                     "weighted replay duplicated market {} candidate",
                     member.market_id
                 )));
             }
-            scores.push(candidate.score);
         }
-        scores.sort_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| left.key.cmp(&right.key))
-        });
-        if scores.is_empty() || scores.windows(2).any(|pair| pair[0].key == pair[1].key) {
+        if replay.is_empty() {
             return Err(Self::invalid(format!(
-                "model run {} replayed an empty or duplicate candidate universe",
+                "model run {} replayed no Route model states",
                 context.model_run_id()
             )));
         }
-        let top_n = u32::try_from(context.top_n())
-            .map_err(|error| Self::invalid(format!("report top_n is invalid: {error}")))?;
-        let candidate_score_floor = policy
-            .snapshot
-            .model_routing
-            .model
-            .candidate_score_floor
-            .value();
-        let minimum_confidence = policy
-            .snapshot
-            .model_routing
-            .model
-            .min_model_confidence
-            .value();
         let input_contract_hash = model_input_contract_hash(&payload.input_contract)?;
         if input_contract_hash != prediction.explanation.input_contract_hash {
             return Err(Self::invalid(format!(
@@ -1943,14 +1890,7 @@ impl FeedbackAttributionMaterializer {
             )));
         }
         Ok(DecisionUniverse {
-            policy: DecisionReplayPolicy::try_new(
-                policy.snapshot_hash,
-                &scores,
-                candidate_score_floor,
-                minimum_confidence,
-                top_n,
-            )?,
-            scores,
+            policy: DecisionReplayPolicy::try_new(policy.snapshot_hash)?,
             replay: DecisionReplayModel::Weighted(replay),
             model_artifact_hash: artifact.content_hash()?,
             input_contract_hash,
@@ -2090,25 +2030,10 @@ impl FeedbackAttributionMaterializer {
             market_id: member.market_id.clone(),
             token_id,
         };
-        let score_multiplier = score.ranking_multiplier;
-        let replayed_score = (score.yes_alpha.abs() * score_multiplier)
-            .round_dp(RESEARCH_DECIMAL_SCALE)
-            .clamp(Decimal::ZERO, Decimal::ONE);
-        if replayed_score != score.composite_score {
-            return Err(Self::invalid(format!(
-                "weighted replay multiplier does not reproduce market {} score",
-                member.market_id
-            )));
-        }
         Ok(Some(WeightedCandidateReplay {
-            score: DecisionCandidateScore {
-                key,
-                score: score.composite_score,
-                confidence: score.reliability,
-            },
+            key,
             state: WeightedReplayState {
                 yes_alpha: score.yes_alpha,
-                score_multiplier,
                 alpha_deadband: evidence.payload.factor_head.alpha_deadband,
             },
         }))
@@ -2172,7 +2097,6 @@ impl FeedbackAttributionMaterializer {
                     context.decision_policy_snapshot_id()
                 ))
             })?;
-        let mut scores = Vec::new();
         let mut candidates = BTreeMap::new();
         let evidence = TreeUniverseEvidence {
             context,
@@ -2186,42 +2110,21 @@ impl FeedbackAttributionMaterializer {
                 continue;
             };
             if candidates
-                .insert(candidate.score.key.clone(), candidate.state)
+                .insert(candidate.key.clone(), candidate.state)
                 .is_some()
             {
                 return Err(Self::invalid(format!(
                     "GBDT replay duplicated candidate {}/{}",
-                    candidate.score.key.market_id, candidate.score.key.token_id
+                    candidate.key.market_id, candidate.key.token_id
                 )));
             }
-            scores.push(candidate.score);
         }
-        scores.sort_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| left.key.cmp(&right.key))
-        });
-        if scores.is_empty() {
+        if candidates.is_empty() {
             return Err(Self::invalid(format!(
-                "GBDT model run {} replayed an empty candidate universe",
+                "GBDT model run {} replayed no Route model states",
                 context.model_run_id()
             )));
         }
-        let top_n = u32::try_from(context.top_n())
-            .map_err(|error| Self::invalid(format!("report top_n is invalid: {error}")))?;
-        let candidate_score_floor = policy
-            .snapshot
-            .model_routing
-            .model
-            .candidate_score_floor
-            .value();
-        let minimum_confidence = policy
-            .snapshot
-            .model_routing
-            .model
-            .min_model_confidence
-            .value();
         let input_contract_hash = model_input_contract_hash(&payload.input_contract)?;
         if input_contract_hash != prediction.explanation.input_contract_hash {
             return Err(Self::invalid(format!(
@@ -2230,14 +2133,7 @@ impl FeedbackAttributionMaterializer {
             )));
         }
         Ok(DecisionUniverse {
-            policy: DecisionReplayPolicy::try_new(
-                policy.snapshot_hash,
-                &scores,
-                candidate_score_floor,
-                minimum_confidence,
-                top_n,
-            )?,
-            scores,
+            policy: DecisionReplayPolicy::try_new(policy.snapshot_hash)?,
             replay: DecisionReplayModel::Tree(Box::new(TreeReplayModel {
                 payload: payload.clone(),
                 prediction_horizon_secs: artifact.header().prediction_horizon_secs(),
@@ -2323,13 +2219,9 @@ impl FeedbackAttributionMaterializer {
             return Ok(None);
         };
         Ok(Some(TreeCandidateReplay {
-            score: DecisionCandidateScore {
-                key: DecisionCandidateKey {
-                    market_id: member.market_id.clone(),
-                    token_id: projected.token_id,
-                },
-                score: projected.composite_score.inner(),
-                confidence: projected.confidence.inner(),
+            key: DecisionCandidateKey {
+                market_id: member.market_id.clone(),
+                token_id: projected.token_id,
             },
             state: TreeReplayState { input, row },
         }))
@@ -3071,7 +2963,6 @@ mod tests {
             knowledge_cutoff: 1,
             model_run_id,
             model_version_id: contract.model_version_id,
-            recommendation_report_id: None,
             market_id: MarketId::new("0xattribution"),
             feature_vector_id: FeatureVectorId::from_v7(),
             model_family: contract.model_family.to_string(),

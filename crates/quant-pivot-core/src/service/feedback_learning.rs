@@ -211,16 +211,30 @@ impl FeedbackLearningExecutionService {
         command: &FeedbackDatasetBuildCommand,
         info: &TrainingDatasetInfo,
     ) -> QuantResult<FeedbackDatasetStageResult> {
-        if info.training_dataset_id != command.request.training_dataset_id
-            || info.model_spec_id != command.request.model_spec_id
-            || info.purpose != command.request.purpose
-            || info.source_lineage != command.request.source_lineage
-            || info.status != TrainingDatasetStatus::Ready
-        {
+        if info.training_dataset_id != command.request.training_dataset_id {
+            return Err(Self::contract(format!(
+                "feedback Dataset identity mismatch: expected {}, read {}",
+                command.request.training_dataset_id, info.training_dataset_id
+            )));
+        }
+        if info.model_spec_id != command.request.model_spec_id {
+            return Err(Self::contract(format!(
+                "feedback Dataset ModelSpec mismatch: expected {}, read {}",
+                command.request.model_spec_id, info.model_spec_id
+            )));
+        }
+        if info.purpose != command.request.purpose {
+            return Err(Self::contract(format!(
+                "feedback Dataset purpose mismatch: expected {}, read {}",
+                command.request.purpose, info.purpose
+            )));
+        }
+        if info.source_lineage != command.request.source_lineage {
             return Err(Self::contract(
-                "feedback Dataset read-back differs from its frozen command",
+                "feedback Dataset source-lineage preimage differs from its frozen command",
             ));
         }
+        Self::ensure_ready_status(info.status, info.failure_detail.as_deref())?;
         let manifest = info
             .manifest
             .as_ref()
@@ -279,6 +293,19 @@ impl FeedbackLearningExecutionService {
             cohort_manifest_hash,
             sample_count,
         })
+    }
+
+    fn ensure_ready_status(
+        status: TrainingDatasetStatus,
+        failure_detail: Option<&str>,
+    ) -> QuantResult<()> {
+        if status == TrainingDatasetStatus::Ready {
+            return Ok(());
+        }
+        let detail = failure_detail.unwrap_or("dataset ledger omitted terminal diagnostics");
+        Err(Self::contract(format!(
+            "feedback Dataset is not Ready: status={status}, detail={detail}"
+        )))
     }
 
     fn training_result(
@@ -996,11 +1023,24 @@ mod tests {
 
     use quant_pivot_error::{QuantError, research::ResearchError};
     use quant_pivot_models::{
-        domain::ports::FeedbackRecipeResourceBudget, enums::quant::FeedbackStage,
+        domain::ports::FeedbackRecipeResourceBudget,
+        enums::quant::{FeedbackStage, TrainingDatasetStatus},
     };
     use tokio_util::sync::CancellationToken;
 
     use super::FeedbackLearningExecutionService;
+
+    #[test]
+    fn dataset_status_preserves_diagnostic() {
+        let result = FeedbackLearningExecutionService::ensure_ready_status(
+            TrainingDatasetStatus::InsufficientLabels,
+            Some("target=token_payout_ratio/0, label_rows=0"),
+        );
+        let error = result.expect_err("insufficient labels must stop DatasetSeal");
+        let rendered = error.to_string();
+        assert!(rendered.contains("status=insufficient_labels"));
+        assert!(rendered.contains("target=token_payout_ratio/0, label_rows=0"));
+    }
 
     #[tokio::test]
     async fn deadline_cancels_work() {

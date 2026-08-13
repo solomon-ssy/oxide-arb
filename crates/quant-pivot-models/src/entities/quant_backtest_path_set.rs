@@ -12,7 +12,7 @@ use crate::types::{
     TrainingDatasetId,
     backtest::{
         BacktestPaths, CpcvFoldArtifacts, CpcvMethodologyBinding, CpcvPathSetSubject,
-        SharpeDistribution,
+        CscvSelectionEvidence, SharpeDistribution,
     },
 };
 
@@ -44,11 +44,13 @@ pub struct Model {
     pub deflated_sharpe: Decimal,
     pub dsr_benchmark_sharpe: Decimal,
     pub pbo: Decimal,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub cscv_selection_evidence: CscvSelectionEvidence,
     pub min_track_record_length_secs: Option<i64>,
-    /// DSR multiple-testing N (= `trial_grid_count`). Same population as the
-    /// trial-grid Sharpe variance V used in the Deflated Sharpe Ratio.
-    pub trial_count: i64,
-    /// Governed trial-grid configurations evaluated for CSCV/PBO + DSR N/V.
+    /// Conservative dependence-adjusted DSR N derived from the complete raw
+    /// trial-return population and frozen pairwise-correlation evidence.
+    pub dsr_conservative_independent_trial_count: i64,
+    /// Raw governed configurations evaluated for CSCV/PBO and DSR N/V.
     pub trial_grid_count: i64,
     /// Audit-only: production `coordinate_search` effective trials (not in DSR N).
     pub coord_search_effective_n: i64,

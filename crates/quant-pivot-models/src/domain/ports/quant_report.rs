@@ -20,12 +20,12 @@ use crate::{
         governance::OperationLogInfo,
         pagination::Paginated,
         quant::{
-            EnqueueReportRunOutcome, RecommendationReportInfo, ReportDiff, ReportFactDeliveryInfo,
-            ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo,
+            EnqueueReportRunOutcome, PortfolioPlanInfo, RecommendationReportInfo, ReportDiff,
+            ReportFactDeliveryInfo, ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo,
         },
     },
     enums::quant::ReportKind,
-    types::{RecommendationId, RecommendationReportId, ReportRunId, ResearchProfileId},
+    types::{PortfolioPlanId, RecommendationId, RecommendationReportId, ReportRunId},
 };
 
 /// Validated command to enqueue an ad-hoc report build.
@@ -62,6 +62,12 @@ pub trait QuantReportPort: Send + Sync {
         &self,
         report_id: &RecommendationReportId,
     ) -> QuantResult<Option<RecommendationReportId>>;
+
+    /// Load the exact global portfolio decision bound by the report header.
+    async fn find_portfolio_plan(
+        &self,
+        portfolio_plan_id: &PortfolioPlanId,
+    ) -> QuantResult<Option<PortfolioPlanInfo>>;
 
     async fn find_report_fact_delivery(
         &self,
@@ -122,10 +128,9 @@ pub trait QuantReportPort: Send + Sync {
         query: ReportFunnelMarketListQuery,
     ) -> QuantResult<Option<Paginated<ReportFunnelMarketView>>>;
 
-    /// Load the unique current authority for one profile and report kind.
+    /// Load the unique global current authority for one report kind.
     async fn current_report(
         &self,
-        profile_id: &ResearchProfileId,
         kind: ReportKind,
     ) -> QuantResult<Option<RecommendationReportInfo>>;
 

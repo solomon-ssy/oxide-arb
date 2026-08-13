@@ -145,7 +145,7 @@ const fn migrations() -> [MigrationSpec; 1] {
         name: "bootstrap",
         safety: ClickHouseMigrationSafety::OnlineMetadata,
         sources: BOOTSTRAP_SOURCES,
-        expected_checksum: "blake3:e0a93da32686226134052225e3126cce9991bc2944a983c9462132677a987101",
+        expected_checksum: "blake3:906e216ad3af1e08c594530e248bf70f45c8f8ec0cdfd59dcc4a946afa50f548",
         destructive_empty_tables: &[],
     }]
 }
@@ -169,11 +169,46 @@ pub fn schema_contract_hash() -> String {
 pub async fn render_schema_manifest(config: &ClickHouseConfig) -> Result<String, StorageError> {
     let client = client(config);
     verify_server_version(&client).await?;
-    let manifest = inspect_schema_manifest(&client).await?;
-    let mut rendered = serde_json::to_string_pretty(&manifest)
-        .map_err(|error| StorageError::Migration(format!("render ClickHouse manifest: {error}")))?;
-    rendered.push('\n');
-    Ok(rendered)
+    render_observed_schema_manifest(&client).await
+}
+
+/// Apply the compiled bootstrap to a provably empty database and render the
+/// resulting semantic manifest without comparing it to the checked artifact.
+///
+/// This is the sole code-generation path for replacing the checked manifest
+/// before a first deployment. Ordinary apply and verify paths always compare
+/// against the checked artifact and therefore remain fail closed.
+pub async fn generate_clean_schema_manifest(
+    config: &ClickHouseConfig,
+) -> Result<String, StorageError> {
+    validate_migration_registry()?;
+    if ensure::database_exists(config).await? {
+        return Err(StorageError::Migration(format!(
+            "clean ClickHouse manifest generation requires absent database `{}`",
+            config.database
+        )));
+    }
+    ensure::ensure_database(config).await?;
+    let client = client(config);
+    verify_server_version(&client).await?;
+    let lock_owner = Uuid::now_v7().to_string();
+    acquire_deployment_lock(&client, &lock_owner).await?;
+    let result = async {
+        apply_schema_migrations_locked(&client, false, false).await?;
+        render_observed_schema_manifest(&client).await
+    }
+    .await;
+    let release = release_deployment_lock(&client, &lock_owner).await;
+    match (result, release) {
+        (Ok(rendered), Ok(())) => Ok(rendered),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(StorageError::Migration(format!(
+            "ClickHouse clean manifest generated but deployment lock release failed: {error}"
+        ))),
+        (Err(generate_error), Err(release_error)) => Err(StorageError::Migration(format!(
+            "ClickHouse clean manifest generation failed: {generate_error}; deployment lock release also failed: {release_error}"
+        ))),
+    }
 }
 
 /// Build a read-only deployment plan. The target database is never created.
@@ -238,7 +273,7 @@ async fn apply_schema_migrations(
     verify_server_version(&client).await?;
     let lock_owner = Uuid::now_v7().to_string();
     acquire_deployment_lock(&client, &lock_owner).await?;
-    let result = apply_schema_migrations_locked(&client, allow_offline).await;
+    let result = apply_schema_migrations_locked(&client, allow_offline, true).await;
     let release = release_deployment_lock(&client, &lock_owner).await;
     match (result, release) {
         (Ok(status), Ok(())) => Ok(status),
@@ -255,6 +290,7 @@ async fn apply_schema_migrations(
 async fn apply_schema_migrations_locked(
     client: &Client,
     allow_offline: bool,
+    verify_expected_manifest: bool,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
     let names = schema_object_names(client).await?;
     if !names.contains(MIGRATION_TABLE) {
@@ -313,7 +349,7 @@ async fn apply_schema_migrations_locked(
         );
     }
 
-    verify_deploy_schema(client).await
+    verify_deploy_schema(client, verify_expected_manifest).await
 }
 
 async fn acquire_deployment_lock(client: &Client, owner: &str) -> Result<(), StorageError> {
@@ -501,16 +537,20 @@ fn validate_online_safe_statement(
 pub(super) async fn verify_schema_client(
     client: &Client,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
-    verify_locked_schema(client, false).await
+    verify_locked_schema(client, false, true).await
 }
 
-async fn verify_deploy_schema(client: &Client) -> Result<ClickHouseSchemaStatus, StorageError> {
-    verify_locked_schema(client, true).await
+async fn verify_deploy_schema(
+    client: &Client,
+    verify_expected_manifest: bool,
+) -> Result<ClickHouseSchemaStatus, StorageError> {
+    verify_locked_schema(client, true, verify_expected_manifest).await
 }
 
 async fn verify_locked_schema(
     client: &Client,
     deployment_lock_owned: bool,
+    verify_expected_manifest: bool,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
     verify_server_version(client).await?;
     if !deployment_lock_owned && table_exists(client, DEPLOYMENT_LOCK_TABLE).await? {
@@ -536,7 +576,7 @@ async fn verify_locked_schema(
             "ClickHouse schema is behind; pending migration versions: {versions}"
         )));
     }
-    verify_structure(client).await?;
+    verify_structure(client, verify_expected_manifest).await?;
     let current_version = plan.applied_versions.last().copied().ok_or_else(|| {
         StorageError::Migration("ClickHouse migration ledger is empty".to_owned())
     })?;
@@ -735,7 +775,10 @@ async fn applied_migrations(client: &Client) -> Result<Vec<AppliedMigrationRow>,
         .map_err(Into::into)
 }
 
-async fn verify_structure(client: &Client) -> Result<(), StorageError> {
+async fn verify_structure(
+    client: &Client,
+    verify_expected_manifest: bool,
+) -> Result<(), StorageError> {
     let rows = CLICKHOUSE_SCHEMA_VERIFY
         .query(
             client,
@@ -828,8 +871,18 @@ async fn verify_structure(client: &Client) -> Result<(), StorageError> {
             )));
         }
     }
-    verify_schema_manifest(client).await?;
+    if verify_expected_manifest {
+        verify_schema_manifest(client).await?;
+    }
     Ok(())
+}
+
+async fn render_observed_schema_manifest(client: &Client) -> Result<String, StorageError> {
+    let manifest = inspect_schema_manifest(client).await?;
+    let mut rendered = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| StorageError::Migration(format!("render ClickHouse manifest: {error}")))?;
+    rendered.push('\n');
+    Ok(rendered)
 }
 
 async fn verify_schema_manifest(client: &Client) -> Result<(), StorageError> {

@@ -80,21 +80,16 @@ pub enum ReportFunnelReason {
     ScoreBelowFloor,
     LowConfidence,
     NoPositiveSignal,
-    InvalidEdgeInputs,
-    ReturnModelUncalibrated,
     ExecutableEntryUnavailable,
-    TradePolicyUnavailable,
-    BelowMinSize,
-    LiquidityInfeasible,
-    BudgetExhausted,
-    MarketCapExhausted,
-    EventCapExhausted,
-    CategoryCapExhausted,
-    CorrelationCapExhausted,
-    AvailableCashExhausted,
-    AggregateExposureCapExhausted,
-    BeyondTopN,
-    SystemDegraded,
+    ScenarioExitCapacityInsufficient,
+    NominalExpectedNetBelowFloor,
+    RobustExpectedNetBelowFloor,
+    ProfitProbabilityBelowFloor,
+    ProbabilityIntervalTooWide,
+    LiquidityBufferInsufficient,
+    SingleRecommendationExposureExceeded,
+    ExistingStructuralConflict,
+    NotSelectedByGlobalOptimum,
     Published,
 }
 
@@ -116,21 +111,16 @@ impl ReportFunnelReason {
             Self::ScoreBelowFloor => "score_below_floor",
             Self::LowConfidence => "low_confidence",
             Self::NoPositiveSignal => "no_positive_signal",
-            Self::InvalidEdgeInputs => "invalid_edge_inputs",
-            Self::ReturnModelUncalibrated => "return_model_uncalibrated",
             Self::ExecutableEntryUnavailable => "executable_entry_unavailable",
-            Self::TradePolicyUnavailable => "trade_policy_unavailable",
-            Self::BelowMinSize => "below_min_size",
-            Self::LiquidityInfeasible => "liquidity_infeasible",
-            Self::BudgetExhausted => "budget_exhausted",
-            Self::MarketCapExhausted => "market_cap_exhausted",
-            Self::EventCapExhausted => "event_cap_exhausted",
-            Self::CategoryCapExhausted => "category_cap_exhausted",
-            Self::CorrelationCapExhausted => "correlation_cap_exhausted",
-            Self::AvailableCashExhausted => "available_cash_exhausted",
-            Self::AggregateExposureCapExhausted => "aggregate_exposure_cap_exhausted",
-            Self::BeyondTopN => "beyond_top_n",
-            Self::SystemDegraded => "system_degraded",
+            Self::ScenarioExitCapacityInsufficient => "scenario_exit_capacity_insufficient",
+            Self::NominalExpectedNetBelowFloor => "nominal_expected_net_below_floor",
+            Self::RobustExpectedNetBelowFloor => "robust_expected_net_below_floor",
+            Self::ProfitProbabilityBelowFloor => "profit_probability_below_floor",
+            Self::ProbabilityIntervalTooWide => "probability_interval_too_wide",
+            Self::LiquidityBufferInsufficient => "liquidity_buffer_insufficient",
+            Self::SingleRecommendationExposureExceeded => "single_recommendation_exposure_exceeded",
+            Self::ExistingStructuralConflict => "existing_structural_conflict",
+            Self::NotSelectedByGlobalOptimum => "not_selected_by_global_optimum",
             Self::Published => "published",
         }
     }
@@ -155,21 +145,16 @@ impl FromStr for ReportFunnelReason {
             Self::ScoreBelowFloor,
             Self::LowConfidence,
             Self::NoPositiveSignal,
-            Self::InvalidEdgeInputs,
-            Self::ReturnModelUncalibrated,
             Self::ExecutableEntryUnavailable,
-            Self::TradePolicyUnavailable,
-            Self::BelowMinSize,
-            Self::LiquidityInfeasible,
-            Self::BudgetExhausted,
-            Self::MarketCapExhausted,
-            Self::EventCapExhausted,
-            Self::CategoryCapExhausted,
-            Self::CorrelationCapExhausted,
-            Self::AvailableCashExhausted,
-            Self::AggregateExposureCapExhausted,
-            Self::BeyondTopN,
-            Self::SystemDegraded,
+            Self::ScenarioExitCapacityInsufficient,
+            Self::NominalExpectedNetBelowFloor,
+            Self::RobustExpectedNetBelowFloor,
+            Self::ProfitProbabilityBelowFloor,
+            Self::ProbabilityIntervalTooWide,
+            Self::LiquidityBufferInsufficient,
+            Self::SingleRecommendationExposureExceeded,
+            Self::ExistingStructuralConflict,
+            Self::NotSelectedByGlobalOptimum,
             Self::Published,
         ]
         .into_iter()
@@ -207,16 +192,15 @@ impl ReportFunnelDiagnostics {
                 reason,
                 ReportFunnelReason::ModelFeatureUnavailable
                     | ReportFunnelReason::FeatureDataQualityRejected
-                    | ReportFunnelReason::BelowMinSize
-                    | ReportFunnelReason::LiquidityInfeasible
-                    | ReportFunnelReason::BudgetExhausted
-                    | ReportFunnelReason::MarketCapExhausted
-                    | ReportFunnelReason::EventCapExhausted
-                    | ReportFunnelReason::CategoryCapExhausted
-                    | ReportFunnelReason::CorrelationCapExhausted
-                    | ReportFunnelReason::AvailableCashExhausted
-                    | ReportFunnelReason::AggregateExposureCapExhausted
-                    | ReportFunnelReason::BeyondTopN
+                    | ReportFunnelReason::ScenarioExitCapacityInsufficient
+                    | ReportFunnelReason::NominalExpectedNetBelowFloor
+                    | ReportFunnelReason::RobustExpectedNetBelowFloor
+                    | ReportFunnelReason::ProfitProbabilityBelowFloor
+                    | ReportFunnelReason::ProbabilityIntervalTooWide
+                    | ReportFunnelReason::LiquidityBufferInsufficient
+                    | ReportFunnelReason::SingleRecommendationExposureExceeded
+                    | ReportFunnelReason::ExistingStructuralConflict
+                    | ReportFunnelReason::NotSelectedByGlobalOptimum
             ),
             Self::MissingModelFeatures { features } => {
                 reason == ReportFunnelReason::ModelFeatureUnavailable && !features.is_empty()
@@ -227,16 +211,15 @@ impl ReportFunnelDiagnostics {
             Self::PlannerRejection { detail } => {
                 matches!(
                     reason,
-                    ReportFunnelReason::BelowMinSize
-                        | ReportFunnelReason::LiquidityInfeasible
-                        | ReportFunnelReason::BudgetExhausted
-                        | ReportFunnelReason::MarketCapExhausted
-                        | ReportFunnelReason::EventCapExhausted
-                        | ReportFunnelReason::CategoryCapExhausted
-                        | ReportFunnelReason::CorrelationCapExhausted
-                        | ReportFunnelReason::AvailableCashExhausted
-                        | ReportFunnelReason::AggregateExposureCapExhausted
-                        | ReportFunnelReason::BeyondTopN
+                    ReportFunnelReason::ScenarioExitCapacityInsufficient
+                        | ReportFunnelReason::NominalExpectedNetBelowFloor
+                        | ReportFunnelReason::RobustExpectedNetBelowFloor
+                        | ReportFunnelReason::ProfitProbabilityBelowFloor
+                        | ReportFunnelReason::ProbabilityIntervalTooWide
+                        | ReportFunnelReason::LiquidityBufferInsufficient
+                        | ReportFunnelReason::SingleRecommendationExposureExceeded
+                        | ReportFunnelReason::ExistingStructuralConflict
+                        | ReportFunnelReason::NotSelectedByGlobalOptimum
                 ) && !detail.trim().is_empty()
             }
         };
@@ -265,7 +248,7 @@ mod tests {
         };
         assert!(
             diagnostics
-                .validate_for(ReportFunnelReason::BudgetExhausted)
+                .validate_for(ReportFunnelReason::RobustExpectedNetBelowFloor)
                 .is_ok()
         );
         assert!(

@@ -161,6 +161,7 @@ impl From<VerifiedModelScoreCalibration> for ResolvedCalibration {
             artifact_id: verified.artifact_id,
             mapping: verified.payload.mapping,
             reliability: verified.payload.reliability,
+            split_payout_rate: verified.payload.split_payout_rate,
         }
     }
 }
@@ -245,14 +246,15 @@ mod tests {
         },
         enums::model::ModelFamily,
         types::{
-            DecisionPolicySnapshotId, ModelSpecId, ModelVersionId, Probability, TrainingDatasetId,
-            builtin_research_profiles,
+            DecisionPolicySnapshotId, ModelSpecId, ModelVersionId, PayoutRatio, Probability,
+            TrainingDatasetId, builtin_research_profiles,
             calibration::{
                 IsotonicKnot, MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
                 ModelScoreCalibrationDatasetBinding, ModelScoreCalibrationFitContract,
                 ModelScoreCalibrationModelBinding, ModelScoreCalibrationPayload,
                 ModelScoreCalibrationPolicyBinding, MonotoneMapping,
                 PublishedWeatherStationLeadBias, ReliabilityBin, ReliabilityReport,
+                SplitPayoutRateEvidence,
             },
         },
     };
@@ -413,6 +415,13 @@ mod tests {
                 log_loss: dec!(0.3),
                 ece: dec!(0.02),
                 n_samples: 1_000,
+            },
+            split_payout_rate: SplitPayoutRateEvidence {
+                total_sample_count: 1_000,
+                split_sample_count: 0,
+                empirical_probability: Probability::ZERO,
+                wilson_ci: (Probability::ZERO, Probability::new(dec!(0.003827))),
+                split_payout_ratio: PayoutRatio::try_new(dec!(0.5)).expect("split payout ratio"),
             },
         }
     }

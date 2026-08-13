@@ -15,8 +15,7 @@ use quant_pivot_models::{
         quant::{DataQualityStatus, FactorDirection},
     },
     runtime_config::{
-        DecimalValue, DomainConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
-        SmallCrossSectionPolicy,
+        DecimalValue, DomainConfig, FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy,
     },
     types::{
         CalibrationArtifactId, FactorDefinitionId, MarketId, Price, Probability, SchemaVersion,
@@ -46,11 +45,7 @@ use crate::{
 
 /// Config for the given families with a small `min_size` so modest test batches
 /// still exercise the cross-sectional path.
-fn factors_config(
-    families: &[FactorFamily],
-    policy: MissingFactorPolicy,
-    floor: &str,
-) -> FactorsConfig {
+fn factors_config(families: &[FactorFamily], floor: &str) -> FactorsConfig {
     let mut config = FactorsConfig {
         enabled_factor_families: families.to_vec(),
         min_factor_confidence: DecimalValue::new(
@@ -58,7 +53,6 @@ fn factors_config(
                 .parse()
                 .expect("fixture confidence floor must be a decimal"),
         ),
-        missing_factor_policy: policy,
         ..FactorsConfig::default()
     };
     config.cross_section.min_size = 2;
@@ -129,7 +123,7 @@ fn compute_one(
     market0: &[(&'static str, FeatureValue)],
     market1: &[(&'static str, FeatureValue)],
 ) -> ScoredFactor {
-    let config = factors_config(&[family], MissingFactorPolicy::ZeroWeight, "0.10");
+    let config = factors_config(&[family], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let as_of = Utc::now();
@@ -181,11 +175,7 @@ fn default_factor_config_families() {
 fn small_cross_not_half() {
     // A single-market batch cannot form a cross-section for a Rank factor;
     // the outcome is Indeterminate, never a fabricated neutral 0.5.
-    let config = factors_config(
-        &[FactorFamily::Liquidity],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
+    let config = factors_config(&[FactorFamily::Liquidity], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vector = make_vector(
@@ -224,11 +214,7 @@ fn small_cross_not_half() {
 fn zero_variance_yields_indeterminate() {
     // Every market has identical liquidity → the cross-section carries no
     // dispersion → ZeroVariance indeterminate (never a silent 0.5).
-    let config = factors_config(
-        &[FactorFamily::Liquidity],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
+    let config = factors_config(&[FactorFamily::Liquidity], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let as_of = Utc::now();
@@ -267,11 +253,7 @@ fn equal_strength_alpha_indeterminate() {
     // Outcome alpha normalizes absolute strength while preserving sign as a
     // separate direction. Equal-magnitude opposing signals therefore have no
     // strength dispersion and must fail closed instead of fabricating scores.
-    let config = factors_config(
-        &[FactorFamily::Microstructure],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
+    let config = factors_config(&[FactorFamily::Microstructure], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let as_of = Utc::now();
@@ -316,11 +298,7 @@ fn equal_strength_alpha_indeterminate() {
 
 #[test]
 fn compute_batch_rejects_mixed() {
-    let config = factors_config(
-        &[FactorFamily::Liquidity],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
+    let config = factors_config(&[FactorFamily::Liquidity], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let as_of = Utc::now();
@@ -352,11 +330,7 @@ fn compute_batch_rejects_mixed() {
 
 #[test]
 fn factor_explanation_lists_drivers() {
-    let config = factors_config(
-        &[FactorFamily::DataQuality],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
+    let config = factors_config(&[FactorFamily::DataQuality], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let mut vector = make_vector(
@@ -389,17 +363,13 @@ fn factor_explanation_lists_drivers() {
     );
 }
 
-// ── Confidence floor + missing policy ─────────────────────────────────────────
+// ── Confidence floor + required-factor contract ───────────────────────────────
 
 #[test]
 fn factor_confidence_zero_confidence() {
-    // Stale data → confidence 0.40 < floor 0.50; under ZeroWeight the factor is
-    // scored but does not contribute, and the market still proceeds.
-    let config = factors_config(
-        &[FactorFamily::Microstructure],
-        MissingFactorPolicy::ZeroWeight,
-        "0.50",
-    );
+    // `book_imbalance` is optional. Stale data → confidence 0.40 < floor 0.50;
+    // the factor is explicit but does not contribute, and the market proceeds.
+    let config = factors_config(&[FactorFamily::Microstructure], "0.50");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let as_of = Utc::now();
@@ -437,14 +407,10 @@ fn factor_confidence_zero_confidence() {
 }
 
 #[test]
-fn factor_missing_reject_policy() {
-    // `spread_efficiency` is required; a market missing it under RejectCandidate
-    // is excluded, while complete markets (present cross-section) proceed.
-    let config = factors_config(
-        &[FactorFamily::Liquidity],
-        MissingFactorPolicy::RejectCandidate,
-        "0.10",
-    );
+fn required_factor_gap_rejects() {
+    // `spread_efficiency` is required by its frozen definition; a market missing
+    // it is excluded, while complete markets (present cross-section) proceed.
+    let config = factors_config(&[FactorFamily::Liquidity], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let as_of = Utc::now();
@@ -501,21 +467,13 @@ fn factor_missing_reject_policy() {
 fn factor_plane_changes_hash() {
     let features = FeaturesConfig::default();
     let one = FactorEngine::new(
-        &factors_config(
-            &[FactorFamily::Liquidity],
-            MissingFactorPolicy::ZeroWeight,
-            "0.50",
-        ),
+        &factors_config(&[FactorFamily::Liquidity], "0.50"),
         &features,
         &DomainConfig::disabled(),
         None,
     );
     let two = FactorEngine::new(
-        &factors_config(
-            &[FactorFamily::Liquidity, FactorFamily::Momentum],
-            MissingFactorPolicy::ZeroWeight,
-            "0.50",
-        ),
+        &factors_config(&[FactorFamily::Liquidity, FactorFamily::Momentum], "0.50"),
         &features,
         &DomainConfig::disabled(),
         None,
@@ -531,21 +489,13 @@ fn factor_plane_changes_hash() {
 fn factor_plane_order_stable() {
     let features = FeaturesConfig::default();
     let forward = FactorEngine::new(
-        &factors_config(
-            &[FactorFamily::Liquidity, FactorFamily::Momentum],
-            MissingFactorPolicy::ZeroWeight,
-            "0.50",
-        ),
+        &factors_config(&[FactorFamily::Liquidity, FactorFamily::Momentum], "0.50"),
         &features,
         &DomainConfig::disabled(),
         None,
     );
     let reversed = FactorEngine::new(
-        &factors_config(
-            &[FactorFamily::Momentum, FactorFamily::Liquidity],
-            MissingFactorPolicy::ZeroWeight,
-            "0.50",
-        ),
+        &factors_config(&[FactorFamily::Momentum, FactorFamily::Liquidity], "0.50"),
         &features,
         &DomainConfig::disabled(),
         None,
@@ -684,11 +634,7 @@ fn varied_batch(count: usize) -> Vec<FeatureVector> {
 
 #[test]
 fn compute_all_batch_deterministic() {
-    let config = factors_config(
-        &[FactorFamily::Liquidity],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
+    let config = factors_config(&[FactorFamily::Liquidity], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vectors = varied_batch(32);
@@ -706,11 +652,7 @@ fn compute_all_batch_deterministic() {
 
 #[test]
 fn compute_batch_preserves_order() {
-    let config = factors_config(
-        &[FactorFamily::Liquidity],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
+    let config = factors_config(&[FactorFamily::Liquidity], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vectors = varied_batch(20);
@@ -728,11 +670,7 @@ fn serial_parallel_normalizer_identical() {
     // The serial and rayon paths share one `CrossSectionalNormalizer`, so they
     // must be bit-identical. (Online-vs-replay parity — both driving the same
     // engine entrypoint — is asserted at the core pipeline level.)
-    let config = factors_config(
-        &[FactorFamily::Liquidity, FactorFamily::Momentum],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
+    let config = factors_config(&[FactorFamily::Liquidity, FactorFamily::Momentum], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vectors = varied_batch(24);
@@ -751,11 +689,7 @@ fn online_replay_entrypoints_policy() {
     // The replay path calls `compute_all_batch` and the online path calls
     // `compute_batch_with_refs`; under the default (`Indeterminate`) policy
     // they must produce identical outcomes — the same normalizer serves both.
-    let config = factors_config(
-        &[FactorFamily::Liquidity, FactorFamily::Momentum],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
+    let config = factors_config(&[FactorFamily::Liquidity, FactorFamily::Momentum], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vectors = varied_batch(20);
@@ -777,11 +711,7 @@ fn cross_sectional_zero_per() {
     // `[0, 1]` via `(z + k) / 2k` (k = clamp_sigma). With no winsorizing/clamping,
     // recovering `z = score·2k − k` across the cross-section must have population
     // mean 0 and std 1 — the defining property of a per-as_of z-score.
-    let config = factors_config(
-        &[FactorFamily::Liquidity],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
+    let config = factors_config(&[FactorFamily::Liquidity], "0.10");
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vectors = varied_batch(9);
@@ -821,11 +751,7 @@ fn cross_sectional_zero_per() {
 fn frozen_reference_quantile_section() {
     // A single-market batch is below `min_size`, but the model artifact's frozen
     // training CDF normalizes it without reading mutable online history.
-    let mut config = factors_config(
-        &[FactorFamily::Liquidity],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
+    let mut config = factors_config(&[FactorFamily::Liquidity], "0.10");
     config.cross_section.min_size = 5;
     config.cross_section.small_cross_section_policy =
         SmallCrossSectionPolicy::FrozenReferenceQuantile;

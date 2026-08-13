@@ -10,10 +10,13 @@ use super::sea_orm_active_enums::{QpOutcomeSide, QpRecommendationStatus};
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_id: Uuid,
-    #[sea_orm(column_type = "Text")]
-    pub research_profile_artifact_id: String,
     pub recommendation_report_id: Uuid,
+    pub report_route_run_id: Uuid,
+    pub portfolio_plan_id: Uuid,
+    pub economic_tier_id: Uuid,
     pub rank: i32,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub route: Json,
     #[sea_orm(column_type = "Text")]
     pub market_id: String,
     #[sea_orm(column_type = "Text")]
@@ -21,19 +24,14 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub token_id: String,
     pub outcome_side: QpOutcomeSide,
-    pub composite_score: Decimal,
-    pub risk_adjusted_score: Decimal,
-    pub confidence: Decimal,
-    pub expected_return_bps: Decimal,
-    pub downside_bps: Decimal,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub economics_json: Json,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub economic_tier_json: Json,
     #[sea_orm(column_type = "JsonBinary")]
     pub identity: Json,
     #[sea_orm(column_type = "JsonBinary")]
     pub market_context: Json,
-    pub rank_before_portfolio: i32,
-    pub liquidity_score: Decimal,
-    pub data_quality_score: Decimal,
-    pub model_score_percentile: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
     pub trade_plan: Json,
     #[sea_orm(column_type = "JsonBinary")]
@@ -49,12 +47,28 @@ pub struct Model {
     pub created_at: DateTimeWithTimeZone,
     #[sea_orm(
         belongs_to,
-        from = "research_profile_artifact_id",
-        to = "research_profile_artifact_id",
+        from = "recommendation_report_id",
+        to = "recommendation_report_id",
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
-    pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
+    pub quant_recommendation_report: BelongsTo<super::quant_recommendation_report::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "report_route_run_id",
+        to = "report_route_run_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_report_route_run: BelongsTo<super::quant_report_route_run::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "portfolio_plan_id",
+        to = "portfolio_plan_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_portfolio_plan: BelongsTo<super::quant_portfolio_plan::Entity>,
     #[sea_orm(
         belongs_to,
         from = "event_id",
@@ -78,16 +92,11 @@ pub struct Model {
     #[sea_orm(has_many)]
     pub quant_order_intents: HasMany<super::quant_order_intent::Entity>,
     #[sea_orm(has_one)]
+    pub quant_recommendation_execution_rollup:
+        HasOne<super::quant_recommendation_execution_rollup::Entity>,
+    #[sea_orm(has_one)]
     pub quant_recommendation_resolution_outcome:
         HasOne<super::quant_recommendation_resolution_outcome::Entity>,
-    #[sea_orm(
-        belongs_to,
-        from = "recommendation_report_id",
-        to = "recommendation_report_id",
-        on_update = "NoAction",
-        on_delete = "NoAction"
-    )]
-    pub quant_recommendation_report: BelongsTo<super::quant_recommendation_report::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

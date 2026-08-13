@@ -65,23 +65,20 @@ jobs:
           fi
 
           smoke_config_dir="$(mktemp -d)"
-          smoke_base_config="$smoke_config_dir/quant-pivot.toml"
-          smoke_local_config="$smoke_config_dir/quant-pivot.local.toml"
+          smoke_config_file="$smoke_config_dir/quant-pivot.account-read.toml"
           cleanup_account_read_config() {
-            if [[ -f "$smoke_local_config" ]]; then
-              shred --remove "$smoke_local_config"
-            fi
-            if [[ -f "$smoke_base_config" ]]; then
-              rm --force "$smoke_base_config"
+            if [[ -f "$smoke_config_file" ]]; then
+              shred --remove "$smoke_config_file"
             fi
             rmdir "$smoke_config_dir"
           }
           trap cleanup_account_read_config EXIT
 
           umask 077
-          cp config/quant-pivot.toml "$smoke_base_config"
           printf '%s' "$ACCOUNT_READ_CONFIG_BASE64" \
-            | base64 --decode >"$smoke_local_config"
+            | base64 --decode >"$smoke_config_file"
           unset ACCOUNT_READ_CONFIG_BASE64
-          chmod 600 "$smoke_local_config"
-          cargo xtask smoke account-read --config-dir "$smoke_config_dir"
+          chmod 600 "$smoke_config_file"
+          cargo xtask smoke account-read \
+            --config-file "$smoke_config_file" \
+            --expected-environment production

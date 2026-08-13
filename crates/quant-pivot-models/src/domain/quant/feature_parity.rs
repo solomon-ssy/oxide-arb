@@ -20,6 +20,8 @@ use crate::{
     },
 };
 
+use super::RepresentedRouteSet;
+
 /// One persisted deterministic parity replay.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_feature_parity_run::Entity")]
@@ -242,7 +244,8 @@ pub fn report_parity_generation_hash(
 /// Immutable report evidence bound to its generation and selection.
 pub fn report_parity_evidence_hash(
     generation: &ContentHash,
-    model_version_id: &ModelVersionId,
+    represented_routes: &RepresentedRouteSet,
+    scenario_artifact_hash: &Option<ContentHash>,
     decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     market_selection_id: &MarketSelectionId,
     data_quality_snapshot_id: &ReportDataQualitySnapshotId,
@@ -251,7 +254,8 @@ pub fn report_parity_evidence_hash(
     #[derive(Serialize)]
     struct Evidence<'a> {
         generation: &'a ContentHash,
-        model_version_id: &'a ModelVersionId,
+        represented_routes: &'a RepresentedRouteSet,
+        scenario_artifact_hash: &'a Option<ContentHash>,
         decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
         market_selection_id: &'a MarketSelectionId,
         data_quality_snapshot_id: &'a ReportDataQualitySnapshotId,
@@ -260,10 +264,11 @@ pub fn report_parity_evidence_hash(
 
     CanonicalDigest::content_hash_typed(
         "quant-pivot/feature-parity/report-evidence",
-        1,
+        2,
         &Evidence {
             generation,
-            model_version_id,
+            represented_routes,
+            scenario_artifact_hash,
             decision_policy_snapshot_id,
             market_selection_id,
             data_quality_snapshot_id,

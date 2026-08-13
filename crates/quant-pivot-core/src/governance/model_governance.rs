@@ -1125,6 +1125,7 @@ fn backtest_report_from_info(info: BacktestReportInfo) -> QuantResult<BacktestRe
     let expected_vs_realized = info.expected_vs_realized;
     let category_breakdown = info.category_breakdown.into_iter().collect();
     let report_pnl_simulation = info.report_pnl_simulation;
+    let portfolio_funnel = info.portfolio_funnel;
     Ok(BacktestReport {
         backtest_report_id: info.backtest_report_id,
         model_version_id: info.model_version_id,
@@ -1153,25 +1154,29 @@ fn backtest_report_from_info(info: BacktestReportInfo) -> QuantResult<BacktestRe
         category_breakdown,
         tail_loss: info.tail_loss,
         report_pnl_simulation,
+        portfolio_funnel,
         report_hash: info.report_hash,
     })
 }
 
 #[cfg(test)]
 mod path_set_gate_input_tests {
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use quant_pivot_models::{
         domain::quant::BacktestPathSetInfo,
+        hashing::CanonicalDigest,
         types::{
             BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
             TrainingDatasetId,
             backtest::{
                 BacktestPaths, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
                 CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
-                SharpeDistribution,
+                CpcvTrialPathBinding, CscvSelectionEvidence, CscvTrialDescriptor,
+                CscvTrialGridBinding, SharpeDistribution,
             },
         },
     };
+    use quant_pivot_research::validation::{TrialPerformanceMatrix, analyze_selection_bias};
     use rust_decimal_macros::dec;
 
     use super::{checked_shadow_stability_lookback, path_set_gate_input};
@@ -1180,7 +1185,40 @@ mod path_set_gate_input_tests {
         ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("hash")
     }
 
+    fn selection_fixture() -> (CscvTrialGridBinding, CscvSelectionEvidence) {
+        let start = Utc::now() - Duration::hours(1);
+        let periods = (1..=4)
+            .map(|offset| start + Duration::minutes(offset * 10))
+            .collect::<Vec<_>>();
+        let columns = [
+            vec![dec!(0.01), dec!(-0.005), dec!(0.012), dec!(-0.004)],
+            vec![dec!(0.008), dec!(-0.007), dec!(0.01), dec!(-0.006)],
+        ];
+        let trials = (0..columns.len())
+            .map(|trial_id| CscvTrialDescriptor {
+                trial_id: u32::try_from(trial_id).expect("trial id"),
+                label: format!("gate-trial-{trial_id}"),
+                config_hash: CanonicalDigest::content_hash_typed(
+                    "quant-pivot/test-gate-cscv-trial",
+                    1,
+                    &trial_id,
+                )
+                .expect("trial hash"),
+            })
+            .collect();
+        let grid = CscvTrialGridBinding::try_new(4, trials).expect("trial grid");
+        let matrix = TrialPerformanceMatrix::from_columns(periods, &columns).expect("trial matrix");
+        let evidence = analyze_selection_bias(&matrix, &grid).expect("selection evidence");
+        (grid, evidence)
+    }
+
     fn info_with_distribution(sharpe_distribution: SharpeDistribution) -> BacktestPathSetInfo {
+        let (trial_grid, cscv_selection_evidence) = selection_fixture();
+        let dsr_conservative_independent_trial_count = i64::from(
+            cscv_selection_evidence
+                .trial_dependence
+                .conservative_independent_trial_count(),
+        );
         BacktestPathSetInfo {
             path_set_id: BacktestPathSetId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
@@ -1197,6 +1235,8 @@ mod path_set_gate_input_tests {
                 CpcvFoldCalibrationPolicy::SubjectHeuristic {
                     return_model_hash: hash(),
                 },
+                CpcvTrialPathBinding::try_new(0, vec![0]).expect("trial path"),
+                trial_grid,
             ),
             fold_artifacts: CpcvFoldArtifacts::try_new(vec![
                 CpcvFoldArtifact {
@@ -1209,18 +1249,67 @@ mod path_set_gate_input_tests {
                     },
                     training_groups_hash: hash(),
                     training_group_count: 1,
+                    calibration_fit_groups_hash: hash(),
+                    calibration_fit_group_count: 1,
+                    scenario_fit_groups_hash: hash(),
+                    scenario_fit_group_count: 1,
                     model_artifact_hash: hash(),
                     serving_contract_hash: hash(),
                     model_payload_hash: hash(),
+                    calibration_function_hash: hash(),
+                    scenario_economic_function_hash: hash(),
+                    calibration_artifact_hash: hash(),
+                    scenario_model_hash: hash(),
                 },
                 CpcvFoldArtifact {
-                    identity: CpcvEstimatorIdentity::Trial { trial_id: 0 },
+                    identity: CpcvEstimatorIdentity::TrialPathValidation {
+                        trial_id: 0,
+                        path_index: 0,
+                        combination_index: 0,
+                        test_partitions_hash: hash(),
+                        test_partition_count: 1,
+                        test_groups_hash: hash(),
+                        test_group_count: 1,
+                    },
                     training_groups_hash: ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
                         .expect("trial hash"),
                     training_group_count: 1,
+                    calibration_fit_groups_hash: hash(),
+                    calibration_fit_group_count: 1,
+                    scenario_fit_groups_hash: hash(),
+                    scenario_fit_group_count: 1,
                     model_artifact_hash: hash(),
                     serving_contract_hash: hash(),
                     model_payload_hash: hash(),
+                    calibration_function_hash: hash(),
+                    scenario_economic_function_hash: hash(),
+                    calibration_artifact_hash: hash(),
+                    scenario_model_hash: hash(),
+                },
+                CpcvFoldArtifact {
+                    identity: CpcvEstimatorIdentity::TrialPathValidation {
+                        trial_id: 1,
+                        path_index: 0,
+                        combination_index: 0,
+                        test_partitions_hash: hash(),
+                        test_partition_count: 1,
+                        test_groups_hash: hash(),
+                        test_group_count: 1,
+                    },
+                    training_groups_hash: ContentHash::parse(&format!("blake3:{}", "c".repeat(64)))
+                        .expect("challenger trial hash"),
+                    training_group_count: 1,
+                    calibration_fit_groups_hash: hash(),
+                    calibration_fit_group_count: 1,
+                    scenario_fit_groups_hash: hash(),
+                    scenario_fit_group_count: 1,
+                    model_artifact_hash: hash(),
+                    serving_contract_hash: hash(),
+                    model_payload_hash: hash(),
+                    calibration_function_hash: hash(),
+                    scenario_economic_function_hash: hash(),
+                    calibration_artifact_hash: hash(),
+                    scenario_model_hash: hash(),
                 },
             ])
             .expect("fold artifacts"),
@@ -1231,10 +1320,11 @@ mod path_set_gate_input_tests {
             median_rank_ic: dec!(0.1),
             deflated_sharpe: dec!(0.95),
             dsr_benchmark_sharpe: dec!(0.1),
-            pbo: dec!(0.2),
+            pbo: cscv_selection_evidence.pbo,
+            cscv_selection_evidence,
             min_track_record_length_secs: Some(86_400),
-            trial_count: 4,
-            trial_grid_count: 4,
+            dsr_conservative_independent_trial_count,
+            trial_grid_count: 2,
             coord_search_effective_n: 0,
             path_set_hash: hash(),
             created_at: Utc::now(),

@@ -93,6 +93,7 @@ mod tests {
         domain::{
             api::{MarketBookView, SystemCapabilities, SystemStatusView},
             governance::SystemStatus,
+            quant::RepresentedRouteSet,
             runtime::{
                 CoreEvent, MaterializationRunEvent, MaterializationRunKind,
                 MaterializationRunStatus, ReconciliationLifecycleEvent, ReportEventKind,
@@ -109,7 +110,8 @@ mod tests {
             settlement::SettlementCaseState,
             system::CapabilityReason,
         },
-        types::{MarketId, RecommendationReportId, ReportRunId, ResearchProfileId},
+        runtime_config::BuyModelRoute,
+        types::{MarketId, RecommendationReportId, ReportRunId},
     };
 
     #[test]
@@ -146,7 +148,8 @@ mod tests {
         let event = CoreEvent::Report(ReportLifecycleEvent {
             event: ReportEventKind::Prepared,
             recommendation_report_id: "report-1".to_owned(),
-            profile_id: ResearchProfileId::new("weather_forecast_24h"),
+            represented_routes: RepresentedRouteSet::from_routes([BuyModelRoute::Weather])
+                .expect("Route set"),
             report_kind: ReportKind::TopN,
             runtime_mode: QuantRuntimeMode::ReportOnly,
             status: RecommendationReportStatus::Prepared,
@@ -186,7 +189,8 @@ mod tests {
         let report = CoreEvent::Report(ReportLifecycleEvent {
             event: ReportEventKind::Published,
             recommendation_report_id: "durable-report-id".to_owned(),
-            profile_id: ResearchProfileId::new("weather_forecast_24h"),
+            represented_routes: RepresentedRouteSet::from_routes([BuyModelRoute::Weather])
+                .expect("Route set"),
             report_kind: ReportKind::TopN,
             runtime_mode: QuantRuntimeMode::ReportOnly,
             status: RecommendationReportStatus::Published,

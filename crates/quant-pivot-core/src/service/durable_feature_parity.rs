@@ -28,23 +28,25 @@ use quant_pivot_models::{
             FactorValueInfo, FeatureParityRunInfo, FeatureVectorInfo, FrozenFeatureParitySubject,
             FrozenFeatureParitySubjectId, MarketSelectionInfo, MarketSelectionMemberInfo,
             ModelRunInfo, ModelRunParityEvidence, ModelVersionInfo, RecommendationReportInfo,
-            ReportDataQualitySnapshotInfo, ReportRunInfo, parity_candidate_membership_hash,
-            parity_selection_hash, report_parity_evidence_hash, report_parity_generation_hash,
+            ReportDataQualitySnapshotInfo, ReportRouteRunInfo, ReportRunInfo, RepresentedRouteSet,
+            parity_candidate_membership_hash, parity_selection_hash, report_parity_evidence_hash,
+            report_parity_generation_hash,
         },
     },
     enums::{
         clickhouse::ChFeatureCellState,
         model::ModelFamily,
         quant::{
-            DataQualityStatus, EmptyReportReason, FeatureCellState, FeatureParityRunKind,
-            FeatureParityStage, ModelRunKind, ModelRunStatus,
+            DataQualityStatus, FeatureCellState, FeatureParityRunKind, FeatureParityStage,
+            ModelRunKind, ModelRunStatus,
         },
     },
-    runtime_config::DecisionPolicySnapshot,
+    runtime_config::{BuyModelRoute, DecisionPolicySnapshot},
     types::{
         ContentHash, DecisionCaptureEvidence, DecisionPolicySnapshotId, FeatureParityDetailSource,
         FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
-        RecommendationReportId, SelectionExclusionSummary, factor::FactorServingPlane,
+        RecommendationReportId, SelectionExclusionSummary, SelectorHashEvidence,
+        SelectorParityEvidence, TradeTapeSourceEvidence, Usd, factor::FactorServingPlane,
         stable_name::FeatureName,
     },
 };
@@ -67,7 +69,7 @@ use quant_pivot_research::{
     },
     selection::{
         ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelectionSnapshot,
-        MarketSelector, SelectedMarket,
+        MarketSelector, ModelFeatureRequirements, SelectedMarket,
     },
 };
 use serde::Serialize;
@@ -91,7 +93,7 @@ use crate::{
         },
         historical_replay::{
             CrossSectionRequest, ReplayCaptureKey, ReplayConfig, ReplayCrossSection,
-            ReplayFactorMode, materialize_cross_section,
+            ReplayFactorMode, ReplayTradeTapeSource, materialize_cross_section,
         },
         model_serving_generation::{
             ModelServingGenerationRequest, ModelServingGenerationStore, ModelServingRouteSnapshot,
@@ -142,6 +144,19 @@ struct ReplayRunContext {
     config: DecisionPolicySnapshot,
     boundary: DecisionBoundary,
     report_id: Option<RecommendationReportId>,
+    represented_routes: Option<RepresentedRouteSet>,
+    selection: MarketSelectionInfo,
+    members: Vec<MarketSelectionMemberInfo>,
+    samples: Vec<ReplaySample>,
+    trade_tape_sources: HashMap<MarketId, TradeTapeSourceEvidence>,
+}
+
+struct ReportReplayContext {
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    snapshot_hash: ContentHash,
+    config: DecisionPolicySnapshot,
+    boundary: DecisionBoundary,
+    represented_routes: RepresentedRouteSet,
     selection: MarketSelectionInfo,
     members: Vec<MarketSelectionMemberInfo>,
 }
@@ -162,6 +177,7 @@ struct MaterializedSelectionReplay {
     selection: MarketSelectionSnapshot,
     snapshot_source: Arc<DecisionSnapshotSource>,
     replay_config: ReplayConfig,
+    required_features: Vec<FeatureName>,
     serving: ModelServingRouteSnapshot,
 }
 
@@ -202,39 +218,15 @@ struct FeatureComparisonInputs<'a> {
     schema: &'a FeatureSchema,
 }
 
-struct ReportOnlineEvidence {
-    features: HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
-    feature_infos: HashMap<FeatureVectorId, FeatureVectorInfo>,
-    boundary: DecisionBoundary,
-}
-
-enum ReportOnlineEvidenceOutcome {
-    Ready(ReportOnlineEvidence),
-    Pending(Vec<PendingFeatureParityComparison>),
-}
-
 struct PreparedReportReplay {
     report_id: RecommendationReportId,
-    ceiling: PreInferenceStageCeiling,
-    context: ReplayRunContext,
-    online: ReportOnlineEvidence,
-}
-
-enum PreparedReportReplayOutcome {
-    Ready(Box<PreparedReportReplay>),
-    Pending(Vec<PendingFeatureParityComparison>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreInferenceStageCeiling {
-    Selection,
-    Feature,
+    context: ReportReplayContext,
 }
 
 #[derive(Default)]
 struct CandidateSubjects {
     model_runs: Vec<ModelRunInfo>,
-    pre_inference_reports: Vec<RecommendationReportInfo>,
+    reports: Vec<RecommendationReportInfo>,
 }
 
 impl DurableFeatureParitySource {
@@ -291,10 +283,7 @@ impl FeatureParityReplaySource for DurableFeatureParitySource {
             validate_candidate_run(row, run)?;
         }
         let mut candidates = self.candidates_for_runs(subjects.model_runs).await?;
-        candidates.extend(
-            self.candidates_for_reports(subjects.pre_inference_reports, run)
-                .await?,
-        );
+        candidates.extend(self.candidates_for_reports(subjects.reports, run).await?);
         Ok(candidates)
     }
 
@@ -421,7 +410,7 @@ impl DurableFeatureParitySource {
             let owner = match subject.subject_id {
                 FrozenFeatureParitySubjectId::ModelRun(id) => FeatureParitySubject::ModelRun(id),
                 FrozenFeatureParitySubjectId::RecommendationReport(id) => {
-                    FeatureParitySubject::PreInferenceReport(id)
+                    FeatureParitySubject::RecommendationReport(id)
                 }
                 FrozenFeatureParitySubjectId::ModelVersion { .. } => {
                     return Err(determinism(format!(
@@ -520,9 +509,23 @@ impl DurableFeatureParitySource {
                             .ok_or_else(|| {
                                 StorageError::not_found("quant_recommendation_report", report_id)
                             })?;
-                    if report.model_run_id.as_ref() != Some(model_run_id) {
+                    let route_run = self
+                        .deps
+                        .reports
+                        .find_model_route_run(model_run_id)
+                        .await?
+                        .ok_or_else(|| {
+                            StorageError::not_found(
+                                "quant_report_route_run.model_run_id",
+                                model_run_id,
+                            )
+                        })?;
+                    if route_run.report_run_id != report.report_run_id
+                        || route_run.model_run_id.as_ref() != Some(model_run_id)
+                        || route_run.model_version_id != model_run.model_version_id
+                    {
                         return Err(determinism(format!(
-                            "parity run {} report does not bind frozen model run {model_run_id}",
+                            "parity run {} report Route lineage does not bind frozen model run {model_run_id}",
                             parity_run.run_id
                         )));
                     }
@@ -544,14 +547,14 @@ impl DurableFeatureParitySource {
                 )?;
                 let evidence_hash = report_parity_evidence_hash(
                     &generation,
-                    &report.model_version_id,
+                    &report.represented_routes_json,
+                    &report.scenario_artifact_hash,
                     &report.decision_policy_snapshot_id,
                     &report.market_selection_id,
                     &report.data_quality_snapshot_ref,
                     &report.portfolio_plan_id,
                 )?;
-                if report.model_run_id.is_some()
-                    || &report.market_selection_id != selection_id
+                if &report.market_selection_id != selection_id
                     || report.decision_at != decision_at
                     || generation != subject.subject_generation
                     || evidence_hash != subject.evidence_hash
@@ -561,8 +564,18 @@ impl DurableFeatureParitySource {
                         .is_some_and(|bound| bound != report_id)
                 {
                     return Err(determinism(format!(
-                        "frozen report evidence drifted for parity run {} subject {report_id}",
-                        parity_run.run_id
+                        "frozen report evidence drifted for parity run {} subject {report_id}: \
+                         selection_match={} decision_match={} generation_expected={} \
+                         generation_frozen={} evidence_expected={} evidence_frozen={} \
+                         run_report_id={:?}",
+                        parity_run.run_id,
+                        &report.market_selection_id == selection_id,
+                        report.decision_at == decision_at,
+                        generation,
+                        subject.subject_generation,
+                        evidence_hash,
+                        subject.evidence_hash,
+                        parity_run.report_id,
                     )));
                 }
             }
@@ -658,71 +671,52 @@ impl DurableFeatureParitySource {
                     .find_by_id(report_id)
                     .await?
                     .ok_or_else(|| StorageError::not_found("recommendation_report", report_id))?;
-                if let Some(model_run_id) = report.model_run_id.as_ref() {
+                validate_report_subject(&report, run)?;
+                let route_runs = self.deps.reports.list_route_runs(report_id).await?;
+                let mut model_runs = Vec::new();
+                for route_run in route_runs {
+                    let Some(model_run_id) = route_run.model_run_id.as_ref() else {
+                        continue;
+                    };
                     let model_run = self
                         .deps
                         .model_runs
                         .find_by_id(model_run_id)
                         .await?
                         .ok_or_else(|| StorageError::not_found("quant_model_run", model_run_id))?;
-                    validate_report_run_binding(&report, &model_run)?;
-                    Ok(CandidateSubjects {
-                        model_runs: vec![model_run],
-                        pre_inference_reports: Vec::new(),
-                    })
-                } else {
-                    validate_pre_inference_report(&report, run)?;
-                    Ok(CandidateSubjects {
-                        model_runs: Vec::new(),
-                        pre_inference_reports: vec![report],
-                    })
+                    validate_route_run_binding(&report, &route_run, &model_run)?;
+                    model_runs.push(model_run);
                 }
+                Ok(CandidateSubjects {
+                    model_runs,
+                    reports: vec![report],
+                })
             }
             FeatureParityRunKind::Full => {
-                let reports = self
+                let mut reports = self
                     .deps
                     .reports
                     .list_committed_between(run.window_start, run.window_end)
                     .await?;
-                let live_runs = self
+                for report in &reports {
+                    validate_report_subject(report, run)?;
+                }
+                let mut model_runs = self
                     .deps
                     .model_runs
                     .list_succeeded_live_between(run.window_start, run.window_end)
                     .await?;
-                let mut live_by_id = live_runs
-                    .into_iter()
-                    .map(|row| (row.model_run_id, row))
-                    .collect::<HashMap<_, _>>();
-                let mut subjects = CandidateSubjects::default();
-                for report in reports {
-                    if let Some(model_run_id) = report.model_run_id.as_ref() {
-                        let model_run = live_by_id.remove(model_run_id).ok_or_else(|| {
-                            determinism(format!(
-                                "committed report {} references live run {} absent from its full-parity window",
-                                report.recommendation_report_id, model_run_id
-                            ))
-                        })?;
-                        validate_report_run_binding(&report, &model_run)?;
-                        subjects.model_runs.push(model_run);
-                    } else {
-                        validate_pre_inference_report(&report, run)?;
-                        subjects.pre_inference_reports.push(report);
-                    }
-                }
-                // Successful live runs without a committed report (for example
-                // an intentionally suppressed empty artifact) remain serving
-                // evidence and are audited by the daily full replay.
-                subjects.model_runs.extend(live_by_id.into_values());
-                subjects
-                    .model_runs
-                    .sort_by_key(|row| (row.window_start, row.model_run_id.to_string()));
-                subjects.pre_inference_reports.sort_by_key(|report| {
+                model_runs.sort_by_key(|row| (row.window_start, row.model_run_id.to_string()));
+                reports.sort_by_key(|report| {
                     (
                         report.decision_at,
                         report.recommendation_report_id.to_string(),
                     )
                 });
-                Ok(subjects)
+                Ok(CandidateSubjects {
+                    model_runs,
+                    reports,
+                })
             }
         }
     }
@@ -759,26 +753,15 @@ impl DurableFeatureParitySource {
     ) -> QuantResult<Vec<FeatureParityCandidate>> {
         let mut candidates = Vec::new();
         for report in reports {
-            validate_pre_inference_report(&report, parity_run)?;
+            validate_report_subject(&report, parity_run)?;
             let members = self
                 .deps
                 .selections
                 .list_members(&report.market_selection_id)
                 .await?;
-            let dq = self
-                .deps
-                .reports
-                .find_data_quality_snapshot(&report.recommendation_report_id)
-                .await?
-                .ok_or_else(|| {
-                    StorageError::not_found(
-                        "quant_report_data_quality_snapshot",
-                        report.data_quality_snapshot_ref,
-                    )
-                })?;
-            let ceiling = validate_pre_inference_evidence(&report, &members, &dq)?;
-            let subject = FeatureParitySubject::PreInferenceReport(report.recommendation_report_id);
-            if ceiling == PreInferenceStageCeiling::Selection {
+            let subject =
+                FeatureParitySubject::RecommendationReport(report.recommendation_report_id);
+            if members.is_empty() {
                 candidates.push(FeatureParityCandidate {
                     sampling_key: format!("report/{}/selection", report.recommendation_report_id),
                     subject,
@@ -931,7 +914,14 @@ impl DurableFeatureParitySource {
                 })
                 .collect::<QuantResult<HashMap<_, _>>>()?;
             let comparisons = self
-                .replay_run(candidate, &run, run_inputs, &run_features, &run_infos)
+                .replay_run(
+                    candidate,
+                    &run,
+                    completion,
+                    run_inputs,
+                    &run_features,
+                    &run_infos,
+                )
                 .await?;
             attempt.comparisons.extend(select_comparisons(
                 &run_id.to_string(),
@@ -948,25 +938,20 @@ impl DurableFeatureParitySource {
     ) -> QuantResult<FeatureParityReplayAttempt> {
         let mut attempt = FeatureParityReplayAttempt::default();
         for (report_id, report_candidates) in group_candidates_by_report(candidates) {
-            match self
+            let prepared = self
                 .prepare_report_replay(&report_id, &report_candidates)
-                .await?
-            {
-                PreparedReportReplayOutcome::Ready(prepared) => {
-                    let comparisons = self
-                        .compare_pre_inference_report(
-                            representative_candidate(&report_id.to_string(), &report_candidates)?,
-                            &prepared,
-                        )
-                        .await?;
-                    attempt.comparisons.extend(select_comparisons(
-                        &report_id.to_string(),
-                        &report_candidates,
-                        &comparisons,
-                    )?);
-                }
-                PreparedReportReplayOutcome::Pending(rows) => attempt.pending.extend(rows),
-            }
+                .await?;
+            let comparisons = self
+                .compare_report_selection(
+                    representative_candidate(&report_id.to_string(), &report_candidates)?,
+                    &prepared,
+                )
+                .await?;
+            attempt.comparisons.extend(select_comparisons(
+                &report_id.to_string(),
+                &report_candidates,
+                &comparisons,
+            )?);
         }
         Ok(attempt)
     }
@@ -975,7 +960,7 @@ impl DurableFeatureParitySource {
         &self,
         report_id: &RecommendationReportId,
         candidates: &[&FeatureParityCandidate],
-    ) -> QuantResult<PreparedReportReplayOutcome> {
+    ) -> QuantResult<Box<PreparedReportReplay>> {
         let candidate = representative_candidate(&report_id.to_string(), candidates)?;
         let report = self
             .deps
@@ -1014,7 +999,7 @@ impl DurableFeatureParitySource {
                     report.data_quality_snapshot_ref,
                 )
             })?;
-        let ceiling = validate_pre_inference_evidence(&report, &members, &dq)?;
+        validate_quality_evidence(&report, &members, &dq)?;
         let config_info = self
             .deps
             .runtime_configs
@@ -1030,32 +1015,18 @@ impl DurableFeatureParitySource {
         let config = config_info.snapshot;
         let expected_boundary = report_decision_boundary(&report, &report_run, &config)?;
         validate_report_selection_binding(&report, &selection)?;
-        let online = match self
-            .load_report_online_evidence(&report, &dq, ceiling, expected_boundary, candidates)
-            .await?
-        {
-            ReportOnlineEvidenceOutcome::Ready(online) => online,
-            ReportOnlineEvidenceOutcome::Pending(pending) => {
-                return Ok(PreparedReportReplayOutcome::Pending(pending));
-            }
-        };
-        Ok(PreparedReportReplayOutcome::Ready(Box::new(
-            PreparedReportReplay {
-                report_id: *report_id,
-                ceiling,
-                context: ReplayRunContext {
-                    model_version_id: report.model_version_id,
-                    decision_policy_snapshot_id: report.decision_policy_snapshot_id,
-                    snapshot_hash,
-                    config,
-                    boundary: online.boundary.clone(),
-                    report_id: Some(*report_id),
-                    selection,
-                    members,
-                },
-                online,
+        Ok(Box::new(PreparedReportReplay {
+            report_id: *report_id,
+            context: ReportReplayContext {
+                decision_policy_snapshot_id: report.decision_policy_snapshot_id,
+                snapshot_hash,
+                config,
+                boundary: expected_boundary,
+                represented_routes: report.represented_routes_json,
+                selection,
+                members,
             },
-        )))
+        }))
     }
 
     async fn load_report_run(
@@ -1084,80 +1055,7 @@ impl DurableFeatureParitySource {
         Ok(run)
     }
 
-    async fn load_report_online_evidence(
-        &self,
-        report: &RecommendationReportInfo,
-        dq: &ReportDataQualitySnapshotInfo,
-        ceiling: PreInferenceStageCeiling,
-        expected_boundary: DecisionBoundary,
-        candidates: &[&FeatureParityCandidate],
-    ) -> QuantResult<ReportOnlineEvidenceOutcome> {
-        if ceiling == PreInferenceStageCeiling::Selection {
-            return Ok(ReportOnlineEvidenceOutcome::Ready(ReportOnlineEvidence {
-                features: HashMap::new(),
-                feature_infos: HashMap::new(),
-                boundary: expected_boundary,
-            }));
-        }
-        let vector_ids = dq
-            .tokens_json
-            .0
-            .iter()
-            .map(|record| {
-                record.feature_vector_id.ok_or_else(|| {
-                    determinism(format!(
-                        "report {} contains legacy-unbound DQ evidence for market {}",
-                        report.recommendation_report_id, record.market_id
-                    ))
-                })
-            })
-            .collect::<QuantResult<Vec<_>>>()?;
-        let rows = dedupe_feature_rows(
-            self.deps
-                .serving_evidence
-                .feature_cells_for_vectors(&vector_ids)
-                .await?,
-        )?;
-        let features = group_feature_rows(rows);
-        let missing = vector_ids
-            .iter()
-            .filter(|vector_id| !features.contains_key(*vector_id))
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            return Ok(ReportOnlineEvidenceOutcome::Pending(
-                pending_report_features(
-                    &report.recommendation_report_id,
-                    &report.model_version_id,
-                    candidates,
-                    &format!("serving_feature_rows_missing:{}", missing.join(",")),
-                ),
-            ));
-        }
-        let infos = self.deps.feature_vectors.find_by_ids(&vector_ids).await?;
-        if infos.len() != vector_ids.len() {
-            return Err(determinism(format!(
-                "report {} exact feature-vector binding resolves {} of {} rows",
-                report.recommendation_report_id,
-                infos.len(),
-                vector_ids.len()
-            )));
-        }
-        let feature_infos = infos
-            .into_iter()
-            .map(|info| (info.feature_vector_id, info))
-            .collect::<HashMap<_, _>>();
-        validate_report_dq_bindings(report, dq, &feature_infos)?;
-        let boundary =
-            boundary_from_report_features(report, &expected_boundary, &features, &feature_infos)?;
-        Ok(ReportOnlineEvidenceOutcome::Ready(ReportOnlineEvidence {
-            features,
-            feature_infos,
-            boundary,
-        }))
-    }
-
-    async fn compare_pre_inference_report(
+    async fn compare_report_selection(
         &self,
         candidate: &FeatureParityCandidate,
         prepared: &PreparedReportReplay,
@@ -1166,64 +1064,24 @@ impl DurableFeatureParitySource {
         let subject = ComparisonSubject {
             report: Some(&prepared.report_id),
             model_run: None,
-            model_version: Some(&context.model_version_id),
+            model_version: None,
         };
-        if prepared.ceiling == PreInferenceStageCeiling::Selection {
-            let replay = self.materialize_selection_replay(context).await?;
-            return selection_comparisons(
-                candidate,
-                subject,
-                &context.selection,
-                &context.members,
-                &replay.selection,
-                &context.boundary,
-            );
-        }
-        let replay = self
-            .materialize_run_replay(
-                &format!("pre-inference report {}", prepared.report_id),
-                context,
-            )
-            .await?;
-        let vector_binding = feature_vector_binding(&prepared.online.features)?;
-        let replay_by_market = replay.cross_section.replay_vectors_by_market();
-        let mut comparisons = selection_comparisons(
+        let replay = self.materialize_report_selection(context).await?;
+        selection_comparisons(
             candidate,
             subject,
             &context.selection,
             &context.members,
-            &replay.selection,
+            &replay,
             &context.boundary,
-        )?;
-        comparisons.extend(snapshot_and_feature_comparisons(
-            candidate,
-            subject,
-            FeatureComparisonInputs {
-                online_features: &prepared.online.features,
-                feature_infos: &prepared.online.feature_infos,
-                replay_by_market: &replay_by_market,
-                replay_captures: &replay.cross_section.captures,
-                vector_binding: &vector_binding,
-                boundary: &context.boundary,
-                decision_policy_snapshot_id: &context.decision_policy_snapshot_id,
-                schema: replay.builder.schema(),
-            },
-        )?);
-        comparisons.push(data_quality_comparison(
-            candidate,
-            subject,
-            &prepared.online.features,
-            &HashMap::new(),
-            &replay_by_market,
-            &context.boundary,
-        )?);
-        Ok(comparisons)
+        )
     }
 
     async fn prepare_replay_run(
         &self,
         candidate: &FeatureParityCandidate,
         run: &ModelRunInfo,
+        completion: &QuantServingEvidenceCompletionRow,
         online_inputs: &[QuantModelInputEventRow],
         online_features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
         feature_infos: &HashMap<FeatureVectorId, FeatureVectorInfo>,
@@ -1247,7 +1105,7 @@ impl DurableFeatureParitySource {
             })?;
         let snapshot_hash = config_info.snapshot_hash;
         let config = config_info.snapshot;
-        let boundary = boundary_from_online(online_inputs, online_features)?;
+        let boundary = boundary_from_online(completion, online_inputs, online_features)?;
         if boundary.decision_at() != candidate.decision_at {
             return Err(determinism(format!(
                 "serving evidence boundary {} does not match candidate {}",
@@ -1255,12 +1113,31 @@ impl DurableFeatureParitySource {
                 candidate.decision_at
             )));
         }
-        let report_id = self
+        let (report_id, represented_routes) = if let Some(route_run) = self
             .deps
             .reports
-            .find_by_model_run(&run.model_run_id)
+            .find_model_route_run(&run.model_run_id)
             .await?
-            .map(|report| report.recommendation_report_id);
+        {
+            let report = self
+                .deps
+                .reports
+                .find_by_report_run(&route_run.report_run_id)
+                .await?
+                .ok_or_else(|| {
+                    StorageError::not_found(
+                        "quant_recommendation_report.report_run_id",
+                        route_run.report_run_id,
+                    )
+                })?;
+            validate_route_run_binding(&report, &route_run, run)?;
+            (
+                Some(report.recommendation_report_id),
+                Some(report.represented_routes_json),
+            )
+        } else {
+            (None, None)
+        };
 
         let selection = self
             .deps
@@ -1277,13 +1154,15 @@ impl DurableFeatureParitySource {
             )));
         }
         let members = self.deps.selections.list_members(&selection_id).await?;
-        validate_replay_feature_population(
+        let samples = replay_feature_population(
             &selection_id,
             &boundary,
             &members,
             online_features,
             feature_infos,
         )?;
+        let trade_tape_sources =
+            frozen_trade_tape_sources(&boundary, online_features, feature_infos)?;
         Ok(ReplayRunContext {
             model_version_id,
             decision_policy_snapshot_id: run.decision_policy_snapshot_id,
@@ -1291,8 +1170,11 @@ impl DurableFeatureParitySource {
             config,
             boundary,
             report_id,
+            represented_routes,
             selection,
             members,
+            samples,
+            trade_tape_sources,
         })
     }
 
@@ -1304,21 +1186,13 @@ impl DurableFeatureParitySource {
         let config = &context.config;
         let boundary = &context.boundary;
         let selection_replay = self.materialize_selection_replay(context).await?;
-        let samples = selection_replay
-            .selection
-            .included
-            .iter()
-            .map(|market| ReplaySample {
-                market_id: market.market_id.clone(),
-                token_id: market.primary_token_id.clone(),
-            })
-            .collect::<Vec<_>>();
+        let samples = context.samples.clone();
         if samples.is_empty() {
             return Err(determinism(format!(
-                "durable selector replay produced no markets for {subject}"
+                "committed serving feature population is empty for {subject}"
             )));
         }
-        let lookback = Duration::from_secs(
+        let prefetch_lookback = Duration::from_secs(
             config
                 .profile_artifacts
                 .features
@@ -1349,7 +1223,7 @@ impl DurableFeatureParitySource {
                 window_end,
                 available_by: window_end,
                 samples: samples.clone(),
-                lookback,
+                lookback: prefetch_lookback,
                 knowledge_lag: boundary.knowledge_lag(),
                 max_horizon_secs: 0,
                 domain: config.profile_artifacts.domain.definition.clone(),
@@ -1364,11 +1238,14 @@ impl DurableFeatureParitySource {
             &CrossSectionRequest {
                 pit: selection_replay.snapshot_source.as_ref(),
                 prefetched: &window.prefetched,
+                trade_tape_source: ReplayTradeTapeSource::FrozenRuntime(
+                    &context.trade_tape_sources,
+                ),
                 decision_at: boundary.decision_at(),
                 group: &samples,
+                required_features: &selection_replay.required_features,
                 category_scope: None,
                 knowledge_lag: boundary.knowledge_lag(),
-                lookback,
             },
         )
         .await?
@@ -1403,6 +1280,14 @@ impl DurableFeatureParitySource {
             factors: config.profile_artifacts.scoring.definition.clone(),
             domain: config.profile_artifacts.domain.definition.clone(),
             data_quality: config.recommendation.data_quality.clone(),
+            liquidity_cap_usd: Usd::new(
+                config
+                    .execution_risk
+                    .portfolio
+                    .exposure_limits
+                    .max_single_recommendation_usd
+                    .value,
+            ),
             bias_table: bias_table.as_ref().map(Arc::clone),
         };
         let builder = ConfiguredFeatureBuilder::new(
@@ -1426,7 +1311,18 @@ impl DurableFeatureParitySource {
             factor_plane,
             bias_table_hash,
         )?;
-        let model_requirements = serving.model_requirements();
+        let model_requirements = if let Some(represented_routes) = &context.represented_routes {
+            self.route_requirements(
+                context.decision_policy_snapshot_id,
+                context.snapshot_hash,
+                config,
+                represented_routes,
+            )
+            .await?
+        } else {
+            serving.model_requirements()
+        };
+        let required_features = model_requirements.union_all();
         let durable_pit = Arc::new(DurablePitSource::new(
             Arc::clone(&self.deps.fact_read),
             Arc::clone(&self.deps.catalog),
@@ -1461,8 +1357,79 @@ impl DurableFeatureParitySource {
             selection,
             snapshot_source: candidate_batch.snapshot_source,
             replay_config,
+            required_features,
             serving,
         })
+    }
+
+    async fn materialize_report_selection(
+        &self,
+        context: &ReportReplayContext,
+    ) -> QuantResult<MarketSelectionSnapshot> {
+        let model_requirements = self
+            .route_requirements(
+                context.decision_policy_snapshot_id,
+                context.snapshot_hash,
+                &context.config,
+                &context.represented_routes,
+            )
+            .await?;
+        let durable_pit = Arc::new(DurablePitSource::new(
+            Arc::clone(&self.deps.fact_read),
+            Arc::clone(&self.deps.catalog),
+            Arc::clone(&self.deps.clob_market_info),
+        ));
+        let candidate_provider = MarketCandidateProvider::new(
+            durable_pit,
+            Arc::clone(&self.deps.linkages),
+            Arc::clone(&self.deps.fact_read),
+        );
+        let candidates = candidate_provider
+            .candidates(
+                &context.boundary,
+                &context.config.profile_artifacts.domain.definition,
+            )
+            .await?;
+        ConfiguredMarketSelector::new()
+            .build_snapshot(
+                MarketSelectionBuildRequest {
+                    decision_at: context.boundary.decision_at(),
+                    decision_policy_snapshot_id: context.decision_policy_snapshot_id,
+                    selection: context.config.recommendation.selection.clone(),
+                    data_quality: context.config.recommendation.data_quality.clone(),
+                    features: context.config.profile_artifacts.features.definition.clone(),
+                    model_requirements,
+                    knowledge_lag_secs: context.boundary.knowledge_lag_secs(),
+                },
+                candidates.candidates,
+            )
+            .await
+    }
+
+    async fn route_requirements(
+        &self,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        snapshot_hash: ContentHash,
+        config: &DecisionPolicySnapshot,
+        represented_routes: &RepresentedRouteSet,
+    ) -> QuantResult<ModelFeatureRequirements> {
+        let mut model_requirements = ModelFeatureRequirements::default();
+        let serving_routes = self
+            .deps
+            .serving_generations
+            .resolve_routes(
+                ModelServingGenerationRequest {
+                    decision_policy_snapshot_id,
+                    snapshot_hash,
+                    snapshot: config,
+                },
+                represented_routes,
+            )
+            .await?;
+        for serving in serving_routes {
+            model_requirements.merge(serving.model_requirements());
+        }
+        Ok(model_requirements)
     }
 
     async fn replay_serving(
@@ -1472,11 +1439,14 @@ impl DurableFeatureParitySource {
         let serving = self
             .deps
             .serving_generations
-            .resolve_route(ModelServingGenerationRequest {
-                decision_policy_snapshot_id: context.decision_policy_snapshot_id,
-                snapshot_hash: context.snapshot_hash,
-                snapshot: &context.config,
-            })
+            .resolve_route(
+                ModelServingGenerationRequest {
+                    decision_policy_snapshot_id: context.decision_policy_snapshot_id,
+                    snapshot_hash: context.snapshot_hash,
+                    snapshot: &context.config,
+                },
+                route_for_model(&context.config, context.model_version_id)?,
+            )
             .await?;
         if serving.champion_model_version_id() != context.model_version_id {
             return Err(determinism(format!(
@@ -1492,6 +1462,7 @@ impl DurableFeatureParitySource {
         &self,
         candidate: &FeatureParityCandidate,
         run: &ModelRunInfo,
+        completion: &QuantServingEvidenceCompletionRow,
         online_inputs: &[QuantModelInputEventRow],
         online_features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
         feature_infos: &HashMap<FeatureVectorId, FeatureVectorInfo>,
@@ -1500,6 +1471,7 @@ impl DurableFeatureParitySource {
             .prepare_replay_run(
                 candidate,
                 run,
+                completion,
                 online_inputs,
                 online_features,
                 feature_infos,
@@ -1511,6 +1483,13 @@ impl DurableFeatureParitySource {
 
         let model_vector_binding = vector_binding(online_inputs)?;
         let all_vector_binding = feature_vector_binding(online_features)?;
+        let route_vector_binding = online_route_binding(
+            &all_vector_binding,
+            online_features,
+            &context.members,
+            replay.serving.route(),
+        )?;
+        validate_input_population(&model_vector_binding, &route_vector_binding)?;
         let replay_by_market = replay.cross_section.replay_vectors_by_market();
         let comparison_subject = ComparisonSubject {
             report: context.report_id.as_ref(),
@@ -1541,12 +1520,15 @@ impl DurableFeatureParitySource {
             },
         )?);
 
-        let admission_matches = replay_admission_matches(&model_vector_binding, &replay);
+        let admission_matches = route_admission_matches(
+            &route_vector_binding,
+            &replay.cross_section,
+            replay.serving.route(),
+        );
         comparisons.push(data_quality_comparison(
             candidate,
             comparison_subject,
             online_features,
-            &model_vector_binding,
             &replay_by_market,
             &context.boundary,
         )?);
@@ -1562,7 +1544,7 @@ impl DurableFeatureParitySource {
                 online_inputs,
                 markets: &replay.cross_section.markets,
                 vectors: &replay.cross_section.vectors,
-                vector_binding: &model_vector_binding,
+                vector_binding: &route_vector_binding,
                 factor_engine: &replay.factor_engine,
                 bias_table_hash: replay.bias_table_hash,
                 serving: &replay.serving,
@@ -1614,7 +1596,6 @@ impl DurableFeatureParitySource {
             .map(|vector| (vector.market_id.clone(), vector))
             .collect::<HashMap<_, _>>();
         let version_id = request.serving.champion_model_version_id();
-        let mut market_ids = BTreeSet::new();
         for row in request.online_inputs {
             if row.model_version_id != version_id {
                 return Err(determinism(format!(
@@ -1622,14 +1603,8 @@ impl DurableFeatureParitySource {
                     row.model_version_id
                 )));
             }
-            market_ids.insert(row.market_id.clone());
         }
-        if market_ids.is_empty() {
-            return Err(determinism(format!(
-                "serving run {} has no online model-input markets",
-                request.run.model_run_id
-            )));
-        }
+        let market_ids = request.vector_binding.keys().cloned().collect();
         verify_replay_contract(
             request.serving.active_version(),
             feature_schema_hash,
@@ -1673,12 +1648,13 @@ impl DurableFeatureParitySource {
             &outcomes,
         );
         let output = runtime.infer_batch(input).await?;
-        if output.input_audit.is_empty() {
-            return Err(determinism(format!(
-                "runtime {version_id} emitted no model-input audit rows"
-            )));
-        }
-        finish_replayed_model_output(&request, output.candidates, output.input_audit, outcomes)
+        finish_replayed_model_output(
+            &request,
+            &route.vectors,
+            output.candidates,
+            output.input_audit,
+            outcomes,
+        )
     }
 
     async fn factor_comparisons(
@@ -1744,6 +1720,31 @@ impl DurableFeatureParitySource {
     }
 }
 
+fn route_for_model(
+    config: &DecisionPolicySnapshot,
+    model_version_id: ModelVersionId,
+) -> QuantResult<BuyModelRoute> {
+    let mut routes = config
+        .model_routing
+        .model
+        .buy_routes
+        .iter()
+        .filter_map(|(route, binding)| {
+            (binding.champion.model_version_id == model_version_id).then_some(*route)
+        });
+    let route = routes.next().ok_or_else(|| {
+        determinism(format!(
+            "model {model_version_id} is not an active Route champion in the frozen policy"
+        ))
+    })?;
+    if routes.next().is_some() {
+        return Err(determinism(format!(
+            "model {model_version_id} is bound as champion for more than one Route"
+        )));
+    }
+    Ok(route)
+}
+
 fn resolve_route_inputs(
     market_ids: BTreeSet<MarketId>,
     market_by_id: &HashMap<MarketId, &SelectedMarket>,
@@ -1776,6 +1777,7 @@ fn resolve_route_inputs(
 
 fn finish_replayed_model_output(
     request: &ModelRouteReplayRequest<'_>,
+    vectors: &[FeatureVector],
     mut candidates: Vec<SignalCandidate>,
     input_audit: Vec<ModelInputAuditRow>,
     factor_outcomes: Vec<MarketFactorOutcome>,
@@ -1796,7 +1798,7 @@ fn finish_replayed_model_output(
     let input_rows = project_replay_rows(
         &request.run.model_run_id,
         request.boundary,
-        request.vectors,
+        vectors,
         request.vector_binding,
         &runtime_output.input_audit,
     )?;
@@ -1882,6 +1884,53 @@ impl FactorProjection {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+struct SelectionMemberProjection {
+    market_id: String,
+    event_id: String,
+    category: String,
+    primary_token_id: String,
+    secondary_token_id: Option<String>,
+    liquidity_usd: Option<String>,
+    volume_24h_usd: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SelectionHeaderProjection<'a> {
+    decision_at: DateTime<Utc>,
+    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
+    selector_hash: &'a ContentHash,
+    selector_evidence: &'a SelectorHashEvidence,
+    market_count: usize,
+    exclusion_summary: SelectionExclusionSummary,
+    membership_hash: ContentHash,
+}
+
+struct SelectorBinding<'a> {
+    provenance: &'static str,
+    selection_id: MarketSelectionId,
+    selector_hash: ContentHash,
+    evidence: &'a SelectorHashEvidence,
+}
+
+impl SelectorBinding<'_> {
+    fn validate(self) -> QuantResult<()> {
+        if self.evidence.selector_hash == self.selector_hash {
+            return Ok(());
+        }
+        Err(determinism(format!(
+            "{} selection {} selector evidence root {} does not match selector_hash {}",
+            self.provenance, self.selection_id, self.evidence.selector_hash, self.selector_hash
+        )))
+    }
+}
+
+#[derive(Serialize)]
+struct SelectionProjection<'a> {
+    header: &'a SelectionHeaderProjection<'a>,
+    member: Option<&'a SelectionMemberProjection>,
+}
+
 fn selection_comparisons(
     candidate: &FeatureParityCandidate,
     subject: ComparisonSubject<'_>,
@@ -1890,27 +1939,20 @@ fn selection_comparisons(
     replay: &MarketSelectionSnapshot,
     boundary: &DecisionBoundary,
 ) -> QuantResult<Vec<FeatureParityComparison>> {
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-    struct Member {
-        market_id: String,
-        event_id: String,
-        category: String,
-        primary_token_id: String,
-        secondary_token_id: Option<String>,
-        liquidity_usd: Option<String>,
-        volume_24h_usd: Option<String>,
+    SelectorBinding {
+        provenance: "persisted",
+        selection_id: online_selection.market_selection_id,
+        selector_hash: online_selection.selector_hash,
+        evidence: &online_selection.selector_evidence,
     }
-
-    #[derive(Serialize)]
-    struct SelectionProjection<'a> {
-        decision_at: DateTime<Utc>,
-        decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
-        selector_hash: &'a ContentHash,
-        market_count: usize,
-        exclusion_summary: SelectionExclusionSummary,
-        members: &'a [Member],
+    .validate()?;
+    SelectorBinding {
+        provenance: "replayed",
+        selection_id: replay.market_selection_id,
+        selector_hash: replay.selector_hash,
+        evidence: &replay.selector_evidence,
     }
-
+    .validate()?;
     let online_market_count = usize::try_from(online_selection.market_count).map_err(|error| {
         determinism(format!(
             "selection {} has invalid market_count {}: {error}",
@@ -1919,7 +1961,7 @@ fn selection_comparisons(
     })?;
     let mut online_projection_members = online_members
         .iter()
-        .map(|row| Member {
+        .map(|row| SelectionMemberProjection {
             market_id: row.market_id.to_string(),
             event_id: row.event_id.to_string(),
             category: row.category.to_string(),
@@ -1937,7 +1979,7 @@ fn selection_comparisons(
     let mut replay_members = replay
         .included
         .iter()
-        .map(|row| Member {
+        .map(|row| SelectionMemberProjection {
             market_id: row.market_id.to_string(),
             event_id: row.event_id.to_string(),
             category: row.category.to_string(),
@@ -1952,48 +1994,107 @@ fn selection_comparisons(
         })
         .collect::<Vec<_>>();
     replay_members.sort();
-    let online_projection = SelectionProjection {
+    if online_market_count != online_projection_members.len() {
+        return Err(determinism(format!(
+            "selection {} market_count {} differs from its {} persisted members",
+            online_selection.market_selection_id,
+            online_market_count,
+            online_projection_members.len()
+        )));
+    }
+    let online_market_ids = online_projection_members
+        .iter()
+        .map(|member| member.market_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let replay_market_ids = replay_members
+        .iter()
+        .map(|member| member.market_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if online_market_ids.len() != online_projection_members.len()
+        || replay_market_ids.len() != replay_members.len()
+    {
+        return Err(determinism(
+            "selection parity encountered duplicate market membership".to_owned(),
+        ));
+    }
+    let online_header = SelectionHeaderProjection {
         decision_at: online_selection.decision_at,
         decision_policy_snapshot_id: &online_selection.decision_policy_snapshot_id,
         selector_hash: &online_selection.selector_hash,
+        selector_evidence: &online_selection.selector_evidence,
         market_count: online_market_count,
         exclusion_summary: online_selection.exclusion_summary,
-        members: &online_projection_members,
+        membership_hash: ResearchHasher::canonical(&online_projection_members)?,
     };
-    let replay_projection = SelectionProjection {
+    let replay_header = SelectionHeaderProjection {
         decision_at: replay.decision_at,
         decision_policy_snapshot_id: &replay.decision_policy_snapshot_id,
         selector_hash: &replay.selector_hash,
+        selector_evidence: &replay.selector_evidence,
         market_count: replay.included.len(),
         exclusion_summary: replay.exclusion_summary,
-        members: &replay_members,
+        membership_hash: ResearchHasher::canonical(&replay_members)?,
     };
-    Ok(vec![comparison(ComparisonInput {
-        candidate,
-        stage: FeatureParityStage::Selection,
-        report_id: subject.report.copied(),
-        model_run_id: subject.model_run.copied(),
-        model_version_id: subject.model_version.copied(),
-        market_id: None,
-        feature_name: None,
-        online: canonical_evidence(&online_projection, None, boundary)?,
-        replay: canonical_evidence(&replay_projection, None, boundary)?,
-        transform_hash: None,
-        detail: FeatureParityDetailSource::Selection {
-            online_count: count(online_projection_members.len(), "selection online count")?,
-            replay_count: count(replay_members.len(), "selection replay count")?,
-            online_selector_hash: online_selection.selector_hash,
-            replay_selector_hash: replay.selector_hash,
-            replay_excluded_count: count(replay.excluded.len(), "selection replay excluded count")?,
-        },
-    })])
+    let online_count = count(online_projection_members.len(), "selection online count")?;
+    let replay_count = count(replay_members.len(), "selection replay count")?;
+    let replay_excluded_count = count(replay.excluded.len(), "selection replay excluded count")?;
+    let replay_by_market = replay_members
+        .iter()
+        .map(|member| (member.market_id.as_str(), member))
+        .collect::<BTreeMap<_, _>>();
+    let project = |market_id: Option<MarketId>,
+                   online_member: Option<&SelectionMemberProjection>,
+                   replay_member: Option<&SelectionMemberProjection>|
+     -> QuantResult<FeatureParityComparison> {
+        let online_projection = SelectionProjection {
+            header: &online_header,
+            member: online_member,
+        };
+        let replay_projection = SelectionProjection {
+            header: &replay_header,
+            member: replay_member,
+        };
+        Ok(comparison(ComparisonInput {
+            candidate,
+            stage: FeatureParityStage::Selection,
+            report_id: subject.report.copied(),
+            model_run_id: subject.model_run.copied(),
+            model_version_id: subject.model_version.copied(),
+            market_id,
+            feature_name: None,
+            online: canonical_evidence(&online_projection, None, boundary)?,
+            replay: canonical_evidence(&replay_projection, None, boundary)?,
+            transform_hash: None,
+            detail: FeatureParityDetailSource::Selection {
+                online_count,
+                replay_count,
+                selector_evidence: Box::new(SelectorParityEvidence {
+                    online: online_selection.selector_evidence,
+                    replay: replay.selector_evidence,
+                }),
+                replay_excluded_count,
+            },
+        }))
+    };
+    if online_projection_members.is_empty() {
+        return Ok(vec![project(None, None, None)?]);
+    }
+    online_projection_members
+        .iter()
+        .map(|member| {
+            project(
+                Some(MarketId::new(&member.market_id)),
+                Some(member),
+                replay_by_market.get(member.market_id.as_str()).copied(),
+            )
+        })
+        .collect()
 }
 
 fn data_quality_comparison(
     candidate: &FeatureParityCandidate,
     subject: ComparisonSubject<'_>,
     online_features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
-    admitted_binding: &HashMap<MarketId, FeatureVectorId>,
     replay_by_market: &HashMap<MarketId, FeatureVector>,
     boundary: &DecisionBoundary,
 ) -> QuantResult<FeatureParityComparison> {
@@ -2009,18 +2110,11 @@ fn data_quality_comparison(
         let first = rows
             .first()
             .ok_or_else(|| determinism(format!("feature evidence group {vector_id} is empty")))?;
-        if rows
-            .iter()
-            .any(|row| row.market_id != first.market_id || row.data_quality != first.data_quality)
-        {
-            return Err(determinism(format!(
-                "feature evidence group {vector_id} has inconsistent market or data-quality state"
-            )));
-        }
+        let data_quality = evidence_data_quality(vector_id, rows)?;
         online.push(DataQualityProjection {
             market_id: first.market_id.to_string(),
-            data_quality: first.data_quality.clone(),
-            admitted: admitted_binding.get(&first.market_id) == Some(vector_id),
+            data_quality: data_quality.to_string(),
+            admitted: data_quality != DataQualityStatus::Insufficient,
         });
     }
     online.sort();
@@ -2072,31 +2166,134 @@ impl ReplayCrossSection {
     }
 }
 
-fn replay_admission_matches(
-    model_vector_binding: &HashMap<MarketId, FeatureVectorId>,
-    replay: &MaterializedRunReplay,
+fn evidence_data_quality(
+    vector_id: &FeatureVectorId,
+    rows: &[QuantFeatureEventRow],
+) -> QuantResult<DataQualityStatus> {
+    let first = rows
+        .first()
+        .ok_or_else(|| determinism(format!("feature evidence group {vector_id} is empty")))?;
+    if rows
+        .iter()
+        .any(|row| row.feature_vector_id != *vector_id || row.data_quality != first.data_quality)
+    {
+        return Err(determinism(format!(
+            "feature evidence group {vector_id} has inconsistent vector/data-quality evidence"
+        )));
+    }
+    first
+        .data_quality
+        .parse::<DataQualityStatus>()
+        .map_err(|error| {
+            determinism(format!(
+                "feature evidence group {vector_id} has invalid data-quality state `{}`: {error}",
+                first.data_quality
+            ))
+        })
+}
+
+fn online_route_binding(
+    all_vectors: &HashMap<MarketId, FeatureVectorId>,
+    online_features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
+    members: &[MarketSelectionMemberInfo],
+    route: BuyModelRoute,
+) -> QuantResult<HashMap<MarketId, FeatureVectorId>> {
+    let mut member_by_market = HashMap::with_capacity(members.len());
+    for member in members {
+        if member_by_market
+            .insert(member.market_id.clone(), member)
+            .is_some()
+        {
+            return Err(determinism(format!(
+                "selection contains duplicate market {}",
+                member.market_id
+            )));
+        }
+    }
+
+    let mut binding = HashMap::new();
+    for (market_id, vector_id) in all_vectors {
+        let member = member_by_market.get(market_id).ok_or_else(|| {
+            determinism(format!(
+                "feature vector {vector_id} market {market_id} is absent from the frozen selection"
+            ))
+        })?;
+        if BuyModelRoute::from(member.category) != route {
+            continue;
+        }
+        let rows = online_features
+            .get(vector_id)
+            .ok_or_else(|| determinism(format!("online feature group {vector_id} disappeared")))?;
+        if evidence_data_quality(vector_id, rows)? != DataQualityStatus::Insufficient {
+            binding.insert(market_id.clone(), *vector_id);
+        }
+    }
+    if binding.is_empty() {
+        return Err(determinism(format!(
+            "successful serving run for route {} has no admitted feature-vector population",
+            route.as_str()
+        )));
+    }
+    Ok(binding)
+}
+
+fn validate_input_population(
+    model_inputs: &HashMap<MarketId, FeatureVectorId>,
+    route_vectors: &HashMap<MarketId, FeatureVectorId>,
+) -> QuantResult<()> {
+    for (market_id, vector_id) in model_inputs {
+        match route_vectors.get(market_id) {
+            Some(expected) if expected == vector_id => {}
+            Some(expected) => {
+                return Err(determinism(format!(
+                    "model-input market {market_id} uses vector {vector_id}, but its admitted route vector is {expected}"
+                )));
+            }
+            None => {
+                return Err(determinism(format!(
+                    "model-input market {market_id} is outside the admitted route population"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn route_admission_matches(
+    online: &HashMap<MarketId, FeatureVectorId>,
+    replay: &ReplayCrossSection,
+    route: BuyModelRoute,
 ) -> bool {
-    model_vector_binding.keys().collect::<BTreeSet<_>>()
+    online.keys().collect::<BTreeSet<_>>()
         == replay
-            .cross_section
-            .vectors
+            .markets
             .iter()
-            .map(|vector| &vector.market_id)
+            .filter(|market| BuyModelRoute::from(market.category) == route)
+            .map(|market| &market.market_id)
             .collect::<BTreeSet<_>>()
 }
 
-fn validate_replay_feature_population(
+fn replay_feature_population(
     selection_id: &MarketSelectionId,
     boundary: &DecisionBoundary,
     members: &[MarketSelectionMemberInfo],
     online_features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
     feature_infos: &HashMap<FeatureVectorId, FeatureVectorInfo>,
-) -> QuantResult<()> {
-    let member_markets = members
-        .iter()
-        .map(|member| member.market_id.clone())
-        .collect::<BTreeSet<_>>();
-    let mut vector_markets = BTreeSet::new();
+) -> QuantResult<Vec<ReplaySample>> {
+    let mut member_by_market = HashMap::with_capacity(members.len());
+    for member in members {
+        if member.market_selection_id != *selection_id
+            || member_by_market
+                .insert(member.market_id.clone(), member)
+                .is_some()
+        {
+            return Err(determinism(format!(
+                "selection {selection_id} contains a duplicate or foreign member {}",
+                member.market_id
+            )));
+        }
+    }
+    let mut samples_by_market = HashMap::with_capacity(feature_infos.len());
     for (vector_id, persisted) in feature_infos {
         let persisted_boundary = &persisted.decision_boundary;
         persisted_boundary.validate()?;
@@ -2115,22 +2312,72 @@ fn validate_replay_feature_population(
             .token_id
             .as_ref()
             .ok_or_else(|| determinism(format!("serving vector {vector_id} has no token id")))?;
-        let valid_binding = member_markets.contains(&first.market_id)
+        let member = member_by_market.get(&first.market_id).ok_or_else(|| {
+            determinism(format!(
+                "feature vector {vector_id} market {} is absent from selection {selection_id}",
+                first.market_id
+            ))
+        })?;
+        let valid_binding = member.primary_token_id == *token_id
             && persisted.market_id == first.market_id
             && persisted.token_id.as_ref() == Some(token_id)
-            && vector_markets.insert(first.market_id.clone());
+            && samples_by_market
+                .insert(
+                    first.market_id.clone(),
+                    ReplaySample {
+                        market_id: first.market_id.clone(),
+                        token_id: token_id.clone(),
+                    },
+                )
+                .is_none();
         if !valid_binding {
             return Err(determinism(format!(
                 "feature vector {vector_id} has a duplicate or inconsistent selection/market/token binding"
             )));
         }
     }
-    if vector_markets != member_markets {
+    if samples_by_market.len() != member_by_market.len() {
         return Err(determinism(format!(
             "selection {selection_id} members do not match its committed feature-vector population"
         )));
     }
-    Ok(())
+    members
+        .iter()
+        .map(|member| {
+            samples_by_market.remove(&member.market_id).ok_or_else(|| {
+                determinism(format!(
+                    "selection {selection_id} member {} has no committed feature vector",
+                    member.market_id
+                ))
+            })
+        })
+        .collect()
+}
+
+fn frozen_trade_tape_sources(
+    boundary: &DecisionBoundary,
+    online_features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
+    feature_infos: &HashMap<FeatureVectorId, FeatureVectorInfo>,
+) -> QuantResult<HashMap<MarketId, TradeTapeSourceEvidence>> {
+    let mut by_market = HashMap::with_capacity(feature_infos.len());
+    for (vector_id, info) in feature_infos {
+        let rows = online_features.get(vector_id).ok_or_else(|| {
+            determinism(format!(
+                "feature rows disappeared while freezing trade-tape evidence for vector {vector_id}"
+            ))
+        })?;
+        let capture = persisted_capture(info, rows, boundary)?;
+        if by_market
+            .insert(info.market_id.clone(), capture.trade_tape_source.clone())
+            .is_some()
+        {
+            return Err(determinism(format!(
+                "serving evidence contains duplicate trade-tape source snapshots for market {}",
+                info.market_id
+            )));
+        }
+    }
+    Ok(by_market)
 }
 
 fn snapshot_and_feature_comparisons(
@@ -2252,6 +2499,14 @@ fn feature_cell_comparisons(
                 online.feature_name
             ))
         })?;
+        if online.audit_fingerprint != replay.audit_fingerprint {
+            tracing::error!(
+                feature_vector_id = %vector_id,
+                feature_name = %online.feature_name,
+                differing_fields = ?feature_row_diff(online, replay),
+                "feature parity feature-row audit fields differ",
+            );
+        }
         comparisons.push(comparison(ComparisonInput {
             candidate,
             stage: FeatureParityStage::FeatureCell,
@@ -2269,6 +2524,74 @@ fn feature_cell_comparisons(
         }));
     }
     Ok(comparisons)
+}
+
+fn feature_row_diff(
+    online: &QuantFeatureEventRow,
+    replay: &QuantFeatureEventRow,
+) -> Vec<&'static str> {
+    [
+        ("event_time", online.event_time != replay.event_time),
+        (
+            "feature_vector_id",
+            online.feature_vector_id != replay.feature_vector_id,
+        ),
+        (
+            "decision_policy_snapshot_id",
+            online.decision_policy_snapshot_id != replay.decision_policy_snapshot_id,
+        ),
+        ("decision_at", online.decision_at != replay.decision_at),
+        (
+            "knowledge_cutoff",
+            online.knowledge_cutoff != replay.knowledge_cutoff,
+        ),
+        (
+            "per_source_cutoffs_json",
+            online.per_source_cutoffs_json != replay.per_source_cutoffs_json,
+        ),
+        ("market_id", online.market_id != replay.market_id),
+        ("token_id", online.token_id != replay.token_id),
+        (
+            "feature_schema_version",
+            online.feature_schema_version != replay.feature_schema_version,
+        ),
+        (
+            "feature_schema_hash",
+            online.feature_schema_hash != replay.feature_schema_hash,
+        ),
+        ("feature_hash", online.feature_hash != replay.feature_hash),
+        (
+            "decision_capture_hash",
+            online.decision_capture_hash != replay.decision_capture_hash,
+        ),
+        ("feature_name", online.feature_name != replay.feature_name),
+        ("cell_state", online.cell_state != replay.cell_state),
+        ("raw_value", online.raw_value != replay.raw_value),
+        ("value_kind", online.value_kind != replay.value_kind),
+        ("source_kind", online.source_kind != replay.source_kind),
+        (
+            "evidence_source_kind",
+            online.evidence_source_kind != replay.evidence_source_kind,
+        ),
+        (
+            "evidence_reference",
+            online.evidence_reference != replay.evidence_reference,
+        ),
+        (
+            "evidence_effective_at",
+            online.evidence_effective_at != replay.evidence_effective_at,
+        ),
+        (
+            "evidence_available_at",
+            online.evidence_available_at != replay.evidence_available_at,
+        ),
+        ("reason", online.reason != replay.reason),
+        ("staleness_ms", online.staleness_ms != replay.staleness_ms),
+        ("data_quality", online.data_quality != replay.data_quality),
+    ]
+    .into_iter()
+    .filter_map(|(field, differs)| differs.then_some(field))
+    .collect()
 }
 
 fn replay_feature_info(
@@ -2502,14 +2825,15 @@ fn model_input_evidence(row: &QuantModelInputEventRow) -> QuantResult<FeaturePar
 }
 
 fn boundary_from_online(
+    completion: &QuantServingEvidenceCompletionRow,
     inputs: &[QuantModelInputEventRow],
     features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
 ) -> QuantResult<DecisionBoundary> {
-    let first = inputs
-        .first()
-        .ok_or_else(|| determinism("model input group is empty".to_owned()))?;
-    let decision_at = required_millis(first.decision_at, "model input decision_at")?;
-    let knowledge_cutoff = required_millis(first.knowledge_cutoff, "model input cutoff")?;
+    let decision_at = required_millis(completion.decision_at, "serving completion decision_at")?;
+    let knowledge_cutoff = required_millis(
+        completion.knowledge_cutoff,
+        "serving completion knowledge_cutoff",
+    )?;
     let lag_ms = decision_at
         .signed_duration_since(knowledge_cutoff)
         .num_milliseconds();
@@ -2521,15 +2845,14 @@ fn boundary_from_online(
     let lag_secs = u64::try_from(lag_ms / 1_000)
         .map_err(|error| determinism(format!("knowledge lag conversion failed: {error}")))?;
     let mut boundary = DecisionClock::new(lag_secs).boundary(decision_at)?;
+    let first_vector_id = completion_vector_ids(completion)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| determinism("serving completion has no feature vectors".to_owned()))?;
     let feature = features
-        .get(&first.feature_vector_id)
+        .get(&first_vector_id)
         .and_then(|rows| rows.first())
-        .ok_or_else(|| {
-            determinism(format!(
-                "no feature boundary for vector {}",
-                first.feature_vector_id
-            ))
-        })?;
+        .ok_or_else(|| determinism(format!("no feature boundary for vector {first_vector_id}")))?;
     let cutoffs: BTreeMap<DecisionSource, DateTime<Utc>> =
         serde_json::from_str(&feature.per_source_cutoffs_json).map_err(|error| {
             ResearchError::Determinism {
@@ -2548,23 +2871,25 @@ fn boundary_from_online(
         boundary = boundary.with_source_cutoff(source, source_lag_secs)?;
     }
     for row in inputs {
-        if row.decision_at != first.decision_at || row.knowledge_cutoff != first.knowledge_cutoff {
+        if row.decision_at != completion.decision_at
+            || row.knowledge_cutoff != completion.knowledge_cutoff
+        {
             return Err(determinism(format!(
                 "model input run {} contains multiple decision boundaries",
-                first.model_run_id
+                completion.model_run_id
             )));
         }
     }
     let expected_source_cutoffs = &feature.per_source_cutoffs_json;
     for rows in features.values() {
         for row in rows {
-            if row.decision_at != first.decision_at
-                || row.knowledge_cutoff != first.knowledge_cutoff
+            if row.decision_at != completion.decision_at
+                || row.knowledge_cutoff != completion.knowledge_cutoff
                 || &row.per_source_cutoffs_json != expected_source_cutoffs
             {
                 return Err(determinism(format!(
                     "feature vector {} contains a boundary inconsistent with model run {}",
-                    row.feature_vector_id, first.model_run_id
+                    row.feature_vector_id, completion.model_run_id
                 )));
             }
         }
@@ -2604,66 +2929,6 @@ pub(crate) fn report_decision_boundary(
             .weather
             .availability_lag_secs,
     )
-}
-
-fn boundary_from_report_features(
-    report: &RecommendationReportInfo,
-    expected: &DecisionBoundary,
-    features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
-    infos: &HashMap<FeatureVectorId, FeatureVectorInfo>,
-) -> QuantResult<DecisionBoundary> {
-    if features.len() != infos.len() || infos.is_empty() {
-        return Err(determinism(format!(
-            "report {} feature evidence is empty or incomplete",
-            report.recommendation_report_id
-        )));
-    }
-    for (vector_id, info) in infos {
-        let boundary = &info.decision_boundary;
-        boundary.validate()?;
-        if boundary != expected || info.decision_at != report.decision_at {
-            return Err(determinism(format!(
-                "report {} vector {} boundary differs from its frozen report config",
-                report.recommendation_report_id, vector_id
-            )));
-        }
-        let rows = features.get(vector_id).ok_or_else(|| {
-            determinism(format!(
-                "report {} vector {} has no durable feature rows",
-                report.recommendation_report_id, vector_id
-            ))
-        })?;
-        if rows.is_empty() {
-            return Err(determinism(format!(
-                "report {} vector {} durable feature group is empty",
-                report.recommendation_report_id, vector_id
-            )));
-        }
-        for row in rows {
-            let cutoffs: BTreeMap<DecisionSource, DateTime<Utc>> =
-                serde_json::from_str(&row.per_source_cutoffs_json).map_err(|error| {
-                    ResearchError::Determinism {
-                        detail: format!(
-                            "report {} vector {} has invalid source cutoffs: {error}",
-                            report.recommendation_report_id, vector_id
-                        ),
-                    }
-                })?;
-            if row.feature_vector_id != *vector_id
-                || row.market_id != info.market_id
-                || row.token_id.as_ref() != info.token_id.as_ref()
-                || row.decision_at != expected.decision_at().timestamp_millis()
-                || row.knowledge_cutoff != expected.knowledge_cutoff().timestamp_millis()
-                || &cutoffs != expected.per_source_cutoffs()
-            {
-                return Err(determinism(format!(
-                    "report {} vector {} feature rows disagree with its PG boundary/identity",
-                    report.recommendation_report_id, vector_id
-                )));
-            }
-        }
-    }
-    Ok(expected.clone())
 }
 
 fn vector_binding(
@@ -2802,7 +3067,7 @@ fn unique_run_ids(candidates: &[FeatureParityCandidate]) -> Vec<ModelRunId> {
         .iter()
         .filter_map(|candidate| match &candidate.subject {
             FeatureParitySubject::ModelRun(run_id) => Some(*run_id),
-            FeatureParitySubject::PreInferenceReport(_) => None,
+            FeatureParitySubject::RecommendationReport(_) => None,
         })
         .collect::<HashSet<_>>()
         .into_iter()
@@ -2832,7 +3097,7 @@ fn group_candidates_by_report(
     let mut by_report: HashMap<RecommendationReportId, Vec<&FeatureParityCandidate>> =
         HashMap::new();
     for candidate in candidates {
-        if let FeatureParitySubject::PreInferenceReport(report_id) = &candidate.subject {
+        if let FeatureParitySubject::RecommendationReport(report_id) = &candidate.subject {
             by_report.entry(*report_id).or_default().push(candidate);
         }
     }
@@ -2858,11 +3123,7 @@ fn validate_run_completion<'a>(
             candidate.decision_at.timestamp_millis()
         )));
     }
-    let run_inputs = inputs_by_run.get(run_id).ok_or_else(|| {
-        determinism(format!(
-            "completed serving run {run_id} has no durable model-input rows"
-        ))
-    })?;
+    let run_inputs = inputs_by_run.get(run_id).map_or(&[][..], Vec::as_slice);
     let expected_feature_ids = completion_vector_ids(completion)?;
     let run_features = expected_feature_ids
         .iter()
@@ -2918,58 +3179,33 @@ fn validate_candidate_run(
     Ok(())
 }
 
-fn validate_report_run_binding(
+fn validate_route_run_binding(
     report: &RecommendationReportInfo,
+    route_run: &ReportRouteRunInfo,
     run: &ModelRunInfo,
 ) -> QuantResult<()> {
-    if report.model_run_id.as_ref() != Some(&run.model_run_id)
+    if route_run.report_run_id != report.report_run_id
+        || route_run.model_run_id.as_ref() != Some(&run.model_run_id)
+        || route_run.model_version_id != run.model_version_id
         || run.window_start != report.decision_at
         || run.decision_policy_snapshot_id != report.decision_policy_snapshot_id
-        || run.model_version_id.as_ref() != Some(&report.model_version_id)
         || run.market_selection_id.as_ref() != Some(&report.market_selection_id)
     {
         return Err(determinism(format!(
-            "report {} serving binding disagrees with model run {}",
-            report.recommendation_report_id, run.model_run_id
+            "report {} Route {:?} serving binding disagrees with model run {}",
+            report.recommendation_report_id, route_run.route, run.model_run_id
         )));
     }
     Ok(())
 }
 
-fn pre_inference_stage_ceiling(
-    report: &RecommendationReportInfo,
-) -> QuantResult<PreInferenceStageCeiling> {
-    if report.model_run_id.is_some() {
-        return Err(determinism(format!(
-            "report {} has a real model run and cannot be replayed as pre-inference",
-            report.recommendation_report_id
-        )));
-    }
-    match report.summary_json.empty_reason {
-        Some(EmptyReportReason::EmptySelection | EmptyReportReason::SystemDegraded) => {
-            Ok(PreInferenceStageCeiling::Selection)
-        }
-        Some(EmptyReportReason::InsufficientDataQuality) => Ok(PreInferenceStageCeiling::Feature),
-        Some(reason) => Err(determinism(format!(
-            "report {} stopped before inference with impossible empty reason {}",
-            report.recommendation_report_id,
-            reason.as_str()
-        ))),
-        None => Err(determinism(format!(
-            "report {} stopped before inference without a frozen empty reason",
-            report.recommendation_report_id
-        ))),
-    }
-}
-
-fn validate_pre_inference_report(
+fn validate_report_subject(
     report: &RecommendationReportInfo,
     parity_run: &FeatureParityRunInfo,
 ) -> QuantResult<()> {
-    pre_inference_stage_ceiling(report)?;
     if report.decision_at < parity_run.window_start || report.decision_at >= parity_run.window_end {
         return Err(determinism(format!(
-            "pre-inference report {} decision time {} is outside parity window [{}, {})",
+            "global report {} decision time {} is outside parity window [{}, {})",
             report.recommendation_report_id,
             report.decision_at,
             parity_run.window_start,
@@ -2977,23 +3213,23 @@ fn validate_pre_inference_report(
         )));
     }
     if parity_run
-        .model_version_id
+        .report_id
         .as_ref()
-        .is_some_and(|expected| expected != &report.model_version_id)
+        .is_some_and(|expected| expected != &report.recommendation_report_id)
     {
         return Err(determinism(format!(
-            "pre-inference report {} does not match parity model-version scope",
+            "global report {} does not match parity report scope",
             report.recommendation_report_id
         )));
     }
     Ok(())
 }
 
-fn validate_pre_inference_evidence(
+fn validate_quality_evidence(
     report: &RecommendationReportInfo,
     members: &[MarketSelectionMemberInfo],
     dq: &ReportDataQualitySnapshotInfo,
-) -> QuantResult<PreInferenceStageCeiling> {
+) -> QuantResult<()> {
     let wrong_snapshot = dq.report_data_quality_snapshot_id != report.data_quality_snapshot_ref;
     let wrong_decision = dq.decision_at != report.decision_at;
     let wrong_config = dq.decision_policy_snapshot_id != report.decision_policy_snapshot_id;
@@ -3003,7 +3239,6 @@ fn validate_pre_inference_evidence(
             report.recommendation_report_id
         )));
     }
-    let ceiling = pre_inference_stage_ceiling(report)?;
     let member_markets = members
         .iter()
         .map(|member| member.market_id.clone())
@@ -3014,52 +3249,32 @@ fn validate_pre_inference_evidence(
             report.recommendation_report_id
         )));
     }
-    match ceiling {
-        PreInferenceStageCeiling::Selection => {
-            if !dq.tokens_json.0.is_empty() {
-                return Err(determinism(format!(
-                    "selection-only report {} carries feature/DQ vector bindings",
-                    report.recommendation_report_id
-                )));
-            }
-            if report.summary_json.empty_reason == Some(EmptyReportReason::EmptySelection)
-                && !member_markets.is_empty()
-            {
-                return Err(determinism(format!(
-                    "empty-selection report {} has persisted selection members",
-                    report.recommendation_report_id
-                )));
-            }
-        }
-        PreInferenceStageCeiling::Feature => {
-            let mut vector_ids = HashSet::new();
-            let mut dq_markets = BTreeSet::new();
-            for record in &dq.tokens_json.0 {
-                let feature_vector_id = record.feature_vector_id.as_ref().ok_or_else(|| {
-                    determinism(format!(
-                        "feature-stage report {} contains legacy-unbound DQ evidence",
-                        report.recommendation_report_id
-                    ))
-                })?;
-                if !vector_ids.insert(*feature_vector_id)
-                    || !dq_markets.insert(record.market_id.clone())
-                    || record.status != DataQualityStatus::Insufficient
-                {
-                    return Err(determinism(format!(
-                        "feature-stage report {} has duplicate or non-rejected DQ evidence",
-                        report.recommendation_report_id
-                    )));
-                }
-            }
-            if dq_markets != member_markets || dq_markets.is_empty() {
-                return Err(determinism(format!(
-                    "feature-stage report {} DQ vectors do not exactly cover its selection",
-                    report.recommendation_report_id
-                )));
-            }
+    let mut vector_ids = HashSet::new();
+    let mut token_ids = HashSet::new();
+    for record in &dq.tokens_json.0 {
+        let feature_vector_id = record.feature_vector_id.as_ref().ok_or_else(|| {
+            determinism(format!(
+                "global report {} contains unbound DQ evidence for market {}",
+                report.recommendation_report_id, record.market_id
+            ))
+        })?;
+        if !member_markets.contains(&record.market_id)
+            || !vector_ids.insert(*feature_vector_id)
+            || !token_ids.insert(record.token_id.clone())
+        {
+            return Err(determinism(format!(
+                "global report {} has duplicate or out-of-selection DQ evidence",
+                report.recommendation_report_id
+            )));
         }
     }
-    Ok(ceiling)
+    if member_markets.is_empty() && !dq.tokens_json.0.is_empty() {
+        return Err(determinism(format!(
+            "empty global report selection {} carries DQ rows",
+            report.recommendation_report_id
+        )));
+    }
+    Ok(())
 }
 
 fn validate_report_selection_binding(
@@ -3070,40 +3285,9 @@ fn validate_report_selection_binding(
         || selection.decision_policy_snapshot_id != report.decision_policy_snapshot_id
     {
         return Err(determinism(format!(
-            "selection {} is not bound to pre-inference report {} decision/config",
+            "selection {} is not bound to global report {} decision/config",
             selection.market_selection_id, report.recommendation_report_id
         )));
-    }
-    Ok(())
-}
-
-fn validate_report_dq_bindings(
-    report: &RecommendationReportInfo,
-    dq: &ReportDataQualitySnapshotInfo,
-    infos: &HashMap<FeatureVectorId, FeatureVectorInfo>,
-) -> QuantResult<()> {
-    for record in &dq.tokens_json.0 {
-        let feature_vector_id = record.feature_vector_id.as_ref().ok_or_else(|| {
-            determinism(format!(
-                "report {} contains legacy-unbound DQ evidence for market {}",
-                report.recommendation_report_id, record.market_id
-            ))
-        })?;
-        let info = infos.get(feature_vector_id).ok_or_else(|| {
-            determinism(format!(
-                "report {} DQ binding references missing vector {}",
-                report.recommendation_report_id, feature_vector_id
-            ))
-        })?;
-        if info.market_id != record.market_id
-            || info.token_id.as_ref() != Some(&record.token_id)
-            || info.data_quality != record.status
-        {
-            return Err(determinism(format!(
-                "report {} DQ binding disagrees with vector {} identity/state",
-                report.recommendation_report_id, feature_vector_id
-            )));
-        }
     }
     Ok(())
 }
@@ -3164,32 +3348,6 @@ fn pending_completion(
         .collect()
 }
 
-fn pending_report_features(
-    report_id: &RecommendationReportId,
-    model_version_id: &ModelVersionId,
-    candidates: &[&FeatureParityCandidate],
-    reason: &str,
-) -> Vec<PendingFeatureParityComparison> {
-    candidates
-        .iter()
-        .map(|candidate| PendingFeatureParityComparison {
-            sampling_key: candidate.sampling_key.clone(),
-            decision_at: candidate.decision_at,
-            stage: FeatureParityStage::FeatureCell,
-            report_id: Some(*report_id),
-            model_run_id: None,
-            model_version_id: Some(*model_version_id),
-            training_dataset_id: None,
-            market_id: candidate.market_id.clone(),
-            feature_name: None,
-            reason: reason.to_owned(),
-            online: None,
-            required_watermark: candidate.decision_at,
-            observed_watermark: None,
-        })
-        .collect()
-}
-
 fn select_comparisons(
     subject: &str,
     candidates: &[&FeatureParityCandidate],
@@ -3210,12 +3368,11 @@ fn select_comparisons(
         }
         if selected_count == 0 {
             return Err(determinism(format!(
-                "replay produced no comparison for sampled market {} in run {run_id}",
+                "replay produced no comparison for sampled market {} in subject {subject}",
                 selected
                     .market_id
                     .as_ref()
                     .map_or("<empty-selection>", MarketId::as_str),
-                run_id = subject
             )));
         }
     }
@@ -3294,32 +3451,42 @@ fn determinism(detail: String) -> QuantError {
 
 #[cfg(test)]
 mod tests {
-    use std::slice;
+    use std::{collections::HashMap, slice};
 
     use chrono::{DateTime, Utc};
     use quant_pivot_models::{
+        clickhouse::{QuantFeatureEventRow, QuantModelInputEventRow},
+        domain::data_plane::DecisionClock,
         domain::quant::{MarketSelectionMemberInfo, ReportDataQualitySnapshotInfo},
         enums::{
+            clickhouse::{ChFeatureCellState, ChFeatureSourceKind, ChFeatureValueKind},
             common::MarketCategory,
             factor::FactorFamily,
             market::MarketStatus,
             quant::{RecommendationReportStatus, ReportKind},
         },
-        runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
+        runtime_config::{BuyModelRoute, DomainConfig, FactorsConfig, FeaturesConfig},
         types::{
-            EventId, FeatureParityDetailSource, FeatureVectorId, ReportDataQualityTokens,
-            TokenDataQualityRecord, TokenId, Usd,
+            DecisionPolicySnapshotId, EventId, FeatureParityDetailSource, FeatureVectorId,
+            MarketSelectionId, ModelVersionId, ReportDataQualityTokens, TokenDataQualityRecord,
+            TokenId, Usd,
         },
     };
     use rust_decimal_macros::dec;
 
     use super::{
-        DataQualityStatus, EmptyReportReason, FactorEngine, FeatureParityCandidate,
-        FeatureParityComparison, FeatureParityEvidence, FeatureParityStage, FeatureParitySubject,
-        MarketId, ModelRunId, PreInferenceStageCeiling, RecommendationReportId, pending_completion,
-        representative_candidate, select_comparisons, validate_pre_inference_evidence,
+        DataQualityStatus, FactorEngine, FeatureParityCandidate, FeatureParityComparison,
+        FeatureParityEvidence, FeatureParityStage, FeatureParitySubject, MarketId, ModelRunId,
+        RecommendationReportId, boundary_from_online, feature_vector_binding, online_route_binding,
+        pending_completion, representative_candidate, select_comparisons,
+        validate_input_population, validate_quality_evidence, validate_run_completion,
     };
-    use crate::test_fixtures::report_fixtures;
+    use crate::{
+        observability::serving_evidence::{
+            SERVING_EVIDENCE_FORMAT_VERSION, completion_marker, feature_commitment,
+        },
+        test_fixtures::report_fixtures,
+    };
 
     fn candidate(
         run_id: &ModelRunId,
@@ -3366,6 +3533,226 @@ mod tests {
                 feature_vector_id: FeatureVectorId::from_v7(),
             },
         }
+    }
+
+    fn feature_row(
+        vector_id: &FeatureVectorId,
+        market_id: &MarketId,
+        decision_at: i64,
+    ) -> QuantFeatureEventRow {
+        QuantFeatureEventRow {
+            event_time: decision_at,
+            feature_vector_id: *vector_id,
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            decision_at,
+            knowledge_cutoff: decision_at,
+            per_source_cutoffs_json: "{}".to_owned(),
+            market_id: market_id.clone(),
+            token_id: None,
+            feature_schema_version: 1,
+            feature_schema_hash: "schema".to_owned(),
+            feature_hash: "feature".to_owned(),
+            decision_capture_hash: "capture".to_owned(),
+            feature_name: "book.best_bid".to_owned(),
+            cell_state: ChFeatureCellState::Observed,
+            raw_value: Some("0.5".to_owned()),
+            value_kind: ChFeatureValueKind::Probability,
+            source_kind: ChFeatureSourceKind::Book,
+            evidence_source_kind: Some(ChFeatureSourceKind::Book),
+            evidence_reference: Some("book:token".to_owned()),
+            evidence_effective_at: Some(decision_at),
+            evidence_available_at: None,
+            reason: None,
+            staleness_ms: Some(0),
+            data_quality: "fresh".to_owned(),
+            audit_fingerprint: "feature-fingerprint".to_owned(),
+            ingestion_time: decision_at + 1,
+        }
+    }
+
+    fn input_row(
+        run_id: &ModelRunId,
+        vector_id: &FeatureVectorId,
+        market_id: &MarketId,
+        decision_at: i64,
+    ) -> QuantModelInputEventRow {
+        QuantModelInputEventRow {
+            event_time: decision_at,
+            format_version: SERVING_EVIDENCE_FORMAT_VERSION,
+            decision_at,
+            knowledge_cutoff: decision_at,
+            model_run_id: *run_id,
+            model_version_id: ModelVersionId::from_v7(),
+            market_id: market_id.clone(),
+            feature_vector_id: *vector_id,
+            model_family: "classical_logistic".to_owned(),
+            raw_input_name: "book.best_bid".to_owned(),
+            raw_state: "observed".to_owned(),
+            raw_value: Some("0.5".to_owned()),
+            encoded_column: "book.best_bid.value".to_owned(),
+            encoded_value_bits: Some(0.5_f64.to_bits()),
+            input_contract_hash: "contract".to_owned(),
+            transform_hash: "transform".to_owned(),
+            training_input_hash: "training".to_owned(),
+            audit_fingerprint: "input-fingerprint".to_owned(),
+            ingestion_time: decision_at + 2,
+        }
+    }
+
+    #[test]
+    fn zero_inputs_complete() {
+        let decision_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+            .expect("millisecond decision time");
+        let boundary = DecisionClock::new(0)
+            .boundary(decision_at)
+            .expect("decision boundary");
+        let run_id = ModelRunId::from_v7();
+        let vector_id = FeatureVectorId::from_v7();
+        let market_id = MarketId::new("zero-input-market");
+        let row = feature_row(&vector_id, &market_id, decision_at.timestamp_millis());
+        let feature_rows = vec![row];
+        let feature_evidence = feature_commitment(&feature_rows).expect("feature commitment");
+        let completion = completion_marker(&run_id, &boundary, &feature_evidence, &[], 1)
+            .expect("zero-input completion");
+        let inputs_by_run = HashMap::new();
+        let features_by_vector = HashMap::from([(vector_id, feature_rows)]);
+        let candidate = candidate(&run_id, market_id.as_str(), decision_at);
+
+        let inputs = validate_run_completion(
+            &run_id,
+            &candidate,
+            &completion,
+            &inputs_by_run,
+            &features_by_vector,
+        )
+        .expect("valid zero-input serving completion");
+
+        assert!(inputs.is_empty());
+        assert_eq!(
+            boundary_from_online(&completion, inputs, &features_by_vector)
+                .expect("boundary from feature evidence"),
+            boundary
+        );
+    }
+
+    #[test]
+    fn missing_inputs_rejected() {
+        let decision_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+            .expect("millisecond decision time");
+        let boundary = DecisionClock::new(0)
+            .boundary(decision_at)
+            .expect("decision boundary");
+        let run_id = ModelRunId::from_v7();
+        let vector_id = FeatureVectorId::from_v7();
+        let market_id = MarketId::new("missing-input-market");
+        let row = feature_row(&vector_id, &market_id, decision_at.timestamp_millis());
+        let feature_rows = vec![row];
+        let feature_evidence = feature_commitment(&feature_rows).expect("feature commitment");
+        let expected_inputs = vec![input_row(
+            &run_id,
+            &vector_id,
+            &market_id,
+            decision_at.timestamp_millis(),
+        )];
+        let completion =
+            completion_marker(&run_id, &boundary, &feature_evidence, &expected_inputs, 1)
+                .expect("non-empty completion");
+        let inputs_by_run = HashMap::new();
+        let features_by_vector = HashMap::from([(vector_id, feature_rows)]);
+        let candidate = candidate(&run_id, market_id.as_str(), decision_at);
+
+        let error = validate_run_completion(
+            &run_id,
+            &candidate,
+            &completion,
+            &inputs_by_run,
+            &features_by_vector,
+        )
+        .expect_err("missing committed inputs must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("durable model-input evidence does not match completion marker")
+        );
+    }
+
+    #[test]
+    fn zero_audit_retains_route() {
+        let decision_at = Utc::now().timestamp_millis();
+        let selection_id = MarketSelectionId::from_v7();
+        let pooled_market = MarketId::new("pooled-admitted");
+        let weather_market = MarketId::new("weather-admitted");
+        let rejected_market = MarketId::new("pooled-rejected");
+        let pooled_vector = FeatureVectorId::from_v7();
+        let weather_vector = FeatureVectorId::from_v7();
+        let rejected_vector = FeatureVectorId::from_v7();
+        let pooled_rows = vec![feature_row(&pooled_vector, &pooled_market, decision_at)];
+        let weather_rows = vec![feature_row(&weather_vector, &weather_market, decision_at)];
+        let mut rejected_rows = vec![feature_row(&rejected_vector, &rejected_market, decision_at)];
+        rejected_rows[0].data_quality = DataQualityStatus::Insufficient.to_string();
+        let online_features = HashMap::from([
+            (pooled_vector, pooled_rows),
+            (weather_vector, weather_rows),
+            (rejected_vector, rejected_rows),
+        ]);
+        let all_vectors =
+            feature_vector_binding(&online_features).expect("complete feature-vector binding");
+        let members = vec![
+            MarketSelectionMemberInfo {
+                market_selection_id: selection_id,
+                market_id: pooled_market.clone(),
+                event_id: EventId::new("pooled-event"),
+                category: MarketCategory::Politics,
+                status: MarketStatus::Active,
+                primary_token_id: TokenId::new("pooled-token"),
+                secondary_token_id: None,
+                liquidity_usd: None,
+                volume_24h_usd: None,
+            },
+            MarketSelectionMemberInfo {
+                market_selection_id: selection_id,
+                market_id: weather_market.clone(),
+                event_id: EventId::new("weather-event"),
+                category: MarketCategory::Weather,
+                status: MarketStatus::Active,
+                primary_token_id: TokenId::new("weather-token"),
+                secondary_token_id: None,
+                liquidity_usd: None,
+                volume_24h_usd: None,
+            },
+            MarketSelectionMemberInfo {
+                market_selection_id: selection_id,
+                market_id: rejected_market,
+                event_id: EventId::new("rejected-event"),
+                category: MarketCategory::Politics,
+                status: MarketStatus::Active,
+                primary_token_id: TokenId::new("rejected-token"),
+                secondary_token_id: None,
+                liquidity_usd: None,
+                volume_24h_usd: None,
+            },
+        ];
+
+        let route_vectors = online_route_binding(
+            &all_vectors,
+            &online_features,
+            &members,
+            BuyModelRoute::Pooled,
+        )
+        .expect("pooled admitted route binding");
+
+        assert_eq!(route_vectors.len(), 1);
+        assert_eq!(route_vectors.get(&pooled_market), Some(&pooled_vector));
+        validate_input_population(&HashMap::new(), &route_vectors)
+            .expect("zero audit rows are valid for an admitted route population");
+        assert!(
+            validate_input_population(
+                &HashMap::from([(weather_market, weather_vector)]),
+                &route_vectors,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3466,15 +3853,13 @@ mod tests {
     }
 
     #[test]
-    fn pre_inference_requires_evidence() {
+    fn global_report_requires_quality() {
         let report_id = RecommendationReportId::from_v7();
-        let mut report = report_fixtures::report(
+        let report = report_fixtures::report(
             report_id,
             ReportKind::TopN,
             RecommendationReportStatus::Published,
         );
-        report.model_run_id = None;
-        report.summary_json.empty_reason = Some(EmptyReportReason::SystemDegraded);
         let member = MarketSelectionMemberInfo {
             market_selection_id: report.market_selection_id,
             market_id: MarketId::new("0xreal"),
@@ -3493,32 +3878,25 @@ mod tests {
             tokens_json: ReportDataQualityTokens(Vec::new()),
             created_at: report.created_at,
         };
-        assert_eq!(
-            validate_pre_inference_evidence(&report, slice::from_ref(&member), &dq)
-                .expect("selection-only evidence"),
-            PreInferenceStageCeiling::Selection
-        );
+        validate_quality_evidence(&report, slice::from_ref(&member), &dq)
+            .expect("selection evidence may precede feature materialization");
 
-        report.summary_json.empty_reason = Some(EmptyReportReason::InsufficientDataQuality);
         let feature_vector_id = FeatureVectorId::from_v7();
         dq.tokens_json = ReportDataQualityTokens(vec![TokenDataQualityRecord {
             feature_vector_id: Some(feature_vector_id),
             token_id: member.primary_token_id.clone(),
             market_id: member.market_id.clone(),
-            status: DataQualityStatus::Insufficient,
+            status: DataQualityStatus::Fresh,
             book_age_ms: 0,
             crossed: false,
             empty: true,
             fact_lag_ms: None,
             missing_required: vec!["book.best_ask".to_owned()],
         }]);
-        assert_eq!(
-            validate_pre_inference_evidence(&report, &[member], &dq)
-                .expect("feature-stage evidence"),
-            PreInferenceStageCeiling::Feature
-        );
+        validate_quality_evidence(&report, slice::from_ref(&member), &dq)
+            .expect("bound global DQ evidence");
 
-        dq.tokens_json.0[0].status = DataQualityStatus::Fresh;
-        assert!(validate_pre_inference_evidence(&report, &[], &dq).is_err());
+        dq.tokens_json.0[0].market_id = MarketId::new("outside-selection");
+        assert!(validate_quality_evidence(&report, &[member], &dq).is_err());
     }
 }

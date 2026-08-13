@@ -82,7 +82,7 @@ pub struct ShadowComparisonRequest<'a> {
 
 /// Compute the active-vs-shadow comparison at the signal/rank layer.
 ///
-/// `top_n` bounds the `TopN` overlap set (by `rank_before_portfolio`);
+/// `top_n` bounds the Route-local `TopN` overlap set (by `route_rank`);
 /// `score_divergence_threshold` (the governed `shadow_diff_threshold`) flips
 /// `hard_divergence` when the mean absolute score delta exceeds it.
 ///
@@ -213,7 +213,7 @@ fn index_by_market(candidates: &[SignalCandidate]) -> BTreeMap<String, Ranked> {
             (
                 candidate.market_id.to_string(),
                 Ranked {
-                    rank: candidate.rank_before_portfolio,
+                    rank: candidate.route_rank,
                     score: candidate.composite_score.inner(),
                     outcome_side: candidate.outcome_side,
                 },
@@ -246,14 +246,12 @@ fn topn_decision_overlap(
     ))
 }
 
-/// Signed decisions ranked within the `TopN` (`rank_before_portfolio <= top_n`).
+/// Signed decisions ranked within the Route-local `TopN` (`route_rank <= top_n`).
 fn top_decisions(candidates: &[SignalCandidate], top_n: usize) -> BTreeSet<(String, i8)> {
     let bound = u32::try_from(top_n).unwrap_or(u32::MAX);
     candidates
         .iter()
-        .filter(|candidate| {
-            candidate.rank_before_portfolio >= 1 && candidate.rank_before_portfolio <= bound
-        })
+        .filter(|candidate| candidate.route_rank >= 1 && candidate.route_rank <= bound)
         .map(|candidate| {
             (
                 candidate.market_id.to_string(),
@@ -304,7 +302,7 @@ mod tests {
             confidence: Probability::new(dec!(0.8)),
             expected_return_bps: dec!(100),
             downside_bps: dec!(50),
-            win_probability: None,
+            payout_distribution: None,
             entry_price_ref: Price::new(dec!(0.5)),
             suggested_horizon_secs: 3_600,
             factor_breakdown: Vec::new(),
@@ -314,7 +312,7 @@ mod tests {
                 top_negative: Vec::new(),
             },
             rejection_warnings: Vec::new(),
-            rank_before_portfolio: rank,
+            route_rank: rank,
             liquidity_score: Probability::ZERO,
             data_quality_score: Probability::ZERO,
             model_score_percentile: Probability::ZERO,
@@ -366,7 +364,7 @@ mod tests {
             .map(|c| {
                 candidate(
                     c.market_id.as_str(),
-                    c.rank_before_portfolio,
+                    c.route_rank,
                     c.composite_score.inner(),
                     c.outcome_side,
                 )

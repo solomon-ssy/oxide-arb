@@ -36,7 +36,7 @@ use quant_pivot_models::{
         CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, DecisionCaptureEvidence,
         DecisionPolicySnapshotId, DecisionSnapshotEvidence, EventId, MarketContext, MarketId,
         Price, Probability, RecommendationIdentity, SchemaVersion, SelectionMemberEvidence, Shares,
-        TokenId, Usd,
+        TokenId, TradeTapeSourceEvidence, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -703,6 +703,7 @@ fn test_decision_capture(
                 source_refs: Vec::new(),
             },
         },
+        trade_tape_source: TradeTapeSourceEvidence::not_required(),
         identity: RecommendationIdentity {
             category: MarketCategory::Other,
             question: "test question".to_owned(),

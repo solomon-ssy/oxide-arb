@@ -116,7 +116,7 @@ pub struct MetricsHub {
     pub ws_events_received: IntCounter,
     pub book_snapshots_applied: IntCounter,
     pub price_changes_applied: IntCounter,
-    pub ws_session_backpressure_invalidations: IntCounter,
+    pub ws_session_invalidated_tokens: IntCounter,
     pub ws_fanout_best_effort_dropped: IntCounter,
     pub ws_fanout_best_effort_coalesced: IntCounter,
     pub ws_fanout_reliable_disconnects: IntCounter,
@@ -284,7 +284,7 @@ struct PipelineMetrics {
     ws_events_received: IntCounter,
     book_snapshots_applied: IntCounter,
     price_changes_applied: IntCounter,
-    ws_session_backpressure_invalidations: IntCounter,
+    ws_session_invalidated_tokens: IntCounter,
     ws_fanout_best_effort_dropped: IntCounter,
     ws_fanout_best_effort_coalesced: IntCounter,
     ws_fanout_reliable_disconnects: IntCounter,
@@ -414,10 +414,10 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
             "quant_pivot_pipeline_price_changes_applied_total",
             "Price-change events applied"
         ),
-        ws_session_backpressure_invalidations: register_counter!(
+        ws_session_invalidated_tokens: register_counter!(
             registry,
-            "quant_pivot_ws_session_backpressure_invalidations_total",
-            "WebSocket sessions invalidated after bounded output enqueue timeout"
+            "quant_pivot_ws_session_invalidated_tokens_total",
+            "Tokens invalidated immediately when a WebSocket session loses continuity"
         ),
         ws_fanout_best_effort_dropped: register_counter!(
             registry,
@@ -669,8 +669,8 @@ fn register_report_metrics(registry: &Registry) -> ReportMetrics {
         current_age: register_gauge_vec!(
             registry,
             "quant_pivot_report_current_age_seconds",
-            "Age of each scope's current Published report",
-            &["profile_id", "report_kind"]
+            "Age of the global current Published report",
+            &["scope", "report_kind"]
         ),
         expire_swept: register_counter!(
             registry,
@@ -992,7 +992,7 @@ impl MetricsHub {
             ws_events_received: pipeline.ws_events_received,
             book_snapshots_applied: pipeline.book_snapshots_applied,
             price_changes_applied: pipeline.price_changes_applied,
-            ws_session_backpressure_invalidations: pipeline.ws_session_backpressure_invalidations,
+            ws_session_invalidated_tokens: pipeline.ws_session_invalidated_tokens,
             ws_fanout_best_effort_dropped: pipeline.ws_fanout_best_effort_dropped,
             ws_fanout_best_effort_coalesced: pipeline.ws_fanout_best_effort_coalesced,
             ws_fanout_reliable_disconnects: pipeline.ws_fanout_reliable_disconnects,
@@ -1425,7 +1425,7 @@ mod tests {
             .inc();
         hub.report_prepared_backlog.set(2);
         hub.report_current_age_seconds
-            .with_label_values(&["weather_forecast_24h", "top_n"])
+            .with_label_values(&["global", "top_n"])
             .set(60);
         hub.inc_fact_claim_lost("verify", "cancelled");
         hub.inc_fact_worker_error("process_one");
@@ -1445,7 +1445,7 @@ mod tests {
             assert!(body.contains(name), "missing metric {name}");
         }
         assert!(body.contains(r#"reason="build_failed""#));
-        assert!(body.contains(r#"profile_id="weather_forecast_24h""#));
+        assert!(body.contains(r#"scope="global""#));
     }
 
     #[test]

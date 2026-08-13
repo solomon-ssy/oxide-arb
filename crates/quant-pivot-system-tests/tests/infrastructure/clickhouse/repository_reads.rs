@@ -7,11 +7,10 @@ use clickhouse::Client;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, ChDecimal64, ChDigest, ChPrice, ChProbability,
-        ChSchemaVersion, ChShares, ChUsd, EntryConditionEvaluationEventRow,
-        MarketResolutionFactInput, MarketResolutionRow, QuantFeatureParityEventRow,
-        QuantReportRecommendationFactRow, ReportMarketFunnelRow, TradeTapeRow,
-        WeatherForecastFactRow, WeatherObservationFactRow,
+        BookL2LedgerRow, BookMicrostructureRow, ChDecimal64, ChDigest, ChPrice, ChSchemaVersion,
+        ChShares, ChUsd, EntryConditionEvaluationEventRow, MarketResolutionFactInput,
+        MarketResolutionRow, QuantFeatureParityEventRow, QuantReportRecommendationFactRow,
+        ReportMarketFunnelRow, TradeTapeRow, WeatherForecastFactRow, WeatherObservationFactRow,
     },
     domain::api::FeatureParityEventListQuery,
     enums::clickhouse::{
@@ -19,10 +18,10 @@ use quant_pivot_models::{
         ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
     },
     types::{
-        ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId,
+        ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId, EconomicTierId,
         EntryConditionInstanceId, EventId, EvmBlockHash, EvmTransactionHash, FeatureParityEventId,
         FeatureParityRunId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PayoutRatio,
-        Price, RecommendationId, RecommendationReportId, Shares, TokenId, Usd,
+        Price, RecommendationId, RecommendationReportId, ReportRouteRunId, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -166,20 +165,27 @@ async fn insert_recommendation_revisions(
         event_time: now,
         recommendation_report_id: report_id.to_owned(),
         recommendation_id: recommendation_id.to_owned(),
+        report_route_run_id: ReportRouteRunId::from_v7(),
+        economic_tier_id: EconomicTierId::from_v7(),
+        route: "pooled".to_owned(),
         rank: 2,
         market_id: market_id.to_owned(),
         token_id: token_id.to_owned(),
         side: ChOutcomeSide::Yes,
-        score: ChProbability::from(Decimal::new(60, 2)),
-        risk_adjusted_score: ChProbability::from(Decimal::new(55, 2)),
-        trade_plan_available: false,
-        suggested_usd: None,
+        profit_probability_bps: 6_000,
+        nominal_expected_net_usd: ChUsd::from(Usd::new(Decimal::new(20, 0))),
+        robust_expected_net_usd: ChUsd::from(Usd::new(Decimal::new(15, 0))),
+        max_loss_usd: ChUsd::from(Usd::new(Decimal::new(25, 0))),
+        cvar_contribution_usd: ChUsd::from(Usd::new(Decimal::new(10, 0))),
+        capital_occupancy_usd_hours: ChUsd::from(Usd::new(Decimal::new(100, 0))),
+        marginal_portfolio_value_usd: ChUsd::from(Usd::new(Decimal::new(12, 0))),
+        suggested_usd: ChUsd::from(Usd::new(Decimal::new(25, 0))),
         valid_until: now + 60_000,
     };
     let revised_recommendation = QuantReportRecommendationFactRow {
         event_time: now + 1,
         rank: 1,
-        score: ChProbability::from(Decimal::new(70, 2)),
+        profit_probability_bps: 7_000,
         ..recommendation.clone()
     };
     let mut original_insert = client
@@ -220,11 +226,10 @@ async fn insert_funnel_revisions(
         event_time: now,
         recommendation_report_id: report_id.to_owned(),
         market_selection_id: MarketSelectionId::from_v7(),
-        profile_id: "replacing-contract".to_owned(),
-        profile_version: 1,
-        profile_content_hash: content_hash('1').to_string(),
         decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-        model_version_id: ModelVersionId::from_v7(),
+        report_route_run_id: Some(ReportRouteRunId::from_v7()),
+        route: Some("pooled".to_owned()),
+        model_version_id: Some(ModelVersionId::from_v7()),
         model_run_id: Some(ModelRunId::from_v7()),
         market_id: market_id.to_owned(),
         event_id: EventId::new("replacing-contract"),
@@ -688,6 +693,7 @@ pub async fn scans_reject_unavailable_rows() {
 
     let visible_at = event_time + 1_000;
     let corrected_at = event_time + 2_000;
+    let completed_bucket_end = event_time + 1_000;
     insert_microstructure_rows(
         &client,
         &[
@@ -713,7 +719,7 @@ pub async fn scans_reject_unavailable_rows() {
         .mid_price_series(
             vec![token_id.clone()],
             event_time - 1,
-            event_time + 1,
+            completed_bucket_end,
             visible_at,
             60,
         )
@@ -729,7 +735,7 @@ pub async fn scans_reject_unavailable_rows() {
         .mid_price_series(
             vec![token_id],
             event_time - 1,
-            event_time + 1,
+            completed_bucket_end,
             corrected_at,
             60,
         )

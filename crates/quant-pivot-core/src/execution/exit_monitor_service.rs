@@ -231,13 +231,7 @@ impl ExitMonitorService {
         // re-inference thesis context); a missing one is non-fatal.
         // Same per-book staleness ceiling as admission `#7` (`BookFreshnessCheck`):
         // frozen `entry_plan.max_book_age_ms` when available, else live config.
-        let max_book_age_ms = recommendation
-            .and_then(|rec| {
-                rec.trade_plan
-                    .frozen()
-                    .map(|(_, entry, _, _, _)| entry.max_book_age_ms)
-            })
-            .unwrap_or(0);
+        let max_book_age_ms = recommendation.map_or(0, |rec| rec.trade_plan.entry.max_book_age_ms);
         let (mark_price, book_fresh, market_abnormal) =
             classify_book(Some(&snapshot), now_ms, max_book_age_ms)?;
 
@@ -315,7 +309,7 @@ impl ExitMonitorService {
         self.deps
             .config
             .current()
-            .operational_control
+            .operations_policy
             .kill_switch
             .emergency_exit
             .clone()

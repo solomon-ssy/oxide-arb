@@ -17,6 +17,7 @@ mod capital;
 mod comparison;
 #[allow(clippy::needless_update)] // NewTrainingDatasetPlan omits materialization/timestamps
 mod dataset;
+mod economic_tier;
 #[allow(clippy::needless_update)] // Insert DTOs omit DB-managed timestamps.
 mod entry_condition;
 mod execution;
@@ -36,6 +37,7 @@ mod feedback_cycle;
 mod feedback_scheduler;
 #[allow(clippy::needless_update)] // Trigger inserts omit DB-managed timestamps.
 mod feedback_trigger;
+mod global_portfolio_plan;
 #[allow(clippy::needless_update)] // NewModelGovernanceAudit omits DB-managed created_at
 mod governance_audit;
 #[allow(clippy::needless_update)] // NewMarketLinkage omits DB-managed created_at
@@ -47,6 +49,7 @@ mod model_candidate_manifest;
 mod model_route_bootstrap;
 mod outcome_reconciliation;
 mod portfolio;
+mod portfolio_scenario;
 mod position;
 mod promotion_permit;
 mod recommendation;
@@ -58,9 +61,11 @@ mod report_data_quality;
 mod report_diff;
 #[allow(clippy::needless_update)] // Insert DTO omits delivery-managed timestamps and lease fields.
 mod report_fact_delivery;
+mod report_route_run;
 #[allow(clippy::needless_update)] // Insert DTO intentionally contains queued-run fields only.
 mod report_run;
 mod report_txn;
+mod represented_route;
 #[allow(clippy::needless_update)] // NewResearchJob omits DB-managed timestamps
 mod research_job;
 #[allow(clippy::needless_update)] // Insert DTO omits DB-managed created_at.
@@ -105,6 +110,10 @@ pub use comparison::{ModelComparisonReportInfo, NewModelComparisonReport};
 pub use dataset::{
     CompleteTrainingDatasetBuild, NewTrainingDatasetPlan, TrainingDatasetInfo,
     TrainingDatasetMaterialization,
+};
+pub use economic_tier::{
+    CapitalOccupancyBucket, EntryEconomics, ExecutableEconomicTier, RecommendationEconomics,
+    ScenarioCashflow,
 };
 pub use entry_condition::{
     ApplyEntryConditionEvaluation, ApplyEntryConditionEvaluationOutcome, CryptoPriceProjectionInfo,
@@ -164,6 +173,11 @@ pub use feedback_scheduler::{
 pub use feedback_trigger::{
     FeedbackTriggerEventInfo, FeedbackTriggerEventInput, NewFeedbackTriggerEvent,
 };
+pub use global_portfolio_plan::{
+    ExactVerificationEvidence, ExistingPortfolioState, GlobalPortfolioPlan,
+    PortfolioConstraintEvidence, PortfolioDecisionResult, PortfolioObjectiveEvidence,
+    SolverEvidence,
+};
 pub use governance_audit::{
     ModelGovernanceAuditDetail, ModelGovernanceAuditInfo, NewModelGovernanceAudit,
     NewRoutePromotionAudit,
@@ -189,7 +203,7 @@ pub use model_candidate_manifest::{
     CandidateExplanationMethod, CandidateExplanationValidation, CandidateExplanationVerification,
     ModelCandidateManifestDocument, ModelCandidateManifestError, ModelCandidateManifestInfo,
     ModelCandidateManifestInput, NewModelCandidateManifest, PromotionGateArtifact,
-    PromotionGateArtifactInput,
+    PromotionGateArtifactInput, scenario_model_bindings_hash,
 };
 pub use model_route_bootstrap::{
     BootstrapModelRoute, CommitModelRouteBootstrap, ModelBootstrapManifest,
@@ -206,6 +220,14 @@ pub use outcome_reconciliation::{
     ResolutionOutcomeReconciliationResult, ResolutionOutcomeTaskClaim,
 };
 pub use portfolio::{NewPortfolioPlan, PortfolioPlanInfo};
+pub use portfolio_scenario::{
+    DiscountCurvePoint, PortfolioScenario, PortfolioScenarioArtifact, PortfolioScenarioFitEvidence,
+    PortfolioScenarioKind, PortfolioScenarioModelArtifact, PortfolioScenarioModelState,
+    PortfolioScenarioResamplingMethod, PortfolioScenarioRouteFactor,
+    PortfolioScenarioRouteFitLineage, PortfolioScenarioRouteModelLineage,
+    PortfolioScenarioVisibility, ScenarioDistribution, ScenarioMarketOutcome, ScenarioPayoutState,
+    ScenarioWeight, StructuralExclusivityGroup, StructuralOutcomeRef,
+};
 pub use position::{NewPosition, PositionExit, PositionFill, PositionInfo};
 pub use promotion_permit::{
     CommitModelRoutePromotion, IssuePromotionPermit, ModelRoutePromotionPolicy,
@@ -242,6 +264,10 @@ pub use report_diff::{
     ReportDiff,
 };
 pub use report_fact_delivery::{NewReportFactDelivery, ReportFactDeliveryInfo};
+pub use report_route_run::{
+    NewReportRouteRun, ReportRouteRun, ReportRouteRunInfo, RouteCandidateFunnel, RouteLineageView,
+    RouteModelLineage, RouteRunOutcome,
+};
 pub use report_run::{
     ClaimReportSchedule, EnqueueReportRunOutcome, MaterializeReportSchedule,
     MaterializeReportScheduleOutcome, NewReportRun, ReconcileReportSchedule,
@@ -251,6 +277,9 @@ pub use report_run::{
 pub use report_txn::{
     CreatePreparedReport, FactDeliverySettlement, NewReportFeatureParity, NewReportTransaction,
     PreparedReportOutcome, PublishReportOutcome,
+};
+pub use represented_route::{
+    RepresentedRouteSet, RouteCompatibilityDigests, RouteCompatibilityError, RouteContractHash,
 };
 pub use research_job::{
     FeedbackStageJobIdentity, JobProgressSink, NewResearchJob, NoopProgressSink,

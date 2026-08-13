@@ -9,7 +9,7 @@ use crate::{
     enums::{common::MarketCategory, market::MarketStatus},
     types::{
         ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId,
-        SelectionExclusionSummary, TokenId, Usd,
+        SelectionExclusionSummary, SelectorHashEvidence, TokenId, Usd,
     },
 };
 
@@ -21,6 +21,7 @@ pub struct MarketSelectionInfo {
     pub decision_at: DateTime<Utc>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub selector_hash: ContentHash,
+    pub selector_evidence: SelectorHashEvidence,
     pub market_count: i32,
     pub exclusion_summary: SelectionExclusionSummary,
     pub created_at: DateTime<Utc>,
@@ -34,6 +35,7 @@ info_from_model!(
         decision_at,
         decision_policy_snapshot_id,
         selector_hash,
+        selector_evidence,
         market_count,
         exclusion_summary,
         created_at,
@@ -48,6 +50,7 @@ pub struct NewMarketSelection {
     pub decision_at: DateTime<Utc>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub selector_hash: ContentHash,
+    pub selector_evidence: SelectorHashEvidence,
     pub market_count: i32,
     pub exclusion_summary: SelectionExclusionSummary,
 }

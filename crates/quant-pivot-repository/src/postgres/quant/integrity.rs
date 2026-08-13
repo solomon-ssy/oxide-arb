@@ -205,7 +205,7 @@ where
     // cadence. Event-driven settlement labels use the canonical `0`
     // horizon-independent contract even when the model serves a non-zero
     // prediction horizon.
-    let target_label_horizon = model.spec.training_contract.target_label_horizon_secs;
+    let target_label_horizon = model.spec.training_contract.target.label_horizon_secs();
     let horizon_matches = target_label_horizon == 0
         || materialization
             .manifest
@@ -331,12 +331,12 @@ fn verify_policy(policy: &DecisionPolicySnapshotModel) -> Result<(), StorageErro
             policy.report_schedule_revision_id,
         ),
         (
-            ConfigResourceKind::OperationalControl,
-            policy.operational_control_revision_id,
+            ConfigResourceKind::OperationsPolicy,
+            policy.operations_policy_revision_id,
         ),
         (
-            ConfigResourceKind::ExecutionAuthorization,
-            policy.execution_authorization_revision_id,
+            ConfigResourceKind::ExecutionAutomationPolicy,
+            policy.execution_automation_policy_revision_id,
         ),
     ];
     if expected != policy.snapshot_hash

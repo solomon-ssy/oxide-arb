@@ -12,6 +12,7 @@ pub mod category_scope;
 pub mod classical;
 #[cfg(feature = "ml-classical")]
 pub mod classical_runtime;
+mod cross_fitted_runtime;
 pub mod degrade;
 pub mod factor_heads;
 pub mod favorite_longshot;
@@ -35,8 +36,10 @@ pub use artifact::{
     TrainingObjectiveReport, model_input_contract_hash,
 };
 pub use calibrator::{
-    CalibrationArtifactLoader, ProbabilityCalibrator, ResolvedCalibration, apply_mapping,
-    isotonic::IsotonicCalibrator, platt::PlattCalibrator, validate_mapping,
+    CalibrationArtifactLoader, NestedCalibration, NestedCalibrationFitInput,
+    NestedCalibrationFitter, NestedCalibrationObservation, NestedCalibrationPolicy,
+    ProbabilityCalibrator, ResolvedCalibration, apply_mapping, isotonic::IsotonicCalibrator,
+    platt::PlattCalibrator, validate_mapping,
 };
 #[cfg(feature = "ml-classical")]
 pub use classical::{
@@ -45,6 +48,7 @@ pub use classical::{
 };
 #[cfg(feature = "ml-classical")]
 pub use classical_runtime::{ClassicalDecisionProjection, ClassicalRuntime};
+pub use cross_fitted_runtime::CrossFittedRuntime;
 pub use degrade::{DegradeAction, InferenceStage};
 pub use favorite_longshot::{BiasFitConfig, BiasSample, FavoriteLongshotBiasTable};
 pub use objective::{ObjectiveComponentReport, RankingDiagnostics};
@@ -66,8 +70,8 @@ pub use signal::{
     canonical_business_prediction_hash, signal_candidate_event, signal_candidate_events,
 };
 pub use trainer::{
-    CancellationProbe, LabelSelector, ModelTrainer, TrainModelRequest, ValidationReport,
-    ValidationSpec, WeightedFactorTrainer, fit_frozen_reference_quantiles,
-    weighted_training_input_hash,
+    CancellationProbe, LabelSelector, ModelTrainer, PreparedWeightedFold, TrainModelRequest,
+    ValidationReport, ValidationSpec, WeightedFactorTrainer, WeightedModelTrainingOutput,
+    fit_frozen_reference_quantiles, weighted_training_input_hash,
 };
 pub use weighted::WeightedFactorRuntime;

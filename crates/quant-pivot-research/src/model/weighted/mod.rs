@@ -34,8 +34,7 @@ use quant_pivot_models::{
     },
     runtime_config::FactorCrossSectionConfig,
     types::{
-        ContentHash, ModelRunId, ModelVersionId, OutcomeTokenBinding, Price, Probability,
-        SignalCandidateId, TokenId,
+        ContentHash, ModelRunId, ModelVersionId, OutcomeTokenBinding, Price, Probability, TokenId,
         factor::{FactorAlphaOrientation, FactorServingPlane},
     },
 };
@@ -298,12 +297,19 @@ impl WeightedFactorRuntime {
             "buy {outcome_side}: alpha {}, composite {composite_score}, reliability {confidence} ({provenance} return)",
             score.yes_alpha
         );
+        let signal_candidate_id = SignalCandidate::id_for(
+            *model_run_id,
+            as_of,
+            &row.market_id,
+            &token_id,
+            outcome_side,
+        )?;
 
         Ok((
             calibration_score,
             rank_score,
             Some(SignalCandidate {
-                signal_candidate_id: SignalCandidateId::from_v7(),
+                signal_candidate_id,
                 model_run_id: *model_run_id,
                 market_id: row.market_id.clone(),
                 token_id,
@@ -312,7 +318,7 @@ impl WeightedFactorRuntime {
                 confidence,
                 expected_return_bps: estimate.expected_return_bps,
                 downside_bps: estimate.downside_bps,
-                win_probability: estimate.win_probability,
+                payout_distribution: estimate.payout_distribution,
                 entry_price_ref,
                 suggested_horizon_secs: self.header.prediction_horizon_secs(),
                 factor_breakdown: contributions,
@@ -326,7 +332,7 @@ impl WeightedFactorRuntime {
                     liquidity_score,
                     data_quality_score,
                 ),
-                rank_before_portfolio: 0,
+                route_rank: 0,
                 liquidity_score,
                 data_quality_score,
                 model_score_percentile: Probability::ZERO,
@@ -525,7 +531,7 @@ impl QuantModelRuntime for WeightedFactorRuntime {
                 .then_with(|| left.market_id.as_str().cmp(right.market_id.as_str()))
         });
         for (index, candidate) in candidates.iter_mut().enumerate() {
-            candidate.rank_before_portfolio =
+            candidate.route_rank =
                 u32::try_from(index + 1).map_err(|error| ResearchError::Inference {
                     detail: format!("weighted candidate rank does not fit u32: {error}"),
                 })?;
@@ -777,7 +783,7 @@ mod tests {
         for candidate in &output.candidates {
             assert!(candidate.composite_score.inner() >= dec!(0));
             assert!(candidate.composite_score.inner() <= dec!(1));
-            assert!(candidate.rank_before_portfolio >= 1);
+            assert!(candidate.route_rank >= 1);
         }
         assert_eq!(output.runtime_metrics.markets_scored, 2);
         assert_eq!(output.input_audit.len(), 4);

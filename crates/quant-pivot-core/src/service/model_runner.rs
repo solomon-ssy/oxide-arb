@@ -13,9 +13,12 @@
 //!
 //! A shadow model, when configured, runs as an isolated `Shadow` run whose failure
 //! never affects the active result (see the inference degradation policy).
-//! Active-path failures fail the run and raise a critical alert — an empty report
-//! is never silently fabricated. Business callers depend only on this service
-//! and `dyn QuantModelRuntime`, never on a concrete runtime type.
+//! Standalone feedback observations use [`ModelRunner::run_shadow_evaluation`]
+//! so neither their champion baseline nor their candidate is misclassified as a
+//! report-bound live decision. Active-path failures fail the run and raise a
+//! critical alert — an empty report is never silently fabricated. Business
+//! callers depend only on this service and `dyn QuantModelRuntime`, never on a
+//! concrete runtime type.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -33,7 +36,7 @@ use quant_pivot_models::{
     domain::{
         data_plane::DecisionBoundary,
         governance::DecisionPolicySnapshotInfo,
-        quant::{ModelVersionInfo, NewModelRun, NewShadowComparison},
+        quant::{ModelVersionInfo, NewModelRun, NewShadowComparison, RepresentedRouteSet},
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource, MarketCategory},
@@ -151,6 +154,17 @@ pub struct ActiveModelRequirementsRequest<'a> {
     pub policy: &'a DecisionPolicySnapshotInfo,
     /// Frozen decision time used by load-time governance checks.
     pub decision_at: DateTime<Utc>,
+    /// Explicit represented Route. Selection scope never chooses a model Route.
+    pub route: BuyModelRoute,
+}
+
+/// Frozen inputs required to resolve all represented active Routes from one
+/// immutable serving generation before any model-dependent filtering.
+pub struct ActiveRouteRequirementsRequest<'a> {
+    /// Frozen durable policy identity and document.
+    pub policy: &'a DecisionPolicySnapshotInfo,
+    /// Exact ordered Route set derived from immutable market eligibility.
+    pub represented_routes: &'a RepresentedRouteSet,
 }
 
 /// Active model metadata and selector-facing feature requirements.
@@ -218,7 +232,8 @@ pub struct ModelMarketDecision {
     pub primary_reason: Option<String>,
 }
 
-/// The successful active-path result threaded back to [`ModelRunner::run`].
+/// The successful champion-baseline result threaded into any configured
+/// candidate Shadow.
 struct ActiveResult {
     output_hash: ContentHash,
     accepted: Vec<SignalCandidate>,
@@ -234,6 +249,35 @@ struct ActiveResult {
     ch_rows: Vec<QuantSignalCandidateEventRow>,
     /// Exact model inputs; durably committed before the active run may succeed.
     model_input_rows: Vec<QuantModelInputEventRow>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InferencePurpose {
+    Live,
+    ShadowEvaluation,
+}
+
+impl InferencePurpose {
+    const fn baseline_kind(self) -> ModelRunKind {
+        match self {
+            Self::Live => ModelRunKind::LiveInference,
+            Self::ShadowEvaluation => ModelRunKind::Shadow,
+        }
+    }
+
+    const fn baseline_scope(self) -> &'static str {
+        match self {
+            Self::Live => "live_inference",
+            Self::ShadowEvaluation => "shadow_evaluation_baseline",
+        }
+    }
+
+    const fn candidate_scope(self) -> &'static str {
+        match self {
+            Self::Live => "shadow",
+            Self::ShadowEvaluation => "shadow_evaluation_candidate",
+        }
+    }
 }
 
 pub(crate) struct AlignedFeatureCrossSection {
@@ -289,7 +333,7 @@ impl ModelRunner {
         }
     }
 
-    /// Run one live-inference round.
+    /// Run one report-bound live-inference round.
     ///
     /// # Errors
     ///
@@ -297,6 +341,45 @@ impl ModelRunner {
     /// is raised, and the error is returned. A shadow failure is isolated and
     /// reported in [`ModelRunOutcome::shadow`], never as an error.
     pub async fn run(&self, request: ModelRunRequest<'_>) -> QuantResult<ModelRunOutcome> {
+        if request.market_selection_id.is_none() {
+            return Err(ResearchError::Inference {
+                detail: "live inference requires an exact persisted market selection".to_owned(),
+            }
+            .into());
+        }
+        self.run_baseline(request, InferencePurpose::Live).await
+    }
+
+    /// Compare the published champion and candidate for standalone feedback
+    /// evidence without manufacturing a report-bound live decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error before creating a run when the snapshot has no governed
+    /// Shadow or when a report selection is supplied to this standalone path.
+    /// Baseline failures remain fatal to the observation; candidate failures
+    /// retain the normal isolated Shadow degradation semantics.
+    pub async fn run_shadow_evaluation(
+        &self,
+        request: ModelRunRequest<'_>,
+    ) -> QuantResult<ModelRunOutcome> {
+        if request.market_selection_id.is_some() {
+            return Err(ResearchError::Inference {
+                detail: "standalone shadow evaluation cannot bind a report market selection"
+                    .to_owned(),
+            }
+            .into());
+        }
+        request.serving.published_shadow_identity()?;
+        self.run_baseline(request, InferencePurpose::ShadowEvaluation)
+            .await
+    }
+
+    async fn run_baseline(
+        &self,
+        request: ModelRunRequest<'_>,
+        purpose: InferencePurpose,
+    ) -> QuantResult<ModelRunOutcome> {
         request
             .serving
             .ensure_policy(request.decision_policy_snapshot_id)?;
@@ -308,13 +391,13 @@ impl ModelRunner {
         let model_run_id = ModelRunId::from_v7();
         let input_hash = input_hash(
             &request,
-            "live_inference",
+            purpose.baseline_scope(),
             &run_serving.contract_hash(),
             Some(&run_version_id),
         )?;
         self.create_run(
             &model_run_id,
-            ModelRunKind::LiveInference,
+            purpose.baseline_kind(),
             Some(run_version_id),
             &request,
             input_hash,
@@ -347,7 +430,8 @@ impl ModelRunner {
                 self.model_run_repo
                     .succeed(&model_run_id, active.output_hash, Some(run_version_id))
                     .await?;
-                let shadow = Box::pin(self.run_shadow(&request, &active)).await;
+                let shadow =
+                    Box::pin(self.run_shadow(&request, &active, purpose.candidate_scope())).await;
                 self.signal_writer.write_batch(active.ch_rows);
                 Ok(ModelRunOutcome {
                     model_run_id,
@@ -380,7 +464,10 @@ impl ModelRunner {
     ) -> QuantResult<ActiveModelRequirements> {
         let serving = self
             .serving_generations
-            .resolve_route(ModelServingGenerationRequest::from(request.policy))
+            .resolve_route(
+                ModelServingGenerationRequest::from(request.policy),
+                request.route,
+            )
             .await?;
         serving.validate_active()?;
         let route = serving.route();
@@ -394,6 +481,38 @@ impl ModelRunner {
             model_requirements,
             serving,
         })
+    }
+
+    /// Resolve and governance-check every represented Route atomically.
+    ///
+    /// This is the report boundary: no candidate may be removed by a model
+    /// filter before all Routes have a compatible champion runtime.
+    pub async fn active_route_requirements(
+        &self,
+        request: ActiveRouteRequirementsRequest<'_>,
+    ) -> QuantResult<Vec<ActiveModelRequirements>> {
+        let serving = self
+            .serving_generations
+            .resolve_routes(
+                ModelServingGenerationRequest::from(request.policy),
+                request.represented_routes,
+            )
+            .await?;
+        serving
+            .into_iter()
+            .map(|serving| {
+                serving.validate_active()?;
+                let route = serving.route();
+                let version = serving.active_version().clone();
+                Ok(ActiveModelRequirements {
+                    route,
+                    model_version_id: version.model_version_id,
+                    version,
+                    model_requirements: serving.model_requirements(),
+                    serving,
+                })
+            })
+            .collect()
     }
 
     /// The active path: exact route → family dispatch → infer → emit.
@@ -425,8 +544,6 @@ impl ModelRunner {
             })
             .collect();
 
-        let floor = request.serving.candidate_score_floor();
-        let min_confidence = request.serving.min_model_confidence();
         let event_time = Utc::now().timestamp_millis();
         let model_input_rows =
             ModelInputEvidenceBatch::try_new(aligned.vectors.as_ref(), &aligned.vector_ids)
@@ -451,7 +568,7 @@ impl ModelRunner {
         // The full ranked candidate set feeds the signal-layer shadow comparison.
         let active_candidates = output.candidates.clone();
         let (rows, accepted, decisions) =
-            partition_candidates(output.candidates, floor, min_confidence, event_time);
+            project_candidate_decisions(output.candidates, event_time);
         Ok(ActiveResult {
             output_hash,
             accepted,
@@ -470,6 +587,7 @@ impl ModelRunner {
         &self,
         request: &ModelRunRequest<'_>,
         active: &ActiveResult,
+        input_scope: &'static str,
     ) -> Option<ShadowRunOutcome> {
         let (shadow_version, loaded) = request.serving.shadow()?;
         let shadow_version_id = shadow_version.model_version_id;
@@ -488,7 +606,7 @@ impl ModelRunner {
         let model_run_id = ModelRunId::from_v7();
         let input_hash = match input_hash(
             request,
-            "shadow",
+            input_scope,
             &loaded.contract_hash(),
             Some(&shadow_version_id),
         ) {
@@ -895,12 +1013,11 @@ async fn finalize_shadow_failure(
     }
 }
 
-/// Split emitted candidates into their fact rows and the accepted subset (score
-/// + confidence above the configured floors).
-fn partition_candidates(
+/// Project every Route-local model output into serving facts and decisions.
+/// Economic admission happens only after probability calibration and cash-flow
+/// normalization; raw model score/confidence never excludes a global candidate.
+fn project_candidate_decisions(
     candidates: Vec<SignalCandidate>,
-    floor: Decimal,
-    min_confidence: Decimal,
     event_time: i64,
 ) -> (
     Vec<QuantSignalCandidateEventRow>,
@@ -911,36 +1028,17 @@ fn partition_candidates(
     let mut accepted = Vec::new();
     let mut decisions = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        let reason = rejection_reason(&candidate, floor, min_confidence);
         decisions.push(ModelMarketDecision {
             signal_candidate_id: candidate.signal_candidate_id,
             market_id: candidate.market_id.clone(),
             token_id: candidate.token_id.clone(),
-            gate_passed: reason.is_empty(),
-            primary_reason: (!reason.is_empty()).then(|| reason.to_owned()),
+            gate_passed: true,
+            primary_reason: None,
         });
-        rows.push(signal_candidate_event(&candidate, reason, event_time));
-        if reason.is_empty() {
-            accepted.push(candidate);
-        }
+        rows.push(signal_candidate_event(&candidate, "", event_time));
+        accepted.push(candidate);
     }
     (rows, accepted, decisions)
-}
-
-/// The empty string for an accepted candidate, or the deterministic reason a
-/// candidate was recorded for audit but excluded from the report.
-fn rejection_reason(
-    candidate: &SignalCandidate,
-    floor: Decimal,
-    min_confidence: Decimal,
-) -> &'static str {
-    if candidate.composite_score.inner() < floor {
-        "score_below_floor"
-    } else if candidate.confidence.inner() < min_confidence {
-        "low_confidence"
-    } else {
-        ""
-    }
 }
 
 /// Align accepted feature vectors with the immutable selection without using

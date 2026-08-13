@@ -10,7 +10,7 @@ use super::{
 use crate::types::{
     BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
     Probability, TrainingDatasetId,
-    backtest::{CategoryMetrics, ExpectedVsRealized, PnlSimulation},
+    backtest::{BacktestPortfolioFunnel, CategoryMetrics, ExpectedVsRealized, PnlSimulation},
 };
 
 #[sea_orm::model]
@@ -41,6 +41,8 @@ pub struct Model {
     pub tail_loss: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
     pub report_pnl_simulation: PnlSimulation,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub portfolio_funnel: BacktestPortfolioFunnel,
     pub report_hash: ContentHash,
     pub parquet_uri: Option<String>,
     pub created_at: DateTime<Utc>,

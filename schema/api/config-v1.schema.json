@@ -167,35 +167,38 @@
           "description": "Maximum orders auto-created per report.",
           "type": "integer",
           "format": "uint32",
-          "default": 0,
           "minimum": 0
         },
         "max_total_usd_per_report": {
           "description": "Maximum total USD auto-executed per report.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
-        },
-        "min_confidence": {
-          "description": "Minimum confidence for auto-execution.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "1.00"
-        },
-        "min_score": {
-          "description": "Minimum score for auto-execution.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.00"
+          "$ref": "#/$defs/DecimalValue"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "max_orders_per_report",
+        "max_total_usd_per_report"
+      ]
+    },
+    "BuyModelRoute": {
+      "description": "Exact Buy-side route represented by one report and one durable model run.\n\n`Pooled` may contain only non-vertical market categories. `Crypto` and\n`Weather` are isolated category routes because their `ResearchProfile`,\ndomain-source, factor-plane, and serving-contract preimages are distinct.",
+      "type": "string",
+      "enum": [
+        "pooled",
+        "crypto",
+        "weather"
+      ]
     },
     "BuyRouteBinding": {
       "description": "Champion plus the optional challenger bound to one exact Buy route.",
       "type": "object",
       "properties": {
         "champion": {
+          "description": "Active champion used for production inference on this Route.",
           "$ref": "#/$defs/ModelBinding"
         },
         "shadow": {
+          "description": "Optional governed challenger evaluated in shadow without serving trades.",
           "anyOf": [
             {
               "$ref": "#/$defs/ModelBinding"
@@ -226,24 +229,26 @@
         }
       ]
     },
-    "CapitalPolicy": {
-      "description": "Capital policy for execution admission.\n\nBoth caps gate order-intent admission (checks `#21` / `#22`). A value of\n`0` **disables** that dimension (no cap) — matching the other opt-in USD\ngovernance knobs. When `> 0` the cap is enforced hard (`Deny`).",
+    "CapitalTimeBucketLimit": {
+      "description": "Maximum capital lock permitted through one elapsed-time boundary.",
       "type": "object",
       "properties": {
-        "max_open_intents": {
-          "description": "Maximum number of concurrently open execution intents. `0` disables the\nopen-intent count cap. Enforced by admission `#21`.",
+        "end_secs": {
+          "description": "Exclusive upper duration of the bucket from decision time.",
           "type": "integer",
-          "format": "uint32",
-          "default": 0,
+          "format": "uint64",
           "minimum": 0
         },
-        "max_reserved_usd": {
-          "description": "Maximum USD that may be reserved across all open execution intents.\n`0` disables the reserved-capital cap. Enforced by admission `#22`.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+        "max_capital_usd": {
+          "description": "Maximum capital locked inside this bucket.",
+          "$ref": "#/$defs/DecimalValue"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "end_secs",
+        "max_capital_usd"
+      ]
     },
     "CheckOutcome": {
       "type": "string",
@@ -251,14 +256,6 @@
         "passed",
         "failed",
         "not_applicable"
-      ]
-    },
-    "ConfidenceSizeCurve": {
-      "description": "Confidence-to-size curve policy.",
-      "type": "string",
-      "enum": [
-        "linear",
-        "step"
       ]
     },
     "ConfigActivityView": {
@@ -320,8 +317,8 @@
         "execution_risk_policy",
         "model_routing",
         "report_schedule",
-        "operational_control",
-        "execution_authorization"
+        "operations_policy",
+        "execution_automation_policy"
       ]
     },
     "ConfigResourceSummaryView": {
@@ -422,37 +419,6 @@
       },
       "additionalProperties": false
     },
-    "CorrelationConfig": {
-      "description": "Correlation-cluster estimation configuration for the correlated-exposure cap.\n\nDrives whether `portfolio.constraints.max_correlated_exposure_usd` actually\nbinds. When disabled, the cap is snapshot-only.",
-      "type": "object",
-      "properties": {
-        "cluster_threshold": {
-          "description": "Absolute Pearson correlation at or above which two markets are clustered.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.7"
-        },
-        "enabled": {
-          "description": "Whether the correlated-exposure cap is enforced. `false` ⇒ no clustering.",
-          "type": "boolean",
-          "default": false
-        },
-        "lookback_days": {
-          "description": "Historical mid-price lookback window for co-movement estimation, in days.",
-          "type": "integer",
-          "format": "uint32",
-          "default": 30,
-          "minimum": 0
-        },
-        "min_observations": {
-          "description": "Minimum paired observations before historical estimation is trusted;\nbelow this the estimator falls back to event/category proxy clusters.",
-          "type": "integer",
-          "format": "uint32",
-          "default": 20,
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false
-    },
     "CreatePolicyDraftRequest": {
       "type": "object",
       "properties": {
@@ -469,45 +435,6 @@
       "required": [
         "document",
         "reason"
-      ]
-    },
-    "CredentialHealthStatus": {
-      "type": "string",
-      "enum": [
-        "available",
-        "missing",
-        "not_configured"
-      ]
-    },
-    "CredentialHealthView": {
-      "type": "object",
-      "properties": {
-        "credential": {
-          "$ref": "#/$defs/CredentialKind"
-        },
-        "status": {
-          "$ref": "#/$defs/CredentialHealthStatus"
-        }
-      },
-      "required": [
-        "credential",
-        "status"
-      ]
-    },
-    "CredentialKind": {
-      "type": "string",
-      "enum": [
-        "postgres_runtime",
-        "clickhouse_runtime",
-        "redis_runtime",
-        "jwt_signing",
-        "polymarket_private_key",
-        "telegram_bot_token",
-        "webhook_authorization",
-        "evidence_attestation",
-        "polymarket_relayer",
-        "chainlink_data_streams_api_key",
-        "chainlink_data_streams_api_secret"
       ]
     },
     "CurrentPolicyResourceView": {
@@ -547,63 +474,65 @@
       "properties": {
         "feature_staleness_policy": {
           "description": "Named policy for stale feature handling.",
-          "$ref": "#/$defs/FeatureStalenessPolicy",
-          "default": "reject_stale_required"
+          "$ref": "#/$defs/FeatureStalenessPolicy"
         },
         "max_book_age_ms": {
           "description": "Maximum age for a book snapshot before it is stale.",
           "type": "integer",
           "format": "uint64",
-          "default": 15000,
           "minimum": 0
         },
         "max_domain_observation_age_secs": {
           "description": "Maximum acceptable age (seconds) of the freshest domain observation for\na linked instrument at decision time\n(`StalenessRule::MaxDomainObservationAge`).",
           "type": "integer",
           "format": "uint64",
-          "default": 300,
           "minimum": 0
         },
         "max_feature_bucket_age_secs": {
           "description": "Maximum acceptable age (seconds) of the freshest materialized feature\nbucket at decision time. Governs offline/online feature staleness\n(`StalenessRule::MaxFeatureBucketAge`) — independent of live ingest lag.",
           "type": "integer",
           "format": "uint64",
-          "default": 30,
           "minimum": 0
         },
         "max_ingest_lag_ms": {
           "description": "Maximum acceptable ingest **pipeline** lag (enqueue→ClickHouse flush-ack),\nin milliseconds. Live-plane backpressure health only — NOT venue book age.\nGoverns `DataQualitySnapshot.ingest_lag_exceeded`, execution admission, and\nmarket-candidate selection.",
           "type": "integer",
           "format": "uint64",
-          "default": 10000,
           "minimum": 0
         },
         "max_stale_book_ratio_bps": {
           "description": "Maximum tolerated stale-book ratio across the live book plane (basis points).\n\nConsumed by execution admission `DataQualityCheck` (#6): deny when\n`stale_tokens / total_tokens * 10_000` exceeds this cap. Distilled into\nfrozen admission input at build time so checks never read config directly.",
           "type": "integer",
           "format": "uint64",
-          "default": 2000,
           "minimum": 0
         },
         "max_trade_tape_age_secs": {
           "description": "Maximum acceptable age (seconds) of the freshest trade-tape print at\ndecision time (`StalenessRule::MaxTradeTapeAge`).",
           "type": "integer",
           "format": "uint64",
-          "default": 300,
           "minimum": 0
         },
         "reject_crossed_books": {
           "description": "Reject crossed books before feature generation.",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         },
         "reject_empty_books": {
           "description": "Reject empty books before feature generation.",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "max_book_age_ms",
+        "max_ingest_lag_ms",
+        "max_feature_bucket_age_secs",
+        "max_trade_tape_age_secs",
+        "max_domain_observation_age_secs",
+        "reject_crossed_books",
+        "reject_empty_books",
+        "feature_staleness_policy",
+        "max_stale_book_ratio_bps"
+      ]
     },
     "DecimalValue": {
       "description": "Validated decimal value serialized as a JSON string without losing precision.",
@@ -648,147 +577,296 @@
         "rollback"
       ]
     },
-    "DeploymentConfigSnapshotView": {
+    "DeployApplyEffect": {
+      "description": "Apply semantics for static process configuration.",
+      "type": "string",
+      "enum": [
+        "process_restart_required"
+      ]
+    },
+    "DeployConfigFieldDescriptor": {
+      "description": "Complete metadata for one static leaf or one wildcard dynamic-binding leaf.",
       "type": "object",
       "properties": {
-        "endpoints": {
+        "apply_effect": {
+          "$ref": "#/$defs/DeployApplyEffect"
+        },
+        "bounds": {
+          "$ref": "#/$defs/DeployFieldBounds"
+        },
+        "constraints": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/DeploymentEndpointView"
+            "type": "string"
           }
         },
-        "identity": {
-          "$ref": "#/$defs/DeploymentIdentityView"
+        "consumer": {
+          "type": "string"
         },
-        "resource_budgets": {
+        "default": true,
+        "documentation_url": {
+          "type": "string"
+        },
+        "dynamic": {
+          "type": "boolean"
+        },
+        "enum_values": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/DeploymentResourceBudgetView"
+            "type": "string"
+          }
+        },
+        "example": true,
+        "json_pointer": {
+          "type": "string"
+        },
+        "operational_impact": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/DeploySensitivity"
+        },
+        "title": {
+          "type": "string"
+        },
+        "toml_path": {
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeployFieldUnit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validation_rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeployValidationRuleDescriptor"
+          }
+        },
+        "value_kind": {
+          "$ref": "#/$defs/DeployValueKind"
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         }
       },
+      "additionalProperties": false,
       "required": [
-        "endpoints",
-        "identity",
-        "resource_budgets"
+        "toml_path",
+        "json_pointer",
+        "title",
+        "purpose",
+        "value_kind",
+        "required",
+        "bounds",
+        "enum_values",
+        "variants",
+        "dynamic",
+        "sensitivity",
+        "operational_impact",
+        "consumer",
+        "apply_effect",
+        "constraints",
+        "validation_rules",
+        "documentation_url"
+      ]
+    },
+    "DeployConfigFieldProjection": {
+      "description": "One descriptor and its exhaustive safe runtime value projection.",
+      "type": "object",
+      "properties": {
+        "descriptor": {
+          "$ref": "#/$defs/DeployConfigFieldDescriptor"
+        },
+        "projection": {
+          "$ref": "#/$defs/DeployProjectedValue"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "descriptor",
+        "projection"
+      ]
+    },
+    "DeployFieldBounds": {
+      "description": "Exact numeric constraints represented without a floating-point conversion.",
+      "type": "object",
+      "properties": {
+        "exclusive_maximum": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exclusive_minimum": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "minimum": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DeployFieldUnit": {
+      "description": "Unit rendered in generated comments and safe deployment projections.",
+      "type": "string",
+      "enum": [
+        "basis_points",
+        "blocks",
+        "bytes",
+        "chain_id",
+        "count",
+        "days",
+        "decimal_places",
+        "degrees",
+        "hours",
+        "index",
+        "meters",
+        "milliseconds",
+        "months",
+        "percent",
+        "port",
+        "ratio",
+        "request_weight_per_minute",
+        "seconds",
+        "shares",
+        "usd",
+        "years"
+      ]
+    },
+    "DeployProjectedValue": {
+      "description": "Safe value projection selected by descriptor sensitivity.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "value": true,
+            "visibility": {
+              "type": "string",
+              "const": "public"
+            }
+          },
+          "required": [
+            "visibility",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "$ref": "#/$defs/DeployProtectedStatus"
+            },
+            "visibility": {
+              "type": "string",
+              "const": "protected"
+            }
+          },
+          "required": [
+            "visibility",
+            "status"
+          ]
+        }
+      ]
+    },
+    "DeployProtectedStatus": {
+      "description": "Whether a protected deploy value is configured without exposing its literal.",
+      "type": "string",
+      "enum": [
+        "configured",
+        "missing"
+      ]
+    },
+    "DeploySensitivity": {
+      "description": "Confidentiality policy for one deploy leaf.",
+      "type": "string",
+      "enum": [
+        "public",
+        "sensitive_endpoint",
+        "sensitive_identifier",
+        "secret"
+      ]
+    },
+    "DeployValidationRuleDescriptor": {
+      "description": "One stable validation rule exposed alongside every affected deploy leaf.",
+      "type": "object",
+      "properties": {
+        "condition": {
+          "type": "string"
+        },
+        "requirement": {
+          "type": "string"
+        },
+        "rule_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rule_id",
+        "condition",
+        "requirement"
+      ]
+    },
+    "DeployValueKind": {
+      "description": "TOML value category exposed to documentation and inventory tooling.",
+      "type": "string",
+      "enum": [
+        "boolean",
+        "integer",
+        "decimal",
+        "string",
+        "string_array",
+        "scalar_array",
+        "variant"
       ]
     },
     "DeploymentConfigView": {
       "type": "object",
       "properties": {
-        "credential_health": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/CredentialHealthView"
-          }
-        },
         "environment": {
           "type": "string"
         },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeployConfigFieldProjection"
+          }
+        },
         "restart_required": {
           "type": "boolean"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/DeploymentConfigSnapshotView"
         }
       },
       "required": [
         "environment",
         "restart_required",
-        "snapshot",
-        "credential_health"
-      ]
-    },
-    "DeploymentEndpointKind": {
-      "type": "string",
-      "enum": [
-        "web_bind",
-        "postgres",
-        "clickhouse",
-        "redis",
-        "gamma_api",
-        "clob_api",
-        "data_api",
-        "artifact_store",
-        "domain_provider"
-      ]
-    },
-    "DeploymentEndpointView": {
-      "type": "object",
-      "properties": {
-        "address": {
-          "description": "Redacted or non-secret endpoint suitable for operator display.",
-          "type": "string"
-        },
-        "kind": {
-          "$ref": "#/$defs/DeploymentEndpointKind"
-        }
-      },
-      "required": [
-        "kind",
-        "address"
-      ]
-    },
-    "DeploymentIdentityView": {
-      "type": "object",
-      "properties": {
-        "deployment_id": {
-          "type": "string"
-        },
-        "instance_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "deployment_id",
-        "instance_id"
-      ]
-    },
-    "DeploymentResourceBudgetView": {
-      "type": "object",
-      "properties": {
-        "kind": {
-          "$ref": "#/$defs/ResourceBudgetKind"
-        },
-        "limits": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/DeploymentResourceLimitView"
-          }
-        }
-      },
-      "required": [
-        "kind",
-        "limits"
-      ]
-    },
-    "DeploymentResourceLimitView": {
-      "type": "object",
-      "properties": {
-        "metric": {
-          "$ref": "#/$defs/ResourceBudgetMetric"
-        },
-        "unit": {
-          "$ref": "#/$defs/ResourceBudgetUnit"
-        },
-        "value": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "metric",
-        "value",
-        "unit"
-      ]
-    },
-    "DrawdownMultiplierPolicy": {
-      "description": "Drawdown multiplier policy.",
-      "type": "string",
-      "enum": [
-        "fixed",
-        "conservative"
+        "fields"
       ]
     },
     "EmergencyExitKind": {
@@ -812,18 +890,20 @@
       "properties": {
         "kind": {
           "description": "Emergency-exit behavior.",
-          "$ref": "#/$defs/EmergencyExitKind",
-          "default": "manual_only"
+          "$ref": "#/$defs/EmergencyExitKind"
         },
         "max_slippage_bps": {
           "description": "Maximum slippage for automated emergency liquidation, in basis points.",
           "type": "integer",
           "format": "uint32",
-          "default": 100,
           "minimum": 0
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "max_slippage_bps"
+      ]
     },
     "EntryConditionWorkerConfig": {
       "description": "Durable condition evaluator cadence, lease, and bounded-pass policy.",
@@ -833,46 +913,48 @@
           "description": "Millisecond cadence of the safety backstop scan. Source notifications,\nbook wakes, and clock deadlines remain the primary wake paths.",
           "type": "integer",
           "format": "uint64",
-          "default": 1000,
           "minimum": 0
         },
         "expiry_batch_limit": {
           "description": "Maximum number of expired instances transitioned in one expiry sweep.",
           "type": "integer",
           "format": "uint64",
-          "default": 512,
           "minimum": 0
         },
         "lease_duration_secs": {
           "description": "Duration in seconds of an exclusive instance-processing lease.",
           "type": "integer",
           "format": "uint64",
-          "default": 15,
           "minimum": 0
         },
         "lease_renew_interval_secs": {
           "description": "Renewal cadence in seconds for a held lease; must remain shorter than\nthe lease duration so takeover is explicit and auditable.",
           "type": "integer",
           "format": "uint64",
-          "default": 5,
           "minimum": 0
         },
         "next_evaluation_delay_ms": {
           "description": "Milliseconds before a still-active instance becomes eligible for its\nnext scheduled evaluation after one worker pass.",
           "type": "integer",
           "format": "uint64",
-          "default": 1000,
           "minimum": 0
         },
         "pass_limit": {
           "description": "Maximum number of due condition instances evaluated in one worker pass.",
           "type": "integer",
           "format": "uint",
-          "default": 256,
           "minimum": 0
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "backstop_interval_ms",
+        "next_evaluation_delay_ms",
+        "lease_duration_secs",
+        "lease_renew_interval_secs",
+        "pass_limit",
+        "expiry_batch_limit"
+      ]
     },
     "EntryOrderPolicy": {
       "description": "Entry order policy for recommendations.",
@@ -882,44 +964,41 @@
           "description": "Maximum allowed entry-order slippage in basis points.",
           "type": "integer",
           "format": "uint32",
-          "default": 50,
           "minimum": 0
         },
         "min_entry_book_depth_usd": {
-          "description": "Minimum visible book depth (USD) required at entry. Frozen onto every\nrecommendation's `EntryPlan.min_depth_usd` at report build and enforced\nby execution admission (`LiquidityDepthCheck`): an intent is deferred\nwhen the fillable ask notional up to the limit price is below this\nfloor. `0` disables the depth floor.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+          "description": "Minimum visible book depth (USD) required at entry. Frozen onto every\nrecommendation's `EntryPlan.min_depth_usd` at report build and enforced\nby execution admission (`LiquidityDepthCheck`): an intent is deferred\nwhen the fillable ask notional up to the limit price is below this\nfloor. The value must be strictly positive; there is no disabled or\nunlimited sentinel.",
+          "$ref": "#/$defs/DecimalValue"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "max_slippage_bps",
+        "min_entry_book_depth_usd"
+      ]
     },
-    "ExecutionAuthorization": {
+    "ExecutionAutomationPolicy": {
       "description": "Explicit authorization for semi-automatic and automatic execution.",
       "type": "object",
       "properties": {
         "auto_execution": {
-          "$ref": "#/$defs/AutoExecutionConfig",
-          "default": {
-            "max_orders_per_report": 0,
-            "max_total_usd_per_report": "0",
-            "min_confidence": "1.00",
-            "min_score": "0.00"
-          }
+          "$ref": "#/$defs/AutoExecutionConfig"
         },
         "schema_version": {
           "$ref": "#/$defs/SchemaVersion",
-          "default": 1,
           "x-format": "integer",
           "x-ui-visible": false
         },
         "semi_auto": {
-          "$ref": "#/$defs/SemiAutoConfig",
-          "default": {
-            "approval_ttl_secs": 900
-          }
+          "$ref": "#/$defs/SemiAutoConfig"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "semi_auto",
+        "auto_execution"
+      ]
     },
     "ExecutionBreakerConfig": {
       "description": "Venue-dimension execution-breaker thresholds.\n\nDrives the stateful execution breaker that watches venue submit/cancel\noutcomes and publishes a `VenueHealth` seam for admission `#18` while\nauto-tripping the operational kill-switch on sustained failure. Transient\ndegradation defers (admission retries); sustained failure halts and latches\nthe kill-switch (`execution_halted`, operator ack required to clear).",
@@ -929,154 +1008,88 @@
           "description": "Seconds of failure-free operation before `Degraded` self-recovers to `Healthy`.",
           "type": "integer",
           "format": "uint64",
-          "default": 30,
           "minimum": 0
         },
         "daily_realized_loss_cap_usd": {
-          "description": "Daily realized-loss cap in USD (UTC day). Cumulative same-day realized\nloss `≥ 80%` of the cap degrades venue health (admission `#18` defers);\n`≥` the cap trips the kill-switch (`execution_halted`, latched). `0`\ndisables the daily-realized-loss dimension.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+          "description": "Daily realized-loss cap in USD (UTC day). Cumulative same-day realized\nloss `≥ 80%` of the cap degrades venue health (admission `#18` defers);\n`≥` the cap trips the kill-switch (`execution_halted`, latched). The\ncap must be strictly positive; there is no disabled sentinel.",
+          "$ref": "#/$defs/DecimalValue"
         },
         "venue_consecutive_failures_to_degrade": {
           "description": "Consecutive venue failures that move the breaker to `Degraded` (admission defers).",
           "type": "integer",
           "format": "uint32",
-          "default": 3,
           "minimum": 0
         },
         "venue_consecutive_failures_to_halt": {
           "description": "Consecutive venue failures that move the breaker to `Halted` and trip the kill-switch.",
           "type": "integer",
           "format": "uint32",
-          "default": 6,
           "minimum": 0
         },
         "venue_error_rate_bps_to_halt": {
           "description": "Rolling-window venue error rate (basis points) that trips `Halted`.",
           "type": "integer",
           "format": "uint32",
-          "default": 5000,
           "minimum": 0
         },
         "venue_min_window_samples": {
           "description": "Minimum window samples before the error-rate gate is evaluated (avoids small-N trips).",
           "type": "integer",
           "format": "uint32",
-          "default": 10,
           "minimum": 0
         },
         "venue_window_secs": {
           "description": "Rolling observation window length in seconds.",
           "type": "integer",
           "format": "uint64",
-          "default": 60,
           "minimum": 0
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "venue_consecutive_failures_to_degrade",
+        "venue_consecutive_failures_to_halt",
+        "venue_error_rate_bps_to_halt",
+        "venue_min_window_samples",
+        "venue_window_secs",
+        "cooldown_secs",
+        "daily_realized_loss_cap_usd"
+      ]
     },
     "ExecutionRiskPolicy": {
       "description": "Capital, sizing, order, exit, reconciliation, and breaker policy.",
       "type": "object",
       "properties": {
         "breaker": {
-          "$ref": "#/$defs/ExecutionBreakerConfig",
-          "default": {
-            "cooldown_secs": 30,
-            "daily_realized_loss_cap_usd": "0",
-            "venue_consecutive_failures_to_degrade": 3,
-            "venue_consecutive_failures_to_halt": 6,
-            "venue_error_rate_bps_to_halt": 5000,
-            "venue_min_window_samples": 10,
-            "venue_window_secs": 60
-          }
-        },
-        "capital": {
-          "$ref": "#/$defs/CapitalPolicy",
-          "default": {
-            "max_open_intents": 0,
-            "max_reserved_usd": "0"
-          }
+          "$ref": "#/$defs/ExecutionBreakerConfig"
         },
         "entry_order_policy": {
-          "$ref": "#/$defs/EntryOrderPolicy",
-          "default": {
-            "max_slippage_bps": 50,
-            "min_entry_book_depth_usd": "0"
-          }
+          "$ref": "#/$defs/EntryOrderPolicy"
         },
         "exit_monitor": {
-          "$ref": "#/$defs/ExitMonitorPolicy",
-          "default": {
-            "enabled": true,
-            "monitor_secs": 10,
-            "opportunistic_sell": {
-              "enabled": false,
-              "shadow_mode": true
-            },
-            "signal_recheck_secs": 60,
-            "signal_reinference": {
-              "enabled": true,
-              "shadow_mode": true
-            }
-          }
+          "$ref": "#/$defs/ExitMonitorPolicy"
         },
         "portfolio": {
-          "$ref": "#/$defs/PortfolioConfig",
-          "default": {
-            "budget": {
-              "max_single_recommendation_usd": "0",
-              "min_recommendation_usd": "0",
-              "total_budget_usd": "0"
-            },
-            "constraints": {
-              "correlation": {
-                "cluster_threshold": "0.7",
-                "enabled": false,
-                "lookback_days": 30,
-                "min_observations": 20
-              },
-              "liquidity_usage_cap_pct": "0.05",
-              "max_category_exposure_usd": "0",
-              "max_correlated_exposure_usd": "0",
-              "max_event_exposure_usd": "0",
-              "max_market_exposure_usd": "0"
-            },
-            "kelly_safety": {
-              "binding_materiality_threshold": "0.90",
-              "edge_uncertainty_floor": "0.5",
-              "edge_uncertainty_k": "1.0",
-              "max_aggregate_exposure_pct": "0.25"
-            },
-            "optimizer": {
-              "integer_inclusion": true,
-              "objective_return_weight": "0",
-              "solver": "microlp"
-            },
-            "sizing": {
-              "confidence_weighting": "linear",
-              "drawdown_scaling": "conservative",
-              "kelly_fraction": "0.5",
-              "max_position_pct": "0.1"
-            }
-          }
+          "$ref": "#/$defs/PortfolioConfig"
         },
         "reconciliation": {
-          "$ref": "#/$defs/ReconciliationPolicy",
-          "default": {
-            "enabled": true,
-            "interval_secs": 60,
-            "stale_open_secs": 300
-          }
+          "$ref": "#/$defs/ReconciliationPolicy"
         },
         "schema_version": {
           "$ref": "#/$defs/SchemaVersion",
-          "default": 1,
           "x-format": "integer",
           "x-ui-visible": false
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "portfolio",
+        "entry_order_policy",
+        "exit_monitor",
+        "reconciliation",
+        "breaker"
+      ]
     },
     "ExitMonitorPolicy": {
       "description": "Exit-monitor cadence and re-inference policy.\n\nPrice/time/trailing tiers run every `monitor_secs`; model re-inference runs\nat most every `signal_recheck_secs` per lot. Invalidation thresholds are\nfrozen in the intent's published trade-policy artifact.",
@@ -1084,41 +1097,37 @@
       "properties": {
         "enabled": {
           "description": "Whether the exit-monitor worker actively evaluates open lots.",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         },
         "monitor_secs": {
           "description": "Seconds between exit-monitor scans (price / time / trailing cadence).",
           "type": "integer",
           "format": "uint64",
-          "default": 10,
           "minimum": 0
         },
         "opportunistic_sell": {
           "description": "Opportunistic-Sell advisory scale-out.",
-          "$ref": "#/$defs/OpportunisticSellPolicy",
-          "default": {
-            "enabled": false,
-            "shadow_mode": true
-          }
+          "$ref": "#/$defs/OpportunisticSellPolicy"
         },
         "signal_recheck_secs": {
           "description": "Minimum seconds between signal re-inference checks for one lot.",
           "type": "integer",
           "format": "uint64",
-          "default": 60,
           "minimum": 0
         },
         "signal_reinference": {
           "description": "Model-backed thesis-invalidation re-inference.",
-          "$ref": "#/$defs/ExitSignalReinferencePolicy",
-          "default": {
-            "enabled": true,
-            "shadow_mode": true
-          }
+          "$ref": "#/$defs/ExitSignalReinferencePolicy"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "monitor_secs",
+        "signal_recheck_secs",
+        "signal_reinference",
+        "opportunistic_sell"
+      ]
     },
     "ExitSignalReinferencePolicy": {
       "description": "Exit-monitor cadence and signal-degradation policy.\n\nThe monitor scans open position lots every `monitor_secs` for the price /\ntime / trailing / partial ladder; the heavier signal re-inference runs at\nModel-backed thesis-invalidation re-inference policy.\n\nWhen `enabled`, the exit monitor re-scores each lot's market via the\nintent-frozen model and compares the fresh composite score against the entry\nbaseline. `shadow_mode` runs the full pipeline but suppresses\n`ThesisInvalidated` exits (metrics + logs only) until operators disable it.",
@@ -1126,16 +1135,18 @@
       "properties": {
         "enabled": {
           "description": "Whether model-backed signal re-inference is active.",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         },
         "shadow_mode": {
           "description": "When true, re-inference runs and is audited, but thesis-invalidation\nexits are suppressed (fail-safe hold; SL/time/trailing still apply).",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "shadow_mode"
+      ]
     },
     "FeatureStalenessPolicy": {
       "description": "Named policy for stale feature handling.",
@@ -1145,47 +1156,19 @@
         "allow_degraded"
       ]
     },
-    "KellySafetyConfig": {
-      "description": "Kelly safety-layer parameters.",
-      "type": "object",
-      "properties": {
-        "binding_materiality_threshold": {
-          "description": "Kelly-stage binding is emitted when the dominant shrink falls below this threshold.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.90"
-        },
-        "edge_uncertainty_floor": {
-          "description": "Floor on the edge-uncertainty shrink multiplier.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.5"
-        },
-        "edge_uncertainty_k": {
-          "description": "Edge-uncertainty shrink coefficient `k` in `shrink = clamp(1 − k·edge_std, floor, 1)`.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "1.0"
-        },
-        "max_aggregate_exposure_pct": {
-          "description": "Hard cap on total simultaneous portfolio exposure as a fraction of bankroll.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.25"
-        }
-      },
-      "additionalProperties": false
-    },
     "KillSwitchPolicy": {
       "description": "Execution kill-switch default policy.\n\nOperational state lives in the `system_runtime_control` singleton. Runtime\nconfig only carries the policy to apply when that state escalates.",
       "type": "object",
       "properties": {
         "emergency_exit": {
           "description": "Emergency-exit behavior for kill-switch escalation.",
-          "$ref": "#/$defs/EmergencyExitPolicy",
-          "default": {
-            "kind": "manual_only",
-            "max_slippage_bps": 100
-          }
+          "$ref": "#/$defs/EmergencyExitPolicy"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "emergency_exit"
+      ]
     },
     "MarketCategory": {
       "description": "Polymarket event category for business selection and model cohorts.",
@@ -1208,24 +1191,29 @@
       "type": "object",
       "properties": {
         "bound_at": {
+          "description": "Database decision time at which the binding became visible.",
           "type": "string",
           "format": "date-time"
         },
         "config_revision": {
+          "description": "Policy-bundle revision atomically committed with this binding.",
           "type": "integer",
           "format": "int64",
           "minimum": 1
         },
         "generation": {
+          "description": "Monotonic Route-serving generation used to reject stale readers.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "model_version_id": {
+          "description": "Immutable model version selected for this exact Route and serving role.",
           "type": "string",
           "format": "uuid"
         },
         "source": {
+          "description": "Governance provenance that created the binding.",
           "$ref": "#/$defs/ModelBindingSource"
         }
       },
@@ -1282,30 +1270,32 @@
       "properties": {
         "ci_confidence": {
           "description": "Two-sided confidence level for reliability-bin Wilson intervals.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.95"
+          "$ref": "#/$defs/DecimalValue"
         },
         "embargo_secs": {
           "description": "Minimum embargo gap (seconds) between a model's training-dataset window\nand its calibration-dataset window.",
           "type": "integer",
           "format": "uint64",
-          "default": 86400,
           "minimum": 0
         },
         "method": {
           "description": "Default calibrator fitting method (`isotonic` or `platt`).",
-          "$ref": "#/$defs/CalibrationMethod",
-          "default": "isotonic"
+          "$ref": "#/$defs/CalibrationMethod"
         },
         "min_samples_isotonic": {
           "description": "Minimum samples required to select isotonic (below ⇒ fit must use Platt).",
           "type": "integer",
           "format": "uint64",
-          "default": 1000,
           "minimum": 0
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "min_samples_isotonic",
+        "embargo_secs",
+        "ci_confidence"
+      ]
     },
     "ModelConfig": {
       "description": "Route-owned Buy models and independent Sell model reference.",
@@ -1320,8 +1310,7 @@
             {
               "type": "null"
             }
-          ],
-          "default": null
+          ]
         },
         "buy_routes": {
           "description": "Exact Buy-side bindings. A missing route fails closed and never falls\nback to another route.",
@@ -1337,65 +1326,50 @@
               "$ref": "#/$defs/BuyRouteBinding"
             }
           },
-          "additionalProperties": false,
-          "default": {}
+          "additionalProperties": false
         },
         "calibration": {
           "description": "Model-score probability-calibrator fit policy.",
-          "$ref": "#/$defs/ModelCalibrationConfig",
-          "default": {
-            "ci_confidence": "0.95",
-            "embargo_secs": 86400,
-            "method": "isotonic",
-            "min_samples_isotonic": 1000
+          "$ref": "#/$defs/ModelCalibrationConfig"
+        },
+        "portfolio_scenario_model_bindings": {
+          "description": "Exact scenario-model bindings. Lookup is by ordered Route-set digest;\nabsence or ambiguity fails the entire report.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PortfolioScenarioModelArtifactBinding"
           }
-        },
-        "candidate_score_floor": {
-          "description": "Minimum candidate score to enter portfolio pruning.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.00"
-        },
-        "min_model_confidence": {
-          "description": "Minimum model confidence.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.50"
         },
         "shadow_diff_threshold": {
           "description": "Shadow/live diff threshold.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.10"
+          "$ref": "#/$defs/DecimalValue"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "buy_routes",
+        "shadow_diff_threshold",
+        "calibration",
+        "portfolio_scenario_model_bindings"
+      ]
     },
     "ModelRouting": {
       "description": "Active, shadow, and exit artifact routing.",
       "type": "object",
       "properties": {
         "model": {
-          "$ref": "#/$defs/ModelConfig",
-          "default": {
-            "active_exit_model_version_id": null,
-            "buy_routes": {},
-            "calibration": {
-              "ci_confidence": "0.95",
-              "embargo_secs": 86400,
-              "method": "isotonic",
-              "min_samples_isotonic": 1000
-            },
-            "candidate_score_floor": "0.00",
-            "min_model_confidence": "0.50",
-            "shadow_diff_threshold": "0.10"
-          }
+          "$ref": "#/$defs/ModelConfig"
         },
         "schema_version": {
           "$ref": "#/$defs/SchemaVersion",
-          "default": 1,
           "x-format": "integer",
           "x-ui-visible": false
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "model"
+      ]
     },
     "ModelVersionRef": {
       "description": "Runtime-config model-version id reference.",
@@ -1408,59 +1382,44 @@
       "properties": {
         "report_published": {
           "description": "Notify operators when a recommendation report is published.",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "report_published"
+      ]
     },
-    "OperationalControl": {
+    "OperationsPolicy": {
       "description": "Immediate operational admission controls and notification routing.",
       "type": "object",
       "properties": {
         "entry_condition": {
-          "$ref": "#/$defs/EntryConditionWorkerConfig",
-          "default": {
-            "backstop_interval_ms": 1000,
-            "expiry_batch_limit": 512,
-            "lease_duration_secs": 15,
-            "lease_renew_interval_secs": 5,
-            "next_evaluation_delay_ms": 1000,
-            "pass_limit": 256
-          }
+          "$ref": "#/$defs/EntryConditionWorkerConfig"
         },
         "kill_switch": {
-          "$ref": "#/$defs/KillSwitchPolicy",
-          "default": {
-            "emergency_exit": {
-              "kind": "manual_only",
-              "max_slippage_bps": 100
-            }
-          }
+          "$ref": "#/$defs/KillSwitchPolicy"
         },
         "notifications": {
-          "$ref": "#/$defs/NotificationPolicies",
-          "default": {
-            "report_published": true
-          }
+          "$ref": "#/$defs/NotificationPolicies"
         },
         "outcome_reconciliation": {
-          "$ref": "#/$defs/OutcomeReconciliationPolicy",
-          "default": {
-            "candidate_batch_size": 256,
-            "enabled": true,
-            "source_block_span": 256,
-            "sweep_secs": 60
-          }
+          "$ref": "#/$defs/OutcomeReconciliationPolicy"
         },
         "schema_version": {
           "$ref": "#/$defs/SchemaVersion",
-          "default": 1,
           "x-format": "integer",
           "x-ui-visible": false
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "entry_condition",
+        "kill_switch",
+        "outcome_reconciliation",
+        "notifications"
+      ]
     },
     "OpportunisticSellPolicy": {
       "description": "Opportunistic-Sell operational control.\n\nAdvisory model-driven scale-out when the thesis still holds but the Sell\nscorer ranks exiting now as better than holding. Evaluated at the same\ncadence as re-inference (`signal_recheck_secs`) and gated behind\nre-inference being enabled (thesis validity must be checkable first).\n\nAll trading thresholds and cumulative/clip bounds live exclusively in the\nimmutable policy and intent. Runtime may only disable or shadow an already\nfrozen rule; it cannot change that rule's decision boundary.",
@@ -1468,16 +1427,18 @@
       "properties": {
         "enabled": {
           "description": "Whether opportunistic-Sell evaluation is active at all.",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "shadow_mode": {
           "description": "When true, the scorer runs and is audited but never submits an exit\n(fail-safe hold; SL/time/trailing/invalidation still apply).",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "shadow_mode"
+      ]
     },
     "OutcomeReconciliationPolicy": {
       "description": "Runtime cadence and bounded work budget for outcome reconciliation.",
@@ -1487,30 +1448,32 @@
           "description": "Maximum recommendations or intents processed by each lane per pass.",
           "type": "integer",
           "format": "uint64",
-          "default": 256,
           "minimum": 0
         },
         "enabled": {
           "description": "Whether the outcome reconciliation worker is enabled.",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         },
         "source_block_span": {
           "description": "Maximum finalized source blocks scanned per resolution pass.",
           "type": "integer",
           "format": "uint64",
-          "default": 256,
           "minimum": 0
         },
         "sweep_secs": {
           "description": "Delay between reconciliation passes in seconds.",
           "type": "integer",
           "format": "uint64",
-          "default": 60,
           "minimum": 0
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "sweep_secs",
+        "candidate_batch_size",
+        "source_block_span"
+      ]
     },
     "PolicyActivationKind": {
       "type": "string",
@@ -1714,7 +1677,7 @@
         "model_evaluation_claim",
         "future_report_run_reconcile",
         "operational_admission",
-        "execution_authorization_admission"
+        "execution_automation_policy_admission"
       ]
     },
     "PolicyApprovalDecision": {
@@ -1879,11 +1842,11 @@
           "type": "object",
           "properties": {
             "document": {
-              "$ref": "#/$defs/OperationalControl"
+              "$ref": "#/$defs/OperationsPolicy"
             },
             "resource_kind": {
               "type": "string",
-              "const": "operational_control"
+              "const": "operations_policy"
             }
           },
           "required": [
@@ -1895,11 +1858,11 @@
           "type": "object",
           "properties": {
             "document": {
-              "$ref": "#/$defs/ExecutionAuthorization"
+              "$ref": "#/$defs/ExecutionAutomationPolicy"
             },
             "resource_kind": {
               "type": "string",
-              "const": "execution_authorization"
+              "const": "execution_automation_policy"
             }
           },
           "required": [
@@ -1970,10 +1933,16 @@
             "$ref": "#/$defs/PolicyConsumer"
           }
         },
+        "document_schema": true,
         "effective_boundary": {
           "$ref": "#/$defs/PolicyApplyBoundary"
         },
-        "json_schema": true,
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimeFieldDescriptor"
+          }
+        },
         "kind": {
           "$ref": "#/$defs/ConfigResourceKind"
         },
@@ -1984,7 +1953,8 @@
       "required": [
         "kind",
         "schema_version",
-        "json_schema",
+        "document_schema",
+        "fields",
         "effective_boundary",
         "consumers"
       ]
@@ -1993,47 +1963,41 @@
       "description": "Revision identities frozen at a decision boundary.",
       "type": "object",
       "properties": {
-        "execution_authorization": {
+        "execution_automation_policy": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "execution_risk_policy": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "model_routing": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
-        "operational_control": {
+        "operations_policy": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "recommendation_policy": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         },
         "report_schedule": {
           "type": [
             "string",
             "null"
-          ],
-          "default": null
+          ]
         }
       },
       "additionalProperties": false
@@ -2168,11 +2132,19 @@
         "code": {
           "$ref": "#/$defs/PolicyValidationCode"
         },
-        "message": {
+        "message_parameters": {
+          "description": "Stable interpolation inputs; UI copy is localized from `code`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "pointer": {
+          "description": "Canonical RFC 6901 pointer to the exact field or document boundary.",
           "type": "string"
         },
-        "path": {
-          "description": "Canonical field path. A path is data, not a categorical state, so a\nvalidated string is the correct representation.",
+        "remediation": {
+          "description": "Actionable, client-safe recovery guidance.",
           "type": "string"
         },
         "severity": {
@@ -2183,8 +2155,9 @@
       "required": [
         "severity",
         "code",
-        "path",
-        "message"
+        "pointer",
+        "message_parameters",
+        "remediation"
       ]
     },
     "PolicyValidationSeverity": {
@@ -2266,167 +2239,234 @@
         "affected_consumers"
       ]
     },
+    "PortfolioAdmission": {
+      "description": "Candidate admission floors applied before global optimization.",
+      "type": "object",
+      "properties": {
+        "liquidity_buffer_bps": {
+          "description": "Additional executable-liquidity haircut applied to available depth, in basis points.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_probability_interval_width_bps": {
+          "description": "Maximum calibrated probability-interval width admitted, in basis points.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "min_nominal_expected_net_usd": {
+          "description": "Minimum nominal discounted expected net USD required for a tier to enter optimization.",
+          "$ref": "#/$defs/DecimalValue"
+        },
+        "min_profit_probability_bps": {
+          "description": "Conservative lower bound on the probability of positive net USD, in basis points.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "min_robust_expected_net_usd": {
+          "description": "Minimum ambiguity-robust discounted expected net USD required before optimization.",
+          "$ref": "#/$defs/DecimalValue"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min_nominal_expected_net_usd",
+        "min_robust_expected_net_usd",
+        "min_profit_probability_bps",
+        "max_probability_interval_width_bps",
+        "liquidity_buffer_bps"
+      ]
+    },
     "PortfolioBudget": {
       "description": "Capital budget governance caps.",
       "type": "object",
       "properties": {
-        "max_single_recommendation_usd": {
-          "description": "Maximum USD allocated to one recommendation.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+        "cash_reserve_usd": {
+          "description": "Cash that must remain immediately available in every scenario.",
+          "$ref": "#/$defs/DecimalValue"
         },
-        "min_recommendation_usd": {
-          "description": "Minimum useful recommendation size in USD.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+        "max_open_capital_usd": {
+          "description": "Maximum capital that may be locked by all open positions and intents.",
+          "$ref": "#/$defs/DecimalValue"
         },
         "total_budget_usd": {
-          "description": "Maximum deployable capital (governance cap, all modes).\n\n`equity = min(real net-liquidation value, total_budget_usd)`; this value\n**never** stands in for equity itself.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+          "description": "Maximum account capital that this strategy may govern.",
+          "$ref": "#/$defs/DecimalValue"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "total_budget_usd",
+        "cash_reserve_usd",
+        "max_open_capital_usd"
+      ]
     },
     "PortfolioConfig": {
-      "description": "Portfolio policy: budget governance, exposure constraints, and sizing model.\n\nPolicy limits only — never account state. Real equity and positions come\nfrom the account snapshot, never from this configuration.",
+      "description": "Portfolio policy expressed entirely as hard economic constraints.\n\nPolicy limits only — never account state. Real equity and positions come\nfrom the account snapshot, never from this configuration.",
       "type": "object",
       "properties": {
+        "admission": {
+          "$ref": "#/$defs/PortfolioAdmission"
+        },
         "budget": {
-          "description": "Capital budget governance caps.",
-          "$ref": "#/$defs/PortfolioBudget",
-          "default": {
-            "max_single_recommendation_usd": "0",
-            "min_recommendation_usd": "0",
-            "total_budget_usd": "0"
-          }
+          "$ref": "#/$defs/PortfolioBudget"
         },
-        "constraints": {
-          "description": "Exposure / liquidity constraints.",
-          "$ref": "#/$defs/PortfolioConstraints",
-          "default": {
-            "correlation": {
-              "cluster_threshold": "0.7",
-              "enabled": false,
-              "lookback_days": 30,
-              "min_observations": 20
-            },
-            "liquidity_usage_cap_pct": "0.05",
-            "max_category_exposure_usd": "0",
-            "max_correlated_exposure_usd": "0",
-            "max_event_exposure_usd": "0",
-            "max_market_exposure_usd": "0"
-          }
+        "exposure_limits": {
+          "$ref": "#/$defs/PortfolioExposureLimits"
         },
-        "kelly_safety": {
-          "description": "Kelly safety-layer knobs (edge uncertainty, aggregate cap, binding threshold).",
-          "$ref": "#/$defs/KellySafetyConfig",
-          "default": {
-            "binding_materiality_threshold": "0.90",
-            "edge_uncertainty_floor": "0.5",
-            "edge_uncertainty_k": "1.0",
-            "max_aggregate_exposure_pct": "0.25"
-          }
-        },
-        "optimizer": {
-          "description": "Portfolio optimizer (`good_lp` LP/MILP) policy.",
-          "$ref": "#/$defs/PortfolioOptimizerConfig",
-          "default": {
-            "integer_inclusion": true,
-            "objective_return_weight": "0",
-            "solver": "microlp"
-          }
-        },
-        "sizing": {
-          "description": "Position-sizing model.",
-          "$ref": "#/$defs/SizingModelConfig",
-          "default": {
-            "confidence_weighting": "linear",
-            "drawdown_scaling": "conservative",
-            "kelly_fraction": "0.5",
-            "max_position_pct": "0.1"
-          }
+        "tail_risk": {
+          "$ref": "#/$defs/PortfolioTailRisk"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "budget",
+        "exposure_limits",
+        "tail_risk",
+        "admission"
+      ]
     },
-    "PortfolioConstraints": {
-      "description": "Exposure and liquidity constraints.",
+    "PortfolioExposureLimits": {
+      "description": "Exposure caps evaluated against existing positions plus selected tiers.",
       "type": "object",
       "properties": {
-        "correlation": {
-          "description": "Correlation-cluster estimation policy gating `max_correlated_exposure_usd`.",
-          "$ref": "#/$defs/CorrelationConfig",
-          "default": {
-            "cluster_threshold": "0.7",
-            "enabled": false,
-            "lookback_days": 30,
-            "min_observations": 20
-          }
-        },
-        "liquidity_usage_cap_pct": {
-          "description": "Maximum fraction of visible liquidity an allocation may consume.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.05"
-        },
         "max_category_exposure_usd": {
           "description": "Maximum USD exposure per category.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
-        },
-        "max_correlated_exposure_usd": {
-          "description": "Maximum correlated exposure in USD.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+          "$ref": "#/$defs/DecimalValue"
         },
         "max_event_exposure_usd": {
           "description": "Maximum USD exposure per event.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+          "$ref": "#/$defs/DecimalValue"
         },
         "max_market_exposure_usd": {
           "description": "Maximum USD exposure per market.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+          "$ref": "#/$defs/DecimalValue"
+        },
+        "max_open_recommendations": {
+          "description": "Maximum number of simultaneously open recommendations.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_route_exposure_usd": {
+          "description": "Maximum USD exposure per model Route.",
+          "$ref": "#/$defs/DecimalValue"
+        },
+        "max_single_recommendation_usd": {
+          "description": "Maximum USD allocated to one recommendation.",
+          "$ref": "#/$defs/DecimalValue"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "max_single_recommendation_usd",
+        "max_market_exposure_usd",
+        "max_event_exposure_usd",
+        "max_category_exposure_usd",
+        "max_route_exposure_usd",
+        "max_open_recommendations"
+      ]
     },
-    "PortfolioOptimizerConfig": {
-      "description": "Portfolio optimizer (`good_lp` LP/MILP) configuration.\n\nThe optimizer is the **single** allocation path (greedy has been removed):\nthe production primary is an exact binary-inclusion MILP, and on any solver\nfailure it falls back to the continuous LP relaxation with deterministic\ninteger recovery, then ultimately to an empty plan — so a report is always\nproduced. `microlp` (pure Rust) is the default backend and ships in every\nbuild; `HiGHS` is an optional native performance backend gated behind the\n`lp-solver-highs` feature.",
+    "PortfolioScenarioModelArtifactBinding": {
+      "description": "Exact promoted scenario-generation model for one ordered represented Route set.",
       "type": "object",
       "properties": {
-        "integer_inclusion": {
-          "description": "`true` ⇒ solve the exact binary-inclusion MILP (production primary);\n`false` ⇒ solve the continuous LP relaxation with deterministic integer\nrecovery (cheaper, fully deterministic — also the fallback / backtest mode).",
-          "type": "boolean",
-          "default": true
+        "bound_at": {
+          "type": "string",
+          "format": "date-time"
         },
-        "objective_return_weight": {
-          "description": "`λ ≥ 0`: weight on normalized expected return in the per-dollar objective\nweight `wᵢ = scoreᵢ · (1 + λ · ret_normᵢ)`. `0` ⇒ pure conviction weighting\n(semantically equivalent to the former greedy fill order).",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+        "calibration_contract_digest": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
         },
-        "solver": {
-          "description": "LP solver backend. `highs` requires the `lp-solver-highs` build feature;\nwhen that feature is absent the planner transparently downgrades to\n`microlp` (recorded in the plan's optimizer metadata).",
-          "$ref": "#/$defs/PortfolioSolverKind",
-          "default": "microlp"
+        "capital_time_bucket_contract_digest": {
+          "description": "Digest of the strictly ordered capital-time boundaries. Per-bucket USD\ncaps remain in the frozen `ExecutionRiskPolicy` and do not require a\nstatistical scenario-model refit when only their values change.",
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "model_content_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "ordered_routes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BuyModelRoute"
+          }
+        },
+        "portfolio_scenario_model_artifact_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "route_set_digest": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "scenario_model_schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "serving_contract_digest": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "trade_policy_contract_digest": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "portfolio_scenario_model_artifact_id",
+        "ordered_routes",
+        "route_set_digest",
+        "serving_contract_digest",
+        "calibration_contract_digest",
+        "trade_policy_contract_digest",
+        "scenario_model_schema_version",
+        "capital_time_bucket_contract_digest",
+        "model_content_hash",
+        "bound_at"
+      ]
     },
-    "PortfolioSolverKind": {
-      "description": "LP solver backend that produced a portfolio plan's allocation.",
-      "oneOf": [
-        {
-          "description": "Pure-Rust `microlp` (default; no native dependency, ships in any build).",
-          "type": "string",
-          "const": "microlp"
+    "PortfolioTailRisk": {
+      "description": "Scenario loss, `CVaR`, drawdown, and time-weighted capital limits.",
+      "type": "object",
+      "properties": {
+        "capital_time_buckets": {
+          "description": "Strictly increasing capital-lock buckets; every tier must terminate in a covered bucket.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapitalTimeBucketLimit"
+          }
         },
-        {
-          "description": "Native `HiGHS` (optional performance backend; `lp-solver-highs` feature).",
-          "type": "string",
-          "const": "highs"
+        "cvar_confidence_bps": {
+          "description": "`CVaR` confidence level in basis points, strictly between 0 and 10,000.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_cvar_usd": {
+          "description": "Maximum allowed `CVaR` loss in USD.",
+          "$ref": "#/$defs/DecimalValue"
+        },
+        "max_drawdown_usd": {
+          "description": "Maximum strategy drawdown admitted at the decision boundary.",
+          "$ref": "#/$defs/DecimalValue"
+        },
+        "max_scenario_loss_usd": {
+          "description": "Maximum allowed loss in any promoted or stress scenario.",
+          "$ref": "#/$defs/DecimalValue"
         }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cvar_confidence_bps",
+        "max_cvar_usd",
+        "max_scenario_loss_usd",
+        "max_drawdown_usd",
+        "capital_time_buckets"
       ]
     },
     "RecommendationPolicy": {
@@ -2434,52 +2474,27 @@
       "type": "object",
       "properties": {
         "data_quality": {
-          "$ref": "#/$defs/DataQualityConfig",
-          "default": {
-            "feature_staleness_policy": "reject_stale_required",
-            "max_book_age_ms": 15000,
-            "max_domain_observation_age_secs": 300,
-            "max_feature_bucket_age_secs": 30,
-            "max_ingest_lag_ms": 10000,
-            "max_stale_book_ratio_bps": 2000,
-            "max_trade_tape_age_secs": 300,
-            "reject_crossed_books": true,
-            "reject_empty_books": true
-          }
+          "$ref": "#/$defs/DataQualityConfig"
         },
         "reports": {
-          "$ref": "#/$defs/ReportsConfig",
-          "default": {
-            "ad_hoc_default_knowledge_lag_secs": 10,
-            "ad_hoc_default_top_n": 20,
-            "ad_hoc_report_enabled": false,
-            "delivery_policy": "store_and_notify",
-            "entry_window_ratio": "0.5",
-            "fallback_horizon_secs": 86400,
-            "hard_candidate_ceiling": 100000,
-            "max_top_n": 100
-          }
+          "$ref": "#/$defs/ReportsConfig"
         },
         "schema_version": {
           "$ref": "#/$defs/SchemaVersion",
-          "default": 1,
           "x-format": "integer",
           "x-ui-visible": false
         },
         "selection": {
-          "$ref": "#/$defs/SelectionConfig",
-          "default": {
-            "allow_near_resolution": false,
-            "enabled_categories": [],
-            "max_spread_bps": 2500,
-            "max_time_to_resolution_secs": 31536000,
-            "min_liquidity_usd": "0",
-            "min_time_to_resolution_secs": 3600,
-            "min_volume_24h_usd": "0"
-          }
+          "$ref": "#/$defs/SelectionConfig"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "selection",
+        "data_quality",
+        "reports"
+      ]
     },
     "ReconciliationPolicy": {
       "description": "Execution reconciliation policy.",
@@ -2487,25 +2502,27 @@
       "properties": {
         "enabled": {
           "description": "Whether execution reconciliation is enabled.",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         },
         "interval_secs": {
           "description": "Reconciliation sweep interval in seconds.",
           "type": "integer",
           "format": "uint64",
-          "default": 60,
           "minimum": 0
         },
         "stale_open_secs": {
           "description": "Seconds an order may remain unreconciled (resting open, or unreadable at\nthe venue) before the worker forces a terminal resolution: a stale\nresting order is actively cancelled, an unreadable order is escalated to\n`Unresolvable`. Bounds how long capital can stay in-flight.",
           "type": "integer",
           "format": "uint64",
-          "default": 300,
           "minimum": 0
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "interval_secs",
+        "stale_open_secs"
+      ]
     },
     "ReportDeliveryPolicy": {
       "description": "Report delivery policy.",
@@ -2520,31 +2537,23 @@
       "type": "object",
       "properties": {
         "schedules": {
+          "description": "Complete governed schedule list; each entry owns cadence, `TopN`, lag, and enabled state.",
           "type": "array",
-          "default": [
-            {
-              "cadence": {
-                "interval_secs": 300,
-                "kind": "interval"
-              },
-              "enabled": true,
-              "knowledge_lag_secs": 10,
-              "schedule_id": "default_interval",
-              "top_n": 20
-            }
-          ],
           "items": {
             "$ref": "#/$defs/ReportScheduleConfig"
           }
         },
         "schema_version": {
           "$ref": "#/$defs/SchemaVersion",
-          "default": 1,
           "x-format": "integer",
           "x-ui-visible": false
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "schedules"
+      ]
     },
     "ReportScheduleConfig": {
       "description": "One report schedule.",
@@ -2552,38 +2561,37 @@
       "properties": {
         "cadence": {
           "description": "How often this schedule fires (fixed interval or cron).",
-          "$ref": "#/$defs/ScheduleCadence",
-          "default": {
-            "interval_secs": 300,
-            "kind": "interval"
-          }
+          "$ref": "#/$defs/ScheduleCadence"
         },
         "enabled": {
           "description": "Whether this schedule is enabled.",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         },
         "knowledge_lag_secs": {
           "description": "Global knowledge lag in seconds.",
           "type": "integer",
           "format": "uint64",
-          "default": 10,
           "minimum": 0
         },
         "schedule_id": {
           "description": "Stable schedule id.",
-          "type": "string",
-          "default": "default_interval"
+          "type": "string"
         },
         "top_n": {
           "description": "`TopN` size for this schedule.",
           "type": "integer",
           "format": "uint32",
-          "default": 20,
           "minimum": 0
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "schedule_id",
+        "cadence",
+        "top_n",
+        "knowledge_lag_secs",
+        "enabled"
+      ]
     },
     "ReportsConfig": {
       "description": "Report schedules and payload sizing.",
@@ -2593,91 +2601,239 @@
           "description": "Default global knowledge lag frozen for an ad-hoc request without an override.",
           "type": "integer",
           "format": "uint64",
-          "default": 10,
           "minimum": 0
         },
         "ad_hoc_default_top_n": {
           "description": "Default `TopN` frozen when an ad-hoc request omits its override.",
           "type": "integer",
           "format": "uint32",
-          "default": 20,
           "minimum": 0
         },
         "ad_hoc_report_enabled": {
           "description": "Whether ad-hoc report generation is enabled.",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "delivery_policy": {
           "description": "Delivery policy name.",
-          "$ref": "#/$defs/ReportDeliveryPolicy",
-          "default": "store_and_notify"
+          "$ref": "#/$defs/ReportDeliveryPolicy"
         },
         "entry_window_ratio": {
           "description": "Entry-window ratio in `(0, 1]`: a recommendation's entry-by deadline is\n`as_of + effective_horizon * entry_window_ratio`. `0.5` enters only while\nat least half the signal's edge remains (the half-life point); the\ntime-stop / exit still uses the full effective horizon.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.5"
-        },
-        "fallback_horizon_secs": {
-          "description": "Fallback prediction horizon (seconds), used **only** when the model\nprovides no per-candidate `suggested_horizon_secs` (classical / non-ML\nruns). The per-recommendation validity is otherwise data-driven from the\nmodel's frozen horizon capped by the market's time-to-resolution; this is\nnever a flat TTL applied uniformly.",
-          "type": "integer",
-          "format": "uint64",
-          "default": 86400,
-          "minimum": 0
+          "$ref": "#/$defs/DecimalValue"
         },
         "hard_candidate_ceiling": {
           "description": "Deployment-proven upper bound for one complete catalog-visible report.\nExceeding it fails the report; it never truncates market candidates.",
           "type": "integer",
           "format": "uint32",
-          "default": 100000,
           "minimum": 0
         },
         "max_top_n": {
           "description": "Maximum `TopN` size (hard upper bound for every schedule and ad-hoc run,\ncapped by [`MAX_REPORT_TOP_N`]).",
           "type": "integer",
           "format": "uint32",
-          "default": 100,
           "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "hard_candidate_ceiling",
+        "max_top_n",
+        "ad_hoc_default_top_n",
+        "ad_hoc_default_knowledge_lag_secs",
+        "entry_window_ratio",
+        "ad_hoc_report_enabled",
+        "delivery_policy"
+      ]
+    },
+    "RuntimeFieldBounds": {
+      "description": "Exact numeric bounds represented without floating-point conversion.",
+      "type": "object",
+      "properties": {
+        "exclusive_maximum": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exclusive_minimum": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "minimum": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false
     },
-    "ResourceBudgetKind": {
+    "RuntimeFieldControl": {
+      "description": "UI control selected from the exact Rust/JSON-Schema field shape.",
       "type": "string",
       "enum": [
-        "database",
-        "clickhouse_writer",
-        "market_data_ingest",
-        "cache",
-        "research_jobs",
-        "report_execution",
-        "web"
+        "toggle",
+        "integer",
+        "decimal",
+        "money",
+        "probability",
+        "text",
+        "select",
+        "multi_select",
+        "duration",
+        "artifact_picker",
+        "artifact_mapping",
+        "schedule_list",
+        "capital_time_buckets",
+        "variant"
       ]
     },
-    "ResourceBudgetMetric": {
-      "type": "string",
-      "enum": [
-        "max_concurrency",
-        "min_concurrency",
-        "queue_capacity",
-        "batch_rows",
-        "operation_timeout",
-        "lease_duration",
-        "heartbeat_interval",
-        "cache_entries",
-        "subscription_capacity",
-        "configured_origins"
+    "RuntimeFieldDescriptor": {
+      "description": "Complete metadata for one editable or explicitly read-only Runtime leaf.",
+      "type": "object",
+      "properties": {
+        "apply_effect": {
+          "$ref": "#/$defs/PolicyApplyBoundary"
+        },
+        "bounds": {
+          "$ref": "#/$defs/RuntimeFieldBounds"
+        },
+        "control": {
+          "$ref": "#/$defs/RuntimeFieldControl"
+        },
+        "default": true,
+        "description": {
+          "type": "string"
+        },
+        "documentation_url": {
+          "type": "string"
+        },
+        "enum_values": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "example": true,
+        "format": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group": {
+          "type": "string"
+        },
+        "order": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "read_only": {
+          "type": "boolean"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "risk_level": {
+          "$ref": "#/$defs/RuntimeFieldRiskLevel"
+        },
+        "title": {
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeFieldUnit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "visibility_condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeVisibilityCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "write_only": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pointer",
+        "title",
+        "description",
+        "required",
+        "bounds",
+        "enum_values",
+        "control",
+        "group",
+        "order",
+        "risk_level",
+        "apply_effect",
+        "read_only",
+        "write_only",
+        "documentation_url"
       ]
     },
-    "ResourceBudgetUnit": {
+    "RuntimeFieldRiskLevel": {
+      "description": "Operator-risk classification for one field mutation.",
       "type": "string",
       "enum": [
-        "count",
-        "rows",
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "RuntimeFieldUnit": {
+      "description": "Human unit rendered beside one Runtime Config control.",
+      "type": "string",
+      "enum": [
+        "usd",
+        "basis_points",
+        "blocks",
         "milliseconds",
         "seconds",
-        "entries",
-        "tokens"
+        "hours",
+        "usd_hours",
+        "ratio",
+        "count",
+        "generation",
+        "revision"
+      ]
+    },
+    "RuntimeVisibilityCondition": {
+      "description": "Typed condition controlling whether a dependent editor is visible.",
+      "type": "object",
+      "properties": {
+        "equals": true,
+        "pointer": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pointer",
+        "equals"
       ]
     },
     "ScheduleCadence": {
@@ -2775,13 +2931,11 @@
       "properties": {
         "allow_near_resolution": {
           "description": "Whether near-resolution markets may enter the selection.",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         "enabled_categories": {
           "description": "Category slugs eligible for quant reports.",
           "type": "array",
-          "default": [],
           "items": {
             "$ref": "#/$defs/MarketCategory"
           }
@@ -2790,35 +2944,39 @@
           "description": "Maximum allowed top-of-book spread in basis points.",
           "type": "integer",
           "format": "uint32",
-          "default": 2500,
           "minimum": 0
         },
         "max_time_to_resolution_secs": {
           "description": "Maximum seconds until market resolution.",
           "type": "integer",
           "format": "uint64",
-          "default": 31536000,
           "minimum": 0
         },
         "min_liquidity_usd": {
           "description": "Minimum displayed liquidity in USD.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+          "$ref": "#/$defs/DecimalValue"
         },
         "min_time_to_resolution_secs": {
           "description": "Minimum seconds until market resolution.",
           "type": "integer",
           "format": "uint64",
-          "default": 3600,
           "minimum": 0
         },
         "min_volume_24h_usd": {
           "description": "Minimum 24h volume in USD.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
+          "$ref": "#/$defs/DecimalValue"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "enabled_categories",
+        "min_liquidity_usd",
+        "min_volume_24h_usd",
+        "max_spread_bps",
+        "allow_near_resolution",
+        "min_time_to_resolution_secs",
+        "max_time_to_resolution_secs"
+      ]
     },
     "SemiAutoConfig": {
       "description": "Semi-auto approval policy.",
@@ -2828,38 +2986,13 @@
           "description": "Approval time-to-live in seconds.",
           "type": "integer",
           "format": "uint64",
-          "default": 900,
           "minimum": 0
         }
       },
-      "additionalProperties": false
-    },
-    "SizingModelConfig": {
-      "description": "Fractional-Kelly position-sizing parameters for the portfolio planner.\n\nKelly is the **only** sizing model: it is the single edge-driven optimal-growth\nsizer, and an edge-free confidence-to-size curve has no place in a capital\nsystem (it would deploy capital regardless of expected value). `confidence`\nis an evidence-quality measure, **not** a calibrated win probability, so it\nnever stands in for `q`: for a `Calibrated` return\nmodel, `q` is the calibrator's `P(win)` directly (`f* = (q - p) / (1 - p)`,\n`p` = market price) — never re-derived from a second, TP/SL-shaped bet\nstructure. `confidence` enters only as an estimation-uncertainty shrinkage\non the Kelly fraction (`confidence_weighting`) — the production-standard\nmitigation for Kelly's sensitivity to edge mis-estimation.",
-      "type": "object",
-      "properties": {
-        "confidence_weighting": {
-          "description": "Confidence-driven shrinkage of the Kelly fraction (estimation\nuncertainty): `confidence` high → near fractional Kelly, low → compressed.",
-          "$ref": "#/$defs/ConfidenceSizeCurve",
-          "default": "linear"
-        },
-        "drawdown_scaling": {
-          "description": "Drawdown-driven scaling policy.",
-          "$ref": "#/$defs/DrawdownMultiplierPolicy",
-          "default": "conservative"
-        },
-        "kelly_fraction": {
-          "description": "Fraction of full Kelly to apply, in `(0, 1]` (half-Kelly ≈ `0.5`).",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.5"
-        },
-        "max_position_pct": {
-          "description": "Maximum single-position size as a fraction of equity (`(0, 1]`).",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0.1"
-        }
-      },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "approval_ttl_secs"
+      ]
     },
     "ValidatePolicyDraftRequest": {
       "type": "object",

@@ -50,13 +50,18 @@ fn new_spec(name: &str, family: ModelFamily) -> NewModelSpec {
 }
 
 fn new_scoped_spec(name: &str, family: ModelFamily, prediction_horizon_secs: u64) -> NewModelSpec {
+    let training_contract = if family == ModelFamily::HoldVsExitWeighted {
+        ModelTrainingContract::hold_vs_exit_default()
+    } else {
+        ModelTrainingContract::outcome_default()
+    };
     model_spec_fixtures::new_model_spec_fixture(
         ModelSpecId::from_v7(),
         name,
         family,
         i64::try_from(prediction_horizon_secs).expect("fixture horizon fits i64"),
         ModelInputContract::single_required("book.mid"),
-        ModelTrainingContract::settlement_default(),
+        training_contract,
     )
 }
 
@@ -201,7 +206,7 @@ pub async fn create_model_version_lock() {
         ModelFamily::HoldVsExitWeighted,
         model_spec_fixtures::pooled_horizon_secs(),
         ModelInputContract::single_required("book.mid"),
-        ModelTrainingContract::settlement_default(),
+        ModelTrainingContract::hold_vs_exit_default(),
     ))
     .await
     .expect("model spec");

@@ -14,8 +14,9 @@ use quant_pivot_error::{
     storage::{StorageError, entity::QUANT_FACTOR},
 };
 use quant_pivot_models::{
+    config::TradeTapeOnChainConfig,
     domain::{
-        data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
+        data_plane::{DecisionBoundary, DecisionClock, DecisionSource, TradeTapeSourceKind},
         quant::{
             LatestFactorSnapshotBundleInfo, LatestFactorSnapshotValueInfo, ModelVersionInfo,
             OrderIntentInfo, PositionInfo,
@@ -30,11 +31,12 @@ use quant_pivot_models::{
     },
     types::{
         Bps, ContentHash, DecisionPolicySnapshotId, MarketId, ModelRunId, ModelVersionId, Price,
-        Usd, stable_name::FactorName,
+        TradeTapeSourceEvidence, Usd, stable_name::FactorName,
     },
 };
 use quant_pivot_repository::traits::{
     FactorRepository, ModelRegistryRepository, PolicyRepository, RecommendationRepository,
+    TradeTapeBlockCursorRepository,
 };
 use quant_pivot_research::{
     factors::{
@@ -44,7 +46,7 @@ use quant_pivot_research::{
         ConfiguredFeatureBuilder, FeatureSourceWindows, FeatureVector, MarketWindowSnapshot,
         TradeTapeWindowSnapshot,
     },
-    model::{ModelRuntimeOutput, QuantModelRuntime, SignalCandidate},
+    model::{ModelRuntimeOutput, QuantModelRuntime, SignalCandidate, SignalWarning},
     pit::{PointInTimeSnapshotSource, ResolvedMarketSnapshot},
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -52,6 +54,7 @@ use rust_decimal::Decimal;
 
 use crate::{
     governance::quality_gate_load::model_contract_ok,
+    ingest::trade_tape_health::{cursors_by_contract_address, market_tape_available},
     prefetch::feature_window::FeatureWindowProvider,
     projection::inference_batch::build_runtime_input,
     service::{
@@ -71,6 +74,8 @@ pub struct ModelBackedExitSignalReinfererDeps {
     pub factors: Arc<dyn FactorRepository>,
     pub pit_source: Arc<dyn PointInTimeSnapshotSource>,
     pub window_provider: FeatureWindowProvider,
+    pub block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
+    pub trade_tape_on_chain: TradeTapeOnChainConfig,
 }
 
 /// Production [`ExitSignalReinferer`] that re-scores one lot via the frozen
@@ -193,6 +198,9 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             data_quality: &config.recommendation.data_quality,
             requirements: &requirements,
             boundary: &boundary,
+            neg_risk: snapshot.market.neg_risk,
+            block_cursor_repo: self.deps.block_cursor_repo.as_ref(),
+            trade_tape_on_chain: &self.deps.trade_tape_on_chain,
             liquidity_cap_usd,
         };
         let Some(vector) = build_live_feature_vector(&request).await? else {
@@ -236,7 +244,6 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
 
         Ok(Some(fresh_signal_from_candidate(
             candidate,
-            &config,
             &version.artifact_hash,
             &fresh.snapshot_hash,
         )))
@@ -254,7 +261,58 @@ pub(crate) struct LiveFeatureBuildRequest<'a> {
     pub data_quality: &'a DataQualityConfig,
     pub requirements: &'a ModelFeatureRequirements,
     pub boundary: &'a DecisionBoundary,
+    pub neg_risk: bool,
+    pub block_cursor_repo: &'a dyn TradeTapeBlockCursorRepository,
+    pub trade_tape_on_chain: &'a TradeTapeOnChainConfig,
     pub liquidity_cap_usd: Usd,
+}
+
+impl LiveFeatureBuildRequest<'_> {
+    async fn load_trade_tape(
+        &self,
+        builder: &ConfiguredFeatureBuilder,
+    ) -> QuantResult<TradeTapeWindowSnapshot> {
+        if !builder.needs_trade_tape() {
+            return Ok(TradeTapeWindowSnapshot::empty(
+                self.market.market_id.clone(),
+                self.boundary.decision_at(),
+                self.boundary.cutoff_for(DecisionSource::TradeTape),
+            ));
+        }
+        if !self.trade_tape_on_chain.enabled {
+            let evidence =
+                TradeTapeSourceEvidence::runtime(false, Vec::new()).map_err(QuantError::config)?;
+            return Ok(TradeTapeWindowSnapshot::empty(
+                self.market.market_id.clone(),
+                self.boundary.decision_at(),
+                self.boundary.cutoff_for(DecisionSource::TradeTape),
+            )
+            .with_source_evidence(evidence, false));
+        }
+        let cursors = self
+            .block_cursor_repo
+            .list_by_source(TradeTapeSourceKind::OnChain)
+            .await?;
+        let by_address = cursors_by_contract_address(&cursors);
+        let source_available =
+            market_tape_available(self.trade_tape_on_chain, &by_address, self.neg_risk);
+        let evidence =
+            TradeTapeSourceEvidence::runtime(true, cursors).map_err(QuantError::config)?;
+        let lookback = Duration::from_secs(self.features.structural.trade_tape_window_secs);
+        let mut windows = self
+            .window_provider
+            .load_trade_tape_windows(slice::from_ref(self.market), self.boundary, lookback)
+            .await?;
+        windows
+            .remove(&self.market.market_id)
+            .map(|window| window.with_source_evidence(evidence, source_available))
+            .ok_or_else(|| {
+                QuantError::config(format!(
+                    "missing prefetched trade-tape window for market {}",
+                    self.market.market_id.as_str()
+                ))
+            })
+    }
 }
 
 async fn infer_lot(
@@ -549,14 +607,7 @@ pub(crate) async fn build_live_feature_vector(
         request.features,
     )
     .await?;
-    let trade_tape = load_trade_tape_window(
-        request.window_provider,
-        &builder,
-        request.market,
-        boundary,
-        request.features,
-    )
-    .await?;
+    let trade_tape = request.load_trade_tape(&builder).await?;
 
     let bundle = builder
         .resolve_inputs(
@@ -610,32 +661,6 @@ async fn load_window(
     })
 }
 
-async fn load_trade_tape_window(
-    window_provider: &FeatureWindowProvider,
-    builder: &ConfiguredFeatureBuilder,
-    market: &SelectedMarket,
-    boundary: &DecisionBoundary,
-    features: &FeaturesConfig,
-) -> QuantResult<TradeTapeWindowSnapshot> {
-    if !builder.needs_trade_tape() {
-        return Ok(TradeTapeWindowSnapshot::empty(
-            market.market_id.clone(),
-            boundary.decision_at(),
-            boundary.cutoff_for(DecisionSource::TradeTape),
-        ));
-    }
-    let lookback = Duration::from_secs(features.structural.trade_tape_window_secs);
-    let mut windows = window_provider
-        .load_trade_tape_windows(slice::from_ref(market), boundary, lookback)
-        .await?;
-    windows.remove(&market.market_id).ok_or_else(|| {
-        QuantError::config(format!(
-            "missing prefetched trade-tape window for market {}",
-            market.market_id.as_str()
-        ))
-    })
-}
-
 pub(crate) fn runtime_decision_boundary(
     config: &DecisionPolicySnapshot,
     decision_at: DateTime<Utc>,
@@ -662,32 +687,21 @@ pub(crate) fn runtime_decision_boundary(
 
 pub(crate) fn liquidity_score_cap(config: &DecisionPolicySnapshot) -> Option<Usd> {
     let max_single = parse_config_decimal(
-        "portfolio.budget.max_single_recommendation_usd",
+        "portfolio.exposure_limits.max_single_recommendation_usd",
         &config
             .execution_risk
             .portfolio
-            .budget
+            .exposure_limits
             .max_single_recommendation_usd
             .value,
     );
-    let usage_cap = parse_config_decimal(
-        "portfolio.constraints.liquidity_usage_cap_pct",
-        &config
-            .execution_risk
-            .portfolio
-            .constraints
-            .liquidity_usage_cap_pct
-            .value,
-    );
-    if usage_cap > Decimal::ZERO && max_single > Decimal::ZERO {
-        return Some(Usd::new(max_single / usage_cap));
+    if max_single > Decimal::ZERO {
+        return Some(Usd::new(max_single));
     }
-    // No positive cap to normalize the liquidity feature against — hold rather
-    // than guess a magic cap that would silently shift the composite score.
+    // A non-positive governed exposure cap cannot define a liquidity scale.
     tracing::warn!(
         %max_single,
-        %usage_cap,
-        "liquidity score cap unavailable (non-positive budget/usage); holding (fail-safe)"
+        "liquidity score cap unavailable; holding (fail-safe)"
     );
     None
 }
@@ -707,7 +721,6 @@ pub fn find_lot_candidate<'a>(
 
 fn fresh_signal_from_candidate(
     candidate: &SignalCandidate,
-    config: &DecisionPolicySnapshot,
     model_artifact_hash: &ContentHash,
     factor_snapshot_hash: &ContentHash,
 ) -> FreshSignal {
@@ -716,24 +729,13 @@ fn fresh_signal_from_candidate(
         factor_snapshot_hash: *factor_snapshot_hash,
         composite_score: candidate.composite_score,
         expected_return_bps: Bps::new(candidate.expected_return_bps),
-        auto_exec_eligible: fresh_auto_exec_eligible(candidate, config),
+        route_gate_eligible: !candidate.rejection_warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                SignalWarning::LowConfidence | SignalWarning::ScoreBelowFloor
+            )
+        }),
     }
-}
-
-fn fresh_auto_exec_eligible(candidate: &SignalCandidate, config: &DecisionPolicySnapshot) -> bool {
-    // Thesis eligibility is the frozen score/confidence policy. Runtime mode is
-    // an independent operator control and must not retrospectively rewrite the
-    // thesis of an already-created auto-execution intent.
-    let policy = &config.execution_authorization.auto_execution;
-    let min_score = parse_config_decimal(
-        "execution.auto_execution.min_score",
-        &policy.min_score.value,
-    );
-    let min_confidence = parse_config_decimal(
-        "execution.auto_execution.min_confidence",
-        &policy.min_confidence.value,
-    );
-    candidate.composite_score.inner() >= min_score && candidate.confidence.inner() >= min_confidence
 }
 
 const fn parse_config_decimal(_field: &str, value: &Decimal) -> Decimal {
@@ -787,7 +789,7 @@ mod tests {
             confidence: Probability::new(dec!(0.8)),
             expected_return_bps: dec!(120),
             downside_bps: dec!(50),
-            win_probability: None,
+            payout_distribution: None,
             entry_price_ref: Price::new(dec!(0.55)),
             suggested_horizon_secs: 3_600,
             factor_breakdown: Vec::new(),
@@ -797,7 +799,7 @@ mod tests {
                 top_negative: Vec::new(),
             },
             rejection_warnings: Vec::new(),
-            rank_before_portfolio: 1,
+            route_rank: 1,
             liquidity_score: Probability::new(dec!(0.5)),
             data_quality_score: Probability::new(dec!(0.9)),
             model_score_percentile: Probability::new(dec!(0.8)),
@@ -941,26 +943,20 @@ mod tests {
     #[test]
     fn liquidity_score_non_positive() {
         let mut config = DecisionPolicySnapshot::default();
-        // Positive budget + usage cap resolve a usable normalization cap.
+        // A positive per-recommendation exposure cap defines the liquidity scale.
         config
             .execution_risk
             .portfolio
-            .budget
+            .exposure_limits
             .max_single_recommendation_usd
             .value = dec!(1000);
-        config
-            .execution_risk
-            .portfolio
-            .constraints
-            .liquidity_usage_cap_pct
-            .value = dec!(0.1);
         assert!(liquidity_score_cap(&config).is_some());
-        // A zero single-recommendation budget cannot normalize the liquidity
+        // A zero single-recommendation cap cannot normalize the liquidity
         // feature → fail-safe None (hold) rather than a guessed magic cap.
         config
             .execution_risk
             .portfolio
-            .budget
+            .exposure_limits
             .max_single_recommendation_usd
             .value = Decimal::ZERO;
         assert!(liquidity_score_cap(&config).is_none());

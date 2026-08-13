@@ -4,16 +4,17 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    quant_account_snapshot, quant_equity_snapshot, quant_market_selection, quant_model_run,
-    quant_model_version, quant_portfolio_plan, quant_recommendation,
-    quant_report_data_quality_snapshot, quant_report_fact_delivery, research_profile_artifact,
+    decision_policy_snapshot, quant_account_snapshot, quant_equity_snapshot,
+    quant_market_selection, quant_portfolio_plan, quant_recommendation,
+    quant_report_data_quality_snapshot, quant_report_fact_delivery, quant_report_run,
 };
 use crate::{
+    domain::quant::RepresentedRouteSet,
     enums::quant::{AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
     types::{
-        AccountSnapshotId, DecisionPolicySnapshotId, EquitySnapshotId, MarketSelectionId,
-        ModelRunId, ModelVersionId, PortfolioPlanId, RecommendationReportId,
-        ReportDataQualitySnapshotId, ReportSummary, ResearchProfileArtifactId, Usd,
+        AccountSnapshotId, ContentHash, DecisionPolicySnapshotId, EquitySnapshotId,
+        MarketSelectionId, PortfolioPlanId, PortfolioScenarioArtifactId, RecommendationReportId,
+        ReportDataQualitySnapshotId, ReportRunId, ReportSummary, Usd,
     },
 };
 
@@ -23,17 +24,19 @@ use crate::{
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_report_id: RecommendationReportId,
-    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    #[sea_orm(unique)]
+    pub report_run_id: ReportRunId,
     pub report_kind: ReportKind,
     pub decision_at: DateTime<Utc>,
-    pub horizon_secs: i64,
     #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    pub model_run_id: Option<ModelRunId>,
-    pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,
     pub portfolio_plan_id: PortfolioPlanId,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub represented_routes_json: RepresentedRouteSet,
+    pub scenario_artifact_id: Option<PortfolioScenarioArtifactId>,
+    pub scenario_artifact_hash: Option<ContentHash>,
     pub top_n: i32,
     pub status: RecommendationReportStatus,
     pub account_source: AccountSource,
@@ -59,14 +62,6 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(
-        belongs_to,
-        relation_enum = "ResearchProfileArtifact",
-        from = "research_profile_artifact_id",
-        to = "research_profile_artifact_id"
-    )]
-    pub research_profile_artifact: BelongsTo<research_profile_artifact::Entity>,
-
-    #[sea_orm(
         self_ref,
         relation_enum = "Successor",
         from = "successor_report_id",
@@ -75,18 +70,18 @@ pub struct Model {
     pub successor: BelongsTo<Option<Entity>>,
     #[sea_orm(
         belongs_to,
-        relation_enum = "ModelVersion",
-        from = "model_version_id",
-        to = "model_version_id"
+        relation_enum = "ReportRun",
+        from = "report_run_id",
+        to = "report_run_id"
     )]
-    pub model_version: BelongsTo<quant_model_version::Entity>,
+    pub report_run: BelongsTo<quant_report_run::Entity>,
     #[sea_orm(
         belongs_to,
-        relation_enum = "ModelRun",
-        from = "model_run_id",
-        to = "model_run_id"
+        relation_enum = "DecisionPolicySnapshot",
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id"
     )]
-    pub model_run: BelongsTo<Option<quant_model_run::Entity>>,
+    pub decision_policy_snapshot: BelongsTo<decision_policy_snapshot::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "MarketSelection",

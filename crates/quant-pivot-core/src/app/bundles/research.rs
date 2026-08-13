@@ -6,7 +6,7 @@ use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
-    config::DeployConfig,
+    config::{DeployConfig, PortfolioSolverDeployConfig},
     domain::ports::{
         CalibrationArtifactFitPort, CommittedPolicyApplyPort, ModelGovernancePort, ModelSpecPort,
     },
@@ -97,6 +97,8 @@ impl InfraBundle {
 pub struct ResearchBundle {
     /// Process-wide serving/offline CPU and memory governor.
     pub compute: Arc<ComputeExecutor>,
+    /// Unique deterministic `HiGHS` boundary shared by live and offline portfolio solves.
+    pub portfolio_solver: PortfolioSolverDeployConfig,
     /// Local (or future object-store) backend for dataset / model artifact bytes.
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Pure, config-driven market selector.
@@ -164,7 +166,7 @@ pub struct ResearchBundle {
     pub model_governance: Arc<dyn ModelGovernancePort>,
     /// Model-spec authoring (the offline research lifecycle root write path).
     pub model_spec: Arc<dyn ModelSpecPort>,
-    /// Resolves `model_score` calibration artifacts for runtime + Kelly safety.
+    /// Resolves Route-local `model_score` probability-calibration artifacts.
     pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     /// Historical fact read port (PIT book / microstructure / settlement).
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
@@ -271,7 +273,6 @@ fn assemble_research_pipelines(
         window_provider: FeatureWindowProvider::new(Arc::clone(&deps.infra.quant_fact_read)),
         feature_repo: Arc::clone(&feature_repo),
         event_writer: Arc::clone(&deps.infra.feature_event_writer),
-        market_registry: Arc::clone(&deps.data.market_registry),
         block_cursor_repo: Arc::clone(&deps.infra.repos.trade_tape_block_cursor)
             as Arc<dyn TradeTapeBlockCursorRepository>,
         linkage_repo: Arc::clone(market_linkage_repo),
@@ -445,6 +446,7 @@ impl ResearchBundle {
 
         Ok(Self {
             compute: Arc::clone(deps.compute),
+            portfolio_solver: deps.deploy.quant.portfolio_solver,
             artifact_store,
             market_selector,
             market_selection_repo,

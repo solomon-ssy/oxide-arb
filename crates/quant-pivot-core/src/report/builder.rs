@@ -1,74 +1,83 @@
-//! Report builder orchestration.
+//! Atomic global report orchestration across every represented model Route.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
     sync::Arc,
 };
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
+    config::PortfolioSolverDeployConfig,
     domain::{
-        data_plane::{DecisionBoundary, DecisionClock},
+        data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
         governance::DecisionPolicySnapshotInfo,
         quant::{
-            MarketSubject, ModelVersionInfo, NewPortfolioPlan, NewReportDataQualitySnapshot,
-            PriceComparator, TradePolicyArtifactInfo,
+            ExecutableEconomicTier, ExistingPortfolioState, MarketCandidate, NewPortfolioPlan,
+            NewReportDataQualitySnapshot, NewReportRouteRun, PortfolioDecisionResult,
+            PortfolioScenarioVisibility, RepresentedRouteSet, RouteCandidateFunnel,
+            RouteModelLineage, RouteRunOutcome, TradePolicyArtifactInfo,
         },
     },
-    enums::{
-        domain::LinkageSourceRole,
-        quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason, TradePolicyStatus},
-    },
-    runtime_config::DecisionPolicySnapshot,
+    enums::quant::{EmptyReportReason, OutcomeSide, TradePolicyStatus},
+    hashing::CanonicalDigest,
+    runtime_config::{BuyModelRoute, DecisionPolicySnapshot},
     types::{
-        Bps, ContentHash, EntryConditionTemplate, EntryConditionTemplateV1, FeatureVectorId,
-        MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId, PortfolioPlanId, Price,
-        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportFunnelReason,
-        ReportFunnelStage, Usd,
+        ContentHash, DecisionPolicySnapshotId, EconomicTierId, EntryOrderTemplate, FeatureVectorId,
+        MarketId, ModelRunId, ModelVersionId, PortfolioPlanId, Price, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, ReportRouteRunId, ReportRunId, Shares, SignalCandidateId, TokenId,
+        TradePolicyCohort, TradePolicyCohortProvenance, Usd,
+        calibration::CalibratedPayoutDistribution,
     },
 };
 use quant_pivot_repository::traits::{
-    MarketSelectionRepository, PolicyRepository, QuantFactReadRepository, TradePolicyRepository,
+    MarketSelectionRepository, PolicyRepository, TradePolicyRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    backtest::PortfolioCaps,
-    features::MarketDecisionCapture,
+    execution_semantics::{PitFeeSchedule, aggressive_buy_limit},
+    features::{FeatureVector, MarketDecisionCapture},
     hashing::ResearchHasher,
-    model::{CalibrationArtifactLoader, ModelArtifact, ResolvedCalibration, SignalCandidate},
+    model::{CalibrationArtifactLoader, ModelArtifact, SignalCandidate},
     portfolio::{
-        AccountSnapshot, CorrelationConstraint, CorrelationEstimator, CorrelationInput,
-        CorrelationMarket, DefaultPortfolioPlanner, DrawdownState, PlanCandidate,
-        PortfolioPlanInput, PortfolioPlanOutput, PortfolioPlanner, RejectedCandidate,
-        optimizer_from_config, sizing_model_from_config,
+        AccountSnapshot, EconomicTierFactory, ExecutableCashTierSeedFactory,
+        ExecutableCashTierSeedInput, ExecutableTierSeed, ExistingPortfolioFactory,
+        GlobalPortfolioInput, GlobalPortfolioPlanner, GlobalPortfolioResult, PlannedEconomicTier,
+        PortfolioScenarioGenerationInput, PortfolioScenarioGenerator, PortfolioScenarioLegInput,
+        SealedPortfolioScenarioArtifact, TierAdmissionRejection, VerifiedPortfolioScenarioModel,
     },
     selection::{
-        MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector, SelectedMarket,
+        MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector,
+        ModelFeatureRequirements, SelectedMarket,
     },
 };
 use rust_decimal::Decimal;
+use serde::Serialize;
 
 use super::{
-    composer::{
-        ComposeReportInput, RecommendationComposer, empty_plan_for_report, executable_sizing_tiers,
-    },
+    composer::{ComposeReportInput, RecommendationComposer},
     readiness::ReportReadinessGate,
-    types::{BuildReportRequest, ComposedReport, EmptyReportContext, ReportTrigger},
+    types::{
+        BuildReportRequest, ComposedReport, EmptyReportContext, PlannedReportRecommendation,
+        ReportTierRejection, ReportTrigger,
+    },
 };
 use crate::{
     governance::{RuntimeControlsHandle, resolve_return_model_calibration},
+    ingest::data_pipeline::MicrostructureCommitBarrier,
+    observability::serving_evidence::FeatureEvidenceCommitment,
     prefetch::market_candidates::{DecisionSnapshotSource, MarketCandidateProvider},
     service::{
         account::AccountProviderFactory,
         equity::{DrawdownProvider, ReportEquitySnapshot},
-        feature_pipeline::{
-            FeaturePipelineRequest, FeaturePipelineResult, FeaturePipelineService, RejectedMarket,
-        },
+        feature_pipeline::{FeaturePipelineRequest, FeaturePipelineResult, FeaturePipelineService},
         market_selection::map_snapshot_to_model,
         model_runner::{
-            ActiveModelRequirements, ActiveModelRequirementsRequest, ModelMarketDecision,
-            ModelRunOutcome, ModelRunRequest, ModelRunner,
+            ActiveModelRequirements, ActiveRouteRequirementsRequest, ModelMarketDecision,
+            ModelRunRequest, ModelRunner,
+        },
+        portfolio_context::{
+            PromotedPortfolioContext, PromotedPortfolioContextLoader, PromotedRouteContract,
         },
     },
 };
@@ -94,10 +103,10 @@ pub struct ReportBuilderDeps {
     pub account_provider_factory: Arc<AccountProviderFactory>,
     pub drawdown_provider: Arc<dyn DrawdownProvider>,
     pub composer: Arc<dyn RecommendationComposer>,
-    pub quant_fact_read_repo: Arc<dyn QuantFactReadRepository>,
-    pub correlation_estimator: Arc<dyn CorrelationEstimator>,
+    pub portfolio_solver: PortfolioSolverDeployConfig,
     pub runtime_controls: RuntimeControlsHandle,
     pub readiness_gate: Arc<dyn ReportReadinessGate>,
+    pub microstructure_commit: Arc<dyn MicrostructureCommitBarrier>,
 }
 
 /// Production report builder.
@@ -106,64 +115,55 @@ pub struct DefaultReportBuilder {
 }
 
 struct BuildContext {
+    report_run_id: ReportRunId,
     version: DecisionPolicySnapshotInfo,
     config: DecisionPolicySnapshot,
     boundary: DecisionBoundary,
     top_n: u32,
+}
+
+struct ReadyRoute {
     active: ActiveModelRequirements,
-    return_model_calibrated: bool,
-    resolved_calibration: Option<ResolvedCalibration>,
-    trade_policy: Option<TradePolicyArtifactInfo>,
-}
-
-struct EmptyComposeInput<'a> {
-    request: &'a BuildReportRequest,
-    context: &'a BuildContext,
-    market_selection_id: MarketSelectionId,
-    market_selection_hash: ContentHash,
-    selection: &'a MarketSelectionSnapshot,
-    account: &'a AccountSnapshot,
-    equity: &'a ReportEquitySnapshot,
-    empty: EmptyReportContext,
+    contract: PromotedRouteContract,
+    trade_policy: TradePolicyArtifactInfo,
+    report_route_run_id: ReportRouteRunId,
     model_run_id: Option<ModelRunId>,
-    market_selection_count: u32,
-    captures: HashMap<MarketId, MarketDecisionCapture>,
-    feature_vector_by_market: HashMap<MarketId, FeatureVectorId>,
-    data_quality_snapshot: NewReportDataQualitySnapshot,
-    /// When the planner ran but published nothing, carry its plan row (solver
-    /// provenance + rejected summary) instead of synthesizing a default plan.
-    portfolio_plan: Option<NewPortfolioPlan>,
-    planner_rejected: &'a [RejectedCandidate],
-    feature_rejected: &'a [RejectedMarket],
-    model_decisions: &'a [ModelMarketDecision],
-    early_funnel_terminal: Option<(ReportFunnelStage, ReportFunnelReason)>,
-}
-
-struct PublishedComposeInput<'a> {
-    request: &'a BuildReportRequest,
-    context: &'a BuildContext,
-    selection: &'a MarketSelectionSnapshot,
-    account: &'a AccountSnapshot,
-    equity: &'a ReportEquitySnapshot,
-    features: &'a FeaturePipelineResult,
-    model_outcome: ModelRunOutcome,
-    plan: PortfolioPlanOutput,
-    crypto_reference_prices: HashMap<MarketId, Usd>,
-}
-
-struct FeatureStageRefs<'a> {
-    request: &'a BuildReportRequest,
-    context: &'a BuildContext,
-    selection: &'a MarketSelectionSnapshot,
-    account: &'a AccountSnapshot,
-    equity: &'a ReportEquitySnapshot,
-    features: &'a FeaturePipelineResult,
+    eligible_markets: u32,
+    feature_complete_markets: u32,
+    calibrated_candidates: u32,
+    admitted_economic_tiers: u32,
+    selected_recommendations: u32,
 }
 
 #[derive(Clone)]
-struct FeatureStageArtifacts {
-    captures: HashMap<MarketId, MarketDecisionCapture>,
-    data_quality_snapshot: NewReportDataQualitySnapshot,
+struct RoutedCandidate {
+    route: BuyModelRoute,
+    model_version_id: ModelVersionId,
+    report_route_run_id: ReportRouteRunId,
+    candidate: SignalCandidate,
+}
+
+#[derive(Clone)]
+struct TierSource {
+    route: BuyModelRoute,
+    report_route_run_id: ReportRouteRunId,
+    model_version_id: ModelVersionId,
+    model_run_id: ModelRunId,
+    candidate: SignalCandidate,
+    trade_policy: TradePolicyCohortProvenance,
+    trade_policy_cohort: TradePolicyCohort,
+    entry_limit_price: Price,
+}
+
+struct SeededTier {
+    seed: ExecutableTierSeed,
+    source: TierSource,
+}
+
+struct PortfolioBuild {
+    row: NewPortfolioPlan,
+    selected: Vec<PlannedEconomicTier>,
+    rejections: Vec<TierAdmissionRejection>,
 }
 
 impl DefaultReportBuilder {
@@ -183,383 +183,161 @@ impl ReportBuilder for DefaultReportBuilder {
 
 impl DefaultReportBuilder {
     async fn build_report(&self, request: BuildReportRequest) -> QuantResult<ComposedReport> {
+        if self.deps.readiness_gate.is_system_degraded() {
+            return Err(ReportError::InvariantViolation {
+                stage: "report_readiness",
+                detail: format!(
+                    "operational phase {:?} is below the report boundary",
+                    self.deps.readiness_gate.operational_phase()
+                ),
+            }
+            .into());
+        }
+
         let context = self.prepare_context(&request).await?;
-        let (selection, decision_snapshot) = self.build_selection(&context).await?;
-        let account = self
-            .account_snapshot(context.boundary.decision_at(), &context.config)
+        let batch = self
+            .deps
+            .candidate_provider
+            .candidates(
+                &context.boundary,
+                &context.config.profile_artifacts.domain.definition,
+            )
             .await?;
+        enforce_candidate_ceiling(
+            batch.candidates.len(),
+            context.config.recommendation.reports.hard_candidate_ceiling,
+        )?;
+
+        let account = self.account_snapshot(&context).await?;
         let mut equity = self
             .deps
             .drawdown_provider
             .snapshot_for_report(&account)
             .await?;
+        self.refresh_drawdown(&account, &mut equity).await?;
 
-        if let Some(report) =
-            self.compose_if_system_degraded(&request, &context, &selection, &account, &equity)?
-        {
-            return Ok(report);
-        }
-        if let Some(report) =
-            self.compose_if_empty_selection(&request, &context, &selection, &account, &equity)?
-        {
-            return Ok(report);
-        }
-        if let Some(report) =
-            self.compose_without_policy(&request, &context, &selection, &account, &equity)?
-        {
-            return Ok(report);
-        }
+        let initial = self
+            .select_snapshot(
+                &context,
+                ModelFeatureRequirements::default(),
+                batch.candidates.clone(),
+            )
+            .await?;
+        let represented_routes = represented_routes(&initial, &account)?;
+        let mut routes = self
+            .resolve_ready_routes(&context, &represented_routes, &initial)
+            .await?;
+        let portfolio_context = self
+            .load_portfolio_context(&context, &represented_routes, &routes)
+            .await?;
+
+        let requirements = merged_requirements(&routes);
+        let selection = self
+            .select_snapshot(&context, requirements.clone(), batch.candidates.clone())
+            .await?;
+        self.persist_selection(&selection, &batch.candidates)
+            .await?;
 
         let features = self
-            .build_features(&context, &selection, decision_snapshot.as_ref())
+            .build_features(
+                &context,
+                &selection,
+                batch.snapshot_source.as_ref(),
+                &requirements,
+            )
             .await?;
-        let model_outcome = match Box::pin(
-            self.run_model_stage(&request, &context, &selection, &account, &equity, &features),
-        )
-        .await?
-        {
-            Err(report) => return Ok(report),
-            Ok(outcome) => outcome,
-        };
-        let artifacts = FeatureStageArtifacts {
-            captures: features.captures.clone(),
-            data_quality_snapshot: features.data_quality_snapshot.clone(),
-        };
-
-        let correlation = self.build_correlation(&context, &selection).await?;
-        self.finalize_equity_for_sizing(&account, &mut equity)
+        let (routed_candidates, model_decisions) = self
+            .run_route_models(&context, &selection, &features, &mut routes)
             .await?;
-        let plan = Self::plan_portfolio(
+        let seeded_tiers = build_economic_tier_seeds(
             &context,
             &selection,
-            &model_outcome,
             &features.captures,
-            &account,
-            equity.drawdown_state,
-            correlation.as_ref(),
+            &routes,
+            &routed_candidates,
+            portfolio_context.as_ref(),
         )?;
-        if plan.planned.is_empty() {
-            return self.compose_empty(EmptyComposeInput {
-                request: &request,
-                context: &context,
-                market_selection_id: selection.market_selection_id,
-                market_selection_hash: selection.selector_hash,
-                selection: &selection,
-                account: &account,
-                equity: &equity,
-                empty: EmptyReportContext {
-                    reason: planner_empty_reason(
-                        &plan.rejected,
-                        plan.plan_row.optimizer_meta_json.status,
-                    ),
-                    candidate_count: model_outcome.emitted,
-                    rejected_count: count_u32(
-                        plan.rejected.len(),
-                        "report.planner_rejected_count",
-                    )?,
-                    warnings: Vec::new(),
-                },
-                model_run_id: Some(model_outcome.model_run_id),
-                market_selection_count: market_selection_count(&selection.included)?,
-                captures: artifacts.captures,
-                feature_vector_by_market: features.feature_vector_by_market(),
-                data_quality_snapshot: artifacts.data_quality_snapshot,
-                portfolio_plan: Some(plan.plan_row),
-                planner_rejected: &plan.rejected,
-                feature_rejected: &features.rejected,
-                model_decisions: &model_outcome.decisions,
-                early_funnel_terminal: None,
-            });
-        }
-
-        self.finalize_equity_for_sizing(&account, &mut equity)
-            .await?;
-
-        let crypto_reference_prices = self
-            .crypto_reference_prices(&context, &features, &plan)
-            .await?;
-        self.compose_published(PublishedComposeInput {
-            request: &request,
+        let scenario_artifact = materialize_portfolio_scenario(
+            &context,
+            &account,
+            &represented_routes,
+            portfolio_context.as_ref(),
+            &seeded_tiers,
+        )?;
+        let (tiers, tier_sources) =
+            finalize_economic_tiers(seeded_tiers, scenario_artifact.as_ref())?;
+        let portfolio = build_portfolio(&PortfolioBuildInput {
             context: &context,
             selection: &selection,
             account: &account,
             equity: &equity,
+            represented_routes: &represented_routes,
+            promoted: portfolio_context.as_ref(),
+            scenario_artifact: scenario_artifact.as_ref(),
+            tiers: &tiers,
+        })?;
+        let tier_rejections = report_tier_rejections(&tiers, &portfolio.rejections)?;
+        update_route_funnels(&mut routes, &tiers, &portfolio)?;
+        let planned = planned_recommendations(&portfolio.selected, &tier_sources)?;
+        // Every derived report fact is anchored to the database-owned frozen
+        // decision clock. Using the process wall clock here makes the same
+        // report-run preimage non-replayable and can place availability after
+        // the PostgreSQL commit clock when host/container clocks drift.
+        let published_at = context.boundary.decision_at();
+        let route_runs = route_rows(&request, &routes, published_at);
+        let empty = empty_context(&EmptyContextInput {
+            initial: &initial,
+            selection: &selection,
             features: &features,
-            model_outcome,
-            plan,
-            crypto_reference_prices,
+            candidates: &routed_candidates,
+            tiers: &tiers,
+            planned: &planned,
+            account: &account,
+            config: &context.config,
+        })?;
+        let feature_vector_by_market = features.vector_ids_by_market()?;
+        let trigger_key = request
+            .trigger
+            .key(request.trigger_time)
+            .map_err(|error| QuantError::config(error.to_string()))?
+            .to_string();
+        self.deps.composer.compose(ComposeReportInput {
+            report_run_id: request.report_run_id,
+            trigger: &request.trigger,
+            trigger_key,
+            decision_at: context.boundary.decision_at(),
+            published_at,
+            decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
+            runtime_config: &context.config,
+            runtime_mode: self.deps.runtime_controls.quant_runtime_mode(),
+            selection: &selection,
+            account: &account,
+            account_snapshot: equity.account_snapshot,
+            equity_snapshot: equity.equity_snapshot,
+            portfolio_plan: portfolio.row,
+            route_runs,
+            tiers: &tiers,
+            planned: &planned,
+            tier_rejections: &tier_rejections,
+            feature_rejected: &features.rejected,
+            model_decisions: &model_decisions,
+            captures: &features.captures,
+            feature_vector_by_market: &feature_vector_by_market,
+            data_quality_snapshot: features.data_quality_snapshot,
+            candidate_count: count_u32(routed_candidates.len(), "report.candidate_count")?,
+            empty,
+            top_n: context.top_n,
         })
-    }
-
-    async fn run_model_stage(
-        &self,
-        request: &BuildReportRequest,
-        context: &BuildContext,
-        selection: &MarketSelectionSnapshot,
-        account: &AccountSnapshot,
-        equity: &ReportEquitySnapshot,
-        features: &FeaturePipelineResult,
-    ) -> QuantResult<Result<ModelRunOutcome, ComposedReport>> {
-        let stage = FeatureStageRefs {
-            request,
-            context,
-            selection,
-            account,
-            equity,
-            features,
-        };
-        if let Some(report) = self.compose_without_features(&stage)? {
-            return Ok(Err(report));
-        }
-
-        let model_outcome = Box::pin(self.run_model(context, selection, features)).await?;
-        let artifacts = FeatureStageArtifacts {
-            captures: features.captures.clone(),
-            data_quality_snapshot: features.data_quality_snapshot.clone(),
-        };
-        if let Some(report) = self.compose_without_signals(&stage, &model_outcome, artifacts)? {
-            return Ok(Err(report));
-        }
-        Ok(Ok(model_outcome))
-    }
-
-    fn compose_if_system_degraded(
-        &self,
-        request: &BuildReportRequest,
-        context: &BuildContext,
-        selection: &MarketSelectionSnapshot,
-        account: &AccountSnapshot,
-        equity: &ReportEquitySnapshot,
-    ) -> QuantResult<Option<ComposedReport>> {
-        if !self.deps.readiness_gate.is_system_degraded() {
-            return Ok(None);
-        }
-        self.compose_empty(EmptyComposeInput {
-            request,
-            context,
-            market_selection_id: selection.market_selection_id,
-            market_selection_hash: selection.selector_hash,
-            selection,
-            account,
-            equity,
-            empty: EmptyReportContext {
-                reason: EmptyReportReason::SystemDegraded,
-                candidate_count: 0,
-                rejected_count: 0,
-                warnings: vec!["operational phase is not Operational".to_owned()],
-            },
-            model_run_id: None,
-            market_selection_count: market_selection_count(&selection.included)?,
-            captures: HashMap::new(),
-            feature_vector_by_market: HashMap::new(),
-            data_quality_snapshot: empty_data_quality_snapshot(
-                context,
-                context.boundary.decision_at(),
-            ),
-            portfolio_plan: None,
-            planner_rejected: &[],
-            feature_rejected: &[],
-            model_decisions: &[],
-            early_funnel_terminal: Some((
-                ReportFunnelStage::FeatureReady,
-                ReportFunnelReason::SystemDegraded,
-            )),
-        })
-        .map(Some)
-    }
-
-    fn compose_if_empty_selection(
-        &self,
-        request: &BuildReportRequest,
-        context: &BuildContext,
-        selection: &MarketSelectionSnapshot,
-        account: &AccountSnapshot,
-        equity: &ReportEquitySnapshot,
-    ) -> QuantResult<Option<ComposedReport>> {
-        if !selection.included.is_empty() {
-            return Ok(None);
-        }
-        self.compose_empty(EmptyComposeInput {
-            request,
-            context,
-            market_selection_id: selection.market_selection_id,
-            market_selection_hash: selection.selector_hash,
-            selection,
-            account,
-            equity,
-            empty: EmptyReportContext {
-                reason: EmptyReportReason::EmptySelection,
-                candidate_count: 0,
-                rejected_count: count_u32(
-                    selection.excluded.len(),
-                    "report.selection_rejected_count",
-                )?,
-                warnings: Vec::new(),
-            },
-            model_run_id: None,
-            market_selection_count: market_selection_count(&selection.included)?,
-            captures: HashMap::new(),
-            feature_vector_by_market: HashMap::new(),
-            data_quality_snapshot: empty_data_quality_snapshot(
-                context,
-                context.boundary.decision_at(),
-            ),
-            portfolio_plan: None,
-            planner_rejected: &[],
-            feature_rejected: &[],
-            model_decisions: &[],
-            early_funnel_terminal: None,
-        })
-        .map(Some)
-    }
-
-    fn compose_without_policy(
-        &self,
-        request: &BuildReportRequest,
-        context: &BuildContext,
-        selection: &MarketSelectionSnapshot,
-        account: &AccountSnapshot,
-        equity: &ReportEquitySnapshot,
-    ) -> QuantResult<Option<ComposedReport>> {
-        if context.trade_policy.is_some() {
-            return Ok(None);
-        }
-        let blocked_count = count_u32(
-            selection.included.len(),
-            "report.trade_policy_blocked_count",
-        )?;
-        self.compose_empty(EmptyComposeInput {
-            request,
-            context,
-            market_selection_id: selection.market_selection_id,
-            market_selection_hash: selection.selector_hash,
-            selection,
-            account,
-            equity,
-            empty: EmptyReportContext {
-                reason: EmptyReportReason::TradePolicyUnavailable,
-                candidate_count: blocked_count,
-                rejected_count: blocked_count,
-                warnings: vec![
-                    "active model has no Published, hash-consistent trade policy binding"
-                        .to_owned(),
-                ],
-            },
-            model_run_id: None,
-            market_selection_count: market_selection_count(&selection.included)?,
-            captures: HashMap::new(),
-            feature_vector_by_market: HashMap::new(),
-            data_quality_snapshot: empty_data_quality_snapshot(
-                context,
-                context.boundary.decision_at(),
-            ),
-            portfolio_plan: None,
-            planner_rejected: &[],
-            feature_rejected: &[],
-            model_decisions: &[],
-            early_funnel_terminal: Some((
-                ReportFunnelStage::PolicyReady,
-                ReportFunnelReason::TradePolicyUnavailable,
-            )),
-        })
-        .map(Some)
-    }
-
-    fn compose_without_features(
-        &self,
-        stage: &FeatureStageRefs<'_>,
-    ) -> QuantResult<Option<ComposedReport>> {
-        if !stage.features.accepted.is_empty() {
-            return Ok(None);
-        }
-        self.compose_empty(EmptyComposeInput {
-            request: stage.request,
-            context: stage.context,
-            market_selection_id: stage.selection.market_selection_id,
-            market_selection_hash: stage.selection.selector_hash,
-            selection: stage.selection,
-            account: stage.account,
-            equity: stage.equity,
-            empty: EmptyReportContext {
-                reason: EmptyReportReason::InsufficientDataQuality,
-                candidate_count: 0,
-                rejected_count: count_u32(
-                    stage.features.rejected.len(),
-                    "report.feature_rejected_count",
-                )?,
-                warnings: vec!["feature pipeline accepted zero markets".to_owned()],
-            },
-            model_run_id: None,
-            market_selection_count: market_selection_count(&stage.selection.included)?,
-            captures: stage.features.captures.clone(),
-            feature_vector_by_market: (stage.features).feature_vector_by_market(),
-            data_quality_snapshot: stage.features.data_quality_snapshot.clone(),
-            portfolio_plan: None,
-            planner_rejected: &[],
-            feature_rejected: &stage.features.rejected,
-            model_decisions: &[],
-            early_funnel_terminal: None,
-        })
-        .map(Some)
-    }
-
-    fn compose_without_signals(
-        &self,
-        stage: &FeatureStageRefs<'_>,
-        model_outcome: &ModelRunOutcome,
-        artifacts: FeatureStageArtifacts,
-    ) -> QuantResult<Option<ComposedReport>> {
-        if !model_outcome.accepted.is_empty() {
-            return Ok(None);
-        }
-        self.compose_empty(EmptyComposeInput {
-            request: stage.request,
-            context: stage.context,
-            market_selection_id: stage.selection.market_selection_id,
-            market_selection_hash: stage.selection.selector_hash,
-            selection: stage.selection,
-            account: stage.account,
-            equity: stage.equity,
-            empty: EmptyReportContext {
-                reason: EmptyReportReason::NoPositiveSignal,
-                candidate_count: model_outcome.emitted,
-                rejected_count: 0,
-                warnings: vec!["active model emitted no positive candidate".to_owned()],
-            },
-            model_run_id: Some(model_outcome.model_run_id),
-            market_selection_count: market_selection_count(&stage.selection.included)?,
-            captures: artifacts.captures,
-            feature_vector_by_market: (stage.features).feature_vector_by_market(),
-            data_quality_snapshot: artifacts.data_quality_snapshot,
-            portfolio_plan: None,
-            planner_rejected: &[],
-            feature_rejected: &stage.features.rejected,
-            model_decisions: &model_outcome.decisions,
-            early_funnel_terminal: None,
-        })
-        .map(Some)
-    }
-}
-
-impl DefaultReportBuilder {
-    async fn finalize_equity_for_sizing(
-        &self,
-        account: &AccountSnapshot,
-        equity: &mut ReportEquitySnapshot,
-    ) -> QuantResult<()> {
-        let resolution = self
-            .deps
-            .drawdown_provider
-            .resolve_drawdown_for_sizing(account, equity.drawdown_state)
-            .await?;
-        equity.drawdown_state = resolution.drawdown_state;
-        equity.equity_snapshot.high_water_mark_usd = resolution.high_water_mark_usd;
-        equity.equity_snapshot.drawdown_pct = resolution.drawdown_state.current_drawdown;
-        Ok(())
     }
 
     async fn prepare_context(&self, request: &BuildReportRequest) -> QuantResult<BuildContext> {
-        let (version, config) = self.load_config(request).await?;
+        let version = self
+            .deps
+            .runtime_config_repo
+            .load_active_at(request.trigger_time)
+            .await?
+            .ok_or_else(|| QuantError::config("no active decision policy snapshot"))?;
+        let config = version.snapshot.clone();
         let knowledge_lag_secs = resolve_knowledge_lag(request, &config)?;
         let boundary = DecisionClock::new(knowledge_lag_secs).serving_boundary(
             request.trigger_time,
@@ -576,111 +354,59 @@ impl DefaultReportBuilder {
                 .weather
                 .availability_lag_secs,
         )?;
-        let top_n = resolve_top_n(request, &config)?;
-        let active = self
-            .deps
-            .model_runner
-            .active_requirements(ActiveModelRequirementsRequest {
-                policy: &version,
-                decision_at: boundary.decision_at(),
-            })
+        self.deps
+            .microstructure_commit
+            .commit_through(boundary.cutoff_for(DecisionSource::Microstructure))
             .await?;
-        let (return_model_calibrated, resolved_calibration, trade_policy) =
-            self.resolve_calibration_state(&active.version).await?;
-
         Ok(BuildContext {
+            report_run_id: request.report_run_id,
             version,
+            top_n: resolve_top_n(request, &config)?,
             config,
             boundary,
-            top_n,
-            active,
-            return_model_calibrated,
-            resolved_calibration,
-            trade_policy,
         })
     }
 
-    /// Single hash-verified artifact load resolving both `return_model_calibrated`
-    /// and the (optional) [`ResolvedCalibration`] — never two independent loads
-    /// of the same artifact (one load, two checks). Delegates
-    /// the calibration-state decision to
-    /// [`resolve_return_model_calibration`](crate::governance::resolve_return_model_calibration) —
-    /// the same shared deep check `publish` / admission / intent creation use
-    /// across the closed loop.
-    async fn resolve_calibration_state(
-        &self,
-        version: &ModelVersionInfo,
-    ) -> QuantResult<(
-        bool,
-        Option<ResolvedCalibration>,
-        Option<TradePolicyArtifactInfo>,
-    )> {
-        let artifact =
-            ModelArtifact::load_verified(self.deps.artifact_store.as_ref(), version).await?;
-        let resolved =
-            resolve_return_model_calibration(self.deps.calibration_loader.as_ref(), &artifact)
-                .await?;
-        let header = artifact.header();
-        let trade_policy = match (
-            header.trade_policy_artifact_id(),
-            header.trade_policy_hash(),
-        ) {
-            (None, None) => None,
-            (Some(artifact_id), Some(expected_hash)) => {
-                let policy = self
-                    .deps
-                    .trade_policy_repo
-                    .find(&artifact_id)
-                    .await?
-                    .ok_or_else(|| ReportError::InvariantViolation {
-                        stage: "model_policy_binding",
-                        detail: format!("model references missing trade policy {artifact_id}"),
-                    })?;
-                let computed_hash = ResearchHasher::canonical(&policy.payload_json)?;
-                if policy.status != TradePolicyStatus::Published
-                    || !policy.payload_json.is_publishable()
-                    || policy.content_hash != expected_hash
-                    || computed_hash != policy.content_hash
-                {
-                    return Err(ReportError::InvariantViolation {
-                        stage: "model_policy_binding",
-                        detail: format!(
-                            "trade policy {artifact_id} is not Published, quality-gated, and hash-consistent"
-                        ),
-                    }
-                    .into());
-                }
-                Some(policy)
-            }
-            _ => {
-                return Err(ReportError::InvariantViolation {
-                    stage: "model_policy_binding",
-                    detail: "model artifact must bind trade policy ID and hash together".to_owned(),
-                }
-                .into());
-            }
-        };
-        Ok((resolved.is_some(), resolved, trade_policy))
+    async fn account_snapshot(&self, context: &BuildContext) -> QuantResult<AccountSnapshot> {
+        let budget = Usd::new(
+            context
+                .config
+                .execution_risk
+                .portfolio
+                .budget
+                .total_budget_usd
+                .value,
+        );
+        self.deps
+            .account_provider_factory
+            .create(budget)?
+            .snapshot(context.boundary.decision_at())
+            .await
     }
 
-    async fn build_selection(
+    async fn refresh_drawdown(
+        &self,
+        account: &AccountSnapshot,
+        equity: &mut ReportEquitySnapshot,
+    ) -> QuantResult<()> {
+        let resolved = self
+            .deps
+            .drawdown_provider
+            .resolve_drawdown_for_sizing(account, equity.drawdown)
+            .await?;
+        equity.drawdown = resolved.drawdown;
+        equity.equity_snapshot.high_water_mark_usd = resolved.high_water_mark_usd;
+        equity.equity_snapshot.drawdown_pct = resolved.drawdown.current_ratio;
+        Ok(())
+    }
+
+    async fn select_snapshot(
         &self,
         context: &BuildContext,
-    ) -> QuantResult<(MarketSelectionSnapshot, Arc<DecisionSnapshotSource>)> {
-        let batch = self
-            .deps
-            .candidate_provider
-            .candidates(
-                &context.boundary,
-                &context.config.profile_artifacts.domain.definition,
-            )
-            .await?;
-        enforce_candidate_ceiling(
-            batch.candidates.len(),
-            context.config.recommendation.reports.hard_candidate_ceiling,
-        )?;
-        let selection = self
-            .deps
+        model_requirements: ModelFeatureRequirements,
+        candidates: Vec<MarketCandidate>,
+    ) -> QuantResult<MarketSelectionSnapshot> {
+        self.deps
             .market_selector
             .build_snapshot(
                 MarketSelectionBuildRequest {
@@ -689,18 +415,154 @@ impl DefaultReportBuilder {
                     selection: context.config.recommendation.selection.clone(),
                     data_quality: context.config.recommendation.data_quality.clone(),
                     features: context.config.profile_artifacts.features.definition.clone(),
-                    model_requirements: context.active.model_requirements.clone(),
+                    model_requirements,
                     knowledge_lag_secs: context.boundary.knowledge_lag_secs(),
                 },
-                batch.candidates.clone(),
+                candidates,
             )
-            .await?;
-        let selection_model = map_snapshot_to_model(&selection, &batch.candidates)?;
+            .await
+    }
+
+    async fn persist_selection(
+        &self,
+        selection: &MarketSelectionSnapshot,
+        candidates: &[MarketCandidate],
+    ) -> QuantResult<()> {
+        let model = map_snapshot_to_model(selection, candidates)?;
         self.deps
             .market_selection_repo
-            .create_snapshot(selection_model.snapshot, selection_model.members)
+            .create_snapshot(model.snapshot, model.members)
             .await?;
-        Ok((selection, batch.snapshot_source))
+        Ok(())
+    }
+
+    async fn resolve_ready_routes(
+        &self,
+        context: &BuildContext,
+        represented_routes: &RepresentedRouteSet,
+        initial: &MarketSelectionSnapshot,
+    ) -> QuantResult<Vec<ReadyRoute>> {
+        if represented_routes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let active = self
+            .deps
+            .model_runner
+            .active_route_requirements(ActiveRouteRequirementsRequest {
+                policy: &context.version,
+                represented_routes,
+            })
+            .await?;
+        let mut ready = Vec::with_capacity(active.len());
+        for active_route in active {
+            let route = active_route.route;
+            let resolved = self
+                .verify_route(context, active_route)
+                .await
+                .map_err(|error| route_error(route, &error))?;
+            let eligible_markets = count_u32(
+                initial
+                    .included
+                    .iter()
+                    .filter(|market| BuyModelRoute::from(market.category) == route)
+                    .count(),
+                "route.eligible_markets",
+            )?;
+            ready.push(ReadyRoute {
+                active: resolved.0,
+                contract: resolved.1,
+                trade_policy: resolved.2,
+                report_route_run_id: route_run_id(context, route)?,
+                model_run_id: None,
+                eligible_markets,
+                feature_complete_markets: 0,
+                calibrated_candidates: 0,
+                admitted_economic_tiers: 0,
+                selected_recommendations: 0,
+            });
+        }
+        if ready
+            .iter()
+            .map(|route| route.active.route)
+            .collect::<Vec<_>>()
+            != represented_routes.routes
+        {
+            return Err(ReportError::InvariantViolation {
+                stage: "route_readiness",
+                detail: "resolved Route order differs from represented Route order".to_owned(),
+            }
+            .into());
+        }
+        Ok(ready)
+    }
+
+    async fn verify_route(
+        &self,
+        context: &BuildContext,
+        active: ActiveModelRequirements,
+    ) -> QuantResult<(
+        ActiveModelRequirements,
+        PromotedRouteContract,
+        TradePolicyArtifactInfo,
+    )> {
+        let artifact =
+            ModelArtifact::load_verified(self.deps.artifact_store.as_ref(), &active.version)
+                .await?;
+        let calibration =
+            resolve_return_model_calibration(self.deps.calibration_loader.as_ref(), &artifact)
+                .await?
+                .ok_or_else(|| ReportError::RouteReadiness {
+                    route: active.route.as_str().to_owned(),
+                    detail: "champion has no active calibrated-probability artifact".to_owned(),
+                })?;
+        let contract = PromotedRouteContract::from_version(active.route, &active.version)?;
+        if calibration.artifact_id != contract.calibration_artifact_id {
+            return Err(ReportError::RouteReadiness {
+                route: active.route.as_str().to_owned(),
+                detail: "resolved calibration differs from the serving contract".to_owned(),
+            }
+            .into());
+        }
+        let policy = load_trade_policy(
+            self.deps.trade_policy_repo.as_ref(),
+            &artifact,
+            &active,
+            &contract,
+        )
+        .await?;
+        if context.boundary.decision_at() < policy.created_at {
+            return Err(ReportError::RouteReadiness {
+                route: active.route.as_str().to_owned(),
+                detail: "Trade Policy is newer than the frozen decision boundary".to_owned(),
+            }
+            .into());
+        }
+        Ok((active, contract, policy))
+    }
+
+    async fn load_portfolio_context(
+        &self,
+        context: &BuildContext,
+        represented_routes: &RepresentedRouteSet,
+        routes: &[ReadyRoute],
+    ) -> QuantResult<Option<PromotedPortfolioContext>> {
+        if represented_routes.is_empty() {
+            return Ok(None);
+        }
+        let loader = PromotedPortfolioContextLoader::new(
+            Arc::clone(&self.deps.artifact_store),
+            self.deps.portfolio_solver,
+            context.config.clone(),
+        );
+        loader
+            .load_routes(
+                represented_routes.clone(),
+                routes.iter().map(|route| route.contract.clone()).collect(),
+                context.boundary.decision_at(),
+                context.top_n,
+            )
+            .await
+            .map(Some)
     }
 
     async fn build_features(
@@ -708,457 +570,1230 @@ impl DefaultReportBuilder {
         context: &BuildContext,
         selection: &MarketSelectionSnapshot,
         decision_snapshot: &DecisionSnapshotSource,
+        requirements: &ModelFeatureRequirements,
     ) -> QuantResult<FeaturePipelineResult> {
+        if selection.included.is_empty() {
+            return Ok(FeaturePipelineResult {
+                accepted: Vec::new(),
+                rejected: Vec::new(),
+                persisted: Vec::new(),
+                feature_evidence: None,
+                captures: HashMap::new(),
+                data_quality_snapshot: context.empty_data_quality_snapshot(),
+            });
+        }
         self.deps
             .feature_pipeline
             .run(FeaturePipelineRequest {
                 included: &selection.included,
                 boundary: context.boundary.clone(),
-                decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
                 features: &context.config.profile_artifacts.features.definition,
                 domain: &context.config.profile_artifacts.domain.definition,
                 data_quality: &context.config.recommendation.data_quality,
-                model_requirements: &context.active.model_requirements,
+                model_requirements: requirements,
                 pit: decision_snapshot,
-                liquidity_cap_usd: liquidity_score_cap(&context.config),
+                decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
+                liquidity_cap_usd: Usd::new(
+                    context
+                        .config
+                        .execution_risk
+                        .portfolio
+                        .exposure_limits
+                        .max_single_recommendation_usd
+                        .value,
+                ),
             })
             .await
     }
 
-    async fn run_model(
+    async fn run_route_models(
         &self,
         context: &BuildContext,
         selection: &MarketSelectionSnapshot,
         features: &FeaturePipelineResult,
-    ) -> QuantResult<ModelRunOutcome> {
-        let feature_evidence =
-            features
-                .feature_evidence
-                .as_ref()
-                .ok_or_else(|| ReportError::InvariantViolation {
-                    stage: "model_runner",
-                    detail: "no feature vector passed the data-quality gate".to_owned(),
-                })?;
-        let feature_vector_ids = features
-            .persisted
+        routes: &mut [ReadyRoute],
+    ) -> QuantResult<(Vec<RoutedCandidate>, Vec<ModelMarketDecision>)> {
+        let persisted = features.vector_ids_by_market()?;
+        let accepted = features
+            .accepted
             .iter()
-            .map(|info| info.feature_vector_id)
-            .collect::<Vec<_>>();
-        let outcome = Box::pin(self.deps.model_runner.run(ModelRunRequest {
-            decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
-            market_selection_id: Some(selection.market_selection_id),
-            selection: &selection.included,
-            feature_vectors: &features.accepted,
-            feature_vector_ids: &feature_vector_ids,
-            feature_evidence,
-            serving: &context.active.serving,
-            top_n: bounded_usize(context.top_n)?,
-            boundary: context.boundary.clone(),
-        }))
-        .await?;
-        if outcome.model_version_id != context.active.model_version_id {
-            return Err(ReportError::InvariantViolation {
-                stage: "model_runner",
+            .map(|vector| (vector.market_id.clone(), vector))
+            .collect::<HashMap<_, _>>();
+        let mut routed_candidates = Vec::new();
+        let mut decisions = Vec::new();
+        for route in routes {
+            let markets = selection
+                .included
+                .iter()
+                .filter(|market| {
+                    BuyModelRoute::from(market.category) == route.active.route
+                        && accepted.contains_key(&market.market_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            route.feature_complete_markets =
+                count_u32(markets.len(), "route.feature_complete_markets")?;
+            if markets.is_empty() {
+                continue;
+            }
+            let (vectors, ids) = route_vectors(&markets, &accepted, &persisted)?;
+            let evidence = features.route_evidence()?;
+            let outcome = self
+                .deps
+                .model_runner
+                .run(ModelRunRequest {
+                    decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
+                    market_selection_id: Some(selection.market_selection_id),
+                    selection: &markets,
+                    feature_vectors: &vectors,
+                    feature_vector_ids: &ids,
+                    feature_evidence: &evidence,
+                    serving: &route.active.serving,
+                    top_n: bounded_usize(context.top_n)?,
+                    boundary: context.boundary.clone(),
+                })
+                .await?;
+            if outcome.model_version_id != route.active.model_version_id {
+                return Err(ReportError::RouteReadiness {
+                    route: route.active.route.as_str().to_owned(),
+                    detail: "model run authority differs from the frozen champion".to_owned(),
+                }
+                .into());
+            }
+            for candidate in &outcome.accepted {
+                if candidate.payout_distribution.is_none() {
+                    return Err(ReportError::RouteReadiness {
+                        route: route.active.route.as_str().to_owned(),
+                        detail: format!(
+                            "candidate {} has no calibrated payout distribution",
+                            candidate.signal_candidate_id
+                        ),
+                    }
+                    .into());
+                }
+            }
+            route.model_run_id = Some(outcome.model_run_id);
+            route.calibrated_candidates = outcome.emitted;
+            routed_candidates.extend(outcome.accepted.into_iter().map(|candidate| {
+                RoutedCandidate {
+                    route: route.active.route,
+                    model_version_id: route.active.model_version_id,
+                    report_route_run_id: route.report_route_run_id,
+                    candidate,
+                }
+            }));
+            decisions.extend(outcome.decisions);
+        }
+        Ok((routed_candidates, decisions))
+    }
+}
+
+async fn load_trade_policy(
+    repository: &dyn TradePolicyRepository,
+    model: &ModelArtifact,
+    active: &ActiveModelRequirements,
+    contract: &PromotedRouteContract,
+) -> QuantResult<TradePolicyArtifactInfo> {
+    let header = model.header();
+    let (Some(artifact_id), Some(expected_hash)) = (
+        header.trade_policy_artifact_id(),
+        header.trade_policy_hash(),
+    ) else {
+        return Err(ReportError::RouteReadiness {
+            route: active.route.as_str().to_owned(),
+            detail: "model must bind Trade Policy id and hash together".to_owned(),
+        }
+        .into());
+    };
+    let policy =
+        repository
+            .find(&artifact_id)
+            .await?
+            .ok_or_else(|| ReportError::RouteReadiness {
+                route: active.route.as_str().to_owned(),
+                detail: format!("bound Trade Policy {artifact_id} is missing"),
+            })?;
+    let computed = ResearchHasher::canonical(&policy.payload_json)?;
+    let fit = &policy.payload_json.fit_contract;
+    let horizon = u64::try_from(contract.prediction_horizon_secs).map_err(|error| {
+        ReportError::RouteReadiness {
+            route: active.route.as_str().to_owned(),
+            detail: format!("prediction horizon is invalid: {error}"),
+        }
+    })?;
+    if artifact_id != contract.trade_policy_artifact_id
+        || policy.status != TradePolicyStatus::Published
+        || !policy.payload_json.is_publishable()
+        || policy.content_hash != expected_hash
+        || computed != policy.content_hash
+        || fit.profile_ref != contract.research_profile_ref
+        || fit.target_horizon_secs != horizon
+    {
+        return Err(ReportError::RouteReadiness {
+            route: active.route.as_str().to_owned(),
+            detail: "Trade Policy is not Published, canonical, and contract-compatible".to_owned(),
+        }
+        .into());
+    }
+    Ok(policy)
+}
+
+fn build_economic_tier_seeds(
+    context: &BuildContext,
+    selection: &MarketSelectionSnapshot,
+    captures: &HashMap<MarketId, MarketDecisionCapture>,
+    routes: &[ReadyRoute],
+    candidates: &[RoutedCandidate],
+    portfolio: Option<&PromotedPortfolioContext>,
+) -> QuantResult<Vec<SeededTier>> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let portfolio = portfolio.ok_or_else(|| ReportError::ScenarioArtifact {
+        detail: "calibrated candidates exist without a promoted scenario-model context".to_owned(),
+    })?;
+    let selected = selection
+        .included
+        .iter()
+        .map(|market| (market.market_id.clone(), market))
+        .collect::<HashMap<_, _>>();
+    let route_map = routes
+        .iter()
+        .map(|route| (route.active.route, route))
+        .collect::<HashMap<_, _>>();
+    let mut tiers = Vec::new();
+    for routed in candidates {
+        let market = selected
+            .get(&routed.candidate.market_id)
+            .copied()
+            .ok_or_else(|| ReportError::InvariantViolation {
+                stage: "economic_tier",
                 detail: format!(
-                    "run authority {} differs from report authority {}",
-                    outcome.model_version_id, context.active.model_version_id
+                    "candidate market {} is absent from final selection",
+                    routed.candidate.market_id
+                ),
+            })?;
+        let capture = captures.get(&routed.candidate.market_id).ok_or_else(|| {
+            ReportError::InvariantViolation {
+                stage: "economic_tier",
+                detail: format!(
+                    "candidate market {} has no frozen capture",
+                    routed.candidate.market_id
+                ),
+            }
+        })?;
+        let route = route_map.get(&routed.route).copied().ok_or_else(|| {
+            ReportError::InvariantViolation {
+                stage: "economic_tier",
+                detail: format!("candidate Route {:?} has no readiness state", routed.route),
+            }
+        })?;
+        let built = candidate_tiers(context, market, capture, routed, route, portfolio)?;
+        tiers.extend(
+            built
+                .into_iter()
+                .map(|(seed, source)| SeededTier { seed, source }),
+        );
+    }
+    tiers.sort_by(|left, right| {
+        (
+            left.seed.route,
+            left.seed.market_id.as_str(),
+            left.seed.tier_ordinal,
+        )
+            .cmp(&(
+                right.seed.route,
+                right.seed.market_id.as_str(),
+                right.seed.tier_ordinal,
+            ))
+    });
+    Ok(tiers)
+}
+
+fn candidate_tiers(
+    context: &BuildContext,
+    market: &SelectedMarket,
+    capture: &MarketDecisionCapture,
+    routed: &RoutedCandidate,
+    route: &ReadyRoute,
+    portfolio: &PromotedPortfolioContext,
+) -> QuantResult<Vec<(ExecutableTierSeed, TierSource)>> {
+    let horizon = validate_candidate_route(market, routed, route)?;
+    let book = capture
+        .book_for(&routed.candidate.token_id)
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "economic_tier",
+            detail: format!(
+                "candidate token {} has no frozen side-specific book",
+                routed.candidate.token_id
+            ),
+        })?;
+    let fee =
+        capture
+            .market
+            .fee_schedule
+            .as_ref()
+            .ok_or_else(|| ReportError::InvariantViolation {
+                stage: "economic_tier",
+                detail: format!("market {} has no PIT fee schedule", market.market_id),
+            })?;
+    let fee_schedule = PitFeeSchedule::from_market_fee_schedule(fee).map_err(|error| {
+        ReportError::InvariantViolation {
+            stage: "economic_tier",
+            detail: format!(
+                "market {} fee schedule is invalid: {error:?}",
+                market.market_id
+            ),
+        }
+    })?;
+    let best_ask = book
+        .asks
+        .first()
+        .map(|level| level.price_decimal())
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "economic_tier",
+            detail: format!(
+                "market {} candidate-side ask book is empty",
+                market.market_id
+            ),
+        })?;
+    let mut by_budget = BTreeMap::<Usd, Vec<(ExecutableTierSeed, TierSource)>>::new();
+    for (index, cohort) in route.trade_policy.payload_json.cohorts.iter().enumerate() {
+        if cohort.key.category != market.category
+            || cohort.key.horizon_secs != horizon
+            || cohort.key.profile_ref != route.contract.research_profile_ref
+            || !matches!(
+                &cohort.entry_condition,
+                quant_pivot_models::types::EntryConditionTemplate::Immediate
+            )
+        {
+            continue;
+        }
+        let (fill_requirement, max_slippage_bps, max_book_age_ms) = match &cohort.entry_order {
+            EntryOrderTemplate::Aggressive {
+                fill_requirement,
+                max_slippage_bps,
+                max_book_age_ms,
+            } => (*fill_requirement, *max_slippage_bps, *max_book_age_ms),
+            EntryOrderTemplate::PassivePostOnly { .. } => continue,
+        };
+        if cohort.max_slippage_bps != max_slippage_bps || cohort.max_book_age_ms != max_book_age_ms
+        {
+            return Err(ReportError::RouteReadiness {
+                route: routed.route.as_str().to_owned(),
+                detail: "Trade Policy cohort duplicates inconsistent entry limits".to_owned(),
+            }
+            .into());
+        }
+        let cohort_index = u32::try_from(index).map_err(|error| ReportError::NumericOverflow {
+            field: "trade_policy.cohort_index",
+            detail: error.to_string(),
+        })?;
+        let tier_ordinal =
+            cohort_index
+                .checked_add(1)
+                .ok_or_else(|| ReportError::NumericOverflow {
+                    field: "economic_tier.tier_ordinal",
+                    detail: "cohort index overflowed u32".to_owned(),
+                })?;
+        let limit_price = aggressive_buy_limit(best_ask, max_slippage_bps);
+        let lineage_hash = tier_lineage_hash(&TierLineageInput {
+            context,
+            capture,
+            routed,
+            route,
+            cohort,
+            cohort_index,
+            fee_schedule: &fee_schedule,
+            portfolio,
+        })?;
+        let Some(seed) = ExecutableCashTierSeedFactory::build(ExecutableCashTierSeedInput {
+            report_route_run_id: routed.report_route_run_id,
+            candidate_id: routed.candidate.signal_candidate_id,
+            tier_ordinal,
+            route: routed.route,
+            market_id: market.market_id.clone(),
+            event_id: market.event_id.clone(),
+            category: market.category,
+            token_id: routed.candidate.token_id.clone(),
+            outcome_side: routed.candidate.outcome_side,
+            bids: &book.bids,
+            asks: &book.asks,
+            fee_schedule: &fee_schedule,
+            fill_at: context.boundary.decision_at(),
+            limit_price,
+            cash_budget: cohort.key.cash_budget_tier,
+            fill_requirement,
+            source_lineage_hash: lineage_hash,
+        })?
+        else {
+            continue;
+        };
+        let price = seed.entry.entry_vwap;
+        if price < cohort.key.entry_price_min
+            || price > cohort.key.entry_price_max
+            || (price == cohort.key.entry_price_max && price != Price::ONE)
+        {
+            continue;
+        }
+        let model_run_id = route
+            .model_run_id
+            .ok_or_else(|| ReportError::InvariantViolation {
+                stage: "economic_tier",
+                detail: "candidate Route has no model run".to_owned(),
+            })?;
+        let provenance = TradePolicyCohortProvenance {
+            artifact_id: route.trade_policy.artifact_id,
+            artifact_hash: route.trade_policy.content_hash,
+            cohort_index,
+            cohort_key: cohort.key.clone(),
+        };
+        by_budget
+            .entry(cohort.key.cash_budget_tier)
+            .or_default()
+            .push((
+                seed,
+                TierSource {
+                    route: routed.route,
+                    report_route_run_id: routed.report_route_run_id,
+                    model_version_id: routed.model_version_id,
+                    model_run_id,
+                    candidate: routed.candidate.clone(),
+                    trade_policy: provenance,
+                    trade_policy_cohort: cohort.clone(),
+                    entry_limit_price: limit_price,
+                },
+            ));
+    }
+    unique_budget_tiers(by_budget, routed)
+}
+
+fn validate_candidate_route(
+    market: &SelectedMarket,
+    routed: &RoutedCandidate,
+    route: &ReadyRoute,
+) -> QuantResult<u64> {
+    if BuyModelRoute::from(market.category) != routed.route
+        || routed.report_route_run_id != route.report_route_run_id
+        || routed.model_version_id != route.active.model_version_id
+    {
+        return Err(ReportError::InvariantViolation {
+            stage: "economic_tier",
+            detail: "candidate, selected market, and Route readiness disagree".to_owned(),
+        }
+        .into());
+    }
+    let horizon = u64::try_from(route.contract.prediction_horizon_secs).map_err(|error| {
+        ReportError::RouteReadiness {
+            route: routed.route.as_str().to_owned(),
+            detail: format!("prediction horizon is invalid: {error}"),
+        }
+    })?;
+    if routed.candidate.suggested_horizon_secs != horizon {
+        return Err(ReportError::RouteReadiness {
+            route: routed.route.as_str().to_owned(),
+            detail: format!(
+                "candidate {} horizon differs from the promoted contract",
+                routed.candidate.signal_candidate_id
+            ),
+        }
+        .into());
+    }
+    Ok(horizon)
+}
+
+fn unique_budget_tiers(
+    by_budget: BTreeMap<Usd, Vec<(ExecutableTierSeed, TierSource)>>,
+    routed: &RoutedCandidate,
+) -> QuantResult<Vec<(ExecutableTierSeed, TierSource)>> {
+    let mut result = Vec::new();
+    for (budget, mut matches) in by_budget {
+        if matches.len() != 1 {
+            return Err(ReportError::RouteReadiness {
+                route: routed.route.as_str().to_owned(),
+                detail: format!(
+                    "candidate {} cash tier {budget} resolves to {} Trade Policy cohorts",
+                    routed.candidate.signal_candidate_id,
+                    matches.len()
                 ),
             }
             .into());
         }
-        Ok(outcome)
-    }
-
-    fn plan_portfolio(
-        context: &BuildContext,
-        selection: &MarketSelectionSnapshot,
-        model_outcome: &ModelRunOutcome,
-        captures: &HashMap<MarketId, MarketDecisionCapture>,
-        account: &AccountSnapshot,
-        drawdown_state: DrawdownState,
-        correlation: Option<&CorrelationConstraint>,
-    ) -> QuantResult<PortfolioPlanOutput> {
-        let caps = portfolio_caps(&context.config);
-        let sizing = sizing_model_from_config(
-            &context.config.execution_risk.portfolio.sizing,
-            &context.config.execution_risk.portfolio.kelly_safety,
-        )?;
-        // The optimizer is built per report from the active (hot-reloadable)
-        // runtime config, so a config change takes effect on the next run.
-        let allocator = optimizer_from_config(&context.config.execution_risk.portfolio.optimizer)?;
-        let planner = DefaultPortfolioPlanner::new(allocator);
-        let plan_candidates = plan_candidates(
-            &model_outcome.accepted,
-            &selection.included,
-            captures,
-            context.trade_policy.as_ref(),
-            context.boundary.decision_at(),
+        result.push(
+            matches
+                .pop()
+                .ok_or_else(|| ReportError::InvariantViolation {
+                    stage: "economic_tier",
+                    detail: "unique Trade Policy cohort disappeared".to_owned(),
+                })?,
         );
-        planner.plan(PortfolioPlanInput {
-            portfolio_plan_id: PortfolioPlanId::from_v7(),
-            model_run_id: model_outcome.model_run_id,
+    }
+    Ok(result)
+}
+
+struct TierLineageInput<'a> {
+    context: &'a BuildContext,
+    capture: &'a MarketDecisionCapture,
+    routed: &'a RoutedCandidate,
+    route: &'a ReadyRoute,
+    cohort: &'a TradePolicyCohort,
+    cohort_index: u32,
+    fee_schedule: &'a PitFeeSchedule,
+    portfolio: &'a PromotedPortfolioContext,
+}
+
+fn tier_lineage_hash(input: &TierLineageInput<'_>) -> QuantResult<ContentHash> {
+    #[derive(Serialize)]
+    struct Preimage<'a> {
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        decision_at: DateTime<Utc>,
+        route: BuyModelRoute,
+        report_route_run_id: ReportRouteRunId,
+        model_version_id: ModelVersionId,
+        model_run_id: ModelRunId,
+        signal_candidate_id: SignalCandidateId,
+        book_snapshot_hash: ContentHash,
+        fee_schedule_hash: ContentHash,
+        trade_policy_hash: ContentHash,
+        cohort_index: u32,
+        cohort: &'a TradePolicyCohort,
+        scenario_model_hash: ContentHash,
+    }
+    let model_run_id = input
+        .route
+        .model_run_id
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "economic_tier",
+            detail: "candidate Route has no model run lineage".to_owned(),
+        })?;
+    let book_snapshot_hash = input
+        .capture
+        .book_snapshot_ref_for(&input.routed.candidate.token_id)
+        .map(|reference| reference.content_hash)
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "economic_tier",
+            detail: "candidate-side book reference is missing".to_owned(),
+        })?;
+    Ok(CanonicalDigest::content_hash_typed(
+        "quant-pivot/economic-tier-source",
+        1,
+        &Preimage {
+            decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id,
+            decision_at: input.context.boundary.decision_at(),
+            route: input.routed.route,
+            report_route_run_id: input.routed.report_route_run_id,
+            model_version_id: input.routed.model_version_id,
+            model_run_id,
+            signal_candidate_id: input.routed.candidate.signal_candidate_id,
+            book_snapshot_hash,
+            fee_schedule_hash: input.fee_schedule.schedule_hash,
+            trade_policy_hash: input.route.trade_policy.content_hash,
+            cohort_index: input.cohort_index,
+            cohort: input.cohort,
+            scenario_model_hash: input.portfolio.scenario_model.content_hash,
+        },
+    )?)
+}
+
+struct ScenarioLegAccumulator {
+    route: BuyModelRoute,
+    market_id: MarketId,
+    token_id: TokenId,
+    outcome_side: OutcomeSide,
+    payout_distribution: CalibratedPayoutDistribution,
+    observed_exit_capacity_shares: Shares,
+    base_capital_release_secs: u64,
+    lineage_hashes: Vec<ContentHash>,
+}
+
+fn materialize_portfolio_scenario(
+    context: &BuildContext,
+    account: &AccountSnapshot,
+    represented_routes: &RepresentedRouteSet,
+    promoted: Option<&PromotedPortfolioContext>,
+    seeded_tiers: &[SeededTier],
+) -> QuantResult<Option<SealedPortfolioScenarioArtifact>> {
+    if represented_routes.is_empty() {
+        if !seeded_tiers.is_empty()
+            || account
+                .positions
+                .iter()
+                .any(|position| position.size.is_positive())
+        {
+            return Err(ReportError::ScenarioArtifact {
+                detail: "economic exposure exists without a represented Route".to_owned(),
+            }
+            .into());
+        }
+        return Ok(None);
+    }
+    let promoted = promoted.ok_or_else(|| ReportError::ScenarioArtifact {
+        detail: "represented Routes exist without a promoted scenario model".to_owned(),
+    })?;
+    let scenario_model = VerifiedPortfolioScenarioModel::verify(
+        &promoted.scenario_model_binding,
+        &promoted.scenario_model,
+        represented_routes,
+    )?;
+    let accumulators = scenario_accumulators(account, seeded_tiers)?;
+    let mut legs = Vec::with_capacity(accumulators.len());
+    for mut accumulator in accumulators {
+        accumulator.lineage_hashes.sort_unstable();
+        accumulator.lineage_hashes.dedup();
+        let lineage_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/report-scenario-leg",
+            1,
+            &(
+                accumulator.route,
+                &accumulator.market_id,
+                &accumulator.token_id,
+                accumulator.outcome_side,
+                accumulator.payout_distribution,
+                accumulator.observed_exit_capacity_shares,
+                accumulator.base_capital_release_secs,
+                &accumulator.lineage_hashes,
+            ),
+        )?;
+        legs.push(PortfolioScenarioLegInput {
+            route: accumulator.route,
+            market_id: accumulator.market_id,
+            token_id: accumulator.token_id,
+            outcome_side: accumulator.outcome_side,
+            calibrated_payout_distribution: accumulator.payout_distribution,
+            observed_exit_capacity_shares: accumulator.observed_exit_capacity_shares,
+            base_capital_release_secs: accumulator.base_capital_release_secs,
+            lineage_hash,
+        });
+    }
+    let input_universe_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/report-scenario-input-universe",
+        1,
+        &(
+            context.version.decision_policy_snapshot_id,
+            context.boundary.decision_at(),
+            represented_routes.digest,
+            promoted.scenario_model.content_hash,
+            account.as_of,
+            &legs,
+        ),
+    )?;
+    PortfolioScenarioGenerator::generate(PortfolioScenarioGenerationInput {
+        model_contract: &scenario_model,
+        decision_at: context.boundary.decision_at(),
+        visibility: PortfolioScenarioVisibility::PointInTime,
+        input_universe_hash,
+        legs: &legs,
+    })
+    .map(Some)
+}
+
+fn scenario_accumulators(
+    account: &AccountSnapshot,
+    seeded_tiers: &[SeededTier],
+) -> QuantResult<Vec<ScenarioLegAccumulator>> {
+    let mut accumulators: BTreeMap<_, ScenarioLegAccumulator> = BTreeMap::new();
+    for seeded in seeded_tiers {
+        let payout_distribution = seeded
+            .source
+            .candidate
+            .payout_distribution
+            .ok_or_else(|| {
+            ReportError::ScenarioArtifact {
+                detail: format!(
+                    "candidate {} has no calibrated payout distribution for scenario materialization",
+                    seeded.source.candidate.signal_candidate_id
+                ),
+            }
+        })?;
+        let release_secs = seeded.source.trade_policy_cohort.vertical_barrier_secs;
+        let key = (
+            seeded.seed.route,
+            seeded.seed.market_id.clone(),
+            seeded.seed.token_id.clone(),
+            seeded.seed.outcome_side.as_str(),
+        );
+        match accumulators.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let existing = entry.get_mut();
+                if existing.payout_distribution != payout_distribution
+                    || existing.base_capital_release_secs != release_secs
+                    || existing.observed_exit_capacity_shares
+                        != seeded.seed.observed_exit_capacity_shares
+                {
+                    return Err(ReportError::ScenarioArtifact {
+                        detail: format!(
+                            "market {} has inconsistent payout, exit-capacity, or Trade Policy release inputs",
+                            seeded.seed.market_id
+                        ),
+                    }
+                    .into());
+                }
+                existing
+                    .lineage_hashes
+                    .push(seeded.seed.source_lineage_hash);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(ScenarioLegAccumulator {
+                    route: seeded.seed.route,
+                    market_id: seeded.seed.market_id.clone(),
+                    token_id: seeded.seed.token_id.clone(),
+                    outcome_side: seeded.seed.outcome_side,
+                    payout_distribution,
+                    observed_exit_capacity_shares: seeded.seed.observed_exit_capacity_shares,
+                    base_capital_release_secs: release_secs,
+                    lineage_hashes: vec![seeded.seed.source_lineage_hash],
+                });
+            }
+        }
+    }
+    for position in account
+        .positions
+        .iter()
+        .filter(|position| position.size.is_positive())
+    {
+        let outcome_side = parse_position_outcome(&position.outcome)?;
+        let route = BuyModelRoute::from(position.category);
+        let key = (
+            route,
+            position.market_id.clone(),
+            position.token_id.clone(),
+            outcome_side.as_str(),
+        );
+        let leg = accumulators.get_mut(&key);
+        let Some(leg) = leg else {
+            return Err(ReportError::ScenarioArtifact {
+                detail: format!(
+                    "open position {} has no calibrated Route/Trade Policy scenario input",
+                    position.token_id
+                ),
+            }
+            .into());
+        };
+        leg.lineage_hashes.push(CanonicalDigest::content_hash_typed(
+            "quant-pivot/scenario-open-position",
+            1,
+            position,
+        )?);
+    }
+    Ok(accumulators.into_values().collect())
+}
+
+fn parse_position_outcome(outcome: &str) -> QuantResult<OutcomeSide> {
+    match outcome.trim().to_ascii_lowercase().as_str() {
+        "yes" => Ok(OutcomeSide::Yes),
+        "no" => Ok(OutcomeSide::No),
+        _ => Err(ReportError::ScenarioArtifact {
+            detail: format!("open position outcome `{outcome}` is not canonical Yes/No"),
+        }
+        .into()),
+    }
+}
+
+fn finalize_economic_tiers(
+    seeded_tiers: Vec<SeededTier>,
+    scenario_artifact: Option<&SealedPortfolioScenarioArtifact>,
+) -> QuantResult<(
+    Vec<ExecutableEconomicTier>,
+    HashMap<EconomicTierId, TierSource>,
+)> {
+    if seeded_tiers.is_empty() {
+        return Ok((Vec::new(), HashMap::new()));
+    }
+    let artifact = scenario_artifact.ok_or_else(|| ReportError::ScenarioArtifact {
+        detail: "executable entry tiers exist without a concrete scenario artifact".to_owned(),
+    })?;
+    let mut tiers = Vec::with_capacity(seeded_tiers.len());
+    let mut sources = HashMap::with_capacity(seeded_tiers.len());
+    for seeded in seeded_tiers {
+        let tier = EconomicTierFactory::build(seeded.seed, artifact)?;
+        if sources
+            .insert(tier.economic_tier_id, seeded.source)
+            .is_some()
+        {
+            return Err(ReportError::InvariantViolation {
+                stage: "economic_tier",
+                detail: format!("duplicate economic tier {}", tier.economic_tier_id),
+            }
+            .into());
+        }
+        tiers.push(tier);
+    }
+    Ok((tiers, sources))
+}
+
+struct PortfolioBuildInput<'a> {
+    context: &'a BuildContext,
+    selection: &'a MarketSelectionSnapshot,
+    account: &'a AccountSnapshot,
+    equity: &'a ReportEquitySnapshot,
+    represented_routes: &'a RepresentedRouteSet,
+    promoted: Option<&'a PromotedPortfolioContext>,
+    scenario_artifact: Option<&'a SealedPortfolioScenarioArtifact>,
+    tiers: &'a [ExecutableEconomicTier],
+}
+
+fn build_portfolio(input: &PortfolioBuildInput<'_>) -> QuantResult<PortfolioBuild> {
+    let context = input.context;
+    let selection = input.selection;
+    let account = input.account;
+    let equity = input.equity;
+    let represented_routes = input.represented_routes;
+    let tiers = input.tiers;
+    let portfolio_plan_id = PortfolioPlanId::from_v7();
+    let current_drawdown_usd = equity.current_drawdown_usd()?;
+    let (existing, result, scenario_id, scenario_hash, scenario_json) =
+        match (input.promoted, input.scenario_artifact) {
+            (Some(promoted), Some(scenario_artifact)) => {
+                let existing = ExistingPortfolioFactory::build(
+                    account,
+                    current_drawdown_usd,
+                    scenario_artifact,
+                )?;
+                let result = GlobalPortfolioPlanner::solve_and_verify(GlobalPortfolioInput {
+                    portfolio_plan_id,
+                    account,
+                    existing: &existing,
+                    represented_routes,
+                    scenario_model_binding: &promoted.scenario_model_binding,
+                    scenario_artifact,
+                    policy: &promoted.policy,
+                    solver: &promoted.solver,
+                    tiers,
+                    top_n: context.top_n,
+                })?;
+                (
+                    existing,
+                    result,
+                    Some(scenario_artifact.portfolio_scenario_artifact_id),
+                    Some(scenario_artifact.content_hash),
+                    Some(scenario_artifact.artifact().clone()),
+                )
+            }
+            (None, None) => {
+                if !represented_routes.is_empty()
+                    || !tiers.is_empty()
+                    || !account.positions.is_empty()
+                {
+                    return Err(ReportError::ScenarioArtifact {
+                        detail: "economic exposure exists without a promoted scenario artifact"
+                            .to_owned(),
+                    }
+                    .into());
+                }
+                (
+                    ExistingPortfolioState {
+                        existing_open_capital_usd: Usd::ZERO,
+                        existing_open_recommendations: 0,
+                        current_drawdown_usd,
+                        scenario_cashflows: Vec::new(),
+                        capital_occupancy: Vec::new(),
+                    },
+                    GlobalPortfolioResult {
+                        plan: None,
+                        selected: Vec::new(),
+                        rejected: Vec::new(),
+                    },
+                    None,
+                    None,
+                    None,
+                )
+            }
+            _ => {
+                return Err(ReportError::ScenarioArtifact {
+                detail:
+                    "promoted scenario model and concrete report artifact must be present together"
+                        .to_owned(),
+            }
+            .into());
+            }
+        };
+    let decision_json = match &result.plan {
+        Some(plan) => PortfolioDecisionResult::Optimized {
+            plan: Box::new(plan.clone()),
+        },
+        None => PortfolioDecisionResult::ZeroCandidates {
+            rejected_tier_count: count_u32(result.rejected.len(), "portfolio.rejected_tier_count")?,
+            evidence_hash: zero_candidate_evidence(
+                represented_routes,
+                scenario_hash,
+                tiers,
+                result.rejected.len(),
+            )?,
+        },
+    };
+    Ok(PortfolioBuild {
+        row: NewPortfolioPlan {
+            portfolio_plan_id,
+            account_snapshot_id: equity.account_snapshot.account_snapshot_id,
+            decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
             market_selection_id: selection.market_selection_id,
             decision_at: context.boundary.decision_at(),
-            candidates: plan_candidates,
-            account,
-            drawdown_state,
-            caps: &caps,
-            max_correlated_exposure_usd: Usd::new(parse_decimal(
-                "portfolio.constraints.max_correlated_exposure_usd",
-                &context
-                    .config
-                    .execution_risk
-                    .portfolio
-                    .constraints
-                    .max_correlated_exposure_usd
-                    .value,
-            )),
-            correlation,
-            calibration: context.resolved_calibration.as_ref(),
-            sizing: sizing.as_ref(),
-            entry_max_slippage_bps: Bps::new(Decimal::from(
-                context
-                    .config
-                    .execution_risk
-                    .entry_order_policy
-                    .max_slippage_bps,
-            )),
-            top_n: bounded_usize(context.top_n)?,
-        })
-    }
+            represented_routes_json: represented_routes.clone(),
+            scenario_artifact_id: scenario_id,
+            scenario_artifact_hash: scenario_hash,
+            scenario_artifact_json: scenario_json,
+            portfolio_policy_json: context.config.execution_risk.portfolio.clone(),
+            existing_state_json: existing,
+            decision_json,
+        },
+        selected: result.selected,
+        rejections: result.rejected,
+    })
+}
 
-    /// Pre-fetch historical mid-price series and estimate correlated clusters,
-    /// when the correlation cap is enabled and configured. Returns `None` when
-    /// the cap is disabled or unset.
-    async fn build_correlation(
-        &self,
-        context: &BuildContext,
-        selection: &MarketSelectionSnapshot,
-    ) -> QuantResult<Option<CorrelationConstraint>> {
-        let constraints = &context.config.execution_risk.portfolio.constraints;
-        let correlation = &constraints.correlation;
-        if !correlation.enabled {
-            return Ok(None);
-        }
-        let cap = parse_decimal(
-            "portfolio.constraints.max_correlated_exposure_usd",
-            &constraints.max_correlated_exposure_usd.value,
-        );
-        if cap <= Decimal::ZERO {
-            return Ok(None);
-        }
-        let cluster_threshold = parse_decimal(
-            "portfolio.constraints.correlation.cluster_threshold",
-            &correlation.cluster_threshold.value,
-        );
-
-        let lookback_secs = i64::from(correlation.lookback_days)
-            .checked_mul(86_400)
-            .ok_or_else(|| QuantError::config("correlation.lookback_days too large"))?;
-        let from_ms = (context.boundary.knowledge_cutoff() - Duration::seconds(lookback_secs))
-            .timestamp_millis();
-        let to_ms = context.boundary.knowledge_cutoff().timestamp_millis();
-        let token_ids = selection
-            .included
-            .iter()
-            .map(|market| market.primary_token_id.clone())
-            .collect::<Vec<_>>();
-        let rows = self
-            .deps
-            .quant_fact_read_repo
-            .mid_price_series(
-                token_ids,
-                from_ms,
-                to_ms,
-                context.boundary.decision_at().timestamp_millis(),
-                CORRELATION_BUCKET_SECS,
-            )
-            .await?;
-
-        let mut by_token: HashMap<String, BTreeMap<i64, Decimal>> = HashMap::new();
-        let mut grid: BTreeSet<i64> = BTreeSet::new();
-        for row in rows {
-            if let Some(price) = row.mid_price {
-                by_token
-                    .entry(row.token_id.to_string())
-                    .or_default()
-                    .insert(row.bucket_ms, Price::from(price).inner());
-                grid.insert(row.bucket_ms);
-            }
-        }
-        let grid: Vec<i64> = grid.into_iter().collect();
-
-        let markets = selection
-            .included
-            .iter()
-            .map(|market| CorrelationMarket {
-                market_id: market.market_id.clone(),
-                event_id: Some(market.event_id.clone()),
-                category: market.category,
-                mid_series: aligned_series(by_token.get(market.primary_token_id.as_str()), &grid),
+fn report_tier_rejections(
+    tiers: &[ExecutableEconomicTier],
+    rejected: &[TierAdmissionRejection],
+) -> QuantResult<Vec<ReportTierRejection>> {
+    let markets = tiers
+        .iter()
+        .map(|tier| (tier.economic_tier_id, tier.market_id.clone()))
+        .collect::<HashMap<_, _>>();
+    rejected
+        .iter()
+        .map(|rejection| {
+            Ok(ReportTierRejection {
+                economic_tier_id: rejection.economic_tier_id,
+                market_id: markets
+                    .get(&rejection.economic_tier_id)
+                    .cloned()
+                    .ok_or_else(|| ReportError::InvariantViolation {
+                        stage: "portfolio_rejection",
+                        detail: format!(
+                            "rejected tier {} is absent from solver input",
+                            rejection.economic_tier_id
+                        ),
+                    })?,
+                code: rejection.code,
             })
-            .collect::<Vec<_>>();
+        })
+        .collect()
+}
 
-        let groups = self
-            .deps
-            .correlation_estimator
-            .estimate(&CorrelationInput {
-                markets: &markets,
-                min_observations: correlation.min_observations,
-                cluster_threshold,
-            })?;
-        Ok(Some(groups.into_constraint(Usd::new(cap))))
-    }
-
-    async fn crypto_reference_prices(
-        &self,
-        context: &BuildContext,
-        features: &FeaturePipelineResult,
-        plan: &PortfolioPlanOutput,
-    ) -> QuantResult<HashMap<MarketId, Usd>> {
-        let Some(policy) = context.trade_policy.as_ref() else {
-            return Ok(HashMap::new());
-        };
-        if !policy
-            .payload_json
-            .cohorts
-            .iter()
-            .any(|cohort| template_has_crypto_event(&cohort.entry_condition))
-        {
-            return Ok(HashMap::new());
-        }
-        let mut prices = HashMap::new();
-        for planned in &plan.planned {
-            let Some(capture) = features.captures.get(&planned.candidate.market_id) else {
-                continue;
-            };
-            let Some(binding) = capture.domain_binding.as_ref() else {
-                continue;
-            };
-            let MarketSubject::Crypto(subject) = &binding.subject else {
-                continue;
-            };
-            if subject.comparator != PriceComparator::UpVsReference {
-                continue;
-            }
-            let Some(reference_at) = subject.reference_at else {
-                continue;
-            };
-            let Some(source) = binding
-                .source_bindings
+fn update_route_funnels(
+    routes: &mut [ReadyRoute],
+    tiers: &[ExecutableEconomicTier],
+    portfolio: &PortfolioBuild,
+) -> QuantResult<()> {
+    let rejected = portfolio
+        .rejections
+        .iter()
+        .map(|rejection| rejection.economic_tier_id)
+        .collect::<HashSet<_>>();
+    for route in routes {
+        route.admitted_economic_tiers = count_u32(
+            tiers
                 .iter()
-                .find(|source| source.role == LinkageSourceRole::LiveEvent)
-            else {
-                continue;
+                .filter(|tier| tier.route == route.active.route)
+                .filter(|tier| !rejected.contains(&tier.economic_tier_id))
+                .count(),
+            "route.admitted_economic_tiers",
+        )?;
+        route.selected_recommendations = count_u32(
+            portfolio
+                .selected
+                .iter()
+                .filter(|planned| planned.tier.route == route.active.route)
+                .count(),
+            "route.selected_recommendations",
+        )?;
+    }
+    Ok(())
+}
+
+fn planned_recommendations(
+    selected: &[PlannedEconomicTier],
+    sources: &HashMap<EconomicTierId, TierSource>,
+) -> QuantResult<Vec<PlannedReportRecommendation>> {
+    selected
+        .iter()
+        .enumerate()
+        .map(|(index, planned)| {
+            let source = sources.get(&planned.tier.economic_tier_id).ok_or_else(|| {
+                ReportError::InvariantViolation {
+                    stage: "portfolio_ranking",
+                    detail: format!(
+                        "selected tier {} has no candidate lineage",
+                        planned.tier.economic_tier_id
+                    ),
+                }
+            })?;
+            Ok(PlannedReportRecommendation {
+                rank: u32::try_from(index)
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or_else(|| ReportError::NumericOverflow {
+                        field: "recommendation.rank",
+                        detail: "selected rank overflowed u32".to_owned(),
+                    })?,
+                route: source.route,
+                report_route_run_id: source.report_route_run_id,
+                model_version_id: source.model_version_id,
+                model_run_id: source.model_run_id,
+                candidate: source.candidate.clone(),
+                tier: planned.tier.clone(),
+                trade_policy: source.trade_policy.clone(),
+                trade_policy_cohort: source.trade_policy_cohort.clone(),
+                entry_limit_price: source.entry_limit_price,
+            })
+        })
+        .collect()
+}
+
+fn route_rows(
+    request: &BuildReportRequest,
+    routes: &[ReadyRoute],
+    finished_at: DateTime<Utc>,
+) -> Vec<NewReportRouteRun> {
+    routes
+        .iter()
+        .map(|route| {
+            let lineage = RouteModelLineage {
+                model_version_id: route.active.model_version_id,
+                model_run_id: route.model_run_id,
+                calibration_artifact_id: route.contract.calibration_artifact_id,
+                trade_policy_artifact_id: route.contract.trade_policy_artifact_id,
+                research_profile_artifact_id: route.contract.research_profile_artifact_id.clone(),
+                research_profile_ref: route.contract.research_profile_ref.clone(),
+                prediction_horizon_secs: route.contract.prediction_horizon_secs,
+                feature_contract_digest: route.contract.feature_contract_digest,
+                pit_lineage_digest: route.contract.pit_lineage_digest,
+                serving_contract_digest: route.contract.serving_contract_hash,
             };
-            if let Some(report) = self
-                .deps
-                .quant_fact_read_repo
-                .crypto_price_report_at(
-                    &source.source_id,
-                    &source.instrument_key,
-                    reference_at.timestamp_millis(),
-                    context.boundary.decision_at().timestamp_millis(),
-                )
-                .await?
-            {
-                prices.insert(
-                    planned.candidate.market_id.clone(),
-                    Usd::new(Decimal::from(report.price)),
-                );
+            NewReportRouteRun {
+                report_route_run_id: route.report_route_run_id,
+                report_run_id: request.report_run_id,
+                route: route.active.route,
+                outcome: if route.selected_recommendations == 0 {
+                    RouteRunOutcome::ZeroCandidates
+                } else {
+                    RouteRunOutcome::Ready
+                },
+                model_version_id: Some(route.active.model_version_id),
+                model_run_id: route.model_run_id,
+                calibration_artifact_id: Some(route.contract.calibration_artifact_id),
+                trade_policy_artifact_id: Some(route.contract.trade_policy_artifact_id),
+                research_profile_artifact_id: Some(
+                    route.contract.research_profile_artifact_id.clone(),
+                ),
+                lineage_json: Some(lineage),
+                funnel_json: RouteCandidateFunnel {
+                    eligible_markets: route.eligible_markets,
+                    feature_complete_markets: route.feature_complete_markets,
+                    calibrated_candidates: route.calibrated_candidates,
+                    admitted_economic_tiers: route.admitted_economic_tiers,
+                    selected_recommendations: route.selected_recommendations,
+                },
+                diagnostic_code: None,
+                finished_at,
             }
-        }
-        Ok(prices)
-    }
-
-    fn compose_published(&self, input: PublishedComposeInput<'_>) -> QuantResult<ComposedReport> {
-        let PortfolioPlanOutput {
-            planned,
-            rejected,
-            plan_row,
-        } = input.plan;
-        self.deps.composer.compose(ComposeReportInput {
-            trigger: &input.request.trigger,
-            trigger_key: input
-                .request
-                .trigger
-                .key(input.request.trigger_time)
-                .map_err(|error| QuantError::config(error.to_string()))?
-                .to_string(),
-            trigger_time: input.request.trigger_time,
-            knowledge_lag_secs: input.context.boundary.knowledge_lag_secs(),
-            decision_at: input.context.boundary.decision_at(),
-            published_at: Utc::now(),
-            decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id,
-            runtime_config: &input.context.config,
-            runtime_mode: self.deps.runtime_controls.quant_runtime_mode(),
-            model_version_id: input.model_outcome.model_version_id,
-            profile_ref: input.context.active.version.profile_ref.clone(),
-            market_selection_id: input.selection.market_selection_id,
-            market_selection_hash: input.selection.selector_hash,
-            selection: input.selection,
-            account: input.account,
-            account_snapshot: input.equity.account_snapshot.clone(),
-            equity_snapshot: input.equity.equity_snapshot.clone(),
-            portfolio_plan: plan_row,
-            planned: &planned,
-            planner_rejected: &rejected,
-            feature_rejected: &input.features.rejected,
-            model_decisions: &input.model_outcome.decisions,
-            early_funnel_terminal: None,
-            captures: input.features.captures.clone(),
-            feature_vector_by_market: (input.features).feature_vector_by_market(),
-            data_quality_snapshot: input.features.data_quality_snapshot.clone(),
-            model_run_id: Some(input.model_outcome.model_run_id),
-            candidate_count: input.model_outcome.emitted,
-            feature_rejected_count: count_u32(
-                input.features.rejected.len(),
-                "report.feature_rejected_count",
-            )?,
-            market_selection_count: market_selection_count(&input.selection.included)?,
-            empty: None,
-            top_n: input.context.top_n,
-            return_model_calibrated: input.context.return_model_calibrated,
-            trade_policy: input.context.trade_policy.as_ref(),
-            crypto_reference_prices: input.crypto_reference_prices,
         })
-    }
-
-    async fn load_config(
-        &self,
-        request: &BuildReportRequest,
-    ) -> QuantResult<(DecisionPolicySnapshotInfo, DecisionPolicySnapshot)> {
-        let version = self
-            .deps
-            .runtime_config_repo
-            .load_active_at(request.trigger_time)
-            .await?
-            .ok_or_else(|| QuantError::config("no active runtime config version"))?;
-        let config = version.snapshot.clone();
-        Ok((version, config))
-    }
-
-    async fn account_snapshot(
-        &self,
-        as_of: DateTime<Utc>,
-        config: &DecisionPolicySnapshot,
-    ) -> QuantResult<AccountSnapshot> {
-        let caps = portfolio_caps(config);
-        let provider = self
-            .deps
-            .account_provider_factory
-            .create(Usd::new(caps.total_budget_usd))?;
-        provider.snapshot(as_of).await
-    }
-
-    fn compose_empty(&self, input: EmptyComposeInput<'_>) -> QuantResult<ComposedReport> {
-        let portfolio_plan = match input.portfolio_plan {
-            Some(portfolio_plan) => portfolio_plan,
-            None => empty_plan_for_report(
-                input.model_run_id,
-                input.market_selection_id,
-                input.context.boundary.decision_at(),
-                input.account,
-                &input.context.config,
-                input.empty.reason,
-                input.empty.rejected_count,
-            ),
-        };
-        self.deps.composer.compose(ComposeReportInput {
-            trigger: &input.request.trigger,
-            trigger_key: input
-                .request
-                .trigger
-                .key(input.request.trigger_time)
-                .map_err(|error| QuantError::config(error.to_string()))?
-                .to_string(),
-            trigger_time: input.request.trigger_time,
-            knowledge_lag_secs: input.context.boundary.knowledge_lag_secs(),
-            decision_at: input.context.boundary.decision_at(),
-            published_at: Utc::now(),
-            decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id,
-            runtime_config: &input.context.config,
-            runtime_mode: self.deps.runtime_controls.quant_runtime_mode(),
-            model_version_id: input.context.active.model_version_id,
-            profile_ref: input.context.active.version.profile_ref.clone(),
-            market_selection_id: input.market_selection_id,
-            market_selection_hash: input.market_selection_hash,
-            selection: input.selection,
-            account: input.account,
-            account_snapshot: input.equity.account_snapshot.clone(),
-            equity_snapshot: input.equity.equity_snapshot.clone(),
-            portfolio_plan,
-            planned: &[],
-            planner_rejected: input.planner_rejected,
-            feature_rejected: input.feature_rejected,
-            model_decisions: input.model_decisions,
-            early_funnel_terminal: input.early_funnel_terminal,
-            captures: input.captures,
-            feature_vector_by_market: input.feature_vector_by_market,
-            data_quality_snapshot: input.data_quality_snapshot,
-            model_run_id: input.model_run_id,
-            candidate_count: input.empty.candidate_count,
-            feature_rejected_count: if input.empty.reason
-                == EmptyReportReason::InsufficientDataQuality
-            {
-                input.empty.rejected_count
-            } else {
-                0
-            },
-            market_selection_count: input.market_selection_count,
-            empty: Some(input.empty),
-            top_n: input.context.top_n,
-            return_model_calibrated: input.context.return_model_calibrated,
-            trade_policy: input.context.trade_policy.as_ref(),
-            crypto_reference_prices: HashMap::new(),
-        })
-    }
+        .collect()
 }
 
-fn template_has_crypto_event(template: &EntryConditionTemplate) -> bool {
-    match template {
-        EntryConditionTemplate::Immediate => false,
-        EntryConditionTemplate::Conditional { root, .. } => node_has_crypto_event(root),
-    }
+struct EmptyContextInput<'a> {
+    initial: &'a MarketSelectionSnapshot,
+    selection: &'a MarketSelectionSnapshot,
+    features: &'a FeaturePipelineResult,
+    candidates: &'a [RoutedCandidate],
+    tiers: &'a [ExecutableEconomicTier],
+    planned: &'a [PlannedReportRecommendation],
+    account: &'a AccountSnapshot,
+    config: &'a DecisionPolicySnapshot,
 }
 
-fn node_has_crypto_event(node: &EntryConditionTemplateV1) -> bool {
-    match node {
-        EntryConditionTemplateV1::MarketEvent {
-            event: MarketEventTemplate::CryptoSubjectPredicateEntered { .. },
-        } => true,
-        EntryConditionTemplateV1::All { children } | EntryConditionTemplateV1::Any { children } => {
-            children.iter().any(node_has_crypto_event)
-        }
-        EntryConditionTemplateV1::Price { .. }
-        | EntryConditionTemplateV1::Clock { .. }
-        | EntryConditionTemplateV1::Factor { .. }
-        | EntryConditionTemplateV1::MarketEvent { .. } => false,
+fn empty_context(input: &EmptyContextInput<'_>) -> QuantResult<Option<EmptyReportContext>> {
+    let EmptyContextInput {
+        initial,
+        selection,
+        features,
+        candidates,
+        tiers,
+        planned,
+        account,
+        config,
+    } = input;
+    if !planned.is_empty() {
+        return Ok(None);
     }
-}
-
-/// Hourly aggregation bucket for the correlation mid-price lookback.
-const CORRELATION_BUCKET_SECS: u32 = 3_600;
-
-/// Align a token's sparse `bucket → mid` map onto the shared grid, carrying the
-/// last observation forward (and back-filling leading gaps with the first
-/// observation). An absent / empty series yields an empty vector, which the
-/// estimator treats as insufficient history (proxy fallback).
-fn aligned_series(series: Option<&BTreeMap<i64, Decimal>>, grid: &[i64]) -> Vec<Decimal> {
-    let Some(series) = series.filter(|series| !series.is_empty()) else {
-        return Vec::new();
+    let reason = if initial.included.is_empty() && account.positions.is_empty() {
+        EmptyReportReason::EmptySelection
+    } else if selection.included.is_empty() || features.accepted.is_empty() {
+        EmptyReportReason::InsufficientDataQuality
+    } else if candidates.is_empty() || tiers.is_empty() {
+        EmptyReportReason::NoPositiveSignal
+    } else if account.available_usd
+        <= Usd::new(
+            config
+                .execution_risk
+                .portfolio
+                .budget
+                .cash_reserve_usd
+                .value,
+        )
+    {
+        EmptyReportReason::AvailableCashExhausted
+    } else {
+        EmptyReportReason::PortfolioBudgetExhausted
     };
-    let Some(mut last) = series.values().next().copied() else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(grid.len());
-    for bucket in grid {
-        if let Some(value) = series.get(bucket) {
-            last = *value;
-        }
-        out.push(last);
+    let rejected = initial
+        .excluded
+        .len()
+        .checked_add(features.rejected.len())
+        .and_then(|value| value.checked_add(candidates.len().saturating_sub(tiers.len())))
+        .ok_or_else(|| ReportError::NumericOverflow {
+            field: "report.empty_rejected_count",
+            detail: "empty-report rejected count overflowed usize".to_owned(),
+        })?;
+    Ok(Some(EmptyReportContext {
+        reason,
+        candidate_count: count_u32(candidates.len(), "report.empty_candidate_count")?,
+        rejected_count: count_u32(rejected, "report.empty_rejected_count")?,
+        warnings: Vec::new(),
+    }))
+}
+
+fn represented_routes(
+    selection: &MarketSelectionSnapshot,
+    account: &AccountSnapshot,
+) -> QuantResult<RepresentedRouteSet> {
+    RepresentedRouteSet::from_categories(
+        selection
+            .included
+            .iter()
+            .map(|market| market.category)
+            .chain(account.positions.iter().map(|position| position.category)),
+    )
+    .map_err(|error| QuantError::config(format!("derive represented Route set: {error}")))
+}
+
+fn merged_requirements(routes: &[ReadyRoute]) -> ModelFeatureRequirements {
+    let mut merged = ModelFeatureRequirements::default();
+    for route in routes {
+        merged.merge(route.active.model_requirements.clone());
     }
-    out
+    merged
+}
+
+fn route_vectors(
+    markets: &[SelectedMarket],
+    vectors: &HashMap<MarketId, &FeatureVector>,
+    persisted: &HashMap<MarketId, FeatureVectorId>,
+) -> QuantResult<(Vec<FeatureVector>, Vec<FeatureVectorId>)> {
+    let mut selected_vectors = Vec::with_capacity(markets.len());
+    let mut selected_ids = Vec::with_capacity(markets.len());
+    for market in markets {
+        selected_vectors.push(
+            vectors
+                .get(&market.market_id)
+                .copied()
+                .cloned()
+                .ok_or_else(|| ReportError::InvariantViolation {
+                    stage: "route_features",
+                    detail: format!("market {} has no accepted feature vector", market.market_id),
+                })?,
+        );
+        selected_ids.push(*persisted.get(&market.market_id).ok_or_else(|| {
+            ReportError::InvariantViolation {
+                stage: "route_features",
+                detail: format!("market {} has no persisted feature id", market.market_id),
+            }
+        })?);
+    }
+    Ok((selected_vectors, selected_ids))
+}
+
+impl FeaturePipelineResult {
+    fn route_evidence(&self) -> QuantResult<FeatureEvidenceCommitment> {
+        Ok(self
+            .feature_evidence
+            .clone()
+            .ok_or_else(|| ReportError::InvariantViolation {
+                stage: "route_features",
+                detail: "accepted route vectors have no durable feature commitment".to_owned(),
+            })?)
+    }
+
+    fn vector_ids_by_market(&self) -> QuantResult<HashMap<MarketId, FeatureVectorId>> {
+        if self.persisted.len() != self.accepted.len() {
+            return Err(ReportError::InvariantViolation {
+                stage: "feature_lineage",
+                detail: "accepted feature vectors and persisted ids are not aligned".to_owned(),
+            }
+            .into());
+        }
+        Ok(self
+            .persisted
+            .iter()
+            .zip(&self.accepted)
+            .map(|(info, vector)| (vector.market_id.clone(), info.feature_vector_id))
+            .collect())
+    }
+}
+
+impl ReportEquitySnapshot {
+    fn current_drawdown_usd(&self) -> QuantResult<Usd> {
+        let drawdown = self
+            .equity_snapshot
+            .high_water_mark_usd
+            .inner()
+            .checked_sub(self.equity_snapshot.capital_base_usd.inner())
+            .ok_or_else(|| ReportError::NumericOverflow {
+                field: "portfolio.current_drawdown_usd",
+                detail: "high-water mark minus capital base overflowed Decimal".to_owned(),
+            })?
+            .max(Decimal::ZERO);
+        Ok(Usd::new(drawdown))
+    }
+}
+
+fn zero_candidate_evidence(
+    routes: &RepresentedRouteSet,
+    scenario_hash: Option<ContentHash>,
+    tiers: &[ExecutableEconomicTier],
+    rejected_count: usize,
+) -> QuantResult<ContentHash> {
+    #[derive(Serialize)]
+    struct Preimage<'a> {
+        route_set_digest: ContentHash,
+        scenario_hash: Option<ContentHash>,
+        tier_ids: Vec<EconomicTierId>,
+        rejected_count: u32,
+        ordered_routes: &'a [BuyModelRoute],
+    }
+    Ok(CanonicalDigest::content_hash_typed(
+        "quant-pivot/zero-candidate-portfolio",
+        1,
+        &Preimage {
+            route_set_digest: routes.digest,
+            scenario_hash,
+            tier_ids: tiers.iter().map(|tier| tier.economic_tier_id).collect(),
+            rejected_count: count_u32(rejected_count, "portfolio.rejected_tier_count")?,
+            ordered_routes: &routes.routes,
+        },
+    )?)
+}
+
+fn route_run_id(context: &BuildContext, route: BuyModelRoute) -> QuantResult<ReportRouteRunId> {
+    let hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/report-route-run",
+        1,
+        &(
+            context.report_run_id,
+            context.version.decision_policy_snapshot_id,
+            context.boundary.decision_at(),
+            route,
+        ),
+    )?;
+    Ok(ReportRouteRunId::from_content_hash(&hash))
+}
+
+fn route_error(route: BuyModelRoute, error: &QuantError) -> QuantError {
+    ReportError::RouteReadiness {
+        route: route.as_str().to_owned(),
+        detail: error.to_string(),
+    }
+    .into()
 }
 
 fn resolve_top_n(
@@ -1177,9 +1812,9 @@ fn resolve_top_n(
                 })?
                 .top_n
         }
-        ReportTrigger::AdHoc { .. } => request.top_n_override.ok_or_else(|| {
-            QuantError::config("ad-hoc report requires an explicit top_n (no configured default)")
-        })?,
+        ReportTrigger::AdHoc { .. } => request
+            .top_n_override
+            .unwrap_or(config.recommendation.reports.ad_hoc_default_top_n),
     };
     if top_n == 0 || top_n > config.recommendation.reports.max_top_n {
         return Err(QuantError::config(format!(
@@ -1188,16 +1823,6 @@ fn resolve_top_n(
         )));
     }
     Ok(top_n)
-}
-
-fn bounded_usize(value: u32) -> QuantResult<usize> {
-    usize::try_from(value).map_err(|error| {
-        ReportError::NumericOverflow {
-            field: "reports.top_n",
-            detail: error.to_string(),
-        }
-        .into()
-    })
 }
 
 fn resolve_knowledge_lag(
@@ -1225,64 +1850,39 @@ fn resolve_knowledge_lag(
             if !config.recommendation.reports.ad_hoc_report_enabled {
                 return Err(QuantError::config("ad-hoc report generation is disabled"));
             }
-            request.knowledge_lag_secs_override.ok_or_else(|| {
-                QuantError::config(
-                    "ad-hoc report requires an explicit knowledge_lag_secs (no configured default)",
-                )
-            })
+            Ok(request.knowledge_lag_secs_override.unwrap_or(
+                config
+                    .recommendation
+                    .reports
+                    .ad_hoc_default_knowledge_lag_secs,
+            ))
         }
     }
 }
 
-fn plan_candidates<'a>(
-    candidates: &'a [SignalCandidate],
-    selected: &'a [SelectedMarket],
-    captures: &HashMap<MarketId, MarketDecisionCapture>,
-    trade_policy: Option<&TradePolicyArtifactInfo>,
-    decision_at: DateTime<Utc>,
-) -> Vec<PlanCandidate<'a>> {
-    candidates
-        .iter()
-        .filter_map(|candidate| {
-            selected
-                .iter()
-                .find(|market| market.market_id == candidate.market_id)
-                .map(|market| PlanCandidate {
-                    candidate,
-                    category: market.category,
-                    event_id: Some(market.event_id.clone()),
-                    liquidity_usd: market.liquidity_usd,
-                    liquidity_score: candidate.liquidity_score,
-                    executable_tiers: captures
-                        .get(&candidate.market_id)
-                        .zip(trade_policy)
-                        .map_or_else(Vec::new, |(capture, artifact)| {
-                            executable_sizing_tiers(
-                                capture,
-                                artifact,
-                                candidate.suggested_horizon_secs,
-                                decision_at,
-                            )
-                        }),
-                })
-        })
-        .collect()
-}
-
-fn market_selection_count(selected: &[SelectedMarket]) -> QuantResult<u32> {
-    count_u32(selected.len(), "report.market_selection_count")
-}
-
-fn enforce_candidate_ceiling(actual: usize, configured_ceiling: u32) -> QuantResult<()> {
-    let ceiling =
-        usize::try_from(configured_ceiling).map_err(|error| ReportError::NumericOverflow {
-            field: "reports.hard_candidate_ceiling",
-            detail: error.to_string(),
-        })?;
+fn enforce_candidate_ceiling(actual: usize, configured: u32) -> QuantResult<()> {
+    let ceiling = usize::try_from(configured).map_err(|error| ReportError::NumericOverflow {
+        field: "reports.hard_candidate_ceiling",
+        detail: error.to_string(),
+    })?;
     if actual > ceiling {
-        return Err(ReportError::ResourceCapacityExceeded { actual, ceiling }.into());
+        return Err(ReportError::ResourceCapacityExceeded {
+            resource: "catalog_visible_markets",
+            actual,
+            ceiling,
+        }
+        .into());
     }
     Ok(())
+}
+
+fn bounded_usize(value: u32) -> QuantResult<usize> {
+    usize::try_from(value)
+        .map_err(|error| ReportError::NumericOverflow {
+            field: "reports.top_n",
+            detail: error.to_string(),
+        })
+        .map_err(Into::into)
 }
 
 fn count_u32(count: usize, field: &'static str) -> QuantResult<u32> {
@@ -1294,236 +1894,40 @@ fn count_u32(count: usize, field: &'static str) -> QuantResult<u32> {
         .map_err(Into::into)
 }
 
-fn empty_data_quality_snapshot(
-    context: &BuildContext,
-    decision_at: DateTime<Utc>,
-) -> NewReportDataQualitySnapshot {
-    NewReportDataQualitySnapshot {
-        report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
-        decision_at,
-        decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
-        tokens_json: ReportDataQualityTokens(Vec::new()),
+impl BuildContext {
+    fn empty_data_quality_snapshot(&self) -> NewReportDataQualitySnapshot {
+        NewReportDataQualitySnapshot {
+            report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
+            decision_at: self.boundary.decision_at(),
+            decision_policy_snapshot_id: self.version.decision_policy_snapshot_id,
+            tokens_json: ReportDataQualityTokens(Vec::new()),
+        }
     }
-}
-
-impl FeaturePipelineResult {
-    fn feature_vector_by_market(&self) -> HashMap<MarketId, FeatureVectorId> {
-        self.persisted
-            .iter()
-            .zip(self.accepted.iter())
-            .map(|(info, vector)| (vector.market_id.clone(), info.feature_vector_id))
-            .collect()
-    }
-}
-
-const fn portfolio_caps(config: &DecisionPolicySnapshot) -> PortfolioCaps {
-    PortfolioCaps {
-        total_budget_usd: parse_decimal(
-            "portfolio.budget.total_budget_usd",
-            &config
-                .execution_risk
-                .portfolio
-                .budget
-                .total_budget_usd
-                .value,
-        ),
-        max_single_recommendation_usd: parse_decimal(
-            "portfolio.budget.max_single_recommendation_usd",
-            &config
-                .execution_risk
-                .portfolio
-                .budget
-                .max_single_recommendation_usd
-                .value,
-        ),
-        min_recommendation_usd: parse_decimal(
-            "portfolio.budget.min_recommendation_usd",
-            &config
-                .execution_risk
-                .portfolio
-                .budget
-                .min_recommendation_usd
-                .value,
-        ),
-        max_market_exposure_usd: parse_decimal(
-            "portfolio.constraints.max_market_exposure_usd",
-            &config
-                .execution_risk
-                .portfolio
-                .constraints
-                .max_market_exposure_usd
-                .value,
-        ),
-        max_event_exposure_usd: parse_decimal(
-            "portfolio.constraints.max_event_exposure_usd",
-            &config
-                .execution_risk
-                .portfolio
-                .constraints
-                .max_event_exposure_usd
-                .value,
-        ),
-        max_category_exposure_usd: parse_decimal(
-            "portfolio.constraints.max_category_exposure_usd",
-            &config
-                .execution_risk
-                .portfolio
-                .constraints
-                .max_category_exposure_usd
-                .value,
-        ),
-        liquidity_usage_cap_pct: parse_decimal(
-            "portfolio.constraints.liquidity_usage_cap_pct",
-            &config
-                .execution_risk
-                .portfolio
-                .constraints
-                .liquidity_usage_cap_pct
-                .value,
-        ),
-        max_aggregate_exposure_pct: parse_decimal(
-            "portfolio.kelly_safety.max_aggregate_exposure_pct",
-            &config
-                .execution_risk
-                .portfolio
-                .kelly_safety
-                .max_aggregate_exposure_pct
-                .value,
-        ),
-    }
-}
-
-const fn parse_decimal(_field: &str, value: &Decimal) -> Decimal {
-    *value
-}
-
-fn liquidity_score_cap(config: &DecisionPolicySnapshot) -> Usd {
-    let caps = portfolio_caps(config);
-    if caps.liquidity_usage_cap_pct > Decimal::ZERO
-        && caps.max_single_recommendation_usd > Decimal::ZERO
-    {
-        return Usd::new(caps.max_single_recommendation_usd / caps.liquidity_usage_cap_pct);
-    }
-    Usd::new(Decimal::from(10_000))
-}
-
-/// Map planner rejections and solver provenance to the report-level empty
-/// reason. Each reason has an independent, non-collapsed trigger:
-///
-/// 1. `SolverUnavailable` (no solver could produce a plan) -> `SystemDegraded`;
-/// 2. any `ReturnModelUncalibrated` -> `ReturnModelUncalibrated`;
-/// 3. any `BudgetExhausted` -> `PortfolioBudgetExhausted`;
-/// 4. any `AvailableCashExhausted` -> `AvailableCashExhausted` (distinct from
-///    "no signal" so operators can tell "out of cash" from "no edge");
-/// 5. otherwise -> `NoPositiveSignal`.
-fn planner_empty_reason(
-    rejected: &[RejectedCandidate],
-    solver_status: OptimizerSolverStatus,
-) -> EmptyReportReason {
-    if solver_status == OptimizerSolverStatus::SolverUnavailable {
-        return EmptyReportReason::SystemDegraded;
-    }
-    if rejected
-        .iter()
-        .any(|rejected| matches!(rejected.reason, RejectionReason::ReturnModelUncalibrated))
-    {
-        return EmptyReportReason::ReturnModelUncalibrated;
-    }
-    if rejected
-        .iter()
-        .any(|rejected| matches!(rejected.reason, RejectionReason::BudgetExhausted))
-    {
-        return EmptyReportReason::PortfolioBudgetExhausted;
-    }
-    if rejected
-        .iter()
-        .any(|rejected| matches!(rejected.reason, RejectionReason::AvailableCashExhausted))
-    {
-        return EmptyReportReason::AvailableCashExhausted;
-    }
-    EmptyReportReason::NoPositiveSignal
 }
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_error::{QuantError, report::ReportError};
+    use chrono::Utc;
     use quant_pivot_models::{
-        enums::quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason},
-        types::{MarketId, SignalCandidateId},
+        runtime_config::DecisionPolicySnapshot,
+        types::{CorrelationId, ReportRunId},
     };
-    use quant_pivot_research::portfolio::RejectedCandidate;
 
-    use super::{enforce_candidate_ceiling, planner_empty_reason};
-
-    fn rejected(reason: RejectionReason) -> RejectedCandidate {
-        RejectedCandidate {
-            signal_candidate_id: SignalCandidateId::from_v7(),
-            market_id: MarketId::new("0xmarket"),
-            reason,
-            detail: String::new(),
-        }
-    }
+    use super::{BuildReportRequest, ReportTrigger, resolve_top_n};
 
     #[test]
-    fn empty_reason_uses_exhausted() {
-        assert_eq!(
-            planner_empty_reason(
-                &[rejected(RejectionReason::BudgetExhausted)],
-                OptimizerSolverStatus::Optimal
-            ),
-            EmptyReportReason::PortfolioBudgetExhausted
-        );
-        assert_eq!(
-            planner_empty_reason(
-                &[rejected(RejectionReason::MarketCapExhausted)],
-                OptimizerSolverStatus::Optimal
-            ),
-            EmptyReportReason::NoPositiveSignal
-        );
-    }
-
-    #[test]
-    fn empty_keeps_no_signal() {
-        assert_eq!(
-            planner_empty_reason(
-                &[rejected(RejectionReason::AvailableCashExhausted)],
-                OptimizerSolverStatus::Optimal
-            ),
-            EmptyReportReason::AvailableCashExhausted
-        );
-    }
-
-    #[test]
-    fn empty_reason_exposes_model() {
-        assert_eq!(
-            planner_empty_reason(
-                &[rejected(RejectionReason::ReturnModelUncalibrated)],
-                OptimizerSolverStatus::Optimal
-            ),
-            EmptyReportReason::ReturnModelUncalibrated
-        );
-    }
-
-    #[test]
-    fn empty_reason_maps_degraded() {
-        assert_eq!(
-            planner_empty_reason(
-                &[rejected(RejectionReason::BeyondTopN)],
-                OptimizerSolverStatus::SolverUnavailable
-            ),
-            EmptyReportReason::SystemDegraded
-        );
-    }
-
-    #[test]
-    fn catalog_capacity_fails_truncating() {
-        assert!(enforce_candidate_ceiling(100_000, 100_000).is_ok());
-        assert!(matches!(
-            enforce_candidate_ceiling(100_001, 100_000),
-            Err(QuantError::Report(ReportError::ResourceCapacityExceeded {
-                actual: 100_001,
-                ceiling: 100_000,
-            }))
-        ));
+    fn ad_hoc_uses_default() {
+        let mut config = DecisionPolicySnapshot::default();
+        config.recommendation.reports.ad_hoc_default_top_n = 17;
+        let request = BuildReportRequest {
+            report_run_id: ReportRunId::from_v7(),
+            trigger: ReportTrigger::AdHoc {
+                request_id: CorrelationId::new("fixture-request"),
+            },
+            trigger_time: Utc::now(),
+            top_n_override: None,
+            knowledge_lag_secs_override: None,
+        };
+        assert_eq!(resolve_top_n(&request, &config).expect("top_n"), 17);
     }
 }

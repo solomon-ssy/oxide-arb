@@ -101,7 +101,7 @@ impl DataBundle {
         let on_session_invalidated: WsSessionInvalidationHook = Arc::new(move |token_ids| {
             let invalidated = invalidation_books.invalidate_ids(token_ids);
             invalidation_metrics
-                .ws_session_backpressure_invalidations
+                .ws_session_invalidated_tokens
                 .inc_by(u64::try_from(invalidated).unwrap_or(u64::MAX));
         });
         let (retirement_tx, retirement_rx) = flume::bounded(1_024);
@@ -165,6 +165,7 @@ impl DataBundle {
             deps,
             gamma_client: &gamma_client,
             ws_manager: &ws_manager,
+            event_repo: &event_repo,
             market_repo: &market_repo,
             catalog_ledger_repo: &catalog_ledger_repo,
             market_registry: &market_registry,
@@ -228,6 +229,7 @@ struct GammaServiceAssembly<'a> {
     deps: &'a DataBundleDeps<'a>,
     gamma_client: &'a Arc<GammaClient>,
     ws_manager: &'a Arc<ClobWsManager>,
+    event_repo: &'a Arc<dyn EventRepository>,
     market_repo: &'a Arc<dyn MarketRepository>,
     catalog_ledger_repo: &'a Arc<dyn CatalogLedgerRepository>,
     market_registry: &'a Arc<MarketRegistry>,
@@ -245,6 +247,7 @@ fn assemble_gamma_service(
         deps,
         gamma_client,
         ws_manager,
+        event_repo,
         market_repo,
         catalog_ledger_repo,
         market_registry,
@@ -272,6 +275,7 @@ fn assemble_gamma_service(
         market_registry: Arc::clone(market_registry),
         market_cache: Arc::clone(market_cache),
         market_filter: Arc::clone(market_filter),
+        event_repo: Arc::clone(event_repo),
         market_repo: Arc::clone(market_repo),
         catalog_ledger_repo: Arc::clone(catalog_ledger_repo),
         cache: Arc::clone(&deps.infra.cache),

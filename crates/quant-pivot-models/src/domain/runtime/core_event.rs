@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::{
         api::{MarketBookView, SystemStatusView},
-        quant::{OrderIntentInfo, RecommendationReportInfo, ReportRunInfo},
+        quant::{OrderIntentInfo, RecommendationReportInfo, ReportRunInfo, RepresentedRouteSet},
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
@@ -26,7 +26,7 @@ use crate::{
     },
     types::{
         ConditionTruth, ContentHash, EntryConditionInstanceId, MarketId, RecommendationReportId,
-        ReportRunId, ResearchProfileId,
+        ReportRunId,
     },
 };
 
@@ -80,7 +80,7 @@ impl ReportEventKind {
 pub struct ReportLifecycleEvent {
     pub event: ReportEventKind,
     pub recommendation_report_id: String,
-    pub profile_id: ResearchProfileId,
+    pub represented_routes: RepresentedRouteSet,
     pub report_kind: ReportKind,
     pub runtime_mode: QuantRuntimeMode,
     pub status: RecommendationReportStatus,
@@ -145,7 +145,7 @@ impl ReportLifecycleEvent {
         Self {
             event,
             recommendation_report_id: report.recommendation_report_id.to_string(),
-            profile_id: report.profile_id.clone(),
+            represented_routes: report.represented_routes_json.clone(),
             report_kind: report.report_kind,
             runtime_mode: report.runtime_mode,
             status: report.status,

@@ -5,7 +5,8 @@
 //! materializes each tick's model input from a **historical PIT source**
 //! (`MaterializedPitEngine` over prefetched `ClickHouse` facts — never the live
 //! `BookStore`) plus the realized settlement outcomes, and this pure engine runs
-//! model inference → LP/MILP allocation → outcome resolution → metrics. Because
+//! model inference → the same global `HiGHS` MILP used by reporting → outcome
+//! resolution → metrics. Because
 //! the engine has no access to a `BookStore` or any live source, "no live
 //! `BookStore` in a backtest" is structurally guaranteed.
 //!
@@ -18,7 +19,7 @@ pub(crate) mod metrics;
 mod runner;
 mod simulator;
 
-use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use calendarize::{
@@ -33,26 +34,36 @@ pub use lot_replay::{
 pub use metrics::sharpe_ratio;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    domain::market::book::BookLevel,
+    config::PortfolioSolverDeployConfig,
+    domain::{
+        market::book::BookLevel,
+        quant::{PortfolioScenarioModelArtifact, PortfolioScenarioVisibility, RepresentedRouteSet},
+    },
     enums::{
         common::MarketCategory,
-        quant::{DataQualityStatus, OutcomeSide},
+        quant::{AccountSource, DataQualityStatus, OutcomeSide},
     },
-    runtime_config::PortfolioConfig,
+    hashing::CanonicalDigest,
+    runtime_config::{BuyModelRoute, PortfolioConfig, PortfolioScenarioModelArtifactBinding},
     types::{
         BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, EventId, MarketId,
-        ModelVersionId, PayoutRatio, Price, Probability, Shares, TokenId, TrainingDatasetId, Usd,
-        backtest::{CategoryMetric, ExpectedVsRealized, PnlSimulation},
+        ModelVersionId, PayoutRatio, Price, Probability, ReportRouteRunId, Shares, TokenId,
+        TrainingDatasetId, Usd,
+        backtest::{BacktestPortfolioFunnel, CategoryMetric, ExpectedVsRealized, PnlSimulation},
     },
 };
-pub use runner::PortfolioReplayBacktester;
+pub use runner::{ModelCalibrationReplay, PortfolioReplayBacktester};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     execution_semantics::PitFeeSchedule,
     features::NullReason,
-    model::{ModelRankTarget, QuantModelRuntime, runtime::ModelRuntimeInput},
+    model::{
+        ModelRankTarget, QuantModelRuntime,
+        runtime::{ModelRuntimeInput, ModelRuntimeOutput},
+    },
+    portfolio::{AccountSnapshot, VerifiedPortfolioScenarioModel, scenario_economic_function_hash},
     precision::RESEARCH_DECIMAL_SCALE,
 };
 
@@ -66,11 +77,45 @@ use crate::{
 pub struct BacktestExecutionSnapshot {
     pub market_id: MarketId,
     pub token_id: TokenId,
+    pub bids: Vec<BookLevel>,
     pub asks: Vec<BookLevel>,
     pub fee_schedule: PitFeeSchedule,
     pub fill_at: DateTime<Utc>,
     pub limit_price: Price,
     pub book_hash: ContentHash,
+}
+
+/// Exact decision-time executable liquidation state for one outcome token.
+///
+/// This contract is deliberately distinct from [`BacktestExecutionSnapshot`]:
+/// entry eligibility is defined by the current model cross-section and asks,
+/// while a self-financing replay must revalue every still-open position from
+/// contemporaneous bids even after that token leaves the model universe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacktestLiquidationSnapshot {
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub bids: Vec<BookLevel>,
+    pub fee_schedule: PitFeeSchedule,
+    pub marked_at: DateTime<Utc>,
+    pub book_hash: ContentHash,
+}
+
+impl From<&BacktestExecutionSnapshot> for BacktestLiquidationSnapshot {
+    /// Project one exact entry-boundary book into its sell-side mark view.
+    ///
+    /// This conversion does not populate later retention boundaries; the core
+    /// orchestrator must still construct that independent time-series plane.
+    fn from(snapshot: &BacktestExecutionSnapshot) -> Self {
+        Self {
+            market_id: snapshot.market_id.clone(),
+            token_id: snapshot.token_id.clone(),
+            bids: snapshot.bids.clone(),
+            fee_schedule: snapshot.fee_schedule.clone(),
+            marked_at: snapshot.fill_at,
+            book_hash: snapshot.book_hash,
+        }
+    }
 }
 
 /// One immutable post-decision price observation used to derive empirical
@@ -173,8 +218,8 @@ pub struct BacktestMarketMeta {
     pub market_id: MarketId,
     /// Market category (domain breakdown + category exposure caps).
     pub category: MarketCategory,
-    /// Owning event (per-event exposure caps), when known.
-    pub event_id: Option<EventId>,
+    /// Owning event (per-event exposure caps). Missing event identity invalidates the tick.
+    pub event_id: EventId,
     /// Visible liquidity (liquidity-usage cap), when known.
     pub liquidity_usd: Option<Usd>,
 }
@@ -185,6 +230,9 @@ pub struct BacktestMarketMeta {
 pub struct MarketOutcome {
     /// Market id.
     pub market_id: MarketId,
+    /// Economic settlement time from the frozen canonical resolution fact.
+    /// `None` is permitted only together with an unresolved payout.
+    pub resolved_at: Option<DateTime<Utc>>,
     /// Exact YES-token payout when mature. `None` means no resolution was
     /// available by the frozen cutoff; it never means a zero payout.
     pub yes_payout_ratio: Option<PayoutRatio>,
@@ -223,55 +271,148 @@ pub struct BacktestTick {
     pub market_meta: Vec<BacktestMarketMeta>,
     /// Full-L2/PIT-fee execution inputs for every outcome token a model may buy.
     pub execution: Vec<BacktestExecutionSnapshot>,
+    /// Exact executable marks for every token that could remain open from an
+    /// earlier decision tick, independent of current model membership.
+    pub liquidation: Vec<BacktestLiquidationSnapshot>,
     /// Token-specific post-decision downside paths from the same Source Slice.
+    pub downside_trajectories: Vec<BacktestDownsideTrajectory>,
+    /// Fully frozen economic/scenario contract for the unique global optimizer path.
+    pub portfolio_contract: BacktestPortfolioContract,
+}
+
+/// Allocation-independent model input and truth for probability calibration.
+///
+/// A challenger must be calibrated before it can become a promoted Route
+/// champion. Consequently this replay contract intentionally contains no
+/// account, scenario-model, portfolio-policy, or active-serving binding. It
+/// still consumes the exact frozen model input, settlement truth, and downside
+/// paths used by the full replay engine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalibrationReplayTick {
+    pub decision_at: DateTime<Utc>,
+    pub model_input: ModelRuntimeInput,
+    pub outcomes: Vec<MarketOutcome>,
     pub downside_trajectories: Vec<BacktestDownsideTrajectory>,
 }
 
-/// Portfolio budget / exposure / liquidity caps (projected from `PortfolioConfig`).
-///
-/// `total_budget_usd`, `max_single_recommendation_usd`, and `min_recommendation_usd`
-/// are literal (a zero budget allocates nothing); the per-market / per-event /
-/// per-category caps are treated as unlimited when non-positive (unconfigured).
+/// Frozen, complete global-portfolio contract for one replay decision tick.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PortfolioCaps {
-    /// Total capital available across the report.
-    pub total_budget_usd: Decimal,
-    /// Maximum USD allocated to a single recommendation.
-    pub max_single_recommendation_usd: Decimal,
-    /// Minimum useful recommendation size (smaller intents are dropped).
-    pub min_recommendation_usd: Decimal,
-    /// Maximum USD exposure per market (unlimited when `<= 0`).
-    pub max_market_exposure_usd: Decimal,
-    /// Maximum USD exposure per event (unlimited when `<= 0`).
-    pub max_event_exposure_usd: Decimal,
-    /// Maximum USD exposure per category (unlimited when `<= 0`).
-    pub max_category_exposure_usd: Decimal,
-    /// Fraction of visible liquidity an allocation may consume (`[0, 1]`).
-    pub liquidity_usage_cap_pct: Decimal,
-    /// Total simultaneous exposure cap as a fraction of bankroll (`[0, 1]`).
-    pub max_aggregate_exposure_pct: Decimal,
+#[serde(deny_unknown_fields)]
+pub struct BacktestPortfolioContract {
+    pub report_route_run_id: ReportRouteRunId,
+    pub route: BuyModelRoute,
+    pub account: AccountSnapshot,
+    pub represented_routes: RepresentedRouteSet,
+    pub policy: PortfolioConfig,
+    pub solver: PortfolioSolverDeployConfig,
+    pub top_n: u32,
 }
 
-impl TryFrom<&PortfolioConfig> for PortfolioCaps {
-    type Error = QuantError;
+/// Immutable promoted scenario/methodology context shared by every tick in one replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestPortfolioContext {
+    pub report_route_run_id: ReportRouteRunId,
+    pub route: BuyModelRoute,
+    pub represented_routes: RepresentedRouteSet,
+    pub policy: PortfolioConfig,
+    pub solver: PortfolioSolverDeployConfig,
+    pub top_n: u32,
+}
 
-    /// Project the runtime-config portfolio section into allocator caps.
-    ///
-    /// `max_correlated_exposure_usd` and the confidence/drawdown curves are
-    /// report-builder concerns and are intentionally not part of the
-    /// allocator's caps.
-    fn try_from(config: &PortfolioConfig) -> Result<Self, Self::Error> {
-        let budget = &config.budget;
-        let constraints = &config.constraints;
+/// Scenario estimator attached at replay execution rather than frozen into
+/// reusable market/economic ticks.
+///
+/// CPCV can therefore attach one independent
+/// fold-local estimator without ever materializing a future-informed promoted
+/// model inside its immutable tick cache.
+#[derive(Debug, PartialEq, Eq)]
+struct VerifiedBacktestScenarioContract {
+    binding: PortfolioScenarioModelArtifactBinding,
+    model: PortfolioScenarioModelArtifact,
+    represented_routes: RepresentedRouteSet,
+    economic_function_hash: ContentHash,
+}
+
+/// Fully verified immutable scenario contract shared by every replay tick.
+///
+/// Construction performs the complete model/binding/Route-set integrity
+/// audit once. Cloning this value only clones an [`Arc`]; it never deep-copies
+/// the scenario state catalog or repeats cryptographic verification inside the
+/// portfolio loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestScenarioContext {
+    contract: Arc<VerifiedBacktestScenarioContract>,
+}
+
+impl BacktestScenarioContext {
+    /// Verify and freeze a scenario model for deterministic replay.
+    pub fn try_new(
+        binding: PortfolioScenarioModelArtifactBinding,
+        model: PortfolioScenarioModelArtifact,
+        represented_routes: RepresentedRouteSet,
+    ) -> QuantResult<Self> {
+        VerifiedPortfolioScenarioModel::verify(&binding, &model, &represented_routes)?;
+        let economic_function_hash = scenario_economic_function_hash(&model)?;
         Ok(Self {
-            total_budget_usd: budget.total_budget_usd.value,
-            max_single_recommendation_usd: budget.max_single_recommendation_usd.value,
-            min_recommendation_usd: budget.min_recommendation_usd.value,
-            max_market_exposure_usd: constraints.max_market_exposure_usd.value,
-            max_event_exposure_usd: constraints.max_event_exposure_usd.value,
-            max_category_exposure_usd: constraints.max_category_exposure_usd.value,
-            liquidity_usage_cap_pct: constraints.liquidity_usage_cap_pct.value,
-            max_aggregate_exposure_pct: config.kelly_safety.max_aggregate_exposure_pct.value,
+            contract: Arc::new(VerifiedBacktestScenarioContract {
+                binding,
+                model,
+                represented_routes,
+                economic_function_hash,
+            }),
+        })
+    }
+
+    #[must_use]
+    pub fn binding(&self) -> &PortfolioScenarioModelArtifactBinding {
+        &self.contract.binding
+    }
+
+    #[must_use]
+    pub fn model(&self) -> &PortfolioScenarioModelArtifact {
+        &self.contract.model
+    }
+
+    #[must_use]
+    pub fn represented_routes(&self) -> &RepresentedRouteSet {
+        &self.contract.represented_routes
+    }
+
+    /// Complete economics-only identity shared by lineage-distinct scenario artifacts.
+    #[must_use]
+    pub fn economic_function_hash(&self) -> ContentHash {
+        self.contract.economic_function_hash
+    }
+
+    pub(crate) fn verified(&self) -> VerifiedPortfolioScenarioModel<'_> {
+        VerifiedPortfolioScenarioModel::from_verified(
+            &self.contract.binding,
+            &self.contract.model,
+            &self.contract.represented_routes,
+        )
+    }
+}
+
+impl BacktestPortfolioContext {
+    /// Freeze one tick-specific account and exact zero-position preimage.
+    pub fn contract(&self, decision_at: DateTime<Utc>) -> QuantResult<BacktestPortfolioContract> {
+        let total_budget = Usd::new(self.policy.budget.total_budget_usd.value);
+        Ok(BacktestPortfolioContract {
+            report_route_run_id: self.report_route_run_id,
+            route: self.route,
+            account: AccountSnapshot::new(
+                decision_at,
+                AccountSource::HistoricalReplay,
+                total_budget,
+                total_budget,
+                total_budget,
+                Usd::ZERO,
+                Vec::new(),
+            ),
+            represented_routes: self.represented_routes.clone(),
+            policy: self.policy.clone(),
+            solver: self.solver,
+            top_n: self.top_n,
         })
     }
 }
@@ -283,10 +424,78 @@ pub struct BacktestInputs<'a> {
     pub request: BacktestRequest,
     /// The model runtime under test (already hash/schema-validated by the factory).
     pub model: &'a dyn QuantModelRuntime,
+    /// Scenario estimator selected for this complete run. Standard replay uses
+    /// a promoted PIT model; CPCV supplies one fold-local estimator.
+    pub scenario: &'a BacktestScenarioContext,
+    /// Explicit PIT versus purged-CV visibility semantics.
+    pub scenario_visibility: PortfolioScenarioVisibility,
     /// Time-ordered replay ticks.
     pub ticks: Vec<BacktestTick>,
-    /// Portfolio caps for the greedy allocator.
-    pub caps: PortfolioCaps,
+}
+
+/// One fold-local OOS inference result retained until the complete CPCV path is assembled.
+///
+/// Scenario context is tick-specific because adjacent path partitions can
+/// originate from different purged estimators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrecomputedBacktestTick {
+    pub model_version_id: ModelVersionId,
+    pub tick: BacktestTick,
+    pub output: ModelRuntimeOutput,
+    pub scenario: BacktestScenarioContext,
+    pub scenario_visibility: PortfolioScenarioVisibility,
+}
+
+impl PrecomputedBacktestTick {
+    /// Hash exactly the immutable inputs that can change stateful portfolio cash flows.
+    ///
+    /// Model inputs, calibration/rank diagnostics, runtime metrics, and artifact
+    /// lineage are intentionally absent after OOS inference. Candidate economics,
+    /// executable market state, policy, account state, scenario economics, and
+    /// validation visibility remain fully committed. Equal digests therefore
+    /// authorize deterministic replay reuse without collapsing governed trials.
+    pub fn economic_replay_digest(&self) -> QuantResult<ContentHash> {
+        let candidates = self
+            .output
+            .candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.signal_candidate_id,
+                    candidate.model_run_id,
+                    &candidate.market_id,
+                    &candidate.token_id,
+                    candidate.outcome_side,
+                    candidate.payout_distribution,
+                    candidate.suggested_horizon_secs,
+                )
+            })
+            .collect::<Vec<_>>();
+        CanonicalDigest::content_hash_typed(
+            "quant-pivot/precomputed-backtest-economic-input",
+            1,
+            &(
+                self.tick.decision_at,
+                &self.tick.outcomes,
+                &self.tick.rank_targets,
+                &self.tick.market_meta,
+                &self.tick.execution,
+                &self.tick.liquidation,
+                &self.tick.downside_trajectories,
+                &self.tick.portfolio_contract,
+                candidates,
+                self.scenario.economic_function_hash(),
+                self.scenario_visibility,
+            ),
+        )
+        .map_err(QuantError::from)
+    }
+}
+
+/// Complete timeline input to the stateful self-financing replay boundary.
+pub struct PrecomputedBacktestInputs {
+    pub request: BacktestRequest,
+    pub ticks: Vec<PrecomputedBacktestTick>,
 }
 
 /// A point-in-time backtest report (the persisted, content-addressed summary).
@@ -304,7 +513,8 @@ pub struct BacktestReport {
     pub window_start: DateTime<Utc>,
     /// Exclusive window end.
     pub window_end: DateTime<Utc>,
-    /// Fraction of emitted candidates that matured into resolved samples.
+    /// Fraction of emitted candidates with mature canonical settlement truth;
+    /// independent of whether the global portfolio funded them.
     pub coverage: Decimal,
     /// Resolved (matured) sample count.
     pub sample_count: u64,
@@ -324,7 +534,8 @@ pub struct BacktestReport {
     pub expected_vs_realized: ExpectedVsRealized,
     /// Maximum equity drawdown as a fraction of the total budget.
     pub max_drawdown: Decimal,
-    /// Mean per-tick portfolio turnover.
+    /// Mean executed entry cash divided by frozen capital across every fixed-
+    /// cadence decision tick. Settlement/redemption is not a second trade.
     pub turnover: Decimal,
     /// Fraction of allocations that respected the liquidity-usage cap.
     pub liquidity_feasibility: Probability,
@@ -334,6 +545,8 @@ pub struct BacktestReport {
     pub tail_loss: Decimal,
     /// Portfolio `PnL` simulation.
     pub report_pnl_simulation: PnlSimulation,
+    /// Count-conserving candidate → tier → admission → selection → execution funnel.
+    pub portfolio_funnel: BacktestPortfolioFunnel,
     /// Canonical hash over every field above.
     pub report_hash: ContentHash,
 }
@@ -453,12 +666,9 @@ pub struct BacktestRunResult {
     pub sample_outcomes: Vec<SampleOutcome>,
     /// Complete same-window decision-tick portfolio-return series.
     pub portfolio_returns: Vec<PortfolioReturnObservation>,
-    /// Canonical per-market allocation weights for every replay tick, in the
-    /// same ascending decision-time order as `portfolio_returns`. CPCV uses
-    /// these exact weights to reconstruct path-level turnover after stitching
-    /// out-of-sample fold partitions; averaging fold-level turnover would lose
-    /// the transitions at partition boundaries.
-    pub tick_weights: Vec<BTreeMap<String, Decimal>>,
+    /// Executed entry cash outlay divided by the frozen capital base for every
+    /// replay tick, in the same ascending order as `portfolio_returns`.
+    pub tick_cash_turnover: Vec<Decimal>,
 }
 
 /// Runs a point-in-time backtest of a model version.

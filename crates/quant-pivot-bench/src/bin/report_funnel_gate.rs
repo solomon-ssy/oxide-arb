@@ -1,4 +1,4 @@
-//! Repeated p99 gate for the 2K-market full-path report funnel kernel.
+//! Repeated p99 gate for the 2K-market report-funnel materialization kernel.
 
 use std::{collections::HashMap, error::Error, time::Instant};
 
@@ -9,18 +9,17 @@ use quant_pivot_core::{
     service::model_runner::ModelMarketDecision,
 };
 use quant_pivot_models::{
-    enums::{common::MarketCategory, quant::RejectionReason},
+    domain::quant::{NewReportRouteRun, RouteCandidateFunnel, RouteRunOutcome},
+    enums::common::MarketCategory,
+    runtime_config::BuyModelRoute,
     types::{
         ContentHash, DecisionPolicySnapshotId, EventId, FeatureVectorId, MarketId,
-        MarketSelectionId, ModelRunId, ModelVersionId, RecommendationId, RecommendationReportId,
-        ResearchProfileId, ResearchProfileRef, SelectionExclusionSummary, SignalCandidateId,
-        TokenId,
+        MarketSelectionId, RecommendationId, RecommendationReportId, ReportRouteRunId, ReportRunId,
+        SelectionExclusionSummary, SelectorHashEvidence, SignalCandidateId, TokenId,
     },
 };
-use quant_pivot_research::{
-    portfolio::RejectedCandidate,
-    selection::{MarketSelectionSnapshot, SelectedMarket},
-};
+use quant_pivot_research::selection::{MarketSelectionSnapshot, SelectedMarket};
+use uuid::Uuid;
 
 const MARKET_COUNT: usize = 2_000;
 const WARMUP_SAMPLES: usize = 5;
@@ -44,11 +43,29 @@ fn selection(
             source_refs: Vec::new(),
         })
         .collect();
+    let selector_hash = ContentHash::from_bytes([1; 32]);
     MarketSelectionSnapshot {
         market_selection_id: MarketSelectionId::from_v7(),
         decision_at,
         decision_policy_snapshot_id,
-        selector_hash: ContentHash::from_bytes([1; 32]),
+        selector_hash,
+        selector_evidence: SelectorHashEvidence {
+            selector_hash,
+            contract_hash: ContentHash::from_bytes([2; 32]),
+            boundary_hash: ContentHash::from_bytes([3; 32]),
+            selection_policy_hash: ContentHash::from_bytes([4; 32]),
+            data_quality_policy_hash: ContentHash::from_bytes([5; 32]),
+            feature_schema_hash: ContentHash::from_bytes([6; 32]),
+            model_requirements_hash: ContentHash::from_bytes([7; 32]),
+            candidates_hash: ContentHash::from_bytes([8; 32]),
+            candidate_catalog_hash: ContentHash::from_bytes([9; 32]),
+            candidate_book_hash: ContentHash::from_bytes([10; 32]),
+            candidate_domain_hash: ContentHash::from_bytes([11; 32]),
+            candidate_decision_hash: ContentHash::from_bytes([12; 32]),
+            included_hash: ContentHash::from_bytes([13; 32]),
+            excluded_hash: ContentHash::from_bytes([14; 32]),
+            exclusion_summary_hash: ContentHash::from_bytes([15; 32]),
+        },
         included,
         excluded: Vec::new(),
         exclusion_summary: SelectionExclusionSummary::default(),
@@ -66,12 +83,10 @@ fn full_compute_inputs(
 ) -> (
     HashMap<MarketId, FeatureVectorId>,
     Vec<ModelMarketDecision>,
-    Vec<RejectedCandidate>,
     Vec<PublishedRecommendationRef>,
 ) {
     let mut feature_vectors = HashMap::with_capacity(MARKET_COUNT);
     let mut model_decisions = Vec::with_capacity(MARKET_COUNT);
-    let mut planner_rejected = Vec::with_capacity(MARKET_COUNT - TOP_N);
     let mut recommendations = Vec::with_capacity(TOP_N);
     for (index, market) in selection.included.iter().enumerate() {
         feature_vectors.insert(market.market_id.clone(), FeatureVectorId::from_v7());
@@ -87,56 +102,60 @@ fn full_compute_inputs(
             recommendations.push(PublishedRecommendationRef {
                 recommendation_id: RecommendationId::from_v7(),
                 market_id: market.market_id.clone(),
-            });
-        } else {
-            planner_rejected.push(RejectedCandidate {
-                signal_candidate_id,
-                market_id: market.market_id.clone(),
-                reason: RejectionReason::BeyondTopN,
-                detail: "ranked beyond governed TopN".to_owned(),
+                report_route_run_id: ReportRouteRunId::new(Uuid::nil()),
+                route: BuyModelRoute::Pooled,
             });
         }
     }
-    (
-        feature_vectors,
-        model_decisions,
-        planner_rejected,
-        recommendations,
-    )
+    (feature_vectors, model_decisions, recommendations)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let decision_at = DateTime::<Utc>::UNIX_EPOCH;
     let decision_policy_snapshot_id = DecisionPolicySnapshotId::from_v7();
     let selection = selection(decision_at, decision_policy_snapshot_id);
-    let profile_ref = ResearchProfileRef {
-        id: ResearchProfileId::new("report_compute_gate"),
-        version: 1,
-        content_hash: ContentHash::from_bytes([2; 32]),
-    };
     let report_id = RecommendationReportId::from_v7();
-    let model_version_id = ModelVersionId::from_v7();
-    let model_run_id = ModelRunId::from_v7();
-    let (feature_vectors, model_decisions, planner_rejected, recommendations) =
-        full_compute_inputs(&selection);
-    let input = ReportFunnelInput {
+    let report_route_run_id = ReportRouteRunId::new(Uuid::nil());
+    let market_count = u32::try_from(MARKET_COUNT)?;
+    let selected_count = u32::try_from(TOP_N)?;
+    let route_runs = [NewReportRouteRun {
+        report_route_run_id,
+        report_run_id: ReportRunId::from_v7(),
+        route: BuyModelRoute::Pooled,
+        outcome: RouteRunOutcome::Ready,
+        model_version_id: None,
+        model_run_id: None,
+        calibration_artifact_id: None,
+        trade_policy_artifact_id: None,
+        research_profile_artifact_id: None,
+        lineage_json: None,
+        funnel_json: RouteCandidateFunnel {
+            eligible_markets: market_count,
+            feature_complete_markets: market_count,
+            calibrated_candidates: market_count,
+            admitted_economic_tiers: 0,
+            selected_recommendations: selected_count,
+        },
+        diagnostic_code: None,
+        finished_at: decision_at,
+    }];
+    let (feature_vectors, model_decisions, recommendations) = full_compute_inputs(&selection);
+    let funnel_input = || ReportFunnelInput {
         report_id: &report_id,
-        profile_ref: &profile_ref,
         decision_policy_snapshot_id: &decision_policy_snapshot_id,
-        model_version_id: &model_version_id,
-        model_run_id: Some(&model_run_id),
         selection: &selection,
+        route_runs: &route_runs,
         feature_rejected: &[],
         feature_vector_by_market: &feature_vectors,
         model_decisions: &model_decisions,
-        planner_rejected: &planner_rejected,
+        tiers: &[],
+        tier_rejections: &[],
         recommendations: &recommendations,
-        early_terminal: None,
         event_time: decision_at,
     };
 
     for _ in 0..WARMUP_SAMPLES {
-        let rows = build_report_market_funnel(input)?;
+        let rows = build_report_market_funnel(funnel_input())?;
         if rows.len() != MARKET_COUNT {
             return Err("report compute warmup row count mismatch".into());
         }
@@ -144,7 +163,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut samples = Vec::with_capacity(MEASURED_SAMPLES);
     for _ in 0..MEASURED_SAMPLES {
         let started = Instant::now();
-        let rows = build_report_market_funnel(input)?;
+        let rows = build_report_market_funnel(funnel_input())?;
         let elapsed = started.elapsed().as_secs_f64();
         if rows.len() != MARKET_COUNT
             || rows
@@ -168,7 +187,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let peak_rss = peak_rss_bytes()?;
     let peak_rss_label = peak_rss.map_or_else(|| "unavailable".to_owned(), |rss| rss.to_string());
     println!(
-        "report_compute_gate path=feature+model+planner+optimizer+topn markets={MARKET_COUNT} top_n={TOP_N} samples={MEASURED_SAMPLES} median_seconds={median:.6} p99_seconds={p99:.6} peak_rss_bytes={peak_rss_label}"
+        "report_funnel_gate path=report_funnel_materialization markets={MARKET_COUNT} top_n={TOP_N} samples={MEASURED_SAMPLES} median_seconds={median:.6} p99_seconds={p99:.6} peak_rss_bytes={peak_rss_label}"
     );
     if p99 > MAX_P99_SECONDS {
         return Err(

@@ -16,7 +16,7 @@ use quant_pivot_models::{
         ports::{PolicySnapshotPort, SystemCapabilityPort},
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode, system::CapabilityReason},
-    runtime_config::BuyModelRoute,
+    runtime_config::DecisionPolicySnapshot,
 };
 use quant_pivot_repository::traits::{ModelRunRepository, RecommendationReportRepository};
 use tokio::sync::watch::{self, Receiver, Sender};
@@ -76,11 +76,15 @@ impl SystemCapabilityService {
             &mut report_reasons,
         );
         let runtime_config = self.runtime_config.current();
-        let has_active_model_pointer =
-            BuyModelRoute::try_from(&runtime_config.recommendation.selection)
-                .ok()
-                .and_then(|route| runtime_config.model_routing.model.champion(route).ok())
-                .is_some();
+        // Report-level Route readiness is resolved only after immutable venue
+        // eligibility discovers the represented Route set. Capability gating
+        // therefore proves that serving can begin, while the report transaction
+        // atomically fails if any actually represented Route lacks a champion,
+        // calibration, trade policy, research profile, or scenario artifact.
+        // Treating an empty category filter (all supported categories) as a
+        // requirement that every possible Route already have a champion would
+        // deadlock valid Crypto/Weather reports before discovery.
+        let has_active_model_pointer = has_serving_entry(&runtime_config);
         require(
             has_active_model_pointer,
             CapabilityReason::NoServingEvidence,
@@ -138,6 +142,10 @@ impl SystemCapabilityService {
     }
 }
 
+fn has_serving_entry(runtime_config: &DecisionPolicySnapshot) -> bool {
+    !runtime_config.model_routing.model.buy_routes.is_empty()
+}
+
 const fn capability(reasons: Vec<CapabilityReason>) -> CapabilityView {
     CapabilityView {
         enabled: reasons.is_empty(),
@@ -188,5 +196,48 @@ impl SystemCapabilityPort for SystemCapabilityService {
             .store(serving_subject, Ordering::Release);
         self.last_status.store(Arc::new(status.clone()));
         Ok(self.publish(self.derive(status, serving_subject)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::has_serving_entry;
+    use quant_pivot_models::{
+        runtime_config::{
+            BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot, ModelBinding,
+            ModelBindingSource,
+        },
+        types::{ModelVersionId, PolicyBundleGeneration},
+    };
+
+    #[test]
+    fn all_scope_allows_discovery() {
+        let mut policy = DecisionPolicySnapshot::default();
+        assert!(
+            policy
+                .recommendation
+                .selection
+                .enabled_categories
+                .is_empty()
+        );
+        assert!(!has_serving_entry(&policy));
+
+        policy.model_routing.model.buy_routes.insert(
+            BuyModelRoute::Weather,
+            BuyRouteBinding {
+                champion: ModelBinding::new(
+                    ModelVersionId::from_v7(),
+                    ModelBindingSource::Bootstrap,
+                    Utc::now(),
+                    PolicyBundleGeneration::FIRST,
+                    1,
+                ),
+                shadow: None,
+            },
+        );
+
+        assert!(has_serving_entry(&policy));
     }
 }

@@ -20,7 +20,8 @@ use quant_pivot_models::{
         BookSnapshotRef, BookSnapshotSource, Bps, CatalogDecisionRef, ContentHash,
         DecisionCaptureEvidence, DecisionPolicySnapshotId, DecisionSnapshotEvidence, EventId,
         MarketContext, MarketId, MarketLinkageId, Probability, RecommendationIdentity,
-        ReportDataQualitySnapshotId, ReportDataQualityTokens, TokenDataQualityRecord, TokenId, Usd,
+        ReportDataQualitySnapshotId, ReportDataQualityTokens, TokenDataQualityRecord, TokenId,
+        TradeTapeSourceEvidence, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -82,6 +83,8 @@ pub struct MarketDecisionCapture {
     pub domain_binding: Option<ResolvedBinding>,
     /// Order book resolved at `as_of`.
     pub book: ResolvedBook,
+    /// Complementary outcome book resolved at the same boundary, when the market is binary.
+    pub secondary_book: Option<ResolvedBook>,
     /// Market metadata resolved at `as_of`.
     pub market: ResolvedMarketContext,
     /// Human-readable identity for the recommendation.
@@ -90,19 +93,60 @@ pub struct MarketDecisionCapture {
     pub market_context: MarketContext,
     /// Replay handle for the frozen book.
     pub book_snapshot_ref: BookSnapshotRef,
+    /// Replay handle for the complementary outcome book.
+    pub secondary_book_snapshot_ref: Option<BookSnapshotRef>,
+    /// Complementary outcome identity, aligned to `secondary_book`.
+    pub secondary_identity: Option<RecommendationIdentity>,
     /// Aggregate data quality after feature classification (updated post-build).
     pub data_quality: DataQualityStatus,
     /// Normalized visible liquidity in `[0, 1]` vs the configured cap.
     pub liquidity_score: Probability,
     /// Durable source snapshot identity shared by online and replay.
     pub snapshot: DecisionSnapshotEvidence,
+    /// Trade-tape source state consumed by this feature build.
+    pub trade_tape_source: TradeTapeSourceEvidence,
 }
 
 impl MarketDecisionCapture {
+    /// Resolve the exact candidate-side book. A NO candidate never walks the YES book.
+    #[must_use]
+    pub fn book_for(&self, token_id: &TokenId) -> Option<&ResolvedBook> {
+        if self.book.token_id == *token_id {
+            return Some(&self.book);
+        }
+        self.secondary_book
+            .as_ref()
+            .filter(|book| book.token_id == *token_id)
+    }
+
+    /// Resolve the replay reference aligned to one candidate-side token.
+    #[must_use]
+    pub fn book_snapshot_ref_for(&self, token_id: &TokenId) -> Option<&BookSnapshotRef> {
+        if self.book_snapshot_ref.token_id == *token_id {
+            return Some(&self.book_snapshot_ref);
+        }
+        self.secondary_book_snapshot_ref
+            .as_ref()
+            .filter(|reference| reference.token_id == *token_id)
+    }
+
+    /// Resolve the human identity aligned to one candidate-side token.
+    #[must_use]
+    pub fn identity_for(&self, token_id: &TokenId) -> Option<&RecommendationIdentity> {
+        if self.book.token_id == *token_id {
+            return Some(&self.identity);
+        }
+        self.secondary_book
+            .as_ref()
+            .filter(|book| book.token_id == *token_id)
+            .and(self.secondary_identity.as_ref())
+    }
+
     #[must_use]
     pub fn evidence(&self) -> DecisionCaptureEvidence {
         DecisionCaptureEvidence {
             snapshot: self.snapshot.clone(),
+            trade_tape_source: self.trade_tape_source.clone(),
             identity: self.identity.clone(),
             market_context: self.market_context.clone(),
             data_quality: self.data_quality,
@@ -283,10 +327,13 @@ pub struct MarketDecisionCaptureInput<'a> {
     pub boundary: &'a DecisionBoundary,
     pub selected: &'a SelectedMarket,
     pub book: ResolvedBook,
+    pub secondary_book: Option<ResolvedBook>,
+    pub secondary_book_snapshot_ref: Option<BookSnapshotRef>,
     pub market: ResolvedMarketContext,
     pub registry: Option<&'a MarketRegistryInfo>,
     pub catalog: CatalogDecisionRef,
     pub domain: Option<&'a DomainSliceInputs>,
+    pub trade_tape_source: &'a TradeTapeSourceEvidence,
     pub liquidity_cap_usd: Usd,
 }
 
@@ -297,15 +344,27 @@ pub fn capture_market_decision(
         boundary,
         selected,
         book,
+        secondary_book,
+        secondary_book_snapshot_ref,
         market,
         registry,
         catalog,
         domain,
+        trade_tape_source,
         liquidity_cap_usd,
     } = input;
     let as_of = boundary.decision_at();
     let book_snapshot_ref = book.snapshot_ref()?;
     let identity = recommendation_identity_from_resolved(selected, registry)?;
+    let secondary_identity = selected
+        .secondary_token_id
+        .as_ref()
+        .map(|token_id| {
+            let mut secondary = selected.clone();
+            secondary.primary_token_id = token_id.clone();
+            recommendation_identity_from_resolved(&secondary, registry)
+        })
+        .transpose()?;
     let market_context = market_context_from_resolved(as_of, &book, &market, selected, registry)?;
     let liquidity_score = liquidity_score_from_resolved(&book, liquidity_cap_usd);
     let book_effective_at = book.effective_at;
@@ -318,12 +377,16 @@ pub fn capture_market_decision(
         market_linkage_hash: domain.map(|inputs| inputs.linkage_hash),
         domain_binding: domain.map(|inputs| inputs.binding.clone()),
         book,
+        secondary_book,
         market,
         identity,
         market_context,
         book_snapshot_ref: book_snapshot_ref.clone(),
+        secondary_book_snapshot_ref,
+        secondary_identity,
         data_quality: DataQualityStatus::Fresh,
         liquidity_score,
+        trade_tape_source: trade_tape_source.clone(),
         snapshot: DecisionSnapshotEvidence {
             boundary: boundary.clone(),
             market_id: selected.market_id.clone(),

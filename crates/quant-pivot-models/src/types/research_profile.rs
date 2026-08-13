@@ -54,6 +54,7 @@ const RESEARCH_FEEDBACK_POLICY_HASH_DOMAIN: &str = "quant-pivot/research-feedbac
     Hash,
     Serialize,
     Deserialize,
+    JsonSchema,
     FromJsonQueryResult,
     FromQueryResult,
 )]
@@ -792,7 +793,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
                 ResearchProfileDataSource::PolymarketResolution,
             ],
             allowed_cash_budget_tiers: cash_budget.clone(),
-            activation_eligibility: ResearchEvaluationTrack::ResearchOnly,
+            activation_eligibility: ResearchEvaluationTrack::SemiAutoCandidate,
             quality_gate: TradePolicyQualityGate::production(),
             feedback_policy: production_feedback_policy(6 * 3_600, 50, 3 * SECONDS_PER_DAY),
         },
@@ -941,15 +942,15 @@ mod tests {
         assert_eq!(weather.profile_ref.version, 4);
         assert_eq!(
             pooled.profile_ref.content_hash.to_string(),
-            "blake3:045ed413fb4ee177cbfa78eff3e934a0f580ffa942d260be6e4ed10b8083e9fb"
+            "blake3:5ead2ec431de352cce70974f7b86c33b6b4e2f5300e8c6a24e179db2285becd8"
         );
         assert_eq!(
             crypto.profile_ref.content_hash.to_string(),
-            "blake3:a1cd751681a00e479378d458f6d7e91911c6b748ee71f02d4a4b5394596654ef"
+            "blake3:1bc32f74f0765d7ce1dc3d6424d3786b452e581fe75b10c2ae9d80c4f56456d2"
         );
         assert_eq!(
             weather.profile_ref.content_hash.to_string(),
-            "blake3:c906d7676bb12b6a75a261c518224efd7391ffbc1bcbad471ec5ccf8baf90c10"
+            "blake3:a2e67aeb609be75cfd05ec5913a9c62968d3b3e274fda12196247da7e20eabcf"
         );
         assert_eq!(pooled.spec.feedback_policy.feedback_cadence_secs, 86_400);
         assert_eq!(
@@ -996,6 +997,11 @@ mod tests {
         );
         assert!(
             weather
+                .spec
+                .permits(ResearchEvaluationTrack::SemiAutoCandidate)
+        );
+        assert!(
+            crypto
                 .spec
                 .permits(ResearchEvaluationTrack::SemiAutoCandidate)
         );

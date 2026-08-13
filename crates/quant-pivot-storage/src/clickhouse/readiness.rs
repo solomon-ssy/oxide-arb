@@ -4,7 +4,8 @@ use chrono::{DateTime, Utc};
 use clickhouse::Row;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::types::{
-    ResearchSourceBinding, ResearchSourceStorageKind, research_source_registry,
+    ResearchSourceBinding, ResearchSourceStorageKind, ResearchSourceTimeEncoding,
+    research_source_registry,
 };
 use serde::Deserialize;
 
@@ -39,16 +40,7 @@ impl ClickHousePool {
         as_of: DateTime<Utc>,
     ) -> Result<RawHistoryObservation, StorageError> {
         validate_raw_history_binding(spec)?;
-        let filter_sql = spec.filter.as_ref().map_or(String::new(), |filter| {
-            format!(" AND {} = ?", filter.column)
-        });
-        let range_sql = format!(
-            "SELECT toUnixTimestamp64Milli(minOrNull({time})) AS earliest_ms, \
-             toUnixTimestamp64Milli(maxOrNull({time})) AS latest_ms, count() AS row_count \
-             FROM {table} WHERE {time} <= fromUnixTimestamp64Milli(?){filter_sql}",
-            time = spec.time_column,
-            table = spec.object,
-        );
+        let range_sql = raw_history_range_sql(spec)?;
         let range_query = CLICKHOUSE_RAW_HISTORY_READINESS
             .query(self.client(), &range_sql)
             .bind(as_of.timestamp_millis());
@@ -137,7 +129,54 @@ fn validate_raw_history_binding(spec: &ResearchSourceBinding) -> Result<(), Stor
             format!("{} is not a ClickHouse source binding", spec.object),
         ));
     }
+    if !matches!(
+        spec.time_encoding,
+        ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds
+            | ResearchSourceTimeEncoding::ClickHouseUnixMilliseconds
+    ) {
+        return Err(StorageError::invariant_violation(
+            Some("research_source_registry"),
+            format!(
+                "{} has non-ClickHouse time encoding {}",
+                spec.object, spec.time_encoding
+            ),
+        ));
+    }
     Ok(())
+}
+
+fn raw_history_range_sql(spec: &ResearchSourceBinding) -> Result<String, StorageError> {
+    validate_raw_history_binding(spec)?;
+    let filter_sql = spec.filter.as_ref().map_or(String::new(), |filter| {
+        format!(" AND {} = ?", filter.column)
+    });
+    let (minimum, maximum, cutoff) = match spec.time_encoding {
+        ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds => (
+            format!("toUnixTimestamp64Milli(minOrNull({}))", spec.time_column),
+            format!("toUnixTimestamp64Milli(maxOrNull({}))", spec.time_column),
+            "fromUnixTimestamp64Milli(?)".to_owned(),
+        ),
+        ResearchSourceTimeEncoding::ClickHouseUnixMilliseconds => (
+            format!("minOrNull({})", spec.time_column),
+            format!("maxOrNull({})", spec.time_column),
+            "?".to_owned(),
+        ),
+        ResearchSourceTimeEncoding::PostgresTimestampWithTimeZone => {
+            return Err(StorageError::invariant_violation(
+                Some("research_source_registry"),
+                format!(
+                    "{} cannot use PostgreSQL timestamp semantics in a ClickHouse readiness query",
+                    spec.object
+                ),
+            ));
+        }
+    };
+    Ok(format!(
+        "SELECT {minimum} AS earliest_ms, {maximum} AS latest_ms, count() AS row_count \
+         FROM {table} WHERE {time} <= {cutoff}{filter_sql}",
+        table = spec.object,
+        time = spec.time_column,
+    ))
 }
 
 #[derive(Row, Deserialize)]
@@ -149,9 +188,11 @@ struct TimeRangeRow {
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_models::types::{ResearchSourceStorageKind, research_source_registry};
+    use quant_pivot_models::types::{
+        ResearchReadinessSource, ResearchSourceStorageKind, research_source_registry,
+    };
 
-    use super::validate_raw_history_binding;
+    use super::{raw_history_range_sql, validate_raw_history_binding};
 
     #[test]
     fn raw_history_identifiers_registry() {
@@ -164,6 +205,30 @@ mod tests {
         assert!(validate_raw_history_binding(&binding).is_ok());
         binding.object = "system.query_log".to_owned();
         assert!(validate_raw_history_binding(&binding).is_err());
+    }
+
+    #[test]
+    fn history_time_encoding_explicit() {
+        let registry = research_source_registry().expect("canonical registry");
+        let date_time = registry
+            .bindings
+            .iter()
+            .find(|binding| binding.source == ResearchReadinessSource::ClobL2)
+            .expect("DateTime64 binding");
+        let unix_millis = registry
+            .bindings
+            .iter()
+            .find(|binding| binding.source == ResearchReadinessSource::AviationWeather)
+            .expect("Unix-millisecond binding");
+
+        let date_time_sql = raw_history_range_sql(date_time).expect("DateTime64 SQL");
+        assert!(date_time_sql.contains("toUnixTimestamp64Milli(minOrNull("));
+        assert!(date_time_sql.contains("fromUnixTimestamp64Milli(?)"));
+
+        let unix_millis_sql = raw_history_range_sql(unix_millis).expect("Unix-millisecond SQL");
+        assert!(unix_millis_sql.contains("minOrNull(observed_at) AS earliest_ms"));
+        assert!(unix_millis_sql.contains("observed_at <= ?"));
+        assert!(!unix_millis_sql.contains("toUnixTimestamp64Milli"));
     }
 }
 

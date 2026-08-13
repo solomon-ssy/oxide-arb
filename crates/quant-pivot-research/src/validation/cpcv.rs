@@ -22,19 +22,26 @@
 //! implementations; supplies lot-grouped implementations with
 //! zero changes here.
 
-use std::{collections::BTreeMap, ops::Range};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+};
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
-use quant_pivot_models::types::{
-    BacktestPathSetId,
-    backtest::{BacktestPath, SharpeDistribution},
+use quant_pivot_models::{
+    domain::quant::PortfolioScenarioVisibility,
+    hashing::CanonicalDigest,
+    types::{
+        BacktestPathSetId, ContentHash,
+        backtest::{BacktestPath, CpcvTrialPathBinding, SharpeDistribution},
+    },
 };
 use rayon::prelude::*;
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::{
-    backtest::metrics::{sharpe_ratio, turnover},
-    model::{runtime::QuantModelRuntime, sell_scorer::SellScorerRuntime},
+    backtest::{BacktestScenarioContext, PrecomputedBacktestTick, metrics::sharpe_ratio},
+    model::{ResolvedCalibration, runtime::QuantModelRuntime, sell_scorer::SellScorerRuntime},
     precision::RESEARCH_DECIMAL_SCALE,
     stats,
     validation::{
@@ -91,6 +98,64 @@ impl CpcvConfig {
     pub fn combination_count(&self) -> QuantResult<u64> {
         binomial(self.n_groups, self.k_test)
     }
+
+    /// Canonical unique fold set required to reconstruct one precommitted
+    /// complete OOS path for every governed trial column.
+    pub fn trial_path(&self, path_index: u32) -> QuantResult<CpcvTrialPathBinding> {
+        if self.n_groups < 2 || self.k_test == 0 || self.k_test >= self.n_groups {
+            return Err(methodology(format!(
+                "CPCV trial path requires N>=2 and 0<k<N, got N={} k={}",
+                self.n_groups, self.k_test
+            )));
+        }
+        let n_groups = usize::try_from(self.n_groups)
+            .map_err(|error| methodology(format!("cpcv.n_groups does not fit usize: {error}")))?;
+        let k_test = usize::try_from(self.k_test)
+            .map_err(|error| methodology(format!("cpcv.k_test does not fit usize: {error}")))?;
+        let path_count = usize::try_from(self.path_count()?)
+            .map_err(|error| methodology(format!("CPCV path count does not fit usize: {error}")))?;
+        let requested_path = usize::try_from(path_index)
+            .map_err(|error| methodology(format!("CPCV path index does not fit usize: {error}")))?;
+        if requested_path >= path_count {
+            return Err(methodology(format!(
+                "CPCV path index {path_index} is outside the configured 0..{path_count} population"
+            )));
+        }
+        let combos = combinations(n_groups, k_test);
+        let slots = assign_path_slots(
+            n_groups,
+            path_count,
+            combos
+                .iter()
+                .enumerate()
+                .map(|(fold_index, test_partitions)| (fold_index, test_partitions.as_slice())),
+        )?;
+        let path_slots = slots.get(requested_path).ok_or_else(|| {
+            methodology(format!(
+                "CPCV path index {path_index} disappeared after slot assignment"
+            ))
+        })?;
+        let combination_indices = path_slots
+            .iter()
+            .copied()
+            .map(|fold_index| {
+                fold_index.ok_or_else(|| {
+                    methodology(format!(
+                        "path {path_index} contains an unfilled partition slot"
+                    ))
+                })
+            })
+            .collect::<QuantResult<BTreeSet<_>>>()?
+            .into_iter()
+            .map(|fold_index| {
+                u32::try_from(fold_index).map_err(|error| {
+                    methodology(format!("CPCV fold index does not fit u32: {error}"))
+                })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        CpcvTrialPathBinding::try_new(path_index, combination_indices)
+            .map_err(|error| methodology(format!("build CPCV trial-path binding: {error}")))
+    }
 }
 
 fn binomial(n: u32, k: u32) -> QuantResult<u64> {
@@ -141,8 +206,16 @@ pub enum FoldTrainingIdentity<'a> {
         test_partitions: &'a [usize],
         test_groups: &'a [usize],
     },
-    /// One governed full-window hyperparameter trial.
-    Trial { trial_id: u32 },
+    /// One purge/embargo CPCV combination for a governed hyperparameter
+    /// trial. Trial evidence is never produced by fitting and evaluating the
+    /// same full window.
+    TrialPathValidation {
+        trial_id: u32,
+        path_index: u32,
+        combination_index: u32,
+        test_partitions: &'a [usize],
+        test_groups: &'a [usize],
+    },
 }
 
 /// Borrowed input to one fold-scoped training call.
@@ -161,12 +234,64 @@ pub struct FoldTrainingRequest<'a> {
 /// trial-grid, DSR/PBO) is written purely against these three abstractions
 /// and never inspects which variant it holds.
 pub enum FoldRuntime {
-    /// A Buy-side (`WeightedFactor` / classical ML) fold runtime.
-    Buy(Box<dyn QuantModelRuntime>),
+    /// A model-only Buy runtime used by allocation-independent validators.
+    BuyModel(Box<dyn QuantModelRuntime>),
+    /// A complete Buy estimator: model, nested calibration, and fold-local
+    /// scenario model fitted without observing its outer test population.
+    BuyPortfolio(Box<PurgedPortfolioFoldRuntime>),
     /// A Sell-side (`HoldVsExitWeighted`) fold runtime.
     Sell(Box<dyn SellScorerRuntime>),
     /// Policy-fit fold selection over precomputed executable candidate paths.
     Policy(PolicyFoldRuntime),
+}
+
+/// Complete fold-local economic estimator for portfolio replay.
+pub struct PurgedPortfolioFoldRuntime {
+    pub model: Box<dyn QuantModelRuntime>,
+    pub calibration: ResolvedCalibration,
+    pub calibration_artifact_hash: ContentHash,
+    pub calibration_function_hash: ContentHash,
+    pub scenario: BacktestScenarioContext,
+    pub scenario_economic_function_hash: ContentHash,
+    pub model_fit_groups_hash: ContentHash,
+    pub calibration_fit_groups_hash: ContentHash,
+    pub scenario_fit_groups_hash: ContentHash,
+    pub test_groups_hash: ContentHash,
+    pub model_fit_groups: Vec<usize>,
+    pub calibration_fit_groups: Vec<usize>,
+    pub scenario_fit_groups: Vec<usize>,
+}
+
+impl PurgedPortfolioFoldRuntime {
+    /// Prove that the replay filter is the exact held-out set committed by the
+    /// fold identity and is disjoint from both estimator-fit populations.
+    pub fn visibility_for(
+        &self,
+        filter: &GroupRowFilter,
+    ) -> QuantResult<PortfolioScenarioVisibility> {
+        let test_groups_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/cpcv-fold-test-groups",
+            1,
+            &filter.group_indices,
+        )?;
+        if test_groups_hash != self.test_groups_hash
+            || filter.group_indices.iter().any(|index| {
+                self.model_fit_groups.binary_search(index).is_ok()
+                    || self.calibration_fit_groups.binary_search(index).is_ok()
+                    || self.scenario_fit_groups.binary_search(index).is_ok()
+            })
+        {
+            return Err(ResearchError::ValidationMethodology {
+                detail: "CPCV portfolio replay is not disjoint from its fold-local estimator fit"
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok(PortfolioScenarioVisibility::PurgedCrossValidation {
+            fit_evidence_hash: self.scenario.model().pit_residual_panel_hash,
+            test_groups_hash,
+        })
+    }
 }
 
 /// Candidate selected using only one fold's purged training groups.
@@ -189,11 +314,25 @@ impl FoldRuntime {
     /// data problem, but still must not crash the CPCV run.
     pub fn as_buy(&self) -> QuantResult<&dyn QuantModelRuntime> {
         match self {
-            Self::Buy(runtime) => Ok(runtime.as_ref()),
+            Self::BuyModel(runtime) => Ok(runtime.as_ref()),
+            Self::BuyPortfolio(runtime) => Ok(runtime.model.as_ref()),
             Self::Sell(_) | Self::Policy(_) => Err(ResearchError::ValidationMethodology {
                 detail: "expected a Buy-side FoldRuntime, got Sell".to_owned(),
             }
             .into()),
+        }
+    }
+
+    /// Project to a complete portfolio fold estimator.
+    pub fn as_portfolio_buy(&self) -> QuantResult<&PurgedPortfolioFoldRuntime> {
+        match self {
+            Self::BuyPortfolio(runtime) => Ok(runtime),
+            Self::BuyModel(_) | Self::Sell(_) | Self::Policy(_) => {
+                Err(ResearchError::ValidationMethodology {
+                    detail: "expected a portfolio Buy FoldRuntime".to_owned(),
+                }
+                .into())
+            }
         }
     }
 
@@ -205,10 +344,12 @@ impl FoldRuntime {
     pub fn as_sell(&self) -> QuantResult<&dyn SellScorerRuntime> {
         match self {
             Self::Sell(runtime) => Ok(runtime.as_ref()),
-            Self::Buy(_) | Self::Policy(_) => Err(ResearchError::ValidationMethodology {
-                detail: "expected a Sell-side FoldRuntime, got Buy".to_owned(),
+            Self::BuyModel(_) | Self::BuyPortfolio(_) | Self::Policy(_) => {
+                Err(ResearchError::ValidationMethodology {
+                    detail: "expected a Sell-side FoldRuntime, got Buy".to_owned(),
+                }
+                .into())
             }
-            .into()),
         }
     }
 
@@ -216,10 +357,12 @@ impl FoldRuntime {
     pub fn as_policy(&self) -> QuantResult<&PolicyFoldRuntime> {
         match self {
             Self::Policy(runtime) => Ok(runtime),
-            Self::Buy(_) | Self::Sell(_) => Err(ResearchError::ValidationMethodology {
-                detail: "expected a Policy FoldRuntime, got a model runtime".to_owned(),
+            Self::BuyModel(_) | Self::BuyPortfolio(_) | Self::Sell(_) => {
+                Err(ResearchError::ValidationMethodology {
+                    detail: "expected a Policy FoldRuntime, got a model runtime".to_owned(),
+                }
+                .into())
             }
-            .into()),
         }
     }
 }
@@ -262,17 +405,32 @@ pub struct GroupEvaluation {
     /// realized tick `PnL` / allocated capital for Buy-side, realized lot
     /// proceeds / cost basis for the Sell-side).
     pub return_value: Decimal,
+    /// Allocation-independent calibration residual used by the scenario-model
+    /// fit after complete OOS path reconstruction.
+    pub scenario_residual: Option<Decimal>,
     /// Every (score, realized) pair this group's replay produced — zero for
     /// a group with nothing scored, one for a single-candidate atomic unit
     /// (e.g. one Sell lot's decision walk), many for a multi-candidate
     /// cross-section (e.g. one Buy `as_of` tick's ranked tokens). Pooled
     /// across the whole path by `build_path` to compute rank IC.
     pub rank_observations: Vec<RankObservation>,
-    /// Exact normalized per-market allocation weights for this decision tick.
-    /// Buy-side replay always supplies this value so complete CPCV paths can
-    /// reconstruct turnover across fold boundaries. Non-portfolio evaluators
-    /// use `None`, making turnover explicitly not evaluable rather than zero.
-    pub allocation_weights: Option<BTreeMap<String, Decimal>>,
+    /// Executed cash turnover for this decision tick as a fraction of the
+    /// frozen capital base. Portfolio CPCV supplies this only after a complete
+    /// path-level stateful replay; allocation-independent evaluators use
+    /// `None` rather than inventing a zero.
+    pub executed_turnover: Option<Decimal>,
+    /// Complete fold-local OOS inference/economic input. Buy portfolio replay
+    /// carries this until φ-path reconstruction can run one self-financing
+    /// account across the whole ordered path; all other families use `None`.
+    pub portfolio_replay: Option<PrecomputedBacktestTick>,
+}
+
+/// Stateful economic result produced only after one complete φ-path has been
+/// reconstructed from fold-local OOS evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathEconomicReplay {
+    pub group_returns: Vec<Decimal>,
+    pub executed_turnover: Decimal,
 }
 
 /// Evaluates a trained model against the groups `filter` selects, returning
@@ -284,6 +442,19 @@ pub trait ReplayEngine: Send + Sync {
         model: &FoldRuntime,
         filter: &GroupRowFilter,
     ) -> QuantResult<Vec<GroupEvaluation>>;
+
+    /// Optionally execute one stateful economic replay after the complete
+    /// path's OOS groups have been assembled in timeline order. The default is
+    /// appropriate only for allocation-independent evaluators whose atomic
+    /// group returns require no cross-period capital state.
+    fn replay_path(
+        &self,
+        _path_index: u32,
+        _groups: &[TimelineGroup],
+        _evaluations: &[&GroupEvaluation],
+    ) -> QuantResult<Option<PathEconomicReplay>> {
+        Ok(None)
+    }
 }
 
 /// A full Combinatorial Purged Cross-Validation result: the reconstructed
@@ -307,6 +478,7 @@ pub struct BacktestPathSet {
 /// Inputs to one CPCV run. `groups` must be sorted ascending by `as_of`
 /// (the same invariant [`PurgedSplitter`] requires) — index `i` in every
 /// [`GroupRowFilter`]/[`GroupEvaluation`] refers to `groups[i]`.
+#[derive(Clone, Copy)]
 pub struct CpcvRequest<'a> {
     pub path_set_id: BacktestPathSetId,
     pub groups: &'a [TimelineGroup],
@@ -339,6 +511,105 @@ impl DefaultCombinatorialPurgedBacktester {
     #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+
+    /// Execute only the fold combinations required to reconstruct one
+    /// precommitted complete OOS path.
+    ///
+    /// Slot assignment is still derived from the full deterministic
+    /// `C(N, k)` combination population. Every retained fold therefore uses
+    /// the exact same test partitions, purged training population, estimator,
+    /// and replay contract as [`CombinatorialPurgedBacktester::run`]. This is
+    /// an exact projection of one path, not reduced-fold cross-validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResearchError::ValidationMethodology`] when `path_index` is
+    /// outside the configured phi-path population or when any selected fold
+    /// cannot be trained, replayed, or reconstructed exactly.
+    pub fn run_path(&self, request: CpcvRequest<'_>, path_index: u32) -> QuantResult<BacktestPath> {
+        let CpcvRequest {
+            path_set_id: _,
+            groups,
+            cpcv,
+            purge,
+            fold_source,
+            replay,
+        } = request;
+        let n_groups = usize::try_from(cpcv.n_groups)
+            .map_err(|error| methodology(format!("cpcv.n_groups does not fit usize: {error}")))?;
+        let k_test = usize::try_from(cpcv.k_test)
+            .map_err(|error| methodology(format!("cpcv.k_test does not fit usize: {error}")))?;
+        validate_config(groups.len(), cpcv, n_groups)?;
+
+        let path_count = usize::try_from(cpcv.path_count()?)
+            .map_err(|error| methodology(format!("CPCV path count does not fit usize: {error}")))?;
+        let requested_path = usize::try_from(path_index)
+            .map_err(|error| methodology(format!("CPCV path index does not fit usize: {error}")))?;
+        if requested_path >= path_count {
+            return Err(methodology(format!(
+                "CPCV path index {path_index} is outside the configured 0..{path_count} population"
+            )));
+        }
+
+        let partitions = partition_indices(groups.len(), n_groups)?;
+        let combos = combinations(n_groups, k_test);
+        let slots = assign_path_slots(
+            n_groups,
+            path_count,
+            combos
+                .iter()
+                .enumerate()
+                .map(|(fold_index, test_partitions)| (fold_index, test_partitions.as_slice())),
+        )?;
+        let path_slots = slots.get(requested_path).ok_or_else(|| {
+            methodology(format!(
+                "CPCV path index {path_index} disappeared after slot assignment"
+            ))
+        })?;
+        let trial_path = cpcv.trial_path(path_index)?;
+        let selected_folds = trial_path
+            .combination_indices
+            .iter()
+            .map(|&fold_index| {
+                usize::try_from(fold_index).map_err(|error| {
+                    methodology(format!("CPCV fold index does not fit usize: {error}"))
+                })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        let fold_results = selected_folds
+            .iter()
+            .map(|&fold_index| {
+                let test_partitions = combos.get(fold_index).ok_or_else(|| {
+                    methodology(format!(
+                        "path {path_index} references missing fold {fold_index}"
+                    ))
+                })?;
+                run_fold(
+                    groups,
+                    &purge,
+                    &partitions,
+                    fold_index,
+                    test_partitions,
+                    fold_source,
+                    replay,
+                )
+                .map(|fold| (fold_index, fold))
+            })
+            .collect::<Vec<_>>();
+        let mut folds = BTreeMap::new();
+        for result in fold_results {
+            let (fold_index, fold) = result?;
+            folds.insert(fold_index, fold);
+        }
+        reconstruct_path(
+            groups,
+            path_index,
+            &partitions,
+            path_slots,
+            replay,
+            |fold_index| folds.get(&fold_index),
+        )
     }
 }
 
@@ -390,55 +661,21 @@ impl CombinatorialPurgedBacktester for DefaultCombinatorialPurgedBacktester {
 
         let partitions = partition_indices(groups.len(), n_groups)?;
         let combos = combinations(n_groups, k_test);
-        let splitter = DefaultPurgedSplitter::new();
 
         let fold_results: Vec<QuantResult<FoldResult>> = combos
             .par_iter()
             .enumerate()
-            .map(
-                |(combination_index, test_partitions)| -> QuantResult<FoldResult> {
-                    let combination_index = u32::try_from(combination_index).map_err(|error| {
-                        methodology(format!("CPCV combination index does not fit u32: {error}"))
-                    })?;
-                    let test_group_indices: Vec<usize> = test_partitions
-                        .iter()
-                        .flat_map(|&partition| partitions[partition].clone())
-                        .collect();
-                    let split = splitter.split(groups, &test_group_indices, &purge)?;
-                    let training_filter = GroupRowFilter {
-                        group_indices: split.train_indices,
-                    };
-                    let test_filter = GroupRowFilter {
-                        group_indices: split.test_indices,
-                    };
-                    let model = fold_source.train_fold(FoldTrainingRequest {
-                        identity: FoldTrainingIdentity::Validation {
-                            combination_index,
-                            test_partitions,
-                            test_groups: &test_filter.group_indices,
-                        },
-                        filter: &training_filter,
-                    })?;
-                    let mut evaluations = replay.evaluate(&model, &test_filter)?;
-                    evaluations.sort_unstable_by_key(|evaluation| evaluation.group_index);
-                    if evaluations.len() != test_filter.group_indices.len()
-                        || evaluations
-                            .iter()
-                            .zip(&test_filter.group_indices)
-                            .any(|(evaluation, &expected)| evaluation.group_index != expected)
-                    {
-                        return Err(methodology(format!(
-                            "CPCV replay returned {} evaluations for {} exact test groups",
-                            evaluations.len(),
-                            test_filter.group_indices.len()
-                        )));
-                    }
-                    Ok(FoldResult {
-                        test_partitions: test_partitions.clone(),
-                        evaluations,
-                    })
-                },
-            )
+            .map(|(combination_index, test_partitions)| {
+                run_fold(
+                    groups,
+                    &purge,
+                    &partitions,
+                    combination_index,
+                    test_partitions,
+                    fold_source,
+                    replay,
+                )
+            })
             .collect();
         let mut folds = Vec::with_capacity(fold_results.len());
         for result in fold_results {
@@ -447,7 +684,7 @@ impl CombinatorialPurgedBacktester for DefaultCombinatorialPurgedBacktester {
 
         let path_count = usize::try_from(cpcv.path_count()?)
             .map_err(|error| methodology(format!("CPCV path count does not fit usize: {error}")))?;
-        let paths = reconstruct_paths(groups, n_groups, path_count, &partitions, &folds)?;
+        let paths = reconstruct_paths(groups, n_groups, path_count, &partitions, &folds, replay)?;
         let sharpe_distribution = sharpe_distribution(&paths)?;
         let median_rank_ic = median(&paths.iter().map(|p| p.rank_ic).collect::<Vec<_>>())?;
 
@@ -459,6 +696,57 @@ impl CombinatorialPurgedBacktester for DefaultCombinatorialPurgedBacktester {
             median_rank_ic,
         })
     }
+}
+
+fn run_fold(
+    groups: &[TimelineGroup],
+    purge: &PurgeConfig,
+    partitions: &[Range<usize>],
+    combination_index: usize,
+    test_partitions: &[usize],
+    fold_source: &dyn FoldModelSource,
+    replay: &dyn ReplayEngine,
+) -> QuantResult<FoldResult> {
+    let combination_index_u32 = u32::try_from(combination_index).map_err(|error| {
+        methodology(format!("CPCV combination index does not fit u32: {error}"))
+    })?;
+    let test_group_indices = test_partitions
+        .iter()
+        .flat_map(|&partition| partitions[partition].clone())
+        .collect::<Vec<_>>();
+    let split = DefaultPurgedSplitter::new().split(groups, &test_group_indices, purge)?;
+    let training_filter = GroupRowFilter {
+        group_indices: split.train_indices,
+    };
+    let test_filter = GroupRowFilter {
+        group_indices: split.test_indices,
+    };
+    let model = fold_source.train_fold(FoldTrainingRequest {
+        identity: FoldTrainingIdentity::Validation {
+            combination_index: combination_index_u32,
+            test_partitions,
+            test_groups: &test_filter.group_indices,
+        },
+        filter: &training_filter,
+    })?;
+    let mut evaluations = replay.evaluate(&model, &test_filter)?;
+    evaluations.sort_unstable_by_key(|evaluation| evaluation.group_index);
+    if evaluations.len() != test_filter.group_indices.len()
+        || evaluations
+            .iter()
+            .zip(&test_filter.group_indices)
+            .any(|(evaluation, &expected)| evaluation.group_index != expected)
+    {
+        return Err(methodology(format!(
+            "CPCV replay returned {} evaluations for {} exact test groups",
+            evaluations.len(),
+            test_filter.group_indices.len()
+        )));
+    }
+    Ok(FoldResult {
+        test_partitions: test_partitions.to_vec(),
+        evaluations,
+    })
 }
 
 fn validate_config(group_count: usize, cpcv: CpcvConfig, n_groups: usize) -> QuantResult<()> {
@@ -501,99 +789,182 @@ fn reconstruct_paths(
     path_count: usize,
     partitions: &[Range<usize>],
     folds: &[FoldResult],
+    replay: &dyn ReplayEngine,
 ) -> QuantResult<Vec<BacktestPath>> {
-    let mut slots: Vec<Vec<Option<usize>>> = vec![vec![None; n_groups]; path_count];
-    for (fold_idx, fold) in folds.iter().enumerate() {
-        for &partition in &fold.test_partitions {
+    let slots = assign_path_slots(
+        n_groups,
+        path_count,
+        folds
+            .iter()
+            .enumerate()
+            .map(|(fold_index, fold)| (fold_index, fold.test_partitions.as_slice())),
+    )?;
+    slots
+        .iter()
+        .enumerate()
+        .map(|(path_index, path_slots)| {
+            let path_index = u32::try_from(path_index).map_err(|error| {
+                methodology(format!("CPCV path index does not fit u32: {error}"))
+            })?;
+            reconstruct_path(
+                groups,
+                path_index,
+                partitions,
+                path_slots,
+                replay,
+                |fold_index| folds.get(fold_index),
+            )
+        })
+        .collect()
+}
+
+fn assign_path_slots<'a>(
+    n_groups: usize,
+    path_count: usize,
+    folds: impl IntoIterator<Item = (usize, &'a [usize])>,
+) -> QuantResult<Vec<Vec<Option<usize>>>> {
+    let mut slots = vec![vec![None; n_groups]; path_count];
+    for (fold_index, test_partitions) in folds {
+        for &partition in test_partitions {
+            if partition >= n_groups {
+                return Err(methodology(format!(
+                    "fold {fold_index} references partition {partition} outside 0..{n_groups}"
+                )));
+            }
             let Some(path) = slots.iter_mut().find(|path| path[partition].is_none()) else {
                 return Err(ResearchError::ValidationMethodology {
                     detail: format!(
                         "phi-path reconstruction ran out of empty slots for partition {partition} \
-                         at fold {fold_idx} — this indicates a combinatorial-symmetry bug, not a \
+                         at fold {fold_index} — this indicates a combinatorial-symmetry bug, not a \
                          data problem"
                     ),
                 }
                 .into());
             };
-            path[partition] = Some(fold_idx);
+            path[partition] = Some(fold_index);
         }
     }
+    Ok(slots)
+}
 
-    let mut paths = Vec::with_capacity(path_count);
-    for (path_index, path_slots) in slots.into_iter().enumerate() {
-        let mut per_group: Vec<Option<&GroupEvaluation>> = vec![None; groups.len()];
-        for (partition, fold_idx) in path_slots.into_iter().enumerate() {
-            let Some(fold_idx) = fold_idx else {
+fn reconstruct_path<'a>(
+    groups: &[TimelineGroup],
+    path_index: u32,
+    partitions: &[Range<usize>],
+    path_slots: &[Option<usize>],
+    replay: &dyn ReplayEngine,
+    fold_at: impl Fn(usize) -> Option<&'a FoldResult>,
+) -> QuantResult<BacktestPath> {
+    if path_slots.len() != partitions.len() {
+        return Err(methodology(format!(
+            "path {path_index} has {} partition slots, expected {}",
+            path_slots.len(),
+            partitions.len()
+        )));
+    }
+    let mut per_group: Vec<Option<&GroupEvaluation>> = vec![None; groups.len()];
+    for (partition, &fold_index) in path_slots.iter().enumerate() {
+        let Some(fold_index) = fold_index else {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!("path {path_index} left partition {partition} unfilled"),
+            }
+            .into());
+        };
+        let fold = fold_at(fold_index).ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: format!("path {path_index} references unavailable fold {fold_index}"),
+        })?;
+        let partition_range = partitions[partition].clone();
+        let start = fold
+            .evaluations
+            .binary_search_by_key(&partition_range.start, |evaluation| evaluation.group_index)
+            .map_err(|_| ResearchError::ValidationMethodology {
+                detail: format!(
+                    "fold {fold_index} has no evaluation for partition {partition} start {}",
+                    partition_range.start
+                ),
+            })?;
+        let end = start.checked_add(partition_range.len()).ok_or_else(|| {
+            methodology("CPCV partition evaluation boundary overflowed usize".to_owned())
+        })?;
+        let evaluations = fold.evaluations.get(start..end).ok_or_else(|| {
+            ResearchError::ValidationMethodology {
+                detail: format!(
+                    "fold {fold_index} has too few evaluations for partition {partition}"
+                ),
+            }
+        })?;
+        for (group_index, evaluation) in partition_range.zip(evaluations) {
+            if evaluation.group_index != group_index {
                 return Err(ResearchError::ValidationMethodology {
-                    detail: format!("path {path_index} left partition {partition} unfilled"),
+                    detail: format!(
+                        "fold {fold_index} evaluation order diverged at group {group_index}: got {}",
+                        evaluation.group_index
+                    ),
                 }
                 .into());
-            };
-            let fold = &folds[fold_idx];
-            let partition_range = partitions[partition].clone();
-            let start = fold
-                .evaluations
-                .binary_search_by_key(&partition_range.start, |evaluation| evaluation.group_index)
-                .map_err(|_| ResearchError::ValidationMethodology {
-                    detail: format!(
-                        "fold {fold_idx} has no evaluation for partition {partition} start {}",
-                        partition_range.start
-                    ),
-                })?;
-            let end = start.checked_add(partition_range.len()).ok_or_else(|| {
-                methodology("CPCV partition evaluation boundary overflowed usize".to_owned())
-            })?;
-            let evaluations = fold.evaluations.get(start..end).ok_or_else(|| {
-                ResearchError::ValidationMethodology {
-                    detail: format!(
-                        "fold {fold_idx} has too few evaluations for partition {partition}"
-                    ),
-                }
-            })?;
-            for (group_index, evaluation) in partition_range.zip(evaluations) {
-                if evaluation.group_index != group_index {
-                    return Err(ResearchError::ValidationMethodology {
-                        detail: format!(
-                            "fold {fold_idx} evaluation order diverged at group {group_index}: got {}",
-                            evaluation.group_index
-                        ),
-                    }
-                    .into());
-                }
-                per_group[group_index] = Some(evaluation);
             }
+            per_group[group_index] = Some(evaluation);
         }
-        let path_index = u32::try_from(path_index)
-            .map_err(|error| methodology(format!("CPCV path index does not fit u32: {error}")))?;
-        paths.push(build_path(path_index, &per_group)?);
     }
-    Ok(paths)
+    let evaluations = per_group
+        .iter()
+        .enumerate()
+        .map(|(group_index, evaluation)| {
+            evaluation.ok_or_else(|| {
+                QuantError::from(ResearchError::ValidationMethodology {
+                    detail: format!("group {group_index} was never evaluated in path {path_index}"),
+                })
+            })
+        })
+        .collect::<QuantResult<Vec<_>>>()?;
+    let economic_replay = replay.replay_path(path_index, groups, &evaluations)?;
+    build_path(path_index, groups, &evaluations, economic_replay)
 }
 
 fn build_path(
     path_index: u32,
-    per_group: &[Option<&GroupEvaluation>],
+    groups: &[TimelineGroup],
+    evaluations: &[&GroupEvaluation],
+    economic_replay: Option<PathEconomicReplay>,
 ) -> QuantResult<BacktestPath> {
-    let mut group_returns = Vec::with_capacity(per_group.len());
+    if evaluations.len() != groups.len() {
+        return Err(methodology(format!(
+            "path {path_index} has {} ordered evaluations for {} groups",
+            evaluations.len(),
+            groups.len()
+        )));
+    }
+    let (group_returns, path_turnover) = if let Some(replay) = economic_replay {
+        if replay.group_returns.len() != evaluations.len() {
+            return Err(methodology(format!(
+                "path {path_index} stateful replay returned {} periods for {} groups",
+                replay.group_returns.len(),
+                evaluations.len()
+            )));
+        }
+        (replay.group_returns, Some(replay.executed_turnover))
+    } else {
+        let turnover = evaluations
+            .iter()
+            .map(|evaluation| evaluation.executed_turnover)
+            .collect::<Option<Vec<_>>>()
+            .map(|values| stats::mean(&values).round_dp(RESEARCH_DECIMAL_SCALE));
+        (
+            evaluations
+                .iter()
+                .map(|evaluation| evaluation.return_value)
+                .collect(),
+            turnover,
+        )
+    };
+    let mut scenario_residuals = Vec::with_capacity(evaluations.len());
     let mut pooled_scores = Vec::new();
     let mut pooled_realized = Vec::new();
-    let mut allocation_weights = Vec::with_capacity(per_group.len());
-    let mut turnover_evaluable = true;
-    for (group_index, evaluation) in per_group.iter().enumerate() {
-        let Some(evaluation) = evaluation else {
-            return Err(ResearchError::ValidationMethodology {
-                detail: format!("group {group_index} was never evaluated in path {path_index}"),
-            }
-            .into());
-        };
-        group_returns.push(evaluation.return_value);
+    for evaluation in evaluations {
+        scenario_residuals.push(evaluation.scenario_residual);
         for observation in &evaluation.rank_observations {
             pooled_scores.push(observation.score);
             pooled_realized.push(observation.realized);
-        }
-        match &evaluation.allocation_weights {
-            Some(weights) => allocation_weights.push(weights.clone()),
-            None => turnover_evaluable = false,
         }
     }
 
@@ -609,11 +980,11 @@ fn build_path(
         stats::spearman(&pooled_scores, &pooled_realized).round_dp(RESEARCH_DECIMAL_SCALE);
     let max_drawdown = max_drawdown_from_returns(&group_returns);
     let tail_loss = tail_loss_from_returns(&group_returns, Decimal::new(10, 2))?;
-    let path_turnover = turnover_evaluable.then(|| turnover(&allocation_weights));
-
     Ok(BacktestPath {
         path_index,
+        decision_times: groups.iter().map(|group| group.decision_at).collect(),
         group_returns,
+        scenario_residuals,
         sharpe,
         rank_ic,
         max_drawdown,
@@ -750,7 +1121,7 @@ fn methodology(detail: String) -> QuantError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
@@ -762,7 +1133,8 @@ mod tests {
     use super::{
         CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
         DefaultCombinatorialPurgedBacktester, FoldModelSource, FoldRuntime, FoldTrainingRequest,
-        GroupEvaluation, GroupRowFilter, RankObservation, ReplayEngine, max_drawdown_from_returns,
+        GroupEvaluation, GroupRowFilter, PathEconomicReplay, RankObservation, ReplayEngine,
+        max_drawdown_from_returns,
     };
     use crate::{
         features::FeatureName,
@@ -802,7 +1174,30 @@ mod tests {
     struct StubFoldSource;
     impl FoldModelSource for StubFoldSource {
         fn train_fold(&self, _request: FoldTrainingRequest<'_>) -> QuantResult<FoldRuntime> {
-            Ok(FoldRuntime::Buy(Box::new(StubRuntime)))
+            Ok(FoldRuntime::BuyModel(Box::new(StubRuntime)))
+        }
+    }
+
+    struct CountingFoldSource {
+        fits: AtomicUsize,
+    }
+
+    impl CountingFoldSource {
+        const fn new() -> Self {
+            Self {
+                fits: AtomicUsize::new(0),
+            }
+        }
+
+        fn fits(&self) -> usize {
+            self.fits.load(Ordering::Relaxed)
+        }
+    }
+
+    impl FoldModelSource for CountingFoldSource {
+        fn train_fold(&self, _request: FoldTrainingRequest<'_>) -> QuantResult<FoldRuntime> {
+            self.fits.fetch_add(1, Ordering::Relaxed);
+            Ok(FoldRuntime::BuyModel(Box::new(StubRuntime)))
         }
     }
 
@@ -822,11 +1217,13 @@ mod tests {
                     group_index,
                     return_value: Decimal::from(u64::try_from(group_index).unwrap_or(0))
                         / Decimal::from(10_000),
+                    scenario_residual: None,
                     rank_observations: vec![RankObservation {
                         score: dec!(1),
                         realized: dec!(1),
                     }],
-                    allocation_weights: None,
+                    executed_turnover: None,
+                    portfolio_replay: None,
                 })
                 .collect())
         }
@@ -949,10 +1346,60 @@ mod tests {
     }
 
     #[test]
-    fn cpcv_turnover_crosses_folds() {
-        struct AlternatingWeightsReplay;
+    fn projected_paths_match_full() {
+        let groups = groups(80);
+        let cpcv = CpcvConfig {
+            n_groups: 8,
+            k_test: 3,
+        };
+        let full_source = CountingFoldSource::new();
+        let full = DefaultCombinatorialPurgedBacktester::new()
+            .run(CpcvRequest {
+                path_set_id: BacktestPathSetId::from_v7(),
+                groups: &groups,
+                cpcv,
+                purge: PurgeConfig::pct_only(dec!(0)),
+                fold_source: &full_source,
+                replay: &DeterministicReplay,
+            })
+            .expect("full CPCV run");
+        assert_eq!(full_source.fits(), 56);
+        assert_eq!(full.paths.len(), 21);
+        let bound_path = cpcv.trial_path(0).expect("canonical trial path binding");
+        assert_eq!(bound_path.path_index, 0);
+        assert_eq!(bound_path.combination_indices.len(), 6);
 
-        impl ReplayEngine for AlternatingWeightsReplay {
+        for expected in &full.paths {
+            let projected_source = CountingFoldSource::new();
+            let projected = DefaultCombinatorialPurgedBacktester::new()
+                .run_path(
+                    CpcvRequest {
+                        path_set_id: BacktestPathSetId::from_v7(),
+                        groups: &groups,
+                        cpcv,
+                        purge: PurgeConfig::pct_only(dec!(0)),
+                        fold_source: &projected_source,
+                        replay: &DeterministicReplay,
+                    },
+                    expected.path_index,
+                )
+                .expect("exact projected CPCV path");
+            assert_eq!(&projected, expected);
+            if expected.path_index == 0 {
+                assert_eq!(
+                    projected_source.fits(),
+                    6,
+                    "the canonical path must fit only its six unique folds"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cpcv_turnover_crosses_folds() {
+        struct ExecutedTurnoverReplay;
+
+        impl ReplayEngine for ExecutedTurnoverReplay {
             fn evaluate(
                 &self,
                 _model: &FoldRuntime,
@@ -961,21 +1408,13 @@ mod tests {
                 Ok(filter
                     .group_indices
                     .iter()
-                    .map(|&group_index| {
-                        let market = if group_index % 2 == 0 {
-                            "market-a"
-                        } else {
-                            "market-b"
-                        };
-                        GroupEvaluation {
-                            group_index,
-                            return_value: Decimal::ZERO,
-                            rank_observations: Vec::new(),
-                            allocation_weights: Some(BTreeMap::from([(
-                                market.to_owned(),
-                                Decimal::ONE,
-                            )])),
-                        }
+                    .map(|&group_index| GroupEvaluation {
+                        group_index,
+                        return_value: Decimal::ZERO,
+                        scenario_residual: None,
+                        rank_observations: Vec::new(),
+                        executed_turnover: Some(Decimal::ONE),
+                        portfolio_replay: None,
                     })
                     .collect())
             }
@@ -992,7 +1431,7 @@ mod tests {
                 },
                 purge: PurgeConfig::pct_only(Decimal::ZERO),
                 fold_source: &StubFoldSource,
-                replay: &AlternatingWeightsReplay,
+                replay: &ExecutedTurnoverReplay,
             })
             .expect("cpcv run");
 
@@ -1005,6 +1444,74 @@ mod tests {
                 .paths
                 .iter()
                 .all(|path| path.turnover == Some(Decimal::ONE))
+        );
+    }
+
+    #[test]
+    fn replay_once_per_path() {
+        struct StatefulReplay {
+            path_calls: AtomicUsize,
+        }
+
+        impl ReplayEngine for StatefulReplay {
+            fn evaluate(
+                &self,
+                _model: &FoldRuntime,
+                filter: &GroupRowFilter,
+            ) -> QuantResult<Vec<GroupEvaluation>> {
+                Ok(filter
+                    .group_indices
+                    .iter()
+                    .map(|&group_index| GroupEvaluation {
+                        group_index,
+                        return_value: Decimal::ZERO,
+                        scenario_residual: None,
+                        rank_observations: Vec::new(),
+                        executed_turnover: None,
+                        portfolio_replay: None,
+                    })
+                    .collect())
+            }
+
+            fn replay_path(
+                &self,
+                _path_index: u32,
+                groups: &[TimelineGroup],
+                evaluations: &[&GroupEvaluation],
+            ) -> QuantResult<Option<PathEconomicReplay>> {
+                assert_eq!(groups.len(), evaluations.len());
+                self.path_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(Some(PathEconomicReplay {
+                    group_returns: vec![dec!(0.001); groups.len()],
+                    executed_turnover: dec!(0.25),
+                }))
+            }
+        }
+
+        let groups = groups(80);
+        let replay = StatefulReplay {
+            path_calls: AtomicUsize::new(0),
+        };
+        let result = DefaultCombinatorialPurgedBacktester::new()
+            .run(CpcvRequest {
+                path_set_id: BacktestPathSetId::from_v7(),
+                groups: &groups,
+                cpcv: CpcvConfig {
+                    n_groups: 8,
+                    k_test: 2,
+                },
+                purge: PurgeConfig::pct_only(Decimal::ZERO),
+                fold_source: &StubFoldSource,
+                replay: &replay,
+            })
+            .expect("stateful CPCV run");
+
+        assert_eq!(replay.path_calls.load(Ordering::Relaxed), 7);
+        assert!(
+            result
+                .paths
+                .iter()
+                .all(|path| path.turnover == Some(dec!(0.25)))
         );
     }
 
@@ -1069,11 +1576,13 @@ mod tests {
                     .map(|&group_index| GroupEvaluation {
                         group_index,
                         return_value: Decimal::ZERO,
+                        scenario_residual: None,
                         rank_observations: vec![RankObservation {
                             score: Decimal::from(group_index as u64),
                             realized: Decimal::from(group_index as u64),
                         }],
-                        allocation_weights: None,
+                        executed_turnover: None,
+                        portfolio_replay: None,
                     })
                     .collect())
             }
@@ -1112,7 +1621,7 @@ mod tests {
     /// data problem.
     #[test]
     fn fold_runtime_rejects_runtime() {
-        let runtime = FoldRuntime::Buy(Box::new(StubRuntime));
+        let runtime = FoldRuntime::BuyModel(Box::new(StubRuntime));
         assert!(runtime.as_sell().is_err());
         assert!(runtime.as_buy().is_ok());
     }

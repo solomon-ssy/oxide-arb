@@ -28,7 +28,6 @@ pub mod model_training;
 pub mod money;
 pub mod outcome_binding;
 pub mod persistence_document;
-pub mod portfolio_plan;
 pub mod recommendation_identity;
 pub mod reconciliation_payload;
 pub mod report_data_quality;
@@ -102,7 +101,8 @@ pub use feature::{
     CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, DomainFeatureSlice,
     EvidenceSourceRef, FeatureCell, FeatureCellState, FeatureParityDetail,
     FeatureParityDetailSource, FeatureSourceRefs, FeatureStaleness, FeatureValue,
-    FeatureVectorPayload, NullReason, SelectionMemberEvidence,
+    FeatureVectorPayload, NullReason, SelectionMemberEvidence, SelectorParityEvidence,
+    TradeTapeCursorEvidence, TradeTapeSourceEvidence,
 };
 pub use ids::{
     AccountSnapshotId, AttributionArtifactId, AuditEventId, BacktestPathSetId, BacktestReportId,
@@ -111,22 +111,23 @@ pub use ids::{
     CatalogMarketChangeId, CatalogMarketObjectId, CatalogSyncBatchId, CatalogSyncRejectionId,
     ClobMarketInfoVersionId, CorrelationId, DecisionPolicySnapshotId, DiagnosticCode,
     DomainEventId, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId, DriftReportId,
-    EntryConditionArtifactId, EntryConditionAuditId, EntryConditionEvaluationOutboxId,
-    EntryConditionInstanceId, EquitySnapshotId, EventId, ExecutionAccountId, ExecutionOrderId,
-    ExecutionTradeRefId, ExecutionTransactionRefId, FactorDefinitionId, FactorValueId,
-    FeatureParityCandidateId, FeatureParityEventId, FeatureParityRunId, FeatureParityStateId,
-    FeatureParitySubjectId, FeatureVectorId, FeedbackAttributionManifestId,
-    FeedbackComparisonArtifactId, FeedbackCoordinatorFaultId, FeedbackCoverageArtifactId,
-    FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackDriftArtifactId, FeedbackEvaluationUseId,
-    FeedbackLearningStageArtifactId, FeedbackRecipeTemplateId, FeedbackShadowArtifactId,
-    FeedbackStageEventId, FeedbackTriggerEventId, FeedbackTruthFreezeArtifactId,
-    FeedbackValidationArtifactId, MarketId, MarketLinkageId, MarketSelectionId, MenuId,
-    ModelCandidateManifestId, ModelComparisonReportId, ModelGovernanceAuditId, ModelRunId,
-    ModelSpecId, ModelVersionId, OperationAction, OperationLogId, OrderId, OrderIntentId,
-    PolicyActivationId, PolicyApprovalId, PolicyRevisionId, PortfolioPlanId, PositionId,
+    EconomicTierId, EntryConditionArtifactId, EntryConditionAuditId,
+    EntryConditionEvaluationOutboxId, EntryConditionInstanceId, EquitySnapshotId, EventId,
+    ExecutionAccountId, ExecutionOrderId, ExecutionTradeRefId, ExecutionTransactionRefId,
+    FactorDefinitionId, FactorValueId, FeatureParityCandidateId, FeatureParityEventId,
+    FeatureParityRunId, FeatureParityStateId, FeatureParitySubjectId, FeatureVectorId,
+    FeedbackAttributionManifestId, FeedbackComparisonArtifactId, FeedbackCoordinatorFaultId,
+    FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackDecisionArtifactId,
+    FeedbackDriftArtifactId, FeedbackEvaluationUseId, FeedbackLearningStageArtifactId,
+    FeedbackRecipeTemplateId, FeedbackShadowArtifactId, FeedbackStageEventId,
+    FeedbackTriggerEventId, FeedbackTruthFreezeArtifactId, FeedbackValidationArtifactId, MarketId,
+    MarketLinkageId, MarketSelectionId, MenuId, ModelCandidateManifestId, ModelComparisonReportId,
+    ModelGovernanceAuditId, ModelRunId, ModelSpecId, ModelVersionId, OperationAction,
+    OperationLogId, OrderId, OrderIntentId, PolicyActivationId, PolicyApprovalId, PolicyRevisionId,
+    PortfolioPlanId, PortfolioScenarioArtifactId, PortfolioScenarioModelArtifactId, PositionId,
     PreproductionResetNonce, ProfileArtifactId, PromotionPermitId, RecommendationId,
-    RecommendationReportId, ReconciliationId, ReportDataQualitySnapshotId, ReportRunId,
-    ReportScheduleGapId, ReportScheduleId, ResearchJobId, ResearchProfileId,
+    RecommendationReportId, ReconciliationId, ReportDataQualitySnapshotId, ReportRouteRunId,
+    ReportRunId, ReportScheduleGapId, ReportScheduleId, ResearchJobId, ResearchProfileId,
     ResearchReadinessEvidenceId, ResolutionObservationId, ResolutionRemediationId, RoleCode,
     RoleId, RuntimeControlTransitionId, SettlementAuthorizationId, SettlementChainSubmissionId,
     SettlementExternalCursorId, SettlementGovernedActionId, SettlementInventoryLotId,
@@ -142,22 +143,19 @@ pub use micro::{
 };
 pub use model_input::{
     ModelInputContract, ModelInputRequiredness, ModelInputSpec, ModelTrainingContract,
+    ModelTrainingTarget,
 };
-pub use money::{Bps, PayoutRatio, PayoutRatioError, Price, Probability, Shares, Usd};
+pub use money::{Bps, PayoutRatio, PayoutRatioError, Price, Probability, Shares, Usd, UsdHours};
 pub use outcome_binding::{OutcomeTokenBinding, OutcomeTokenBindingError};
 pub use persistence_document::{
     ExternalJsonDocument, OperationDetailDocument, OperationDetailError,
-};
-pub use portfolio_plan::{
-    PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioRejectedSummary,
-    PortfolioRiskBudget,
 };
 pub use recommendation_identity::RecommendationIdentity;
 pub use reconciliation_payload::{ReconciliationEvidence, ReconciliationEvidenceChain};
 pub use report_data_quality::{ReportDataQualityTokens, TokenDataQualityRecord};
 pub use report_fact_bundle::{
-    REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV1, ReportFactNotificationRecommendationV1,
-    ReportFactNotificationV1, ReportFactTableCommitment,
+    REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV2, ReportFactNotificationRecommendationV2,
+    ReportFactNotificationV2, ReportFactTableCommitment,
 };
 pub use report_funnel::{
     MissingFeatureDiagnostic, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
@@ -165,10 +163,10 @@ pub use report_funnel::{
 pub use report_payload::{
     ConfidenceSummary, DataQualitySummary, EligibilitySummary, EntryOrderPolicy, EntryPlan,
     EvidenceRefs, EvidenceRefsInput, ExecutionEligibility, ExitPlan, FactorBreakdownEntry,
-    OpportunisticExitPolicy, RecommendationFactorBreakdown, RecommendationTradePlan,
-    RejectionReasonCount, ReportSummary, RiskEnvelope, RiskEnvelopeHashInput, ScaleOutTarget,
-    SizingPlan, ThesisInvalidationPolicy, TradePlanBlocker, TradePolicyCohortProvenance,
-    TrailingStopPolicy,
+    OpportunisticExitPolicy, PortfolioRejectionReason, RecommendationFactorBreakdown,
+    RecommendationTradePlan, RejectionReasonCount, ReportSummary, RiskEnvelope,
+    RiskEnvelopeHashInput, ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy,
+    TradePolicyCohortProvenance, TrailingStopPolicy,
 };
 pub use research_job_payload::{ResearchJobError, ResearchJobParams, ResearchJobProgress};
 pub use research_profile::{
@@ -186,10 +184,11 @@ pub use research_readiness::{
     HistoryCoverage, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION, ResearchReadinessEvidencePayload,
     ResearchReadinessSource, ResearchReadinessSourceParseError, ResearchSourceBinding,
     ResearchSourceFilter, ResearchSourceRegistry, ResearchSourceStorageKind,
-    ResearchSourceStorageKindParseError, RetentionRunwayEvidenceV1, RetentionSourceObservationV1,
+    ResearchSourceStorageKindParseError, ResearchSourceTimeEncoding,
+    ResearchSourceTimeEncodingParseError, RetentionRunwayEvidenceV1, RetentionSourceObservationV1,
     SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1, research_source_registry,
 };
-pub use selection::SelectionExclusionSummary;
+pub use selection::{SelectionExclusionSummary, SelectorHashEvidence};
 pub use semantic::{
     ArtifactVersion, AttestationKeyId, EvmAddress, EvmBlockHash, EvmCalldataHash, EvmCodeHash,
     EvmConditionId, EvmTransactionHash, EvmUint256, ReaderContractVersion, RelayerTransactionId,

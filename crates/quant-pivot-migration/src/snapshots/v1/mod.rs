@@ -83,6 +83,7 @@ pub mod quant_recommendation_resolution_outcome;
 pub mod quant_reconciliation;
 pub mod quant_report_data_quality_snapshot;
 pub mod quant_report_fact_delivery;
+pub mod quant_report_route_run;
 pub mod quant_report_run;
 pub mod quant_report_schedule_gap;
 pub mod quant_report_schedule_state;
@@ -211,6 +212,7 @@ pub const TABLES: &[&str] = &[
     "quant_report_data_quality_snapshot",
     "quant_report_fact_delivery",
     "quant_report_run",
+    "quant_report_route_run",
     "quant_report_schedule_gap",
     "quant_report_schedule_state",
     "quant_research_job",
@@ -472,6 +474,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_report_data_quality_snapshot.rs"),
     include_bytes!("quant_report_fact_delivery.rs"),
     include_bytes!("quant_report_run.rs"),
+    include_bytes!("quant_report_route_run.rs"),
     include_bytes!("quant_report_schedule_gap.rs"),
     include_bytes!("quant_report_schedule_state.rs"),
     include_bytes!("quant_research_job.rs"),

@@ -1,7 +1,7 @@
 //! Report-pipeline system contracts against disposable `PostgreSQL`.
 
 use chrono::{Duration, Utc};
-use quant_pivot_error::{QuantError, account::AccountError};
+use quant_pivot_error::{QuantError, account::AccountError, report::ReportError};
 use quant_pivot_models::{
     domain::{api::OperationLogQuery, quant::NewEquitySnapshot},
     entities::{
@@ -16,19 +16,18 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgEquitySnapshotRepository, PgFactorRepository, PgMarketSelectionRepository,
-        PgOperationLogRepository,
+        PgOperationLogRepository, PgPortfolioPlanRepository,
     },
     traits::{
         EquitySnapshotRepository, FactorRepository, MarketSelectionRepository,
-        OperationLogRepository, RecommendationRepository, ReportRunRepository,
+        OperationLogRepository, PortfolioPlanRepository, RecommendationReportRepository,
+        RecommendationRepository, ReportRunRepository,
     },
 };
-use quant_pivot_research::precision::RESEARCH_DECIMAL_SCALE;
 use quant_pivot_system_tests::{
     postgres::setup_pg,
-    support::report_pipeline_harness::{HarnessOptions, MARKET_ID, ReportPipelineHarness},
+    support::report_pipeline_harness::{HarnessOptions, MARKET_ID_2, ReportPipelineHarness},
 };
-use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{EntityTrait, PaginatorTrait};
 
@@ -54,14 +53,20 @@ pub async fn ad_hoc_publishes_recommendations() {
         report.status_reason,
         report.summary_json
     );
-    let factors = if let Some(model_run_id) = report.model_run_id {
-        PgFactorRepository::new(db.clone())
-            .list_values_for_run(&model_run_id)
-            .await
-            .expect("load report factor values")
-    } else {
-        Vec::new()
-    };
+    let route_runs = harness
+        .report_repo
+        .list_route_runs(&report.recommendation_report_id)
+        .await
+        .expect("load report Route runs");
+    let mut factors = Vec::new();
+    for model_run_id in route_runs.iter().filter_map(|run| run.model_run_id) {
+        factors.extend(
+            PgFactorRepository::new(db.clone())
+                .list_values_for_run(&model_run_id)
+                .await
+                .expect("load Route-run factor values"),
+        );
+    }
     let selection_members = PgMarketSelectionRepository::new(db.clone())
         .list_members(&report.market_selection_id)
         .await
@@ -71,10 +76,16 @@ pub async fn ad_hoc_publishes_recommendations() {
         .await
         .expect("load report market-selection snapshot")
         .expect("report market-selection snapshot");
+    let portfolio_plan = PgPortfolioPlanRepository::new(db.clone())
+        .find_by_id(&report.portfolio_plan_id)
+        .await
+        .expect("load report portfolio plan")
+        .expect("report portfolio plan");
     assert!(
         report.summary_json.published_recommendation_count >= 1,
-        "report published no recommendations: summary={:?}, selection={selection:?}, selection_members={selection_members:?}, factors={factors:?}",
+        "report published no recommendations: summary={:?}, decision={:?}, route_runs={route_runs:?}, selection={selection:?}, selection_members={selection_members:?}, factors={factors:?}",
         report.summary_json,
+        portfolio_plan.decision_json,
     );
 
     let operation_logs = PgOperationLogRepository::new(db.clone());
@@ -113,7 +124,21 @@ pub async fn ad_hoc_publishes_recommendations() {
         .await
         .expect("load recommendations");
     assert!(!recs.is_empty());
-    assert_eq!(recs[0].market_id.as_str(), MARKET_ID);
+    assert!(recs.iter().all(|recommendation| {
+        recommendation
+            .economics_json
+            .robust_expected_net_usd
+            .is_positive()
+            && recommendation
+                .economics_json
+                .marginal_portfolio_value_usd
+                .is_positive()
+    }));
+    assert!(recs.windows(2).all(|pair| {
+        pair[0].economics_json.marginal_portfolio_value_usd
+            >= pair[1].economics_json.marginal_portfolio_value_usd
+    }));
+    assert_eq!(recs[0].market_id.as_str(), MARKET_ID_2);
 }
 
 pub async fn pinned_route_uses_generation() {
@@ -137,7 +162,16 @@ pub async fn pinned_route_uses_generation() {
         .execute_ad_hoc(harness.ad_hoc_request("pinned-weather-route"))
         .await
         .expect("a complete route generation must use its immutable model contract");
-    assert_eq!(report.model_version_id, harness.model_version_id);
+    let route_runs = harness
+        .report_repo
+        .list_route_runs(&report.recommendation_report_id)
+        .await
+        .expect("load pinned report Route runs");
+    assert_eq!(route_runs.len(), 1);
+    assert_eq!(
+        route_runs[0].model_version_id,
+        Some(harness.model_version_id)
+    );
     assert_eq!(
         MarketSelectionEntity::find()
             .count(&db)
@@ -229,24 +263,28 @@ pub async fn missing_non_empty_report() {
     ))
     .await;
 
-    let report = harness
-        .execute_ad_hoc(harness.ad_hoc_request("missing-trade-policy"))
+    let request_id = "missing-trade-policy";
+    let error = harness
+        .execute_ad_hoc(harness.ad_hoc_request(request_id))
         .await
-        .expect("missing policy must produce an auditable empty report");
-
-    assert_eq!(report.status, RecommendationReportStatus::Published);
-    assert_eq!(
-        report.summary_json.empty_reason,
-        Some(EmptyReportReason::TradePolicyUnavailable)
-    );
-    assert_eq!(report.summary_json.published_recommendation_count, 0);
+        .expect_err("missing Route trade policy must fail the report run");
     assert!(
-        harness
-            .recommendation_repo
-            .find_by_report(&report.recommendation_report_id)
-            .await
-            .expect("load recommendations")
-            .is_empty()
+        matches!(
+            error,
+            QuantError::Report(ReportError::RouteReadiness { .. })
+        ),
+        "unexpected missing-policy error: {error}"
+    );
+    let trigger_key =
+        ReportTriggerKey::parse(format!("ad_hoc:{request_id}")).expect("report trigger key");
+    let existing = harness
+        .report_run_repo
+        .find_by_trigger_key(&trigger_key)
+        .await
+        .expect("lookup trigger key");
+    assert!(
+        existing.is_some_and(|run| run.output_report_id.is_none()),
+        "missing Route readiness must retain run diagnostics without publishing a report"
     );
 }
 
@@ -385,12 +423,15 @@ pub async fn evidence_refs_rank_populated() {
         "book_snapshot_ref must be populated from decision capture"
     );
     assert!(
-        rec.liquidity_score.inner() > dec!(0),
-        "liquidity_score should be derived from factor breakdown"
+        rec.economic_tier_json
+            .entry
+            .visible_liquidity_usd
+            .is_positive()
     );
-    assert!(
-        rec.data_quality_score.inner() > dec!(0),
-        "data_quality_score should be derived from factor breakdown"
+    assert!(rec.economics_json.robust_expected_net_usd.is_positive());
+    assert_eq!(
+        rec.economics_json, rec.economic_tier_json.economics,
+        "published economics must be the exact selected tier economics"
     );
     assert!(
         !rec.factor_breakdown.0.is_empty(),
@@ -398,42 +439,9 @@ pub async fn evidence_refs_rank_populated() {
     );
 }
 
-async fn neutral_kelly_fraction(collateral: Usd) -> Decimal {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let harness = Box::pin(ReportPipelineHarness::bootstrap(
-        &db,
-        HarnessOptions {
-            collateral,
-            ..HarnessOptions::default()
-        },
-    ))
-    .await;
-    let report = harness
-        .execute_ad_hoc(harness.ad_hoc_request("drawdown-neutral-baseline"))
-        .await
-        .expect("neutral drawdown baseline report");
-    let recommendations = harness
-        .recommendation_repo
-        .find_by_report(&report.recommendation_report_id)
-        .await
-        .expect("load neutral recommendations");
-    let recommendation = recommendations
-        .iter()
-        .find(|recommendation| recommendation.market_id.as_str() == MARKET_ID)
-        .expect("neutral baseline must publish primary market recommendation");
-    recommendation
-        .trade_plan
-        .sizing()
-        .unwrap_or_else(|| panic!("frozen sizing: {:?}", recommendation.trade_plan))
-        .kelly_fraction_applied
-        .expect("neutral kelly fraction")
-}
-
 pub async fn report_persists_real_history() {
     let collateral = Usd::new(dec!(8000));
     let peak = Usd::new(dec!(10000));
-    let neutral_kelly = neutral_kelly_fraction(collateral).await;
 
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -479,33 +487,14 @@ pub async fn report_persists_real_history() {
     assert_eq!(equity.high_water_mark_usd, peak);
     assert_eq!(equity.capital_base_usd, collateral);
 
-    let drawdown_recs = harness
-        .recommendation_repo
-        .find_by_report(&report.recommendation_report_id)
+    let portfolio_plan = PgPortfolioPlanRepository::new(db)
+        .find_by_id(&report.portfolio_plan_id)
         .await
-        .expect("load drawdown recommendations");
-    let drawdown_rec = drawdown_recs
-        .iter()
-        .find(|rec| rec.market_id.as_str() == MARKET_ID)
-        .expect("drawdown report must publish primary market recommendation");
-    let drawdown_sizing = drawdown_rec.trade_plan.sizing().expect("frozen sizing");
+        .expect("load drawdown portfolio plan")
+        .expect("drawdown portfolio plan row");
     assert_eq!(
-        drawdown_sizing.drawdown_shrink_applied,
-        Some(dec!(0.8)),
-        "the frozen sizing provenance must bind the real 20% drawdown"
+        portfolio_plan.existing_state_json.current_drawdown_usd,
+        Usd::new(dec!(2000)),
+        "the global optimizer must freeze the real account drawdown in USD"
     );
-    let drawdown_kelly = drawdown_sizing
-        .kelly_fraction_applied
-        .expect("drawdown kelly fraction");
-
-    // Each report stores only the final research-scale multiplier. Scaling the already-rounded
-    // neutral report is therefore a double-rounded comparison against the drawdown report's
-    // single final round, so the two may differ by one research-scale quantum.
-    let expected_drawdown_kelly = (neutral_kelly * dec!(0.8)).round_dp(RESEARCH_DECIMAL_SCALE);
-    let rounding_quantum = Decimal::new(1, RESEARCH_DECIMAL_SCALE);
-    assert!(
-        (drawdown_kelly - expected_drawdown_kelly).abs() <= rounding_quantum,
-        "Conservative drawdown scale must apply before research-scale rounding: actual={drawdown_kelly}, expected={expected_drawdown_kelly}, quantum={rounding_quantum}"
-    );
-    assert!(drawdown_kelly < neutral_kelly);
 }

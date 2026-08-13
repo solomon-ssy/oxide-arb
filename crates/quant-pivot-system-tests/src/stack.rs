@@ -29,7 +29,8 @@ use testcontainers_modules::{postgres::Postgres, redis::Redis};
 const POSTGRES_DATABASE: &str = "quant_pivot_system";
 const POSTGRES_IMAGE_TAG: &str = "16";
 const REDIS_IMAGE_TAG: &str = "7-alpine";
-const CLICKHOUSE_IMAGE_TAG: &str = "26.5";
+/// Exact `ClickHouse` image used by disposable schema and production-stack gates.
+pub const CLICKHOUSE_IMAGE_TAG: &str = "26.5";
 /// Fixed credential installed only in disposable system-test databases.
 pub const BOOTSTRAP_ADMIN_PASSWORD: &str = "system-test-bootstrap-admin";
 

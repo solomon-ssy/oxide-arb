@@ -9,12 +9,12 @@ use quant_pivot_models::{
     types::{AccountPositions, AccountSnapshotId, EquitySnapshotId, ExecutionAccountId, Usd},
 };
 use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
-use quant_pivot_research::portfolio::{AccountSnapshot, DrawdownState};
+use quant_pivot_research::portfolio::{AccountDrawdown, AccountSnapshot};
 
 /// Drawdown resolution used for sizing and persisted equity snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SizingDrawdownResolution {
-    pub drawdown_state: DrawdownState,
+    pub drawdown: AccountDrawdown,
     pub high_water_mark_usd: Usd,
 }
 
@@ -23,7 +23,7 @@ pub struct SizingDrawdownResolution {
 pub struct ReportEquitySnapshot {
     pub account_snapshot: NewAccountSnapshot,
     pub equity_snapshot: NewEquitySnapshot,
-    pub drawdown_state: DrawdownState,
+    pub drawdown: AccountDrawdown,
 }
 
 /// Drawdown provider consumed by the report builder.
@@ -43,7 +43,7 @@ pub trait DrawdownProvider: Send + Sync {
     async fn resolve_drawdown_for_sizing(
         &self,
         account: &AccountSnapshot,
-        floor: DrawdownState,
+        floor: AccountDrawdown,
     ) -> QuantResult<SizingDrawdownResolution>;
 }
 
@@ -85,7 +85,7 @@ impl EquitySnapshotService {
         account_snapshot_id: Option<AccountSnapshotId>,
     ) -> QuantResult<ReportEquitySnapshot> {
         let resolution = self
-            .resolve_drawdown_from_ledger(account, DrawdownState::neutral())
+            .resolve_drawdown_from_ledger(account, AccountDrawdown::neutral())
             .await?;
         let realized_pnl_cumulative_usd = self.positions.realized_pnl_cumulative_usd().await?;
         let open_lots = self.positions.find_open_lots().await?;
@@ -117,21 +117,21 @@ impl EquitySnapshotService {
             realized_pnl_cumulative_usd,
             unrealized_pnl_usd,
             high_water_mark_usd: resolution.high_water_mark_usd,
-            drawdown_pct: resolution.drawdown_state.current_drawdown,
+            drawdown_pct: resolution.drawdown.current_ratio,
             account_snapshot_ref,
         };
 
         Ok(ReportEquitySnapshot {
             account_snapshot,
             equity_snapshot,
-            drawdown_state: resolution.drawdown_state,
+            drawdown: resolution.drawdown,
         })
     }
 
     async fn resolve_drawdown_from_ledger(
         &self,
         account: &AccountSnapshot,
-        floor: DrawdownState,
+        floor: AccountDrawdown,
     ) -> QuantResult<SizingDrawdownResolution> {
         let previous = self
             .equity_snapshots
@@ -144,8 +144,8 @@ impl EquitySnapshotService {
         let fresh_drawdown =
             EquitySnapshotInfo::drawdown(account.capital_base_usd, high_water_mark_usd);
         Ok(SizingDrawdownResolution {
-            drawdown_state: floor.conservative_max(DrawdownState {
-                current_drawdown: fresh_drawdown,
+            drawdown: floor.conservative_max(AccountDrawdown {
+                current_ratio: fresh_drawdown,
             }),
             high_water_mark_usd,
         })
@@ -165,7 +165,7 @@ impl DrawdownProvider for EquitySnapshotService {
     async fn resolve_drawdown_for_sizing(
         &self,
         account: &AccountSnapshot,
-        floor: DrawdownState,
+        floor: AccountDrawdown,
     ) -> QuantResult<SizingDrawdownResolution> {
         self.resolve_drawdown_from_ledger(account, floor).await
     }

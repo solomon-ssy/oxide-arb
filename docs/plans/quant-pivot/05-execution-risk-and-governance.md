@@ -5,12 +5,16 @@
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
 > - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `post_deployment_behavior`: 本次实现只交付唯一终态 clean-install contract；不设计升级、降级、旧版本共存或历史数据转换。
+> - `rollback_and_data_verification`: 仅在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置需要操作者另行授权。
 
 > 状态：生产级目标设计
 >
 > 目标：用 Recommendation 驱动的新执行闭环替换旧 FOK Endgame trade pipeline。
+
+> **Cross-Route risk contract**：报告风险来自同一 `GlobalPortfolioPlan`，其输入是各 Route 的
+> `ExecutableEconomicTier` 与联合 `PortfolioScenarioArtifact`。执行 admission 只能收紧冻结的经济层级，
+> 不能以 raw score/confidence、per-candidate Kelly、Pearson/category proxy 或 solver fallback 重算报告。
 
 ## 0. 总原则
 
@@ -316,13 +320,18 @@ Admission 不是旧 `RiskPipeline` 的兼容层，而是新执行前置门。
 Portfolio planner 负责：
 
 - total capital cap。
+- capital reserve 与逐 time-bucket locked-capital cap。
 - per market cap。
 - per event cap。
 - per category cap。
-- correlation cap。
+- per Route cap。
 - liquidity cap。
-- confidence cap。
-- drawdown-aware cap。
+- profit-probability lower-bound admission。
+- maximum scenario loss、CVaR 与 drawdown hard caps。
+- market/event/outcome structural dependence。
+
+跨 Route 依赖由不可变联合 scenario artifact 表达，不使用历史 Pearson 或 category proxy。组合只接受
+唯一 HiGHS MILP 的 optimal + exact-verified 结果；任何 optimizer degradation 令 report run 失败。
 
 ### 7.2 执行层风险
 

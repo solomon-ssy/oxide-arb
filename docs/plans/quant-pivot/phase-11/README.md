@@ -77,7 +77,7 @@ loader、JSONB 双读、alias、版本映射或 re-export。`production_frozen` 
 
 Phase 3–6 已把 quant-pivot 建成一套**工程治理达到生产级**的系统:真实 CLOB 签名下单；当前经 11.7
 扩展为 24 项准入、
-证据链对账、凭证 fail-closed、good_lp MILP、分数 Kelly、模型 publish/rollback/shadow 治理。
+证据链对账、凭证 fail-closed、全局 MILP、概率校准、模型 publish/rollback/shadow 治理。
 
 但一次针对**关键算法与模型训练是否生产级最佳实践 + 业务闭环语义是否精准**的深度审计,发现系统的
 **"阿尔法层"与"研究反馈闭环"尚未生产级**。用一句话概括:
@@ -107,7 +107,7 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 10 | 历史 registry PIT 返回 None → 离线/在线特征不对称 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
 | 11 | classical ML 缺失非关键特征 `fill_missing:0.0`,违反禁止静默填零 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
 | 12 | 默认二进制不链接 optimize/ml-classical;不开 lp-solver 返回空推荐 | [11.0](11.0-contract-freeze-and-deletion-inventory.md) |
-| 13 | Kelly 的 q 来自未校准收益模型 → 系统性过押/错押 | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
+| 13 | 未校准概率进入资金决策 → 系统性过押/错押 | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
 | 14 | TP/SL 由模型启发式曲线推导,不用经验 MFE/MAE | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 15 | 退出结构最小化(partial/trailing/invalidation 恒空) | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 16 | 入场触发只有 LimitPrice/Immediate;无 confirmation_window | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
@@ -129,7 +129,7 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.2.1 | Platform-Internal Structural Alpha | 结构因子族 + neg-risk 全腿 + favorite-longshot 偏差表(11.3 提前件) | 4(前半) | [11.2.1](11.2.1-platform-structural-alpha.md) |
 | 11.2.2 | Crypto External Vertical | 两层向量 + 分层 linkage + Binance 特征源 + category 路由 | 4(后半) | [11.2.2](11.2.2-crypto-external-vertical.md) |
 | 11.2.3 | Tier 2 LLM Linkage Fallback | 离线 LLM 结构化抽取 + grounding gate + review queue | — (extends 11.2.2) | [11.2.3](11.2.3-tier2-llm-linkage.md) |
-| 11.3 | Probabilistic Calibration & Kelly Safety | 校准 + 收益模型 + Kelly 安全 | 5, 8, 13 | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
+| 11.3 | Probabilistic Calibration & Scenario Uncertainty | 校准 + uncertainty/scenario evidence | 5, 8, 13 | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
 | 11.4 | Training Objective & Learning-to-Rank | 训练目标(LTR + 下行/换手) | 6 | [11.4](11.4-training-objective-learning-to-rank.md) |
 | 11.5 | Leakage-Aware Validation & Overfitting Control | 防过拟合方法论(买方 WeightedFactor/classical) — **已落地** (model_run FK + publish_path_set_id bind + trial fail-closed + classical purged CV + publish label-horizon rescan;Sell → 11.5.1) | 7, 9 | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
 | 11.5.1 | Sell-Side Lot-Level Leakage-Aware Validation | 防过拟合方法论套用到 Sell/Hold-vs-Exit 家族 — **已落地 + remediation**（residual-shares 状态机 + 路径分叉停止、activity-only DSR/PBO、null baseline uplift、Sell DD/tail 硬门禁；CPCV request 契约由 11.6 统一冻结） | — (11.5 落地中发现的覆盖缺口,不单独关闭审计点,见文档头部) | [11.5.1](11.5.1-sell-side-lot-level-validation.md) |
@@ -151,7 +151,7 @@ flowchart TD
     P1121["11.2.1 Platform Structural Alpha"]
     P1122["11.2.2 Crypto External Vertical"]
     P1123["11.2.3 Tier 2 LLM Linkage"]
-    P113["11.3 Calibration & Kelly Safety"]
+    P113["11.3 Calibration & Scenario Uncertainty"]
     P114["11.4 Training Objective & LTR"]
     P115["11.5 Leakage/CPCV/DSR"]
     P1151["11.5.1 Sell Lot-Level Validation"]
@@ -194,7 +194,8 @@ flowchart TD
   所有后续子phase 从 boot contract 读取 schema，而不是复制或预占版本号。
 - **11.1 / 11.6** 是数据地基：11.6 的 frozen input transform、immutable factor revision 和 parity
   facts 是后续模型 publish、11.9 drift/challenger 的硬前提；确定性 mismatch 不得由 drift 逻辑吞并。
-- **11.4 → 11.5 → 11.3** 是模型可信链:先有正确目标,再有防过拟合验证,最后才有校准喂 Kelly。
+- **11.4 → 11.5 → 11.3** 是模型可信链：先有正确目标，再有防过拟合验证，最后生成可供
+  executable cash-flow/scenario contract 消费的校准概率与 uncertainty evidence。
   **11.5 → 11.5.1**:11.5 只给买方(WeightedFactor/classical)接方法论,证明 purge/CPCV/trial-grid/
   CSCV/DSR/PBO 算法正确;11.5.1 把同一套算法(设计上对"原子分裂单元"无感知)套用到 Sell/Hold-vs-Exit
   家族,只新增一个 lot 级组合回放引擎(`LotReplayBacktester`)与一个 `FoldModelSource` 实现,不重新发明
@@ -211,7 +212,7 @@ flowchart TD
   **接管并取代 [`../phase-03/03.8-vertical-domain-closed-loop.md`](../phase-03/03.8-vertical-domain-closed-loop.md)**
   的垂直闭环设计(确定性优先 linkage 取代 LLM 优先;`ResolutionOracle` + basis 取代"特征源=结算源=Binance")。
   11.2.1 **提前**落地 11.3 的 `FavoriteLongshotBiasTable`(favorite-longshot 因子所需),11.3 正式落地时统一收敛
-  治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。11.2.1/11.2.2 的历史版本波次已被
+  治理（见 [11.3 §2](11.3-probabilistic-calibration-and-kelly.md)）。11.2.1/11.2.2 的历史版本波次已被
   boot baseline 取代，但两层向量等业务决策保留。11.9 的旧 Implementation Closure 曾撤回，
   current-byte remediation、测试和关闭证据已于 2026-07-31 完成，逐项状态只见
   [11.9 Implementation Ledger](11.9-attribution-feedback-and-auto-retraining.md#11-implementation-ledger)；
@@ -227,8 +228,8 @@ flowchart TD
 1. **可解释优先**:任何新模型族(LTR/GBDT/校准器)必须能输出 recommendation-level 的预测解释
    (见 11.9);无法通过 exact explanation efficiency gate 的模型不能成为 Champion，更不能进入
    auto-execution(与 08 §15.5 一致)。
-2. **校准是硬不变量**:任何进入 Kelly sizing 的 `expected_return`/`downside`/`P(win)` 必须来自
-   **校准后**的模型输出;未校准 artifact 禁止 publish(11.3)。
+2. **校准是硬不变量**：任何进入 candidate admission、scenario cashflow 或 global portfolio 的概率/
+   uncertainty 必须来自校准后的 promoted artifact；未校准 artifact 禁止 publish（11.3）。
 3. **防过拟合是硬门禁**:任何 model version publish 前必须有 CPCV 多路径分布 + Deflated Sharpe +
    PBO 报告;`rank_ic` 升为**硬门禁**(11.5)。
 4. **训练-服务零 skew**：`DecisionBoundary` 只推导一次 source cutoff；selection/feature/capture 共用
@@ -319,12 +320,10 @@ attribution)是历史设计文档。Phase 11 采取**破坏式接管**:
 - Calibration workflow(reliability + Brier): <https://metricgate.com/blogs/workflow-calibrating-predicted-probabilities/>
 - MachineLearningMastery — calibrated classification: <https://machinelearningmastery.com/calibrated-classification-model-in-scikit-learn/>
 
-**Kelly 与仓位(11.3)**
+**联合场景与稳健组合（11.3 / 05.8）**
 
-- MacLean, Thorp, Ziemba — *The Good and Bad Properties of the Kelly Criterion*: <https://www.stat.berkeley.edu/~aldous/157/Papers/Good_Bad_Kelly.pdf>
-- Kelly criterion (Wikipedia): <https://en.wikipedia.org/wiki/Kelly_criterion>
-- Advanced Kelly(edge uncertainty / 多注收缩 / 25% 总敞口上限): <https://comparenbet.org/guide-advanced-kelly>
-- Nick Yoder — The Kelly Criterion(分数 Kelly 与回撤): <https://nickyoder.com/kelly-criterion/>
+- Boyd et al. — Robust Portfolio Optimization: <https://stanford.edu/~boyd/papers/cvx_portfolio.html>
+- Rockafellar–Uryasev CVaR publications: <https://uryasev.ams.stonybrook.edu/publications/>
 
 **训练目标 / Learning-to-Rank(11.4)**
 

@@ -858,6 +858,7 @@ impl FeedbackExecutionPorts {
                 as Arc<dyn FeedbackCycleRepository>,
             models: Arc::clone(&context.research.model_registry_repo)
                 as Arc<dyn ModelRegistryRepository>,
+            policies: Arc::clone(&context.infra.repos.runtime_config) as Arc<dyn PolicyRepository>,
             preimages: Arc::clone(&context.research.serving_preimages),
             cohort_repository: Arc::clone(&context.infra.repos.feedback_cohort)
                 as Arc<dyn FeedbackCohortRepository>,
@@ -1148,6 +1149,8 @@ impl FeedbackCoordinator {
                 cycles: Arc::clone(&cycles),
                 jobs: Arc::clone(&jobs),
                 models: Arc::clone(&context.research.model_registry_repo),
+                path_sets: Arc::clone(&context.research.backtest_path_set_repo),
+                calibrations: Arc::clone(&context.research.calibration_artifact_repo),
                 policies: Arc::clone(&context.infra.repos.runtime_config)
                     as Arc<dyn PolicyRepository>,
                 manifests: Arc::clone(&context.infra.repos.model_candidate_manifest)

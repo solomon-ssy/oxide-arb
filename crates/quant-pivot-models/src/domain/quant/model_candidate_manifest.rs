@@ -10,13 +10,16 @@ use crate::{
     entities::quant_model_candidate_manifest,
     enums::{common::MarketCategory, model::ModelFamily},
     hashing::CanonicalDigest,
+    runtime_config::{BuyModelRoute, PortfolioScenarioModelArtifactBinding},
     types::{
         BacktestPathSetId, CalibrationArtifactId, ContentHash, FeedbackCycleId,
-        ModelCandidateManifestId, ModelSpecId, ModelVersionId, ResearchProfileRef,
-        TrainingDatasetId,
+        ModelCandidateManifestId, ModelSpecId, ModelVersionId, PortfolioScenarioModelArtifactId,
+        ResearchProfileRef, TrainingDatasetId,
         model_serving::{ModelServingBindings, ModelServingEstimatorBinding},
     },
 };
+
+use super::RepresentedRouteSet;
 
 const MANIFEST_FORMAT_VERSION: u32 = 4;
 const MANIFEST_HASH_DOMAIN: &str = "quant-pivot/model-candidate-manifest";
@@ -239,6 +242,7 @@ pub struct PromotionGateArtifact {
     pub cpcv_path_set_id: BacktestPathSetId,
     pub cpcv_path_set_hash: ContentHash,
     pub explanation_validation_hash: ContentHash,
+    pub scenario_model_bindings_hash: ContentHash,
 }
 
 #[derive(Serialize)]
@@ -259,6 +263,7 @@ struct PromotionGatePreimage<'a> {
     cpcv_path_set_id: BacktestPathSetId,
     cpcv_path_set_hash: ContentHash,
     explanation_validation_hash: ContentHash,
+    scenario_model_bindings_hash: ContentHash,
 }
 
 /// Complete server-derived inputs for the pre-shadow readiness gate.
@@ -278,6 +283,7 @@ pub struct PromotionGateArtifactInput {
     pub cpcv_path_set_id: BacktestPathSetId,
     pub cpcv_path_set_hash: ContentHash,
     pub explanation_validation_hash: ContentHash,
+    pub scenario_model_bindings_hash: ContentHash,
 }
 
 impl PromotionGateArtifact {
@@ -301,6 +307,7 @@ impl PromotionGateArtifact {
             cpcv_path_set_id: input.cpcv_path_set_id,
             cpcv_path_set_hash: input.cpcv_path_set_hash,
             explanation_validation_hash: input.explanation_validation_hash,
+            scenario_model_bindings_hash: input.scenario_model_bindings_hash,
         })?;
         let artifact = Self {
             format_version: PROMOTION_GATE_FORMAT_VERSION,
@@ -320,6 +327,7 @@ impl PromotionGateArtifact {
             cpcv_path_set_id: input.cpcv_path_set_id,
             cpcv_path_set_hash: input.cpcv_path_set_hash,
             explanation_validation_hash: input.explanation_validation_hash,
+            scenario_model_bindings_hash: input.scenario_model_bindings_hash,
         };
         artifact.validate()?;
         Ok(artifact)
@@ -368,6 +376,7 @@ impl PromotionGateArtifact {
             cpcv_path_set_id: self.cpcv_path_set_id,
             cpcv_path_set_hash: self.cpcv_path_set_hash,
             explanation_validation_hash: self.explanation_validation_hash,
+            scenario_model_bindings_hash: self.scenario_model_bindings_hash,
         }
     }
 
@@ -409,6 +418,8 @@ pub struct ModelCandidateManifestDocument {
     pub feedback_policy_hash: ContentHash,
     pub decision_policy_snapshot_hash: ContentHash,
     pub explanation_validation: CandidateExplanationValidation,
+    pub portfolio_scenario_model_bindings: Vec<PortfolioScenarioModelArtifactBinding>,
+    pub scenario_model_bindings_hash: ContentHash,
     pub promotion_gate: PromotionGateArtifact,
 }
 
@@ -435,6 +446,8 @@ pub struct ModelCandidateManifestInput {
     pub feedback_policy_hash: ContentHash,
     pub decision_policy_snapshot_hash: ContentHash,
     pub explanation_validation: CandidateExplanationValidation,
+    pub portfolio_scenario_model_bindings: Vec<PortfolioScenarioModelArtifactBinding>,
+    pub scenario_model_bindings_hash: ContentHash,
     pub promotion_gate: PromotionGateArtifact,
 }
 
@@ -465,6 +478,8 @@ impl ModelCandidateManifestDocument {
             feedback_policy_hash: input.feedback_policy_hash,
             decision_policy_snapshot_hash: input.decision_policy_snapshot_hash,
             explanation_validation: input.explanation_validation,
+            portfolio_scenario_model_bindings: input.portfolio_scenario_model_bindings,
+            scenario_model_bindings_hash: input.scenario_model_bindings_hash,
             promotion_gate: input.promotion_gate,
         };
         document.validate()?;
@@ -501,6 +516,9 @@ impl ModelCandidateManifestDocument {
         }
         self.promotion_gate.validate()?;
         self.explanation_validation.validate()?;
+        validate_scenario_model_bindings(self.category, &self.portfolio_scenario_model_bindings)?;
+        let expected_scenario_bindings_hash =
+            scenario_model_bindings_hash(&self.portfolio_scenario_model_bindings)?;
         if self.feedback_cycle_id != self.promotion_gate.feedback_cycle_id
             || self.candidate_recipe_hash != self.promotion_gate.candidate_recipe_hash
             || self.model_version_id != self.promotion_gate.candidate_model_version_id
@@ -514,6 +532,8 @@ impl ModelCandidateManifestDocument {
             || self.explanation_validation.input_contract_hash != self.input_contract_hash
             || self.explanation_validation.report_hash
                 != self.promotion_gate.explanation_validation_hash
+            || self.scenario_model_bindings_hash != expected_scenario_bindings_hash
+            || self.scenario_model_bindings_hash != self.promotion_gate.scenario_model_bindings_hash
         {
             return Err(ModelCandidateManifestError::Invalid(
                 "candidate manifest differs from its final promotion gate".to_owned(),
@@ -527,6 +547,60 @@ impl ModelCandidateManifestDocument {
         CanonicalDigest::content_hash_typed(MANIFEST_HASH_DOMAIN, MANIFEST_FORMAT_VERSION, self)
             .map_err(|error| ModelCandidateManifestError::Hash(error.to_string()))
     }
+
+    #[must_use]
+    pub fn scenario_model_bindings(&self) -> &[PortfolioScenarioModelArtifactBinding] {
+        &self.portfolio_scenario_model_bindings
+    }
+}
+
+pub fn scenario_model_bindings_hash(
+    bindings: &[PortfolioScenarioModelArtifactBinding],
+) -> Result<ContentHash, ModelCandidateManifestError> {
+    CanonicalDigest::content_hash_typed(
+        "quant-pivot/candidate-scenario-model-bindings",
+        1,
+        &bindings,
+    )
+    .map_err(|error| ModelCandidateManifestError::Hash(error.to_string()))
+}
+
+pub(super) fn validate_scenario_model_bindings(
+    category: MarketCategory,
+    bindings: &[PortfolioScenarioModelArtifactBinding],
+) -> Result<(), ModelCandidateManifestError> {
+    let route = BuyModelRoute::try_from(Some(category))
+        .map_err(|error| ModelCandidateManifestError::Invalid(error.to_string()))?;
+    if bindings.is_empty() {
+        return Err(ModelCandidateManifestError::Invalid(
+            "candidate manifest has no prospective scenario-model binding".to_owned(),
+        ));
+    }
+    let mut previous = None;
+    for binding in bindings {
+        let represented = RepresentedRouteSet::from_routes(binding.ordered_routes.clone())
+            .map_err(|error| ModelCandidateManifestError::Invalid(error.to_string()))?;
+        let key = (
+            binding.route_set_digest,
+            binding.model_content_hash,
+            binding.portfolio_scenario_model_artifact_id.as_uuid(),
+        );
+        if represented.routes != binding.ordered_routes
+            || represented.digest != binding.route_set_digest
+            || !binding.ordered_routes.contains(&route)
+            || binding.portfolio_scenario_model_artifact_id
+                != PortfolioScenarioModelArtifactId::from_content_hash(&binding.model_content_hash)
+            || binding.scenario_model_schema_version.get() == 0
+            || previous.is_some_and(|prior| prior >= key)
+        {
+            return Err(ModelCandidateManifestError::Invalid(
+                "candidate scenario-model bindings are non-canonical, incompatible, or do not cover the promoted Route"
+                    .to_owned(),
+            ));
+        }
+        previous = Some(key);
+    }
+    Ok(())
 }
 
 /// Insert payload for the WORM candidate-manifest ledger.

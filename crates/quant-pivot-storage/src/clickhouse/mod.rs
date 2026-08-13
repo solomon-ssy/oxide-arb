@@ -15,7 +15,8 @@ pub use ensure::{
 pub use migration::{
     ClickHouseMigrationSafety, ClickHouseSchemaMigrationInfo, ClickHouseSchemaPlan,
     ClickHouseSchemaStatus, apply_offline_schema_migrations, apply_online_schema_migrations,
-    plan_schema, render_schema_manifest, schema_contract_hash, verify_schema,
+    generate_clean_schema_manifest, plan_schema, render_schema_manifest, schema_contract_hash,
+    verify_schema,
 };
 pub use pool::ClickHousePool;
 pub use query::ClickHouseQueryLimits;

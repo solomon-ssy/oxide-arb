@@ -350,9 +350,7 @@ impl RecommendationInfo {
         if intent_config_version_id != active_config_version_id {
             return Some(ApprovalInvalidation::RuntimeConfigChanged);
         }
-        let Some((_, _, _, _, risk_envelope)) = self.trade_plan.frozen() else {
-            return Some(ApprovalInvalidation::RiskEnvelopeMismatch);
-        };
+        let risk_envelope = &self.trade_plan.risk_envelope;
         if *intent_risk_envelope_hash != risk_envelope.envelope_hash {
             return Some(ApprovalInvalidation::RiskEnvelopeMismatch);
         }

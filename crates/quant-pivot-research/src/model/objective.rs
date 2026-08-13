@@ -155,6 +155,27 @@ pub(crate) struct CrossSectionGroup {
     /// Conservative upper bound of member rows' `TrainingLabel::matured_at`.
     pub(crate) label_horizon_end: DateTime<Utc>,
     pub(crate) rows: Vec<SampleRow>,
+    /// Immutable label ranks are independent of every candidate weight vector.
+    /// Excluding this derived cache from the training-input preimage preserves
+    /// the canonical artifact hash while avoiding one sort per objective call.
+    #[serde(skip)]
+    label_ranks: Vec<Decimal>,
+}
+
+impl CrossSectionGroup {
+    pub(crate) fn new(
+        decision_at: DateTime<Utc>,
+        label_horizon_end: DateTime<Utc>,
+        rows: Vec<SampleRow>,
+    ) -> Self {
+        let labels = rows.iter().map(|row| row.label).collect::<Vec<_>>();
+        Self {
+            decision_at,
+            label_horizon_end,
+            rows,
+            label_ranks: stats::average_ranks(&labels),
+        }
+    }
 }
 
 /// Pure objective evaluator shared by coordinate search and optional argmin.
@@ -182,9 +203,57 @@ impl ObjectiveEvaluator {
         weights: &[Decimal],
         groups: &[CrossSectionGroup],
     ) -> QuantResult<ObjectiveComponentReport> {
-        let (rank_loss, pair_count, rank_loss_group_count) = self.rank_loss(weights, groups)?;
-        let tail_penalty = self.tail_penalty(weights, groups)?;
-        let turnover_penalty = self.turnover_penalty(weights, groups);
+        let mut group_losses = Vec::new();
+        let mut pair_count = 0_u64;
+        let mut returns = Vec::with_capacity(groups.len());
+        let mut tick_weights = Vec::with_capacity(groups.len());
+        for group in groups {
+            let scores = group
+                .rows
+                .iter()
+                .map(|row| row.net(weights))
+                .collect::<Vec<_>>();
+            let (group_loss, group_pairs) = self.group_rank_loss(group, &scores)?;
+            pair_count = pair_count.checked_add(group_pairs).ok_or_else(|| {
+                ResearchError::ValidationMethodology {
+                    detail: "rank-loss total pair count overflow".to_owned(),
+                }
+            })?;
+            if group_pairs > 0 {
+                group_losses.push(group_loss);
+            }
+
+            let allocations = topn_allocations(&scores, group, self.spec.pseudo_top_n);
+            let group_return_bps = group
+                .rows
+                .iter()
+                .zip(&allocations)
+                .map(|(row, allocation)| row.label * *allocation)
+                .sum::<Decimal>();
+            returns.push(group_return_bps / Decimal::from(BPS_PER_UNIT_RETURN));
+            let mut by_token = BTreeMap::new();
+            for (row, allocation) in group.rows.iter().zip(&allocations) {
+                if *allocation > Decimal::ZERO {
+                    let entry = by_token
+                        .entry(row.allocation_key.clone())
+                        .or_insert(Decimal::ZERO);
+                    *entry += *allocation;
+                }
+            }
+            tick_weights.push(by_token);
+        }
+        let rank_loss_group_count = u64::try_from(group_losses.len()).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("rank-loss group count exceeds u64: {error}"),
+            }
+        })?;
+        let rank_loss = if group_losses.is_empty() {
+            Decimal::ZERO
+        } else {
+            stats::mean(&group_losses)
+        };
+        let tail_penalty = tail_penalty(&mut returns, self.spec.tail_fraction)?;
+        let turnover_penalty = metrics::allocation_churn(&tick_weights);
         let l2_penalty: Decimal = weights.iter().map(|w| *w * *w).sum();
         let total_loss = rank_loss
             + self.spec.lambda_tail * tail_penalty
@@ -246,131 +315,69 @@ impl ObjectiveEvaluator {
         .rounded())
     }
 
-    fn rank_loss(
+    fn group_rank_loss(
         &self,
-        weights: &[Decimal],
-        groups: &[CrossSectionGroup],
-    ) -> QuantResult<(Decimal, u64, u64)> {
-        let mut group_losses = Vec::new();
-        let mut pair_count = 0_u64;
-        for group in groups {
-            let scores: Vec<Decimal> = group.rows.iter().map(|row| row.net(weights)).collect();
-            let labels: Vec<Decimal> = group.rows.iter().map(|row| row.label).collect();
-            let score_ranks = stats::average_ranks(&scores);
-            let label_ranks = stats::average_ranks(&labels);
-            let n = group.rows.len();
-            let mut group_loss = Decimal::ZERO;
-            let mut group_pairs = 0_u64;
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    let label_diff = labels[i] - labels[j];
-                    if label_diff.is_zero() {
-                        continue;
-                    }
-                    let pair_weight = match self.spec.rank_loss {
-                        RankLossKind::PairwiseRanknet => Decimal::ONE,
-                        RankLossKind::RankIcWeightedRanknet => rank_pair_weight(
-                            score_ranks[i],
-                            score_ranks[j],
-                            label_ranks[i],
-                            label_ranks[j],
-                            n,
-                        ),
-                    };
-                    if pair_weight <= Decimal::ZERO {
-                        continue;
-                    }
-                    let sign = if label_diff > Decimal::ZERO {
-                        Decimal::ONE
-                    } else {
-                        -Decimal::ONE
-                    };
-                    let score_diff =
-                        decimal_to_f64("rank_loss.score_diff", (scores[i] - scores[j]) * sign)?;
-                    let loss = ranknet_logistic_loss(score_diff)?;
-                    group_loss += loss * pair_weight;
-                    group_pairs = group_pairs.checked_add(1).ok_or_else(|| {
-                        ResearchError::ValidationMethodology {
-                            detail: "rank-loss group pair count overflow".to_owned(),
-                        }
-                    })?;
+        group: &CrossSectionGroup,
+        scores: &[Decimal],
+    ) -> QuantResult<(Decimal, u64)> {
+        let score_ranks = stats::average_ranks(scores);
+        let n = group.rows.len();
+        let mut group_loss = Decimal::ZERO;
+        let mut group_pairs = 0_u64;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let label_diff = group.rows[i].label - group.rows[j].label;
+                if label_diff.is_zero() {
+                    continue;
                 }
-            }
-            pair_count = pair_count.checked_add(group_pairs).ok_or_else(|| {
-                ResearchError::ValidationMethodology {
-                    detail: "rank-loss total pair count overflow".to_owned(),
+                let pair_weight = match self.spec.rank_loss {
+                    RankLossKind::PairwiseRanknet => Decimal::ONE,
+                    RankLossKind::RankIcWeightedRanknet => rank_pair_weight(
+                        score_ranks[i],
+                        score_ranks[j],
+                        group.label_ranks[i],
+                        group.label_ranks[j],
+                        n,
+                    ),
+                };
+                if pair_weight <= Decimal::ZERO {
+                    continue;
                 }
-            })?;
-            if group_pairs > 0 {
-                group_losses.push(group_loss);
+                let sign = if label_diff > Decimal::ZERO {
+                    Decimal::ONE
+                } else {
+                    -Decimal::ONE
+                };
+                let score_diff =
+                    decimal_to_f64("rank_loss.score_diff", (scores[i] - scores[j]) * sign)?;
+                let loss = ranknet_logistic_loss(score_diff)?;
+                group_loss += loss * pair_weight;
+                group_pairs = group_pairs.checked_add(1).ok_or_else(|| {
+                    ResearchError::ValidationMethodology {
+                        detail: "rank-loss group pair count overflow".to_owned(),
+                    }
+                })?;
             }
         }
-        let rank_loss_group_count = u64::try_from(group_losses.len()).map_err(|error| {
-            ResearchError::ValidationMethodology {
-                detail: format!("rank-loss group count exceeds u64: {error}"),
-            }
-        })?;
-        if group_losses.is_empty() {
-            return Ok((Decimal::ZERO, pair_count, rank_loss_group_count));
-        }
-        Ok((
-            stats::mean(&group_losses),
-            pair_count,
-            rank_loss_group_count,
-        ))
+        Ok((group_loss, group_pairs))
     }
+}
 
-    fn tail_penalty(
-        &self,
-        weights: &[Decimal],
-        groups: &[CrossSectionGroup],
-    ) -> QuantResult<Decimal> {
-        if groups.is_empty() {
-            return Ok(Decimal::ZERO);
-        }
-        let mut returns = Vec::with_capacity(groups.len());
-        for group in groups {
-            let allocations = topn_pseudo_allocations(weights, group, self.spec.pseudo_top_n);
-            let group_return_bps: Decimal = group
-                .rows
-                .iter()
-                .zip(allocations.iter())
-                .map(|(row, allocation)| row.label * *allocation)
-                .sum();
-            returns.push(group_return_bps / Decimal::from(BPS_PER_UNIT_RETURN));
-        }
-        returns.sort();
-        let raw = (Decimal::from(returns.len() as u64) * self.spec.tail_fraction).ceil();
-        let take = raw
-            .to_usize()
-            .ok_or_else(|| ResearchError::MatrixBuild {
-                detail: format!("tail sample count `{raw}` is outside usize range"),
-            })?
-            .max(1)
-            .min(returns.len());
-        let tail_mean = stats::mean(&returns[..take]);
-        Ok((-tail_mean).max(Decimal::ZERO))
+fn tail_penalty(returns: &mut [Decimal], fraction: Decimal) -> QuantResult<Decimal> {
+    if returns.is_empty() {
+        return Ok(Decimal::ZERO);
     }
-
-    fn turnover_penalty(&self, weights: &[Decimal], groups: &[CrossSectionGroup]) -> Decimal {
-        let tick_weights: Vec<BTreeMap<String, Decimal>> = groups
-            .iter()
-            .map(|group| {
-                let allocations = topn_pseudo_allocations(weights, group, self.spec.pseudo_top_n);
-                let mut by_token = BTreeMap::new();
-                for (row, allocation) in group.rows.iter().zip(allocations.iter()) {
-                    if *allocation > Decimal::ZERO {
-                        let entry = by_token
-                            .entry(row.allocation_key.clone())
-                            .or_insert(Decimal::ZERO);
-                        *entry += *allocation;
-                    }
-                }
-                by_token
-            })
-            .collect();
-        metrics::turnover(&tick_weights)
-    }
+    returns.sort();
+    let raw = (Decimal::from(returns.len() as u64) * fraction).ceil();
+    let take = raw
+        .to_usize()
+        .ok_or_else(|| ResearchError::MatrixBuild {
+            detail: format!("tail sample count `{raw}` is outside usize range"),
+        })?
+        .max(1)
+        .min(returns.len());
+    let tail_mean = stats::mean(&returns[..take]);
+    Ok((-tail_mean).max(Decimal::ZERO))
 }
 
 /// Closed-form `RankIC` contribution of swapping a pair's predicted ranks.
@@ -488,16 +495,30 @@ fn decimal_log2(value: Decimal) -> QuantResult<Decimal> {
 /// Selects the top `pseudo_top_n` rows by score (ties broken by `allocation_key`),
 /// then assigns each selected row `1 / n_selected`. Negative scores still receive
 /// weight — there is no `max(score, 0)` collapse to an empty portfolio.
+#[cfg(test)]
 fn topn_pseudo_allocations(
     weights: &[Decimal],
     group: &CrossSectionGroup,
     pseudo_top_n: u32,
 ) -> Vec<Decimal> {
-    let n = group.rows.len();
+    let scores = group
+        .rows
+        .iter()
+        .map(|row| row.net(weights))
+        .collect::<Vec<_>>();
+    topn_allocations(&scores, group, pseudo_top_n)
+}
+
+fn topn_allocations(
+    scores: &[Decimal],
+    group: &CrossSectionGroup,
+    pseudo_top_n: u32,
+) -> Vec<Decimal> {
+    let n = scores.len();
+    debug_assert_eq!(n, group.rows.len());
     if n == 0 || pseudo_top_n == 0 {
         return vec![Decimal::ZERO; n];
     }
-    let scores: Vec<Decimal> = group.rows.iter().map(|row| row.net(weights)).collect();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
         scores[b].cmp(&scores[a]).then_with(|| {
@@ -574,7 +595,7 @@ fn parse_tail_fraction(value: Decimal) -> QuantResult<Decimal> {
 
 #[cfg(test)]
 mod tests {
-    use std::slice;
+    use std::{collections::BTreeMap, slice};
 
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
@@ -587,8 +608,9 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{
-        CrossSectionGroup, ObjectiveEvaluator, SampleRow, ndcg_at_k, rank_pair_weight,
-        runtime_training_objective, topn_pseudo_allocations,
+        BPS_PER_UNIT_RETURN, CrossSectionGroup, ObjectiveComponentReport, ObjectiveEvaluator,
+        SampleRow, metrics, ndcg_at_k, rank_pair_weight, runtime_training_objective, stats,
+        tail_penalty, topn_pseudo_allocations,
     };
 
     fn row(key: &str, signed: Decimal, label: Decimal) -> SampleRow {
@@ -599,31 +621,107 @@ mod tests {
         }
     }
 
+    fn group(rows: Vec<SampleRow>) -> CrossSectionGroup {
+        let decision_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        CrossSectionGroup::new(decision_at, decision_at, rows)
+    }
+
+    fn independent_report(
+        evaluator: &ObjectiveEvaluator,
+        weights: &[Decimal],
+        groups: &[CrossSectionGroup],
+    ) -> ObjectiveComponentReport {
+        let mut group_losses = Vec::new();
+        let mut pair_count = 0_u64;
+        for group in groups {
+            let scores = group
+                .rows
+                .iter()
+                .map(|row| row.net(weights))
+                .collect::<Vec<_>>();
+            let (group_loss, group_pairs) = evaluator
+                .group_rank_loss(group, &scores)
+                .expect("independent rank loss");
+            pair_count += group_pairs;
+            if group_pairs > 0 {
+                group_losses.push(group_loss);
+            }
+        }
+        let rank_loss = if group_losses.is_empty() {
+            Decimal::ZERO
+        } else {
+            stats::mean(&group_losses)
+        };
+
+        let allocations = groups
+            .iter()
+            .map(|group| topn_pseudo_allocations(weights, group, evaluator.spec.pseudo_top_n))
+            .collect::<Vec<_>>();
+        let mut returns = groups
+            .iter()
+            .zip(&allocations)
+            .map(|(group, group_allocations)| {
+                group
+                    .rows
+                    .iter()
+                    .zip(group_allocations)
+                    .map(|(row, allocation)| row.label * *allocation)
+                    .sum::<Decimal>()
+                    / Decimal::from(BPS_PER_UNIT_RETURN)
+            })
+            .collect::<Vec<_>>();
+        let tail_penalty = tail_penalty(&mut returns, evaluator.spec.tail_fraction)
+            .expect("independent tail penalty");
+        let tick_weights = groups
+            .iter()
+            .zip(&allocations)
+            .map(|(group, group_allocations)| {
+                let mut by_token = BTreeMap::new();
+                for (row, allocation) in group.rows.iter().zip(group_allocations) {
+                    if *allocation > Decimal::ZERO {
+                        *by_token
+                            .entry(row.allocation_key.clone())
+                            .or_insert(Decimal::ZERO) += *allocation;
+                    }
+                }
+                by_token
+            })
+            .collect::<Vec<_>>();
+        let turnover_penalty = metrics::allocation_churn(&tick_weights);
+        let l2_penalty = weights.iter().map(|weight| *weight * *weight).sum();
+        let total_loss = rank_loss
+            + evaluator.spec.lambda_tail * tail_penalty
+            + evaluator.spec.lambda_turnover * turnover_penalty
+            + evaluator.spec.lambda_l2 * l2_penalty;
+        ObjectiveComponentReport {
+            rank_loss,
+            tail_penalty,
+            turnover_penalty,
+            l2_penalty,
+            total_loss,
+            group_count: groups.len() as u64,
+            rank_loss_group_count: group_losses.len() as u64,
+            pair_count,
+        }
+    }
+
     #[test]
     fn correct_pairwise_order_order() {
-        let group = CrossSectionGroup {
-            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            rows: vec![
-                row("m:a", dec!(1), dec!(10)),
-                row("m:b", dec!(0), dec!(-10)),
-            ],
-        };
+        let correctly_ranked = group(vec![
+            row("m:a", dec!(1), dec!(10)),
+            row("m:b", dec!(0), dec!(-10)),
+        ]);
         let evaluator = ObjectiveEvaluator::new(TrainingObjectiveSpec {
             rank_loss: RankLossKind::PairwiseRanknet,
             ..TrainingObjectiveSpec::default()
         });
         let correct = evaluator
-            .evaluate(&[dec!(1)], slice::from_ref(&group))
+            .evaluate(&[dec!(1)], slice::from_ref(&correctly_ranked))
             .expect("eval");
-        let reversed_group = CrossSectionGroup {
-            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            rows: vec![
-                row("m:a", dec!(0), dec!(10)),
-                row("m:b", dec!(1), dec!(-10)),
-            ],
-        };
+        let reversed_group = group(vec![
+            row("m:a", dec!(0), dec!(10)),
+            row("m:b", dec!(1), dec!(-10)),
+        ]);
         let reversed = evaluator
             .evaluate(&[dec!(1)], &[reversed_group])
             .expect("eval");
@@ -641,14 +739,10 @@ mod tests {
 
     #[test]
     fn objective_breakdown_matches_components() {
-        let group = CrossSectionGroup {
-            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            rows: vec![
-                row("m:a", dec!(1), dec!(-100)),
-                row("m:b", dec!(0), dec!(50)),
-            ],
-        };
+        let group = group(vec![
+            row("m:a", dec!(1), dec!(-100)),
+            row("m:b", dec!(0), dec!(50)),
+        ]);
         let spec = TrainingObjectiveSpec {
             lambda_tail: dec!(0.5),
             lambda_turnover: dec!(0.2),
@@ -662,6 +756,56 @@ mod tests {
             + spec.lambda_turnover * report.turnover_penalty
             + spec.lambda_l2 * report.l2_penalty;
         assert_eq!(report.total_loss, expected);
+    }
+
+    #[test]
+    fn fused_objective_matches_independent() {
+        let groups = vec![
+            group(vec![
+                row("m:a", dec!(3), dec!(-100)),
+                row("m:b", dec!(2), dec!(40)),
+                row("m:c", dec!(1), dec!(40)),
+            ]),
+            group(vec![
+                row("m:b", dec!(1), dec!(70)),
+                row("m:c", dec!(4), dec!(-30)),
+                row("m:d", dec!(2), dec!(10)),
+            ]),
+            group(vec![
+                row("m:a", dec!(-1), dec!(25)),
+                row("m:d", dec!(3), dec!(-50)),
+                row("m:e", dec!(2), dec!(80)),
+            ]),
+        ];
+        for rank_loss in [
+            RankLossKind::PairwiseRanknet,
+            RankLossKind::RankIcWeightedRanknet,
+        ] {
+            let evaluator = ObjectiveEvaluator::new(TrainingObjectiveSpec {
+                rank_loss,
+                lambda_tail: dec!(0.35),
+                tail_fraction: dec!(0.67),
+                lambda_turnover: dec!(0.2),
+                lambda_l2: dec!(0.01),
+                pseudo_top_n: 2,
+                ..TrainingObjectiveSpec::default()
+            });
+            let actual = evaluator.evaluate(&[dec!(0.75)], &groups).expect("fused");
+            assert_eq!(
+                actual,
+                independent_report(&evaluator, &[dec!(0.75)], &groups)
+            );
+        }
+    }
+
+    #[test]
+    fn label_ranks_not_serialized() {
+        let group = group(vec![
+            row("m:a", dec!(1), dec!(10)),
+            row("m:b", dec!(0), dec!(-10)),
+        ]);
+        let serialized = serde_json::to_value(group).expect("serialize group");
+        assert!(serialized.get("label_ranks").is_none());
     }
 
     #[test]
@@ -679,15 +823,11 @@ mod tests {
 
     #[test]
     fn topn_pseudo_keep_separate() {
-        let group = CrossSectionGroup {
-            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            rows: vec![
-                row("m1:yes", dec!(3), dec!(10)),
-                row("m1:no", dec!(2), dec!(5)),
-                row("m2:yes", dec!(1), dec!(1)),
-            ],
-        };
+        let group = group(vec![
+            row("m1:yes", dec!(3), dec!(10)),
+            row("m1:no", dec!(2), dec!(5)),
+            row("m2:yes", dec!(1), dec!(1)),
+        ]);
         let alloc = topn_pseudo_allocations(&[dec!(1)], &group, 2);
         assert_eq!(alloc[0], dec!(0.5));
         assert_eq!(alloc[1], dec!(0.5));
@@ -697,15 +837,11 @@ mod tests {
 
     #[test]
     fn topn_pseudo_allocations_weight() {
-        let group = CrossSectionGroup {
-            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            rows: vec![
-                row("m:a", dec!(-3), dec!(10)),
-                row("m:b", dec!(-1), dec!(5)),
-                row("m:c", dec!(-2), dec!(1)),
-            ],
-        };
+        let group = group(vec![
+            row("m:a", dec!(-3), dec!(10)),
+            row("m:b", dec!(-1), dec!(5)),
+            row("m:c", dec!(-2), dec!(1)),
+        ]);
         // Scores = signed * weight = -3, -1, -2 → top-2 by score: m:b then m:c.
         let alloc = topn_pseudo_allocations(&[dec!(1)], &group, 2);
         assert_eq!(alloc[0], Decimal::ZERO);
@@ -717,19 +853,14 @@ mod tests {
     #[test]
     fn rank_loss_excludes_groups() {
         let groups = vec![
-            CrossSectionGroup {
-                decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-                label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-                rows: vec![
-                    row("m:a", dec!(1), dec!(10)),
-                    row("m:b", dec!(0), dec!(-10)),
-                ],
-            },
-            CrossSectionGroup {
-                decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-                label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-                rows: vec![row("m:c", dec!(1), dec!(5)), row("m:d", dec!(0), dec!(5))],
-            },
+            group(vec![
+                row("m:a", dec!(1), dec!(10)),
+                row("m:b", dec!(0), dec!(-10)),
+            ]),
+            group(vec![
+                row("m:c", dec!(1), dec!(5)),
+                row("m:d", dec!(0), dec!(5)),
+            ]),
         ];
         let evaluator = ObjectiveEvaluator::new(TrainingObjectiveSpec {
             rank_loss: RankLossKind::PairwiseRanknet,
@@ -743,15 +874,11 @@ mod tests {
 
     #[test]
     fn rank_ic_weighted_pairwise() {
-        let group = CrossSectionGroup {
-            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            rows: vec![
-                row("m:a", dec!(3), dec!(30)),
-                row("m:b", dec!(2), dec!(10)),
-                row("m:c", dec!(1), dec!(20)),
-            ],
-        };
+        let group = group(vec![
+            row("m:a", dec!(3), dec!(30)),
+            row("m:b", dec!(2), dec!(10)),
+            row("m:c", dec!(1), dec!(20)),
+        ]);
         let pairwise = ObjectiveEvaluator::new(TrainingObjectiveSpec {
             rank_loss: RankLossKind::PairwiseRanknet,
             lambda_tail: Decimal::ZERO,

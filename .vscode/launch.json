@@ -15,11 +15,15 @@
           "kind": "bin"
         }
       },
-      "args": ["--config-dir", "config"],
+      "args": [
+        "--config-file",
+        "${workspaceFolder}/config/quant-pivot.toml",
+        "--expected-environment",
+        "local-development"
+      ],
       "cwd": "${workspaceFolder}",
       "env": {
-        "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
-        "OXIDE_ARB_CONFIG_DIR": "config"
+        "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
       }
     },
     {
@@ -33,18 +37,22 @@
           "kind": "bin"
         }
       },
-      "args": ["--config-dir", "config"],
+      "args": [
+        "--config-file",
+        "${workspaceFolder}/config/quant-pivot.toml",
+        "--expected-environment",
+        "local-development"
+      ],
       "cwd": "${workspaceFolder}",
       "env": {
         "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
-        "QUANT_PIVOT_CONFIG_DIR": "config",
         "RUST_LOG": "debug"
       }
     },
     {
       "type": "lldb",
       "request": "launch",
-      "name": "quant-pivot (detection funnel debug)",
+      "name": "quant-pivot (report pipeline debug)",
       "cargo": {
         "args": ["build", "--bin=quant-pivot", "--package=quant-pivot-bin"],
         "filter": {
@@ -52,12 +60,16 @@
           "kind": "bin"
         }
       },
-      "args": ["--config-dir", "config"],
+      "args": [
+        "--config-file",
+        "${workspaceFolder}/config/quant-pivot.toml",
+        "--expected-environment",
+        "local-development"
+      ],
       "cwd": "${workspaceFolder}",
       "env": {
         "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
-        "QUANT_PIVOT_CONFIG_DIR": "config",
-        "RUST_LOG": "info,oxide_arb_core::detection::scanner=debug,oxide_arb_algorithm::pipeline=debug"
+        "RUST_LOG": "info,quant_pivot_core=debug"
       }
     },
     {

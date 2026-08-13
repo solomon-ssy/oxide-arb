@@ -1,14 +1,15 @@
 //! Web server + JWT configuration (`[web]` / `[web.jwt]`).
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::secret::SecretText;
 
 /// HTTP/WebSocket server configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WebConfig {
     /// Bind address (default `0.0.0.0`).
     pub listen_host: String,
@@ -41,8 +42,8 @@ impl Default for WebConfig {
 }
 
 /// Bounded admission contract for password hashing and verification.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PasswordCryptoConfig {
     /// Maximum admitted operations, including the one executing on the
     /// isolated security pool. Excess requests fail fast with HTTP 429.
@@ -69,10 +70,11 @@ impl WebConfig {
 }
 
 /// JWT access/refresh token configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JwtConfig {
     /// Base64URL-no-pad 32-byte HS256 signing-key source.
+    #[serde(serialize_with = "super::secret::serialize_empty")]
     pub signing_key: SecretText,
     /// Token issuer claim (default `quant-pivot`).
     pub issuer: String,
@@ -168,7 +170,25 @@ mod tests {
     #[test]
     fn nested_jwt_deserializes_redacted() {
         let cfg: WebConfig = serde_json::from_str(
-            r#"{ "listen_port": 9090, "jwt": { "signing_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "access_ttl_secs": 60 } }"#,
+            r#"{
+                "listen_host": "0.0.0.0",
+                "listen_port": 9090,
+                "cors_allowed_origins": [],
+                "serve_static_ui": false,
+                "static_ui_dir": "static/ui",
+                "password_crypto": {
+                    "max_in_flight": 8,
+                    "deadline_ms": 15000
+                },
+                "jwt": {
+                    "signing_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "issuer": "quant-pivot",
+                    "audience": "quant-pivot-web",
+                    "access_ttl_secs": 60,
+                    "refresh_ttl_secs": 604800,
+                    "absolute_session_ttl_secs": 2592000
+                }
+            }"#,
         )
         .expect("valid web config");
         assert_eq!(cfg.listen_port, 9090);

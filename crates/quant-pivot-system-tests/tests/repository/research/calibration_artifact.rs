@@ -15,12 +15,13 @@ use quant_pivot_models::{
     },
     types::{
         CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, Probability,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, PayoutRatio, Probability,
         calibration::{
             IsotonicKnot, MODEL_SCORE_CALIBRATION_FORMAT_VERSION, MarketPriceBiasPayload,
             ModelScoreCalibrationDatasetBinding, ModelScoreCalibrationFitContract,
             ModelScoreCalibrationModelBinding, ModelScoreCalibrationPayload,
             ModelScoreCalibrationPolicyBinding, MonotoneMapping, ReliabilityBin, ReliabilityReport,
+            SplitPayoutRateEvidence,
         },
     },
 };
@@ -144,7 +145,7 @@ async fn prepare_fixture_inner(db: &DatabaseConnection, scope: &str) -> Calibrat
             ModelFamily::WeightedFactor,
             model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
-            ModelTrainingContract::settlement_default(),
+            ModelTrainingContract::outcome_default(),
         ))
         .await
         .expect("model spec");
@@ -257,6 +258,13 @@ async fn prepare_fixture_inner(db: &DatabaseConnection, scope: &str) -> Calibrat
         },
         mapping: fixture_mapping(),
         reliability: fixture_reliability(),
+        split_payout_rate: SplitPayoutRateEvidence {
+            total_sample_count: 10,
+            split_sample_count: 0,
+            empirical_probability: Probability::ZERO,
+            wilson_ci: (Probability::ZERO, Probability::new(dec!(0.277533))),
+            split_payout_ratio: PayoutRatio::try_new(dec!(0.5)).expect("split payout ratio"),
+        },
     };
     let artifact = build_calibration_artifact(payload, fit_window_start, fit_window_end);
     let mut fixture = CalibrationFixture {

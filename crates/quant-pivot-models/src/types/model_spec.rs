@@ -88,7 +88,7 @@ impl ModelSpecDefinition<'_> {
         if self.input_contract.inputs.is_empty() {
             return Err("input_contract must contain at least one raw feature".to_owned());
         }
-        self.training_contract.validate()
+        self.training_contract.validate_for(self.model_family)
     }
 
     /// Domain-separated content hash of the complete semantic definition.
@@ -113,7 +113,7 @@ mod tests {
         fn test_fixture() -> Self {
             Self {
                 summary: "Buy-side weighted-factor baseline".to_owned(),
-                hypothesis: "Governed factor ranks predict positive forward net returns".to_owned(),
+                hypothesis: "Governed factors forecast terminal payout probability".to_owned(),
                 limitations: vec![
                     "Evaluate only on Polymarket markets covered by the frozen profile".to_owned(),
                 ],
@@ -140,7 +140,7 @@ mod tests {
     fn semantic_changes_change_hash() {
         let thesis = ModelSpecThesis::test_fixture();
         let input = ModelInputContract::single_required("book.mid");
-        let training = ModelTrainingContract::settlement_default();
+        let training = ModelTrainingContract::outcome_default();
         let definition = ModelSpecDefinition {
             name: "buy-baseline",
             model_family: ModelFamily::WeightedFactor,

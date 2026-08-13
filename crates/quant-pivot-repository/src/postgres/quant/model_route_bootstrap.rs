@@ -181,7 +181,7 @@ impl PgModelRouteBootstrapRepository {
         transaction: &DatabaseTransaction,
         preflight: &ModelRouteBootstrapPreflight,
     ) -> Result<(), RouteBootstrapCommitError> {
-        PgFeatureParityRepository::verify_clear_latch_generation(
+        PgFeatureParityRepository::verify_route_governance(
             transaction,
             &preflight.manifest().feature_parity_state_id(),
         )
@@ -420,13 +420,13 @@ impl PgModelRouteBootstrapRepository {
                 revisions.report_schedule,
                 ConfigResourceKind::ReportSchedule,
             )?,
-            operational_control_revision_id: required(
-                revisions.operational_control,
-                ConfigResourceKind::OperationalControl,
+            operations_policy_revision_id: required(
+                revisions.operations_policy,
+                ConfigResourceKind::OperationsPolicy,
             )?,
-            execution_authorization_revision_id: required(
-                revisions.execution_authorization,
-                ConfigResourceKind::ExecutionAuthorization,
+            execution_automation_policy_revision_id: required(
+                revisions.execution_automation_policy,
+                ConfigResourceKind::ExecutionAutomationPolicy,
             )?,
             snapshot: document,
             source: DecisionPolicySnapshotSource::Activation,

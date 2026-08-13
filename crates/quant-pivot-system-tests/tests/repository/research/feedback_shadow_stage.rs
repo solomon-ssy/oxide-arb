@@ -13,10 +13,8 @@ use quant_pivot_core::service::{
     feedback_shadow_stage::{FeedbackShadowStageAdapter, FeedbackShadowStageDeps},
     model_serving_generation::{ModelServingGenerationStore, PublishedShadowRouteIdentity},
     model_serving_registry::ModelServingRuntimeRegistry,
-    research_readiness::EvidenceScopeIdentity,
 };
 use quant_pivot_models::{
-    config::{ArtifactStoreDeployConfig, ClickHouseConfig},
     domain::{
         ports::{
             FeedbackComparisonArtifactRef, FeedbackComparisonCandidateRef,
@@ -65,8 +63,9 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgFeedbackCycleRepository, PgModelCandidateManifestRepository, PgModelRegistryRepository,
-        PgPolicyRepository, PgResearchJobRepository, PgShadowComparisonRepository,
+        PgBacktestPathSetRepository, PgCalibrationArtifactRepository, PgFeedbackCycleRepository,
+        PgModelCandidateManifestRepository, PgModelRegistryRepository, PgPolicyRepository,
+        PgResearchJobRepository, PgShadowComparisonRepository,
     },
     traits::{
         FeedbackCycleClaim, FeedbackCycleRepository, FeedbackEvaluationWriteOutcome,
@@ -90,9 +89,9 @@ use quant_pivot_research::{
     model::ReturnModelSpec,
 };
 use quant_pivot_system_tests::{
-    postgres::setup_pg,
+    postgres::{PostgresClock, setup_pg},
     support::{
-        artifact_store::ReadTamperArtifactStoreFixture,
+        artifact_store::{ReadTamperArtifactStoreFixture, VersionedArtifactStoreFixture},
         model_serving_fixtures::{
             ModelArtifactFixtureSeed, ModelDatasetLedgerFixture, ModelDatasetLedgerSeed,
             ModelPayloadFixture, ModelVersionFixture, SealedModelFixture,
@@ -100,6 +99,8 @@ use quant_pivot_system_tests::{
         model_serving_runtime::ModelServingRegistryFixture,
         model_spec_fixtures,
         policy_fixtures::{activate_policy_bundle, bootstrap_policy_bundle},
+        portfolio_scenario_fixtures::{activate_report_portfolio, seed_crypto_model},
+        trade_policy_fixtures::PublishedTradePolicyFixture,
     },
 };
 use rust_decimal::Decimal;
@@ -138,6 +139,8 @@ fn shadow_stage(
             cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
             jobs: Arc::clone(jobs) as Arc<dyn ResearchJobRepository>,
             models: Arc::new(PgModelRegistryRepository::new(db.clone())),
+            path_sets: Arc::new(PgBacktestPathSetRepository::new(db.clone())),
+            calibrations: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
             policies: Arc::new(PgPolicyRepository::new(db.clone())),
             manifests: Arc::new(PgModelCandidateManifestRepository::new(db.clone())),
             artifacts: Arc::clone(&store),
@@ -169,6 +172,11 @@ impl ArtifactRoot {
             env::temp_dir().join(format!("quant-pivot-w2-f10-{}", ModelVersionId::from_v7()));
         fs::create_dir_all(&path).expect("create F10 artifact root");
         Self { path }
+    }
+
+    pub fn store(&self) -> Arc<dyn ArtifactStore> {
+        let inner: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(self.path.clone()));
+        Arc::new(VersionedArtifactStoreFixture::new(inner))
     }
 }
 
@@ -334,7 +342,7 @@ async fn build_scoped_models(
         ModelFamily::WeightedFactor,
         prediction_horizon_secs,
         ModelInputContract::single_required("book.mid"),
-        ModelTrainingContract::settlement_default(),
+        ModelTrainingContract::outcome_default(),
     );
     let definition_hash = model_spec.definition_hash;
     let registry = PgModelRegistryRepository::new(db.clone());
@@ -413,7 +421,7 @@ pub async fn build_crypto_models(
         .profile_artifacts
         .research_method
         .model_promotion
-        .required_shadow_window_secs = 2;
+        .required_shadow_window_secs = 60;
     let policy_id = bootstrap_policy_bundle(
         &PgPolicyRepository::new(db.clone()),
         &policy,
@@ -421,15 +429,29 @@ pub async fn build_crypto_models(
         "bootstrap exact category shadow window",
     )
     .await;
-    Box::pin(build_scoped_models(
+    let champion = seed_crypto_model(
         db,
         store,
         policy_id,
-        model_spec_fixtures::crypto_profile_ref(),
-        Some(MarketCategory::Crypto),
-        model_spec_fixtures::crypto_horizon_secs(),
-    ))
+        ModelVersionId::from_v7(),
+        "p03-feedback-crypto-champion",
+    )
     .await
+    .expect("persist calibrated P03 Crypto champion");
+    let candidate = seed_crypto_model(
+        db,
+        store,
+        policy_id,
+        ModelVersionId::from_v7(),
+        "p03-feedback-crypto-candidate",
+    )
+    .await
+    .expect("persist calibrated P03 Crypto candidate");
+    assert_ne!(champion.model_version_id, candidate.model_version_id);
+    ShadowModels {
+        champion,
+        candidate,
+    }
 }
 
 pub struct ActivatedServing {
@@ -441,16 +463,16 @@ pub async fn build_serving(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
 ) -> ActivatedServing {
-    let evidence_scope = EvidenceScopeIdentity::from_config(
-        &ClickHouseConfig::default(),
-        &ArtifactStoreDeployConfig::default(),
-    )
-    .expect("F10 serving evidence scope");
+    let evidence_scope =
+        PublishedTradePolicyFixture::evidence_scope().expect("F10 serving evidence scope");
     let runtime_registry = ModelServingRegistryFixture {
         db: db.clone(),
         artifact_store: Arc::clone(store),
         evidence_scope,
-        evidence_attestor: None,
+        evidence_attestor: Some(
+            PublishedTradePolicyFixture::evidence_attestor()
+                .expect("F10 serving evidence attestor"),
+        ),
     }
     .build();
     let bundle = PgPolicyRepository::new(db.clone())
@@ -556,6 +578,10 @@ pub async fn activate_crypto_generation(
         .expect("load activated P03 bundle")
         .expect("activated P03 bundle");
     assert_eq!(bundle.decision_policy_snapshot_id, snapshot_id);
+    let visible_at = db.statement_time().await + Duration::seconds(1);
+    activate_report_portfolio(db, store, [BuyModelRoute::Crypto], visible_at)
+        .await
+        .expect("activate exact P03 Crypto scenario model");
     build_serving(db, store).await
 }
 
@@ -1260,13 +1286,22 @@ pub async fn insert_stable_observations(
         profile.spec.feedback_policy.shadow_minimum_observations,
         u64::try_from(SHADOW_OBSERVATION_COUNT).expect("shadow observation count")
     );
-    assert_eq!(identity.required_shadow_window_secs, 2);
+    assert_eq!(identity.required_shadow_window_secs, 60);
     let window_start = identity.shadow_bound_at;
-    tokio::time::sleep(StdDuration::from_millis(1_100)).await;
+    let window_end = window_start
+        + Duration::seconds(
+            i64::try_from(identity.required_shadow_window_secs)
+                .expect("shadow window seconds fit i64"),
+        );
+    let observation_start = db.statement_time().await.max(window_start);
+    assert!(
+        observation_start + Duration::seconds(1) < window_end,
+        "published shadow must leave one second for exact observations"
+    );
     let rows = (0..SHADOW_OBSERVATION_COUNT).map(|index| {
         let offset_micros = i64::try_from(index).expect("shadow index") * 1_000_000
             / i64::try_from(SHADOW_OBSERVATION_COUNT - 1).expect("shadow observation denominator");
-        let decision_at = window_start + Duration::microseconds(offset_micros);
+        let decision_at = observation_start + Duration::microseconds(offset_micros);
         let comparison_hash = ResearchHasher::canonical(&(
             "p03-stable-published-shadow-v1",
             identity.policy_bundle_generation,
@@ -1279,7 +1314,10 @@ pub async fn insert_stable_observations(
         .exec(db)
         .await
         .expect("persist complete P03 production shadow window");
-    tokio::time::sleep(StdDuration::from_millis(1_100)).await;
+    let database_time = db.statement_time().await;
+    if let Ok(remaining) = window_end.signed_duration_since(database_time).to_std() {
+        tokio::time::sleep(remaining + StdDuration::from_millis(10)).await;
+    }
 }
 
 pub async fn terminal_restart_tamper() {

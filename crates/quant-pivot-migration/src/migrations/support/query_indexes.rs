@@ -2329,21 +2329,17 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_recommendation_profile_available_id",
+        name: "idx_quant_recommendation_route_rank",
         table: "quant_recommendation",
         method: IndexMethod::BTree,
         unique: false,
         columns: &[
             IndexColumnSpec {
-                name: "research_profile_artifact_id",
+                name: "report_route_run_id",
                 direction: IndexDirection::Asc,
             },
             IndexColumnSpec {
-                name: "created_at",
-                direction: IndexDirection::Asc,
-            },
-            IndexColumnSpec {
-                name: "recommendation_id",
+                name: "rank",
                 direction: IndexDirection::Asc,
             },
         ],
@@ -2640,44 +2636,6 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_recommendation_report_profile_artifact_kind_decision_at",
-        table: "quant_recommendation_report",
-        method: IndexMethod::BTree,
-        unique: false,
-        columns: &[
-            IndexColumnSpec {
-                name: "research_profile_artifact_id",
-                direction: IndexDirection::Asc,
-            },
-            IndexColumnSpec {
-                name: "report_kind",
-                direction: IndexDirection::Asc,
-            },
-            IndexColumnSpec {
-                name: "decision_at",
-                direction: IndexDirection::Desc,
-            },
-        ],
-        predicate: None,
-    },
-    IndexSpec {
-        name: "idx_quant_recommendation_report_model_decision_at",
-        table: "quant_recommendation_report",
-        method: IndexMethod::BTree,
-        unique: false,
-        columns: &[
-            IndexColumnSpec {
-                name: "model_version_id",
-                direction: IndexDirection::Asc,
-            },
-            IndexColumnSpec {
-                name: "decision_at",
-                direction: IndexDirection::Desc,
-            },
-        ],
-        predicate: None,
-    },
-    IndexSpec {
         name: "idx_quant_recommendation_report_status_decision_at",
         table: "quant_recommendation_report",
         method: IndexMethod::BTree,
@@ -2712,27 +2670,38 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "uq_quant_recommendation_report_current_artifact_scope",
+        name: "uq_quant_recommendation_report_current_scope",
         table: "quant_recommendation_report",
         method: IndexMethod::BTree,
         unique: true,
-        columns: &[
-            IndexColumnSpec {
-                name: "research_profile_artifact_id",
-                direction: IndexDirection::Asc,
-            },
-            IndexColumnSpec {
-                name: "report_kind",
-                direction: IndexDirection::Asc,
-            },
-        ],
+        columns: &[IndexColumnSpec {
+            name: "report_kind",
+            direction: IndexDirection::Asc,
+        }],
         predicate: Some("(status = 'published'::qp_recommendation_report_status)"),
     },
     IndexSpec {
-        name: "uq_quant_recommendation_report_model_run",
-        table: "quant_recommendation_report",
+        name: "idx_quant_report_route_run_report",
+        table: "quant_report_route_run",
         method: IndexMethod::BTree,
-        unique: true,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "report_run_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "finished_at",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_report_route_run_model",
+        table: "quant_report_route_run",
+        method: IndexMethod::BTree,
+        unique: false,
         columns: &[IndexColumnSpec {
             name: "model_run_id",
             direction: IndexDirection::Asc,

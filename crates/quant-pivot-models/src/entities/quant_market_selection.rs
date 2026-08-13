@@ -6,6 +6,7 @@ use sea_orm::entity::prelude::*;
 use super::quant_market_selection_member;
 use crate::types::{
     ContentHash, DecisionPolicySnapshotId, MarketSelectionId, SelectionExclusionSummary,
+    SelectorHashEvidence,
 };
 
 #[sea_orm::model]
@@ -17,6 +18,8 @@ pub struct Model {
     pub decision_at: DateTime<Utc>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub selector_hash: ContentHash,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub selector_evidence: SelectorHashEvidence,
     pub market_count: i32,
     #[sea_orm(column_type = "JsonBinary")]
     pub exclusion_summary: SelectionExclusionSummary,

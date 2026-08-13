@@ -188,6 +188,13 @@ impl ModelRouteEvidenceService {
                 "route full parity subject differs from the immutable model artifact",
             ));
         }
+        if let Some(unsettled) = self.deps.feature_parity.find_unsettled_runtime().await? {
+            return Err(Self::invalid(format!(
+                "runtime feature parity run {} is still {}; route governance requires settled serving evidence",
+                unsettled.run_id,
+                unsettled.status.as_str()
+            )));
+        }
         let state = self
             .deps
             .feature_parity

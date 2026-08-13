@@ -24,7 +24,10 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    clickhouse::{BookL2LedgerRow, BookMicrostructureRow, MarketResolutionRow, TradeTapeRow},
+    clickhouse::{
+        BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS, BookL2LedgerRow, BookMicrostructureRow,
+        MarketResolutionRow, TradeTapeRow,
+    },
     domain::{
         data_plane::{
             CryptoPriceReport, DecisionBoundary, DecisionClock, DecisionSource, DomainObservation,
@@ -954,7 +957,11 @@ pub fn feature_window(
     for row in rows {
         let at = timestamp_millis(row.bucket_time, "microstructure bucket_time")?;
         let available_at = timestamp_millis(row.available_at, "microstructure available_at")?;
-        if at >= start && at <= cutoff && available_at <= boundary.decision_at() {
+        let bucket_closed = row
+            .bucket_time
+            .saturating_add(BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS)
+            <= cutoff.timestamp_millis();
+        if at >= start && bucket_closed && available_at <= boundary.decision_at() {
             buckets.push(bucket_from_row(row, at, available_at));
         }
     }
@@ -1151,7 +1158,11 @@ mod tests {
 
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::market::{MarketRegistryInfo, TokenInfo},
+        clickhouse::{BookMicrostructureRow, ChSchemaVersion},
+        domain::{
+            data_plane::DecisionClock,
+            market::{MarketRegistryInfo, TokenInfo},
+        },
         enums::{
             catalog::CatalogFilterReasonSet,
             common::{CategorySet, MarketCategory, TickSize},
@@ -1161,7 +1172,43 @@ mod tests {
     };
     use rust_decimal_macros::dec;
 
-    use super::{book_prefetch_start, selected_market};
+    use super::{book_prefetch_start, feature_window, selected_market};
+
+    fn microstructure_row(token_id: &TokenId, bucket_time: i64) -> BookMicrostructureRow {
+        BookMicrostructureRow {
+            token_id: token_id.clone(),
+            market_id: None,
+            bucket_time,
+            best_bid_open: None,
+            best_bid_high: None,
+            best_bid_low: None,
+            best_bid_close: None,
+            best_ask_open: None,
+            best_ask_high: None,
+            best_ask_low: None,
+            best_ask_close: None,
+            spread_bps_min: None,
+            spread_bps_avg: None,
+            spread_bps_max: None,
+            mid_price_open: None,
+            mid_price_close: None,
+            top1_depth_usd_avg: None,
+            top5_depth_usd_avg: None,
+            top20_depth_usd_avg: None,
+            imbalance_avg: None,
+            update_count: 0,
+            snapshot_count: 0,
+            delta_count: 0,
+            delete_count: 0,
+            crossed_count: 0,
+            invalid_level_count: 0,
+            gap_count: 0,
+            last_trade_count: 0,
+            max_book_age_ms: 0,
+            schema_version: ChSchemaVersion::FIRST,
+            available_at: bucket_time,
+        }
+    }
 
     fn market() -> MarketRegistryInfo {
         MarketRegistryInfo {
@@ -1232,6 +1279,51 @@ mod tests {
             .expect("prefetch start");
 
         assert_eq!(from, window_start - ChronoDuration::seconds(10));
+    }
+
+    #[test]
+    fn feature_window_half_open() {
+        let cutoff = Utc
+            .with_ymd_and_hms(2026, 7, 12, 12, 0, 0)
+            .single()
+            .expect("timestamp");
+        let boundary = DecisionClock::new(0)
+            .boundary(cutoff)
+            .expect("decision boundary");
+        let token_id = TokenId::from("yes");
+        let rows = [
+            microstructure_row(
+                &token_id,
+                (cutoff - ChronoDuration::seconds(3_601)).timestamp_millis(),
+            ),
+            microstructure_row(
+                &token_id,
+                (cutoff - ChronoDuration::seconds(3_600)).timestamp_millis(),
+            ),
+            microstructure_row(
+                &token_id,
+                (cutoff - ChronoDuration::seconds(1)).timestamp_millis(),
+            ),
+            microstructure_row(
+                &token_id,
+                (cutoff - ChronoDuration::milliseconds(999)).timestamp_millis(),
+            ),
+            microstructure_row(&token_id, cutoff.timestamp_millis()),
+        ];
+
+        let window = feature_window(token_id, &boundary, Duration::from_hours(1), &rows)
+            .expect("feature window");
+
+        assert_eq!(window.buckets.len(), 2);
+        assert_eq!(
+            window.buckets[0].bucket_time,
+            cutoff - ChronoDuration::seconds(3_600)
+        );
+        assert_eq!(
+            window.buckets[1].bucket_time,
+            cutoff - ChronoDuration::seconds(1)
+        );
+        assert_eq!(window.buckets_in(Duration::from_hours(1)).len(), 2);
     }
 
     #[test]

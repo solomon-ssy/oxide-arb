@@ -23,7 +23,7 @@
 //! # Feature flags
 //!
 //! The base research build links the pure-Rust numeric stack (`ndarray` /
-//! `statrs` / `rayon`) and the required `microlp` portfolio solver. `research-jobs`
+//! `statrs` / `rayon`) and the required `HiGHS` MILP portfolio solver. `research-jobs`
 //! (`S3` / `polars` / `parquet`), `optimize` (`argmin`), and `ml-classical`
 //! (`smartcore`) remain independently feature-gated; the production binary
 //! chooses its deployment feature set explicitly.

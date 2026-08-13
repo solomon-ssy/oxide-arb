@@ -38,6 +38,7 @@ use quant_pivot_system_tests::{
         },
         model_spec_fixtures,
         policy_fixtures::bootstrap_default_policy_bundle,
+        research_fixtures::fully_resolved_backtest_funnel,
     },
 };
 use rust_decimal_macros::dec;
@@ -77,7 +78,7 @@ async fn seed_model_version(
             ModelFamily::WeightedFactor,
             model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
-            ModelTrainingContract::settlement_default(),
+            ModelTrainingContract::outcome_default(),
         ))
         .await
         .expect("model spec");
@@ -235,6 +236,7 @@ fn new_report(
             gross_return: dec!(0.125),
             pnl_curve: Vec::new(),
         },
+        portfolio_funnel: fully_resolved_backtest_funnel(1, 10),
         report_hash: content_hash('0'),
         parquet_uri: None,
     };

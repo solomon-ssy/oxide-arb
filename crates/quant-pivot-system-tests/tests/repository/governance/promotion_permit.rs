@@ -15,7 +15,7 @@ use quant_pivot_models::{
             NewPromotionPermit, PromotionGateArtifact, PromotionGateArtifactInput,
             PromotionPermitActor, PromotionPermitInfo, PromotionPermitIssueInput,
             PromotionPermitScope, PromotionPermitScopeInput, PromotionPermitStatus,
-            RevokePromotionPermit,
+            RepresentedRouteSet, RevokePromotionPermit, scenario_model_bindings_hash,
         },
         rbac::{AssignPermissions, AssignRoles, NewRole, NewUser, Permission},
     },
@@ -32,10 +32,12 @@ use quant_pivot_models::{
         quant::QuantRuntimeMode,
         rbac::{Operation, ResourceType, RoleKind, RoleStatus, UserStatus},
     },
+    runtime_config::{BuyModelRoute, PortfolioScenarioModelArtifactBinding},
     types::{
         BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, FeedbackCycleId,
         ModelCandidateManifestId, ModelVersionId, PolicyBundleGeneration, PolicyIdempotencyKey,
-        PromotionPermitId, ResearchProfileId, ResearchProfileRef, RoleCode, RoleId, UserId,
+        PortfolioScenarioModelArtifactId, PromotionPermitId, ResearchProfileId, ResearchProfileRef,
+        RoleCode, RoleId, SchemaVersion, UserId,
     },
 };
 use quant_pivot_repository::{
@@ -179,6 +181,25 @@ impl PermitContext {
             .expect("derive permit candidate explanation validation");
         let cpcv_path_set_id = BacktestPathSetId::from_v7();
         let cpcv_path_set_hash = content_hash('c');
+        let represented_routes =
+            RepresentedRouteSet::from_routes([BuyModelRoute::Crypto]).expect("Crypto Route set");
+        let scenario_model_content_hash = content_hash('d');
+        let portfolio_scenario_model_bindings = vec![PortfolioScenarioModelArtifactBinding {
+            portfolio_scenario_model_artifact_id:
+                PortfolioScenarioModelArtifactId::from_content_hash(&scenario_model_content_hash),
+            ordered_routes: represented_routes.routes,
+            route_set_digest: represented_routes.digest,
+            serving_contract_digest: content_hash('e'),
+            calibration_contract_digest: content_hash('f'),
+            trade_policy_contract_digest: content_hash('6'),
+            scenario_model_schema_version: SchemaVersion::FIRST,
+            capital_time_bucket_contract_digest: content_hash('7'),
+            model_content_hash: scenario_model_content_hash,
+            bound_at: Utc::now(),
+        }];
+        let scenario_model_bindings_hash =
+            scenario_model_bindings_hash(&portfolio_scenario_model_bindings)
+                .expect("candidate scenario bindings hash");
         let promotion_gate = PromotionGateArtifact::try_seal(PromotionGateArtifactInput {
             feedback_cycle_id,
             candidate_recipe_hash: content_hash('b'),
@@ -195,6 +216,7 @@ impl PermitContext {
             cpcv_path_set_id,
             cpcv_path_set_hash,
             explanation_validation_hash: explanation.report_hash,
+            scenario_model_bindings_hash,
         })
         .expect("seal permit promotion gate");
         let calibration = bindings
@@ -224,6 +246,8 @@ impl PermitContext {
             cpcv_path_set_hash,
             profile_ref: candidate.profile_ref.clone(),
             category: MarketCategory::Crypto,
+            portfolio_scenario_model_bindings,
+            scenario_model_bindings_hash,
             feedback_policy_hash,
             decision_policy_snapshot_hash: bindings.policy_snapshot.snapshot_hash,
             explanation_validation: explanation,

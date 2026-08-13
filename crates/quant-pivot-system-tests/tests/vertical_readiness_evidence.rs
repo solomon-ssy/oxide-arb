@@ -8,12 +8,15 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    config::{DeployConfig, WeatherVerticalBindingsConfig, builtin_weather_station_profiles},
+    config::{
+        DeployConfig, DeployConfigLoadRequest, WeatherVerticalBindingsConfig,
+        builtin_weather_station_profiles,
+    },
     enums::domain::DomainFamily,
     hashing::CanonicalDigest,
     runtime_config::QualityGateConfig,
     types::{
-        CRYPTO_PRICE_15M_PROFILE_ID, CapabilityEligibility, ContentHash,
+        CRYPTO_PRICE_15M_PROFILE_ID, CapabilityEligibility, ContentHash, DeploymentEnvironment,
         DomainCapabilityReasonCode, DomainContractCapability, DomainContractFamily,
         ResearchEvaluationTrack, ResearchProfileRef, WEATHER_FORECAST_24H_PROFILE_ID,
         builtin_research_profiles,
@@ -548,28 +551,28 @@ impl CryptoReadinessEvidenceManifest {
                 sequence: 1,
                 access: RecoveryAccess::ReadOnly,
                 authorization: RecoveryAuthorization::None,
-                command: "cargo xtask postgres-schema plan --config-dir config",
+                command: "cargo xtask postgres-schema plan --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 success_condition: "the immutable migration plan is reviewed without changing the target",
             },
             RecoveryStep {
                 sequence: 2,
                 access: RecoveryAccess::Mutating,
                 authorization: RecoveryAuthorization::OperatorRequired,
-                command: "cargo xtask postgres-schema apply --config-dir config",
+                command: "cargo xtask postgres-schema apply --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 success_condition: "the existing deploy owner applies the reviewed immutable plan",
             },
             RecoveryStep {
                 sequence: 3,
                 access: RecoveryAccess::ReadOnly,
                 authorization: RecoveryAuthorization::None,
-                command: "cargo xtask postgres-schema verify --config-dir config",
+                command: "cargo xtask postgres-schema verify --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 success_condition: "the current PostgreSQL identity and runtime contract verify exactly",
             },
             RecoveryStep {
                 sequence: 4,
                 access: RecoveryAccess::ServiceLifecycle,
                 authorization: RecoveryAuthorization::OperatorRequired,
-                command: "cargo run -p quant-pivot-bin -- --config-dir config",
+                command: "cargo run -p quant-pivot-bin -- --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 success_condition: "the current binary starts on the verified schema and its canonical outcome/feedback workers run without typed failures",
             },
             RecoveryStep {
@@ -662,14 +665,14 @@ impl CryptoReadinessEvidenceManifest {
         assert_eq!(input.projection.current_environment.real_label_count, None);
         assert_eq!(
             input.projection.current_environment.preflight_command,
-            "cargo xtask postgres-schema verify --config-dir config"
+            "cargo xtask postgres-schema verify --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development"
         );
         assert_eq!(
             input.projection.current_environment.recovery_commands,
             [
-                "cargo xtask postgres-schema plan --config-dir config",
-                "cargo xtask postgres-schema apply --config-dir config",
-                "cargo xtask postgres-schema verify --config-dir config",
+                "cargo xtask postgres-schema plan --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
+                "cargo xtask postgres-schema apply --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
+                "cargo xtask postgres-schema verify --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
             ]
         );
         assert_eq!(input.projection.label_count, 0);
@@ -694,13 +697,13 @@ impl CryptoReadinessEvidenceManifest {
     ) {
         assert_eq!(
             contract.activation_eligibility,
-            ResearchEvaluationTrack::ResearchOnly
+            ResearchEvaluationTrack::SemiAutoCandidate
         );
         assert_eq!(contract.minimum_mature_labels, 500);
         assert_eq!(contract.minimum_coverage, "0.95");
         assert_eq!(contract.cpcv_minimum_paths, 21);
         assert_eq!(contract.minimum_deflated_sharpe_ratio, "0.95");
-        assert_eq!(contract.maximum_probability_backtest_overfitting, "0.5");
+        assert_eq!(contract.maximum_probability_backtest_overfitting, "0.05");
         assert_eq!(contract.shadow_minimum_observations, 1_000);
         assert_eq!(contract.required_shadow_window_secs, 86_400);
         let distinct = gates
@@ -724,7 +727,7 @@ impl CryptoReadinessEvidenceManifest {
         assert!(recovery.iter().any(|step| {
             step.access == RecoveryAccess::Mutating
                 && step.authorization == RecoveryAuthorization::OperatorRequired
-                && step.command == "cargo xtask postgres-schema apply --config-dir config"
+                && step.command == "cargo xtask postgres-schema apply --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development"
         }));
         assert_eq!(references.len(), 3);
     }
@@ -1524,10 +1527,10 @@ impl WeatherReadinessEvidenceManifest {
             operational_activation: OperationalActivationVerdict::Blocked,
             activation_claim: ActivationClaim::NotClaimed,
             current_environment: WeatherCurrentEnvironment {
-                postgres_preflight_command: "cargo xtask postgres-schema verify --config-dir config",
+                postgres_preflight_command: "cargo xtask postgres-schema verify --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 postgres_preflight_access: PreflightAccess::ReadOnly,
                 postgres_blocker: UpstreamBlocker::PostgresSchemaIdentityMismatch,
-                clickhouse_preflight_command: "cargo xtask clickhouse-schema verify --config-dir config",
+                clickhouse_preflight_command: "cargo xtask clickhouse-schema verify --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 clickhouse_preflight_access: PreflightAccess::ReadOnly,
                 clickhouse_facts: current_facts,
             },
@@ -1645,49 +1648,49 @@ impl WeatherReadinessEvidenceManifest {
                 sequence: 1,
                 access: RecoveryAccess::ReadOnly,
                 authorization: RecoveryAuthorization::None,
-                command: "cargo xtask postgres-schema plan --config-dir config",
+                command: "cargo xtask postgres-schema plan --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 success_condition: "the immutable PostgreSQL plan is reviewed without changing the target",
             },
             RecoveryStep {
                 sequence: 2,
                 access: RecoveryAccess::Mutating,
                 authorization: RecoveryAuthorization::OperatorRequired,
-                command: "cargo xtask postgres-schema apply --config-dir config",
+                command: "cargo xtask postgres-schema apply --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 success_condition: "the existing deploy owner applies the reviewed immutable PostgreSQL plan",
             },
             RecoveryStep {
                 sequence: 3,
                 access: RecoveryAccess::ReadOnly,
                 authorization: RecoveryAuthorization::None,
-                command: "cargo xtask postgres-schema verify --config-dir config",
+                command: "cargo xtask postgres-schema verify --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 success_condition: "the current PostgreSQL identity and runtime contract verify exactly",
             },
             RecoveryStep {
                 sequence: 4,
                 access: RecoveryAccess::ReadOnly,
                 authorization: RecoveryAuthorization::None,
-                command: "cargo xtask clickhouse-schema plan --config-dir config",
+                command: "cargo xtask clickhouse-schema plan --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 success_condition: "the immutable ClickHouse initialization plan is reviewed without DDL",
             },
             RecoveryStep {
                 sequence: 5,
                 access: RecoveryAccess::Mutating,
                 authorization: RecoveryAuthorization::OperatorRequired,
-                command: "cargo xtask clickhouse-schema apply-online --config-dir config",
+                command: "cargo xtask clickhouse-schema apply-online --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 success_condition: "the existing deploy owner initializes or restores the reviewed online-safe ClickHouse identity",
             },
             RecoveryStep {
                 sequence: 6,
                 access: RecoveryAccess::ReadOnly,
                 authorization: RecoveryAuthorization::None,
-                command: "cargo xtask clickhouse-schema verify --config-dir config",
+                command: "cargo xtask clickhouse-schema verify --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 success_condition: "the current ClickHouse ledger and Weather PIT fact tables verify exactly",
             },
             RecoveryStep {
                 sequence: 7,
                 access: RecoveryAccess::ServiceLifecycle,
                 authorization: RecoveryAuthorization::OperatorRequired,
-                command: "cargo run -p quant-pivot-bin -- --config-dir config",
+                command: "cargo run -p quant-pivot-bin -- --config-file /absolute/path/to/quant-pivot.toml --expected-environment local-development",
                 success_condition: "the current binary reconciles the live catalog and official Weather source cursors without typed failures",
             },
             RecoveryStep {
@@ -1845,17 +1848,17 @@ fn historical_fixture(
 }
 
 fn current_deploy() -> DeployConfig {
-    let config_dir = env::var_os("W4_E09_CONFIG_DIR").unwrap_or_else(|| {
+    let config_file = env::var_os("W4_E09_CONFIG_FILE").unwrap_or_else(|| {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config")
+            .join("../../config/quant-pivot.toml")
             .into_os_string()
     });
-    DeployConfig::load(
-        Path::new(&config_dir)
-            .to_str()
-            .expect("W4-E09 config directory is valid UTF-8"),
-    )
-    .expect("load current deploy config without printing secrets")
+    let expected_environment =
+        env::var("W4_E09_EXPECTED_ENVIRONMENT").unwrap_or_else(|_| "local-development".to_owned());
+    let environment = DeploymentEnvironment::parse(&expected_environment)
+        .expect("W4-E09 expected environment is valid");
+    let request = DeployConfigLoadRequest::new(PathBuf::from(config_file), environment);
+    DeployConfig::load(&request).expect("load current deploy config without printing secrets")
 }
 
 #[test]

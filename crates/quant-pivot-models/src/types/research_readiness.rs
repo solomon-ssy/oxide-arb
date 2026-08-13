@@ -43,6 +43,21 @@ wire_enum! {
     }
 }
 
+wire_enum! {
+    /// Exact physical representation of a research source's event-time column.
+    ///
+    /// Readiness queries must not infer this from a table or column name. The
+    /// representation is part of the signed registry contract because applying
+    /// a `DateTime64` conversion to an integer epoch column changes both query
+    /// validity and the meaning of the resulting retention evidence.
+    @derive(PartialOrd, Ord)
+    pub enum ResearchSourceTimeEncoding {
+        PostgresTimestampWithTimeZone => "postgres_timestamptz",
+        ClickHouseDateTime64Milliseconds => "clickhouse_datetime64_milliseconds",
+        ClickHouseUnixMilliseconds => "clickhouse_unix_milliseconds",
+    }
+}
+
 /// Generic `PostgreSQL` coverage returned by typed repository probes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryCoverage {
@@ -65,6 +80,7 @@ pub struct ResearchSourceBinding {
     pub storage: ResearchSourceStorageKind,
     pub object: String,
     pub time_column: String,
+    pub time_encoding: ResearchSourceTimeEncoding,
     pub partition_key: Option<String>,
     pub filter: Option<ResearchSourceFilter>,
 }
@@ -162,6 +178,7 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Source::ClobL2,
             "quant_book_stream_session",
             "opened_at",
+            ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
             "toYYYYMM(session_date)",
             None,
         ),
@@ -169,6 +186,7 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Source::ClobL2,
             "quant_book_l2_ledger",
             "venue_event_time",
+            ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
             "toYYYYMM(event_date)",
             None,
         ),
@@ -176,6 +194,7 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Source::ClobL2,
             "book_microstructure_1s",
             "bucket_time",
+            ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
             "toYYYYMM(bucket_date)",
             None,
         ),
@@ -183,6 +202,7 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Source::TradeTape,
             "quant_trade_tape",
             "event_time",
+            ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
             "toYYYYMM(event_date)",
             None,
         ),
@@ -190,6 +210,7 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Source::BinanceMarketData,
             "quant_crypto_price_report",
             "event_time",
+            ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
             "toYYYYMM(event_time)",
             Some(("source_id", "binance")),
         ),
@@ -197,6 +218,7 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Source::PolymarketRtds,
             "quant_crypto_price_report",
             "event_time",
+            ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
             "toYYYYMM(event_time)",
             Some(("source_id", "polymarket_rtds_binance")),
         ),
@@ -204,6 +226,7 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Source::DomainObservation,
             "quant_domain_observation",
             "event_time",
+            ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
             "toYYYYMM(event_date)",
             None,
         ),
@@ -211,6 +234,7 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Source::AviationWeather,
             "quant_weather_observation_fact",
             "observed_at",
+            ResearchSourceTimeEncoding::ClickHouseUnixMilliseconds,
             "intDiv(local_date, 3660)",
             Some(("source_id", "aviation_weather")),
         ),
@@ -218,6 +242,7 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Source::GhcnhCalibration,
             "quant_weather_observation_fact",
             "observed_at",
+            ResearchSourceTimeEncoding::ClickHouseUnixMilliseconds,
             "intDiv(local_date, 3660)",
             Some(("source_id", "ghcnh")),
         ),
@@ -225,6 +250,7 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Source::GefsEnsemble,
             "quant_weather_forecast_fact",
             "valid_time",
+            ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
             "toYYYYMM(reference_time)",
             Some(("source_id", "gefs")),
         ),
@@ -232,6 +258,7 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Source::PolymarketResolution,
             "market_resolution_event",
             "resolved_at",
+            ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
             "toYYYYMM(resolved_date)",
             None,
         ),
@@ -252,6 +279,7 @@ fn pg_binding(
         storage,
         object: object.to_owned(),
         time_column: time_column.to_owned(),
+        time_encoding: ResearchSourceTimeEncoding::PostgresTimestampWithTimeZone,
         partition_key: None,
         filter: None,
     }
@@ -261,6 +289,7 @@ fn ch_binding(
     source: ResearchReadinessSource,
     object: &str,
     time_column: &str,
+    time_encoding: ResearchSourceTimeEncoding,
     partition_key: &str,
     filter: Option<(&str, &str)>,
 ) -> ResearchSourceBinding {
@@ -269,6 +298,7 @@ fn ch_binding(
         storage: ResearchSourceStorageKind::ClickHouseTable,
         object: object.to_owned(),
         time_column: time_column.to_owned(),
+        time_encoding,
         partition_key: Some(partition_key.to_owned()),
         filter: filter.map(|(column, value)| ResearchSourceFilter {
             column: column.to_owned(),
@@ -285,6 +315,7 @@ pub struct RetentionSourceObservationV1 {
     pub storage: ResearchSourceStorageKind,
     pub object: String,
     pub time_column: String,
+    pub time_encoding: ResearchSourceTimeEncoding,
     pub earliest_event_time: Option<DateTime<Utc>>,
     pub latest_event_time: Option<DateTime<Utc>>,
     pub row_count: u64,
@@ -341,13 +372,20 @@ impl RetentionRunwayEvidenceV1 {
                                 && observation
                                     .partition_key
                                     .as_deref()
-                                    .is_some_and(|key| key.contains("toYYYYMM("))
+                                    .is_some_and(|key| !key.trim().is_empty())
+                                && matches!(
+                                    observation.time_encoding,
+                                    ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds
+                                        | ResearchSourceTimeEncoding::ClickHouseUnixMilliseconds
+                                )
                         }
                         ResearchSourceStorageKind::PostgresLedger
                         | ResearchSourceStorageKind::PostgresVersionedProjection => {
                             observation.active_bytes.is_none()
                                 && observation.active_partition_count.is_none()
                                 && observation.partition_key.is_none()
+                                && observation.time_encoding
+                                    == ResearchSourceTimeEncoding::PostgresTimestampWithTimeZone
                         }
                     }
             })
@@ -370,6 +408,7 @@ impl RetentionRunwayEvidenceV1 {
                             && observation.storage == binding.storage
                             && observation.object == binding.object
                             && observation.time_column == binding.time_column
+                            && observation.time_encoding == binding.time_encoding
                             && observation.partition_key == binding.partition_key
                     })
                     .count()
@@ -434,7 +473,7 @@ mod tests {
     use super::{
         ContentHash, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION, ResearchReadinessSource,
         ResearchSourceBinding, ResearchSourceRegistry, ResearchSourceStorageKind,
-        RetentionRunwayEvidenceV1, RetentionSourceObservationV1,
+        ResearchSourceTimeEncoding, RetentionRunwayEvidenceV1, RetentionSourceObservationV1,
         SHADOW_LATENCY_PROFILE_FORMAT_VERSION, ShadowLatencyProfileV1,
     };
 
@@ -460,6 +499,7 @@ mod tests {
                     storage: ResearchSourceStorageKind::ClickHouseTable,
                     object: "quant_book_l2_ledger".to_owned(),
                     time_column: "persisted_time".to_owned(),
+                    time_encoding: ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
                     earliest_event_time: Some(observed_at - Duration::days(220)),
                     latest_event_time: Some(observed_at),
                     row_count: 100,
@@ -481,7 +521,12 @@ mod tests {
         let mut evidence = RetentionRunwayEvidenceV1::test_fixture();
         assert!(evidence.proven());
 
-        evidence.observations[0].partition_key = Some("toDate(persisted_time)".to_owned());
+        evidence.observations[0].partition_key = Some(" ".to_owned());
+        assert!(!evidence.proven());
+
+        evidence = RetentionRunwayEvidenceV1::test_fixture();
+        evidence.observations[0].time_encoding =
+            ResearchSourceTimeEncoding::PostgresTimestampWithTimeZone;
         assert!(!evidence.proven());
 
         evidence = RetentionRunwayEvidenceV1::test_fixture();
@@ -504,6 +549,7 @@ mod tests {
                 storage: ResearchSourceStorageKind::ClickHouseTable,
                 object: "quant_book_l2_ledger".to_owned(),
                 time_column: "persisted_time".to_owned(),
+                time_encoding: ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
                 partition_key: Some("toYYYYMM(persisted_time)".to_owned()),
                 filter: None,
             }],

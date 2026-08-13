@@ -332,6 +332,7 @@ pg_enum! {
     /// direction is an execution-layer concern (see [`crate::enums::common::Side`]),
     /// and the sell/exit plan is expressed entirely by `ExitPlan`; this enum never
     /// encodes a sell.
+    @derive(schemars::JsonSchema)
     pub enum OutcomeSide {
         Yes => "yes",
         No => "no",
@@ -1385,59 +1386,8 @@ pg_enum! {
     pub enum AccountSource {
         #[default]
         Polymarket => "polymarket",
-    }
-}
-
-wire_enum! {
-    /// Position-sizing model that produced a recommendation's size.
-    @derive(Default)
-    pub enum SizingModelKind {
-        /// Fractional Kelly — the single production sizing model.
-        #[default]
-        Kelly => "kelly",
-    }
-}
-
-wire_enum! {
-    /// The cap that bound a recommendation's final size.
-    ///
-    /// `None` means no hard cap bound the size (it was limited only by the
-    /// Kelly / curve suggestion itself).
-    @derive(Default)
-    pub enum BindingConstraint {
-        /// Total deployable portfolio budget.
-        PortfolioBudget => "portfolio_budget",
-        /// Available cash (collateral − reserved) exhausted.
-        AvailableCash => "available_cash",
-        /// Per-recommendation absolute size cap (`max_single_recommendation_usd`).
-        SingleRecommendationCap => "single_recommendation_cap",
-        /// Per-market exposure cap.
-        SingleMarketCap => "single_market_cap",
-        /// Per-event exposure cap.
-        EventCap => "event_cap",
-        /// Per-category exposure cap.
-        CategoryCap => "category_cap",
-        /// Visible-liquidity usage cap.
-        LiquidityCap => "liquidity_cap",
-        /// Correlated-cluster exposure cap (`max_correlated_exposure_usd`);
-        /// also emitted when the Kelly-stage correlation shrink
-        /// (`f_i /= 1 + (n-1)·ρ̄`) is the dominant sizing shrink. This shares
-        /// the exposure cap's root cause but occurs at a different pipeline stage.
-        CorrelationCap => "correlation_cap",
-        /// Drawdown-scaling cap: the Kelly-stage drawdown multiplier was the
-        /// dominant shrink on the final size.
-        DrawdownCap => "drawdown_cap",
-        /// Confidence-floor cap: the Kelly-stage confidence multiplier was the
-        /// dominant shrink on the final size.
-        ConfidenceCap => "confidence_cap",
-        /// Fractional-Kelly upper bound.
-        KellyCap => "kelly_cap",
-        /// Total simultaneous portfolio exposure hard cap
-        /// (`portfolio.kelly_safety.max_aggregate_exposure_pct`).
-        AggregateExposureCap => "aggregate_exposure_cap",
-        /// No hard cap bound the size.
-        #[default]
-        None => "none",
+        /// Governed immutable PIT replay; forbidden for a publishable live report.
+        HistoricalReplay => "historical_replay",
     }
 }
 
@@ -1460,15 +1410,6 @@ wire_enum! {
         AvailableCashExhausted => "available_cash_exhausted",
         /// No candidate carried a positive signal.
         NoPositiveSignal => "no_positive_signal",
-        /// The active model has no calibrated probability and therefore cannot
-        /// produce a truthful capital plan.
-        ReturnModelUncalibrated => "return_model_uncalibrated",
-        /// The active model does not bind a Published, hash-consistent trade
-        /// policy and therefore cannot produce an executable trade plan.
-        TradePolicyUnavailable => "trade_policy_unavailable",
-        /// The system was degraded below the generation threshold (readiness
-        /// gate not `Operational`, or the portfolio solver was unavailable).
-        SystemDegraded => "system_degraded",
     }
 }
 
@@ -1479,64 +1420,8 @@ wire_enum! {
         /// The runtime mode is report-only.
         #[default]
         ReportOnlyMode => "report_only_mode",
-        /// The risk envelope failed validation.
-        RiskEnvelopeInvalid => "risk_envelope_invalid",
-        /// Inputs were stale at decision time.
-        DataStale => "data_stale",
-        /// Confidence was below the execution floor.
-        LowConfidence => "low_confidence",
-        /// An operator manually blocked execution.
-        ManuallyBlocked => "manually_blocked",
-        /// The candidate has not passed shadow comparison.
-        ShadowNotPassed => "shadow_not_passed",
-        /// The execution budget is exhausted.
-        BudgetExhausted => "budget_exhausted",
-        /// The model's return model is `Heuristic` (uncalibrated) — fail-closed
-        /// `SemiAuto`/`AutoExecution` never build an intent
-        /// off an uncalibrated return estimate.
-        ReturnModelUncalibrated => "return_model_uncalibrated",
-        /// `ModelVersion` has no hash-verified Published policy or no executable cohort.
-        TradePolicyUnavailable => "trade_policy_unavailable",
-    }
-}
-
-wire_enum! {
-    /// Why a candidate was dropped during portfolio planning (not published).
-    ///
-    /// The planner records one reason per rejected candidate; the report rolls
-    /// these up into [`crate::types::RejectionReasonCount`].
-    @derive(Default)
-    pub enum RejectionReason {
-        /// No positive Kelly edge (`f* <= 0`); never funded.
-        #[default]
-        NoPositiveSignal => "no_positive_signal",
-        /// The candidate's edge inputs were invalid (non-positive downside, or a
-        /// degenerate win probability) — sizing refused to fabricate a bet.
-        InvalidEdgeInputs => "invalid_edge_inputs",
-        /// The return model did not provide a calibrated win probability.
-        ReturnModelUncalibrated => "return_model_uncalibrated",
-        /// No unique policy-validated decision-time entry tier could be walked.
-        ExecutableEntryUnavailable => "executable_entry_unavailable",
-        /// The allocated size fell below `min_recommendation_usd`.
-        BelowMinSize => "below_min_size",
-        /// The total deployable budget room was exhausted.
-        BudgetExhausted => "budget_exhausted",
-        /// The per-market exposure cap was exhausted.
-        MarketCapExhausted => "market_cap_exhausted",
-        /// The per-event exposure cap was exhausted.
-        EventCapExhausted => "event_cap_exhausted",
-        /// The per-category exposure cap was exhausted.
-        CategoryCapExhausted => "category_cap_exhausted",
-        /// The visible liquidity could not support the minimum useful size.
-        LiquidityInfeasible => "liquidity_infeasible",
-        /// The correlated-cluster exposure cap was exhausted.
-        CorrelationCapExhausted => "correlation_cap_exhausted",
-        /// Available cash (collateral − reserved) was exhausted.
-        AvailableCashExhausted => "available_cash_exhausted",
-        /// Fundable, but ranked beyond the report's `top_n` cut.
-        BeyondTopN => "beyond_top_n",
-        /// The total simultaneous portfolio exposure hard cap was exhausted.
-        AggregateExposureCapExhausted => "aggregate_exposure_cap_exhausted",
+        /// The report-level order-count or USD automation cap was exhausted.
+        AutomationCapExceeded => "automation_cap_exceeded",
     }
 }
 
@@ -1579,10 +1464,10 @@ wire_enum! {
 wire_enum! {
     /// The source a `Calibrated` return model's downside (bps) is read from.
     ///
-    /// A single variant today (`MfeMae`): the system's Kelly/TP-SL structure
-    /// already treats "downside" as a stop distance, not a binary-settlement
-    /// full loss, so `MfeMae` (the empirical max-adverse-excursion label) is
-    /// the semantically correct source.
+    /// A single variant today (`MfeMae`): Route-local executable-policy fitting
+    /// treats "downside" as adverse excursion before exit, not as an arbitrary
+    /// cross-Route objective weight. Global sizing instead consumes complete
+    /// scenario cashflows and exact USD risk constraints.
     @derive(Default, schemars::JsonSchema)
     pub enum DownsideSource {
         /// Mean `max_adverse_excursion_bps` observed in the calibration split's
@@ -1662,65 +1547,6 @@ pg_enum! {
         /// Official Deposit Wallet; funder is the deterministic current
         /// `BeaconProxy` wallet and CLOB orders use `Poly1271`.
         DepositWallet => "deposit_wallet",
-    }
-}
-
-wire_enum! {
-    /// LP solver backend that produced a portfolio plan's allocation.
-    @derive(Default, schemars::JsonSchema)
-    pub enum PortfolioSolverKind {
-        /// Pure-Rust `microlp` (default; no native dependency, ships in any build).
-        #[default]
-        Microlp => "microlp",
-        /// Native `HiGHS` (optional performance backend; `lp-solver-highs` feature).
-        Highs => "highs",
-    }
-}
-
-wire_enum! {
-    /// Which LP solve mode produced the allocation.
-    @derive(Default)
-    pub enum PortfolioSolveMode {
-        /// Exact MILP with binary `TopN` inclusion (the production primary path).
-        #[default]
-        MilpExact => "milp_exact",
-        /// Continuous LP relaxation with deterministic integer recovery (the
-        /// fail-closed fallback and the deterministic backtest mode).
-        ContinuousRelaxation => "continuous_relaxation",
-    }
-}
-
-wire_enum! {
-    /// Terminal status of the portfolio optimizer for one plan (observability of
-    /// which solve path actually produced the allocation).
-    @derive(Default)
-    pub enum OptimizerSolverStatus {
-        /// Solved to proven optimality.
-        #[default]
-        Optimal => "optimal",
-        /// A feasible (not proven-optimal) solution was returned.
-        Feasible => "feasible",
-        /// The model was infeasible (only contradictory constraints can cause this,
-        /// as the empty allocation is always feasible).
-        Infeasible => "infeasible",
-        /// The MILP path failed and the continuous relaxation produced the plan.
-        FellBackRelaxation => "fell_back_relaxation",
-        /// No solver could produce a plan; an empty (all-zero) allocation was emitted.
-        SolverUnavailable => "solver_unavailable",
-    }
-}
-
-wire_enum! {
-    /// Provenance of the correlation clusters used for the correlation-exposure cap.
-    @derive(Default)
-    pub enum CorrelationSource {
-        /// Estimated from historical mid-price co-movement (Pearson on log returns).
-        Historical => "historical",
-        /// Event/category proxy clusters (insufficient history for estimation).
-        Proxy => "proxy",
-        /// Correlation constraint disabled; no clustering or correlated-exposure cap.
-        #[default]
-        Disabled => "disabled",
     }
 }
 

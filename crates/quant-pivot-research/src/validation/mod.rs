@@ -32,10 +32,10 @@ pub mod trials;
 pub use cpcv::{
     BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
     DefaultCombinatorialPurgedBacktester, FoldModelSource, FoldRuntime, FoldTrainingIdentity,
-    FoldTrainingRequest, GroupEvaluation, GroupRowFilter, PolicyFoldRuntime, RankObservation,
-    ReplayEngine,
+    FoldTrainingRequest, GroupEvaluation, GroupRowFilter, PathEconomicReplay, PolicyFoldRuntime,
+    PurgedPortfolioFoldRuntime, RankObservation, ReplayEngine,
 };
 pub use dsr::{DsrInput, DsrReport, min_track_record_length};
-pub use pbo::{PboInput, TrialPerformanceMatrix, probability_of_backtest_overfitting};
+pub use pbo::{PboInput, TrialPerformanceMatrix, analyze_selection_bias};
 pub use purge::{DefaultPurgedSplitter, PurgeConfig, PurgedSplit, PurgedSplitter, TimelineGroup};
 pub use trials::{ClassicalTrialGrid, Trial, TrialGridSpec, WeightedFactorTrialGrid};

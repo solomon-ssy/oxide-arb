@@ -18,7 +18,7 @@ use crate::{
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelComparisonReportId,
         ModelRunId, ModelVersionId, Probability, TrainingDatasetId,
-        backtest::{CategoryMetrics, ExpectedVsRealized, PnlSimulation},
+        backtest::{BacktestPortfolioFunnel, CategoryMetrics, ExpectedVsRealized, PnlSimulation},
     },
 };
 
@@ -79,6 +79,7 @@ pub struct BacktestReportView {
     pub category_breakdown: CategoryMetrics,
     pub tail_loss: Decimal,
     pub report_pnl_simulation: PnlSimulation,
+    pub portfolio_funnel: BacktestPortfolioFunnel,
     pub report_hash: ContentHash,
     pub parquet_uri: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -135,6 +136,7 @@ impl BacktestReportView {
             category_breakdown: info.category_breakdown,
             tail_loss: info.tail_loss,
             report_pnl_simulation: info.report_pnl_simulation,
+            portfolio_funnel: info.portfolio_funnel,
             report_hash: info.report_hash,
             parquet_uri: info.parquet_uri,
             created_at: info.created_at,

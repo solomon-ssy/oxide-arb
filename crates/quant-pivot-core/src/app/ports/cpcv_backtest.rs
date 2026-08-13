@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
+    config::PortfolioSolverDeployConfig,
     domain::{
         api::{BacktestPathSetView, CpcvBacktestJobParams},
         ports::CpcvBacktestPort,
@@ -17,7 +18,7 @@ use quant_pivot_models::{
     enums::quant::{DatasetPurpose, ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     types::{
         BacktestPathSetId, DecisionPolicySnapshotId, ModelRunId, ModelVersionId, TrainingDatasetId,
-        model_lineage::ModelVersionDerivation, model_metrics::ModelVersionMetricsDefinition,
+        Usd, model_lineage::ModelVersionDerivation, model_metrics::ModelVersionMetricsDefinition,
     },
 };
 use quant_pivot_repository::traits::{
@@ -43,6 +44,7 @@ use crate::{
 /// Admin port wired from the canonical [`ResearchBundle`].
 pub struct CoreCpcvBacktestPort {
     compute: Arc<ComputeExecutor>,
+    portfolio_solver: PortfolioSolverDeployConfig,
     artifact_store: Arc<dyn ArtifactStore>,
     path_set_repo: Arc<dyn BacktestPathSetRepository>,
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
@@ -54,6 +56,7 @@ pub struct CoreCpcvBacktestPort {
 /// Explicit dependencies for the canonical CPCV execution adapter.
 pub struct CoreCpcvBacktestPortDeps {
     pub compute: Arc<ComputeExecutor>,
+    pub portfolio_solver: PortfolioSolverDeployConfig,
     pub artifact_store: Arc<dyn ArtifactStore>,
     pub path_set_repo: Arc<dyn BacktestPathSetRepository>,
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
@@ -74,6 +77,7 @@ impl CoreCpcvBacktestPort {
     pub fn new(deps: CoreCpcvBacktestPortDeps) -> Self {
         Self {
             compute: deps.compute,
+            portfolio_solver: deps.portfolio_solver,
             artifact_store: deps.artifact_store,
             path_set_repo: deps.path_set_repo,
             model_registry_repo: deps.model_registry_repo,
@@ -88,6 +92,7 @@ impl CoreCpcvBacktestPort {
     pub fn from_research(research: &ResearchBundle) -> Self {
         Self::new(CoreCpcvBacktestPortDeps {
             compute: Arc::clone(&research.compute),
+            portfolio_solver: research.portfolio_solver,
             artifact_store: Arc::clone(&research.artifact_store),
             path_set_repo: Arc::clone(&research.backtest_path_set_repo),
             model_registry_repo: Arc::clone(&research.model_registry_repo),
@@ -101,7 +106,8 @@ impl CoreCpcvBacktestPort {
         &self,
         source: &VerifiedModelServingPreimage,
     ) -> QuantResult<CpcvBacktestService> {
-        let runtime = &source.policy_snapshot().snapshot;
+        let policy = source.policy_snapshot();
+        let runtime = &policy.snapshot;
         let model_family = source
             .artifact()
             .header()
@@ -124,12 +130,21 @@ impl CoreCpcvBacktestPort {
                 artifact_store: Arc::clone(&self.artifact_store),
             },
             CpcvBacktestConfig::from_policy(runtime, model_family)?,
-            &runtime.execution_risk.portfolio,
+            policy,
+            self.portfolio_solver,
             ReplayConfig {
                 features: runtime.profile_artifacts.features.definition.clone(),
                 factors: runtime.profile_artifacts.scoring.definition.clone(),
                 domain: runtime.profile_artifacts.domain.definition.clone(),
                 data_quality: runtime.recommendation.data_quality.clone(),
+                liquidity_cap_usd: Usd::new(
+                    runtime
+                        .execution_risk
+                        .portfolio
+                        .exposure_limits
+                        .max_single_recommendation_usd
+                        .value,
+                ),
                 bias_table,
             },
         )
@@ -197,6 +212,7 @@ impl CoreCpcvBacktestPort {
             &source,
             dataset,
             DatasetPurpose::Training,
+            &bindings.policy_snapshot,
         ))
         .await?;
         let parent = match version.verified_derivation().map_err(|error| {
@@ -297,11 +313,14 @@ impl CoreCpcvBacktestPort {
             paths: outcome.path_set.paths.clone().into(),
             deflated_sharpe: outcome.dsr.deflated_sharpe,
             dsr_benchmark_sharpe: outcome.dsr.benchmark_sharpe,
-            pbo: outcome.pbo,
+            pbo: outcome.cscv_selection_evidence.pbo,
+            cscv_selection_evidence: outcome.cscv_selection_evidence.clone(),
             min_track_record_length_secs: outcome
                 .min_track_record_length
                 .map(|duration| duration.num_seconds()),
-            trial_count: i64::from(outcome.trial_count),
+            dsr_conservative_independent_trial_count: i64::from(
+                outcome.dsr_conservative_independent_trial_count,
+            ),
             trial_grid_count: i64::from(outcome.trial_grid_count),
             coord_search_effective_n: i64::from(outcome.coord_search_effective_n),
         })

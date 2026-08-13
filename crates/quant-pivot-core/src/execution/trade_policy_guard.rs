@@ -4,7 +4,7 @@ use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     domain::quant::{ModelVersionInfo, RecommendationInfo},
     enums::quant::TradePolicyStatus,
-    types::{RecommendationTradePlan, ResearchProfileRef, TradePolicyArtifactId},
+    types::{ResearchProfileRef, TradePolicyArtifactId},
 };
 use quant_pivot_repository::traits::TradePolicyRepository;
 use quant_pivot_research::hashing::ResearchHasher;
@@ -16,14 +16,12 @@ pub async fn require_frozen_trade_policy(
     model_version: &ModelVersionInfo,
     recommendation: &RecommendationInfo,
 ) -> QuantResult<ResearchProfileRef> {
-    let RecommendationTradePlan::Frozen { policy, sizing, .. } = &recommendation.trade_plan else {
-        return Err(denied("recommendation trade plan is unavailable").into());
-    };
-    if model_version.profile_ref != recommendation.profile_ref {
-        return Err(denied(
-            "recommendation research profile does not match the frozen model version",
-        )
-        .into());
+    let policy = &recommendation.trade_plan.policy;
+    let sizing = &recommendation.trade_plan.sizing;
+    if model_version.profile_ref != policy.cohort_key.profile_ref {
+        return Err(
+            denied("frozen trade-policy cohort does not match the model research profile").into(),
+        );
     }
     if model_version.trade_policy_artifact_id.as_ref() != Some(&policy.artifact_id)
         || model_version.trade_policy_hash.as_ref() != Some(&policy.artifact_hash)
@@ -67,9 +65,9 @@ pub async fn require_frozen_trade_policy(
     if cohort.key != policy.cohort_key {
         return Err(denied("frozen trade-policy cohort provenance does not match artifact").into());
     }
-    if cohort.key.profile_ref != recommendation.profile_ref {
+    if cohort.key.profile_ref != model_version.profile_ref {
         return Err(denied(
-            "trade-policy cohort research profile does not match the recommendation",
+            "trade-policy cohort research profile does not match the frozen model version",
         )
         .into());
     }

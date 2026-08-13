@@ -96,6 +96,7 @@ pub mod quant_recommendation_resolution_outcome;
 pub mod quant_reconciliation;
 pub mod quant_report_data_quality_snapshot;
 pub mod quant_report_fact_delivery;
+pub mod quant_report_route_run;
 pub mod quant_report_run;
 pub mod quant_report_schedule_gap;
 pub mod quant_report_schedule_state;

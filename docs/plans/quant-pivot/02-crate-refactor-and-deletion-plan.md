@@ -5,8 +5,8 @@
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
 > - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `post_deployment_behavior`: 本次实现只交付唯一终态 clean-install contract；不设计升级、降级、旧版本共存或历史数据转换。
+> - `rollback_and_data_verification`: 仅在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置需要操作者另行授权。
 
 > 状态：破坏式实施清单
 >
@@ -220,7 +220,9 @@ quant-pivot-risk/src/
 
 ### 4.3 禁止迁移
 
-旧 `QuarterKelly` 不能作为默认 sizing。quant-pivot 可以有 Kelly factor，但 sizing 必须先由 portfolio planner 结合置信度、流动性、相关性、最大损失、报告 horizon 统一裁剪。
+旧 `QuarterKelly`、fractional Kelly 和任何 per-candidate sizing model 全部删除。production sizing 只能从
+真实 L2 生成的离散 `ExecutableEconomicTier` 中，由跨 Route 联合场景的唯一全局 MILP 选择；不存在
+confidence/correlation proxy 或 solver fallback。
 
 ## 5. `quant-pivot-control` 合并/改名
 

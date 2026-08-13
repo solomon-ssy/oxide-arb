@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use chrono::Duration;
+use chrono::{DateTime, Duration};
 use quant_pivot_models::{
     clickhouse::{ChUsd, QuantReportRecommendationFactRow, ReportMarketFunnelRow},
     config::ClickHouseConfig,
@@ -18,10 +18,10 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::ReportDeliveryPolicy,
     types::{
-        REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV1,
-        ReportFactNotificationRecommendationV1, ReportFactNotificationV1,
+        REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV2,
+        ReportFactNotificationRecommendationV2, ReportFactNotificationV2,
         ReportFactTableCommitment, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
-        ReportRunId, ReportTriggerKey, WorkerId,
+        ReportTriggerKey, Usd, WorkerId,
     },
 };
 use quant_pivot_repository::{
@@ -29,6 +29,7 @@ use quant_pivot_repository::{
     postgres::{PgRecommendationReportRepository, PgReportRunRepository},
     traits::{FactWriter, RecommendationReportRepository, ReportRunRepository},
 };
+use rust_decimal::prelude::ToPrimitive;
 use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection};
 
 use quant_pivot_research::artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore};
@@ -48,21 +49,32 @@ pub async fn materialize_report_facts(
         .recommendations
         .iter()
         .map(|recommendation| {
+            let economics = recommendation.economics_json;
             Ok(QuantReportRecommendationFactRow {
                 event_time: report.decision_at.timestamp_millis(),
                 recommendation_report_id: report.recommendation_report_id,
                 recommendation_id: recommendation.recommendation_id,
+                report_route_run_id: recommendation.report_route_run_id,
+                economic_tier_id: recommendation.economic_tier_id,
+                route: recommendation.route.as_str().to_owned(),
                 rank: u32::try_from(recommendation.rank)?,
                 market_id: recommendation.market_id.clone(),
                 token_id: recommendation.token_id.clone(),
                 side: recommendation.outcome_side.into(),
-                score: recommendation.composite_score.into(),
-                risk_adjusted_score: recommendation.risk_adjusted_score.into(),
-                trade_plan_available: recommendation.trade_plan.is_available(),
-                suggested_usd: recommendation
-                    .trade_plan
-                    .sizing()
-                    .map(|sizing| ChUsd::from(sizing.suggested_usd)),
+                profit_probability_bps: economics
+                    .profit_probability_bps
+                    .inner()
+                    .to_i64()
+                    .context("profit probability bps must fit i64")?,
+                nominal_expected_net_usd: ChUsd::from(economics.nominal_expected_net_usd),
+                robust_expected_net_usd: ChUsd::from(economics.robust_expected_net_usd),
+                max_loss_usd: ChUsd::from(economics.max_loss_usd),
+                cvar_contribution_usd: ChUsd::from(economics.cvar_contribution_usd),
+                capital_occupancy_usd_hours: ChUsd::from(Usd::new(
+                    economics.capital_occupancy_usd_hours.inner(),
+                )),
+                marginal_portfolio_value_usd: ChUsd::from(economics.marginal_portfolio_value_usd),
+                suggested_usd: ChUsd::from(recommendation.trade_plan.sizing.suggested_usd),
                 valid_until: recommendation.valid_until.timestamp_millis(),
             })
         })
@@ -71,7 +83,12 @@ pub async fn materialize_report_facts(
         .recommendations
         .iter()
         .map(|recommendation| {
-            let profile_ref = recommendation.research_profile_artifact_id.profile_ref();
+            let route_run = transaction
+                .route_runs
+                .iter()
+                .find(|run| run.report_route_run_id == recommendation.report_route_run_id)
+                .context("recommendation Route run must exist")?;
+            let lineage = route_run.lineage_json.as_ref();
             let terminal_stage = ReportFunnelStage::Published;
             let primary_reason = ReportFunnelReason::Published;
             let secondary_diagnostics = ReportFunnelDiagnostics::None {};
@@ -79,12 +96,11 @@ pub async fn materialize_report_facts(
                 event_time: report.decision_at.timestamp_millis(),
                 recommendation_report_id: report.recommendation_report_id,
                 market_selection_id: report.market_selection_id,
-                profile_id: profile_ref.id.to_string(),
-                profile_version: profile_ref.version,
-                profile_content_hash: profile_ref.content_hash.to_string(),
                 decision_policy_snapshot_id: report.decision_policy_snapshot_id,
-                model_version_id: report.model_version_id,
-                model_run_id: report.model_run_id,
+                report_route_run_id: Some(route_run.report_route_run_id),
+                route: Some(route_run.route.as_str().to_owned()),
+                model_version_id: lineage.map(|value| value.model_version_id),
+                model_run_id: lineage.and_then(|value| value.model_run_id),
                 market_id: recommendation.market_id.clone(),
                 event_id: recommendation.event_id.clone(),
                 primary_token_id: recommendation
@@ -165,23 +181,25 @@ pub async fn seal_report_facts(
         .recommendations
         .iter()
         .take(3)
-        .map(|recommendation| ReportFactNotificationRecommendationV1 {
+        .map(|recommendation| ReportFactNotificationRecommendationV2 {
             market_id: recommendation.market_id.to_string(),
             outcome_side: recommendation.outcome_side,
-            score: recommendation.composite_score,
-            suggested_usd: recommendation
-                .trade_plan
-                .sizing()
-                .map(|sizing| sizing.suggested_usd),
+            route: recommendation.route,
+            profit_probability_bps: recommendation.economics_json.profit_probability_bps,
+            robust_expected_net_usd: recommendation.economics_json.robust_expected_net_usd,
+            marginal_portfolio_value_usd: recommendation
+                .economics_json
+                .marginal_portfolio_value_usd,
+            suggested_usd: recommendation.trade_plan.sizing.suggested_usd,
         })
         .collect();
-    let bundle = ReportFactBundleV1 {
+    let bundle = ReportFactBundleV2 {
         format_version: REPORT_FACT_BUNDLE_FORMAT_VERSION,
         recommendation_report_id: report.recommendation_report_id,
         created_at: report.decision_at,
         delivery_policy: ReportDeliveryPolicy::StoreOnly,
         notify_operators: false,
-        notification: ReportFactNotificationV1 {
+        notification: ReportFactNotificationV2 {
             kind: report.report_kind,
             status: report.status.as_str().to_owned(),
             runtime_mode: report.runtime_mode,
@@ -270,22 +288,27 @@ pub async fn persist_prepared_report(
     knowledge_lag_secs: i64,
 ) -> RecommendationReportInfo {
     let clock = PgReportRunRepository::new(db.clone());
+    let latest_availability_at = transaction
+        .recommendations
+        .iter()
+        .map(|recommendation| recommendation.created_at)
+        .fold(transaction.report.created_at, DateTime::max);
     let now = loop {
         let now = clock
             .database_time()
             .await
             .expect("read database time for report fixture");
-        if now >= transaction.report.decision_at {
+        if now >= latest_availability_at {
             break now;
         }
-        let wait = (transaction.report.decision_at - now)
+        let wait = (latest_availability_at - now)
             .to_std()
             .expect("positive database clock wait");
         tokio::time::sleep(wait).await;
     };
     let worker_id = WorkerId::from_v7();
     let lease_expires_at = now + Duration::minutes(10);
-    let report_run_id = ReportRunId::from_v7();
+    let report_run_id = transaction.report.report_run_id;
     transaction.report.status = RecommendationReportStatus::Prepared;
     transaction.report.published_at = None;
     transaction.report.successor_report_id = None;

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use self::WeatherHistoricalBindingKind::{ExactStation as Exact, OfficialNearbyProxy as Proxy};
@@ -17,8 +18,8 @@ use super::secret::SecretText;
 pub const WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS: u64 = 7_200;
 
 /// External domain data-source connections.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DomainSourcesConfig {
     pub binance: BinanceSourceConfig,
     pub binance_usdm_futures: BinanceSourceConfig,
@@ -74,8 +75,8 @@ impl Default for DomainSourcesConfig {
 ///
 /// Every item is validated at deploy bootstrap and becomes an expected-source
 /// ledger row before its first cursor exists.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WeatherVerticalBindingsConfig {
     pub hko_rainfall: Vec<HkoRainfallBindingConfig>,
     pub hko_daily_temperature: Vec<HkoDailyTemperatureBindingConfig>,
@@ -163,55 +164,77 @@ impl Default for WeatherVerticalBindingsConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HkoRainfallBindingConfig {
+    /// Contract-facing HKO site label used to select this explicit binding.
     pub site_key: String,
+    /// Official HKO station identifier embedded in the source product path.
     pub station_key: String,
+    /// Exact official daily-rainfall CSV used to produce settlement evidence.
     pub daily_csv_url: String,
+    /// Latitude of the exact HKO station used to validate spatial contract identity.
     pub latitude: Decimal,
+    /// Longitude of the exact HKO station used to validate spatial contract identity.
     pub longitude: Decimal,
+    /// IANA timezone used to close the station's observation day without UTC guessing.
     pub timezone: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HkoDailyTemperatureBindingConfig {
+    /// Official HKO station identifier whose monthly daily-temperature file is ingested.
     pub station: String,
+    /// IANA timezone that defines the station's local observation day.
     pub timezone: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AirNowPm25ReportingAreaBindingConfig {
+    /// Official `AirNow` reporting-area name matched to the market's resolution geography.
     pub area: String,
+    /// Two-letter US state code disambiguating the official reporting-area name.
     pub state: String,
+    /// IANA timezone used to place hourly AQI observations on the contract day.
     pub timezone: String,
 }
 
 /// Exact preliminary PM2.5 AQI monitoring site used as a contract fallback.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AirNowPm25SiteBindingConfig {
+    /// Human contract location that this exact `AirNow` monitoring site is allowed to represent.
     pub contract_location: String,
+    /// Human-facing `AirNow` resolution page retained as primary settlement provenance.
     pub primary_resolution_url: String,
+    /// Canonical Air Quality System site identifier used by `AirNow` observations.
     pub aqsid: String,
+    /// Official monitoring-site name retained in provenance and operator diagnostics.
     pub site_name: String,
+    /// Two-letter US state code used to validate the AQS site identity.
     pub state: String,
+    /// Latitude of the monitoring site used for exact spatial binding checks.
     pub latitude: Decimal,
+    /// Longitude of the monitoring site used for exact spatial binding checks.
     pub longitude: Decimal,
+    /// IANA timezone used to construct the site's contract-day AQI maximum.
     pub timezone: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TornadoRegionBindingConfig {
+    /// Stable deployment-owned identifier used by market linkage and evidence lineage.
     pub region_id: String,
+    /// Exact national or state scope applied to SPC and NCEI tornado records.
     pub scope: TornadoRegionScopeConfig,
+    /// IANA timezone used to delimit the region's contract day.
     pub timezone: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
 pub enum TornadoRegionScopeConfig {
     UnitedStates,
@@ -221,30 +244,39 @@ pub enum TornadoRegionScopeConfig {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NhcHistoricalStormBindingConfig {
+    /// NHC ocean-basin catalog whose storm identifiers are valid for this binding.
     pub basin: String,
+    /// Canonical NHC storm identifier whose immutable HURDAT2 track is consumed.
     pub storm_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NwsWindStationBindingConfig {
+    /// ICAO/NWS station identifier whose official observations determine wind extremes.
     pub station: String,
+    /// IANA timezone used to delimit the station's contract day.
     pub timezone: String,
 }
 
 /// Hong Kong Observatory official climate-data products.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HkoOpenDataSourceConfig {
+    /// Controls startup and scheduling of official HKO source ingestion.
     pub enabled: bool,
+    /// HKO Open Data API root used for products that are not bound to an explicit file URL.
     pub base_url: String,
+    /// End-to-end timeout for one HKO HTTP request.
     pub request_timeout_ms: u64,
+    /// Poll cadence for immutable daily-rainfall products.
     pub daily_rainfall_poll_secs: u64,
     /// Completed daily-rainfall rows retained on each immutable file scan.
     pub daily_rainfall_lookback_days: u16,
+    /// Poll cadence for HKO monthly files containing completed daily temperatures.
     pub daily_temperature_poll_secs: u64,
     /// Maximum monthly partitions inspected newest-first when the latest
     /// documented publication is not yet present in the source file.
@@ -266,13 +298,18 @@ impl Default for HkoOpenDataSourceConfig {
 }
 
 /// EPA `AirNow` nationwide reporting-area file.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AirNowSourceConfig {
+    /// Controls startup and scheduling of official `AirNow` ingestion.
     pub enabled: bool,
+    /// Official daily reporting-area file used for preliminary regional AQI.
     pub reporting_area_url: String,
+    /// `AirNow` archive root used to resolve hourly site-observation files by UTC date.
     pub hourly_aq_base_url: String,
+    /// End-to-end timeout for one `AirNow` HTTP request.
     pub request_timeout_ms: u64,
+    /// Poll cadence for preliminary `AirNow` area and site observations.
     pub poll_secs: u64,
     /// `AirNow` republishes recent hourly observations as preliminary
     /// corrections; workers must re-read at least this window.
@@ -294,16 +331,24 @@ impl Default for AirNowSourceConfig {
 }
 
 /// NOAA SPC preliminary reports and NCEI final Storm Events archive.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TornadoSourceConfig {
+    /// Controls startup and scheduling of SPC/NCEI tornado ingestion.
     pub enabled: bool,
+    /// Official SPC preliminary severe-weather report root.
     pub spc_base_url: String,
+    /// Official NCEI Storm Events bulk CSV archive root.
     pub ncei_csv_base_url: String,
+    /// Official NCEI tornado time-series API root used for finalized aggregates.
     pub ncei_time_series_base_url: String,
+    /// End-to-end timeout for one SPC or NCEI HTTP request.
     pub request_timeout_ms: u64,
+    /// Poll cadence for intraday preliminary SPC reports.
     pub spc_poll_secs: u64,
+    /// Refresh cadence for finalized NCEI Storm Events archives.
     pub ncei_refresh_secs: u64,
+    /// Poll cadence for finalized NCEI tornado aggregate series.
     pub ncei_time_series_poll_secs: u64,
     /// Complete official archive years re-read on every NCEI refresh.
     pub ncei_backfill_years: u8,
@@ -328,14 +373,20 @@ impl Default for TornadoSourceConfig {
 }
 
 /// NOAA National Hurricane Center current advisory and HURDAT2 archives.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NhcSourceConfig {
+    /// Controls startup and scheduling of official NHC ingestion.
     pub enabled: bool,
+    /// Official NHC current-storm catalog used to discover active advisories.
     pub current_storms_url: String,
+    /// Official NHC data root containing advisories and HURDAT2 best-track archives.
     pub data_archive_url: String,
+    /// End-to-end timeout for one NHC HTTP request.
     pub request_timeout_ms: u64,
+    /// Poll cadence for active-storm advisories.
     pub advisory_poll_secs: u64,
+    /// Refresh cadence for historical HURDAT2 best-track archives.
     pub best_track_refresh_secs: u64,
 }
 
@@ -353,13 +404,18 @@ impl Default for NhcSourceConfig {
 }
 
 /// NASA GISS GISTEMP v4 global land-ocean temperature anomaly table.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NasaGistempSourceConfig {
+    /// Controls startup and scheduling of NASA GISTEMP ingestion.
     pub enabled: bool,
+    /// Official monthly GISTEMP global anomaly CSV.
     pub csv_url: String,
+    /// Official annual GISTEMP global anomaly series used for year-end resolution.
     pub annual_url: String,
+    /// End-to-end timeout for one NASA GISTEMP HTTP request.
     pub request_timeout_ms: u64,
+    /// Refresh cadence for published monthly and annual GISTEMP observations.
     pub refresh_secs: u64,
 }
 
@@ -376,15 +432,22 @@ impl Default for NasaGistempSourceConfig {
 }
 
 /// NOAA/NSIDC Sea Ice Index v4 daily and monthly extent files.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NsidcSeaIceSourceConfig {
+    /// Controls startup and scheduling of official NSIDC Sea Ice Index ingestion.
     pub enabled: bool,
+    /// Official Northern Hemisphere daily sea-ice extent CSV.
     pub north_daily_csv_url: String,
+    /// Official Southern Hemisphere daily sea-ice extent CSV.
     pub south_daily_csv_url: String,
+    /// Official Northern Hemisphere monthly sea-ice data root.
     pub north_monthly_base_url: String,
+    /// Official Southern Hemisphere monthly sea-ice data root.
     pub south_monthly_base_url: String,
+    /// End-to-end timeout for one NSIDC HTTP request.
     pub request_timeout_ms: u64,
+    /// Refresh cadence for daily and monthly NSIDC publications.
     pub refresh_secs: u64,
 }
 
@@ -404,12 +467,16 @@ impl Default for NsidcSeaIceSourceConfig {
 }
 
 /// NOAA/NWS API station observations used for wind extremes.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NwsObservationSourceConfig {
+    /// Controls startup and scheduling of official NWS station-observation ingestion.
     pub enabled: bool,
+    /// Official api.weather.gov root used for station metadata and observations.
     pub base_url: String,
+    /// End-to-end timeout for one NWS HTTP request.
     pub request_timeout_ms: u64,
+    /// Poll cadence for the latest station observation batch.
     pub poll_secs: u64,
     /// Number of newest station reports scanned to bridge normal null-value
     /// observations without inventing wind values.
@@ -429,15 +496,19 @@ impl Default for NwsObservationSourceConfig {
 }
 
 /// Public Polymarket Real-Time Data Socket connection.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PolymarketRtdsSourceConfig {
+    /// Controls startup and subscription of the public Polymarket RTDS adapter.
     pub enabled: bool,
+    /// Official RTDS WebSocket endpoint used for source-native crypto observations.
     pub websocket_url: String,
+    /// Maximum time allowed to establish one RTDS WebSocket session.
     pub connect_timeout_ms: u64,
     /// Official protocol heartbeat cadence. The RTDS documentation requires a
     /// text `PING` every five seconds.
     pub keepalive_secs: u64,
+    /// Maximum accepted difference between RTDS event time and the local midpoint clock.
     pub max_clock_skew_ms: u64,
 }
 
@@ -453,15 +524,22 @@ impl Default for PolymarketRtdsSourceConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WeatherStationProfileConfig {
+    /// IANA timezone that defines the station's contract observation day.
     pub timezone: String,
+    /// Latitude of the contract station used for spatial identity and weather-model inputs.
     pub latitude: Decimal,
+    /// Longitude of the contract station used for spatial identity and weather-model inputs.
     pub longitude: Decimal,
+    /// Station elevation above mean sea level used by elevation-sensitive weather features.
     pub elevation_meters: Decimal,
+    /// Optional exact `GHCNh` station identifier used for hourly calibration history.
     pub ghcnh_station_id: Option<String>,
+    /// Optional exact `GHCNd` station identifier used for archive-quality daily truth.
     pub ghcnd_station_id: Option<String>,
+    /// Declares whether historical calibration is exact, an explicit official proxy, or unavailable.
     pub historical_binding_kind: WeatherHistoricalBindingKind,
 }
 
@@ -470,7 +548,7 @@ pub struct WeatherStationProfileConfig {
 ///
 /// Proxy use is explicit and enters the immutable station profile hash; it can
 /// never masquerade as exact settlement provenance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WeatherHistoricalBindingKind {
     ExactStation,
@@ -971,18 +1049,28 @@ fn station_without_historical(
 }
 
 /// Binance spot REST and aggregate-trade stream connection.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BinanceSourceConfig {
+    /// Controls startup and scheduling of this Binance market-data source.
     pub enabled: bool,
+    /// REST API root used for klines, exchange time, and bounded recovery reads.
     pub rest_url: String,
+    /// WebSocket endpoint used for live aggregate-trade ingestion.
     pub websocket_url: String,
+    /// Official Binance bulk-data archive root used for historical PIT backfill.
     pub archive_url: String,
+    /// Maximum Binance request weight admitted per rolling minute across this source client.
     pub weight_budget_per_min: u32,
+    /// Poll cadence for the latest closed kline after live-stream recovery.
     pub kline_poll_secs: u64,
+    /// Poll cadence for bounded aggregate-trade gap recovery.
     pub agg_trade_recovery_poll_secs: u64,
+    /// Maximum lifetime of one WebSocket session before proactive rotation prevents server expiry.
     pub websocket_rotation_secs: u64,
+    /// Maximum records decoded and persisted by one bounded recovery batch.
     pub batch_size: usize,
+    /// End-to-end timeout for one Binance REST request.
     pub request_timeout_ms: u64,
     /// Maximum trusted difference between the local midpoint clock and
     /// Binance `GET /api/v3/time`.
@@ -1019,25 +1107,34 @@ impl BinanceSourceConfig {
 }
 
 /// Chainlink Data Streams REST/WebSocket connection.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ChainlinkDataStreamsSourceConfig {
     /// A missing subscription is valid for unrelated reports. Any bound
     /// condition still fails closed at preflight/evaluation.
     pub enabled: bool,
+    /// REST API root used for authenticated report recovery and pagination.
     pub rest_url: String,
+    /// WebSocket endpoint used for authenticated live report delivery.
     pub websocket_url: String,
+    /// Subscription API key paired atomically with `api_secret`.
+    #[serde(serialize_with = "super::secret::serialize_optional_empty")]
     pub api_key: Option<SecretText>,
+    /// Subscription API secret paired atomically with `api_key`.
+    #[serde(serialize_with = "super::secret::serialize_optional_empty")]
     pub api_secret: Option<SecretText>,
     /// Logical feed key (`BTC-USD`) to immutable V3 feed metadata.
     pub feeds: BTreeMap<String, ChainlinkDataStreamFeedConfig>,
+    /// Maximum accepted difference between signed report time and the local midpoint clock.
     pub max_clock_skew_ms: u64,
+    /// Maximum reports requested in one bounded REST recovery page.
     pub rest_page_limit: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChainlinkDataStreamFeedConfig {
+    /// Immutable Chainlink Data Streams V3 feed identifier from the active subscription.
     pub feed_id: String,
     /// Decimal scale declared by the subscribed feed metadata.
     pub decimals: u32,
@@ -1069,12 +1166,16 @@ impl ChainlinkDataStreamsSourceConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AviationWeatherSourceConfig {
+    /// Controls startup and scheduling of Aviation Weather station ingestion.
     pub enabled: bool,
+    /// Official Aviation Weather API root used for METAR station observations.
     pub base_url: String,
+    /// Poll cadence for the latest METAR station observations.
     pub poll_secs: u64,
+    /// End-to-end timeout for one Aviation Weather HTTP request.
     pub request_timeout_ms: u64,
     /// Delay after station-local midnight before emitting NOAA observation-day
     /// close. This is not Wunderground settlement finalization.
@@ -1093,14 +1194,20 @@ impl Default for AviationWeatherSourceConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GhcnhSourceConfig {
+    /// Controls startup and scheduling of NOAA `GHCNh` calibration ingestion.
     pub enabled: bool,
+    /// Official NOAA `GHCNh` by-year archive root.
     pub base_url: String,
+    /// End-to-end timeout for one `GHCNh` archive request.
     pub request_timeout_ms: u64,
+    /// Refresh cadence for the active calibration-year window.
     pub refresh_secs: u64,
+    /// Number of complete prior years loaded for station calibration and bias estimation.
     pub calibration_years: u8,
+    /// Maximum station/year `GHCNh` objects fetched concurrently.
     pub max_concurrency: usize,
 }
 
@@ -1118,14 +1225,20 @@ impl Default for GhcnhSourceConfig {
 }
 
 /// NOAA `GHCNd` station-file source used only for archive-quality daily labels.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GhcndSourceConfig {
+    /// Controls startup and scheduling of NOAA `GHCNd` truth ingestion.
     pub enabled: bool,
+    /// Official NOAA `GHCNd` station-file archive root.
     pub base_url: String,
+    /// End-to-end timeout for one `GHCNd` archive request.
     pub request_timeout_ms: u64,
+    /// Refresh cadence for the active archive-quality truth window.
     pub refresh_secs: u64,
+    /// Number of complete prior years retained when building archive-quality daily truth labels.
     pub lookback_years: u8,
+    /// Maximum station `GHCNd` objects fetched concurrently.
     pub max_concurrency: usize,
 }
 
@@ -1142,15 +1255,22 @@ impl Default for GhcndSourceConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GefsSourceConfig {
+    /// Controls startup and scheduling of NOAA GEFS forecast ingestion.
     pub enabled: bool,
+    /// Official NOAA GEFS object-store root used to resolve cycle products.
     pub bucket_url: String,
+    /// End-to-end timeout for one GEFS object request.
     pub request_timeout_ms: u64,
+    /// Poll cadence for newly available GEFS forecast cycles.
     pub poll_secs: u64,
+    /// Conservative delay after nominal cycle time before a GEFS publication may be treated as available.
     pub publication_lag_secs: u64,
+    /// Furthest forecast lead admitted into the PIT feature plane.
     pub max_lead_hours: u16,
+    /// Maximum GEFS cycle objects fetched and decoded concurrently.
     pub max_concurrency: usize,
 }
 

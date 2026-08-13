@@ -491,7 +491,7 @@ mod trade_tape_null_reason_tests {
         domain::data_plane::{TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind},
         enums::common::MarketCategory,
         runtime_config::{DataQualityConfig, FeaturesConfig},
-        types::{MarketId, Price, Shares, TokenId, Usd},
+        types::{MarketId, Price, Shares, TokenId, TradeTapeSourceEvidence, Usd},
     };
     use rust_decimal::Decimal;
 
@@ -515,7 +515,12 @@ mod trade_tape_null_reason_tests {
         if source_available {
             TradeTapeWindowSnapshot::available(market_id, as_of, as_of, prints)
         } else {
-            TradeTapeWindowSnapshot::empty(market_id, as_of, as_of)
+            TradeTapeWindowSnapshot::available(market_id, as_of, as_of, prints)
+                .with_source_evidence(
+                    TradeTapeSourceEvidence::runtime(false, Vec::new())
+                        .expect("valid disabled runtime evidence"),
+                    false,
+                )
         }
     }
 
@@ -583,7 +588,7 @@ mod trade_tape_null_reason_tests {
     #[test]
     fn unavailable_source_marks_unavailable() {
         let config = FeaturesConfig::default();
-        let trade_tape = trade_tape_snapshot(false, Vec::new());
+        let trade_tape = trade_tape_snapshot(false, vec![fill_print("0x1", Decimal::from(100))]);
         let features = trade_tape_only(&trade_tape, &config);
         assert_eq!(features.len(), 9);
         for feature in features {

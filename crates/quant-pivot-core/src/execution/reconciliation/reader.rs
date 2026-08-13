@@ -37,7 +37,7 @@ pub trait VenueReconciliationReader: Send + Sync {
     /// (evidence #3 — absolute corroboration that shares were received).
     async fn token_balance(&self, token_id: &TokenId) -> QuantResult<Shares>;
 
-    /// Current USDC.e collateral balance (evidence #4 — absolute corroboration
+    /// Current pUSD collateral balance (evidence #4 — absolute corroboration
     /// that collateral was spent).
     async fn collateral_balance(&self) -> QuantResult<Usd>;
 }

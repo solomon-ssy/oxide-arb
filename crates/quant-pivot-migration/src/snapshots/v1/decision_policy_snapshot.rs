@@ -18,8 +18,8 @@ pub struct Model {
     pub execution_risk_policy_revision_id: Uuid,
     pub model_routing_revision_id: Uuid,
     pub report_schedule_revision_id: Uuid,
-    pub operational_control_revision_id: Uuid,
-    pub execution_authorization_revision_id: Uuid,
+    pub operations_policy_revision_id: Uuid,
+    pub execution_automation_policy_revision_id: Uuid,
     pub source: QpDecisionPolicySnapshotSource,
     pub created_by_kind: QpPolicyActorKind,
     pub created_by_user_id: Option<Uuid>,
@@ -37,6 +37,10 @@ pub struct Model {
     pub quant_backtest_reports: HasMany<super::quant_backtest_report::Entity>,
     #[sea_orm(has_many)]
     pub quant_order_intents: HasMany<super::quant_order_intent::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_portfolio_plans: HasMany<super::quant_portfolio_plan::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_recommendation_reports: HasMany<super::quant_recommendation_report::Entity>,
     #[sea_orm(has_many)]
     pub quant_report_data_quality_snapshots:
         HasMany<super::quant_report_data_quality_snapshot::Entity>,

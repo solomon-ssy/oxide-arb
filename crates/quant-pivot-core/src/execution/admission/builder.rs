@@ -146,8 +146,19 @@ impl AdmissionInputBuilder {
                 .value,
         );
         let max_stale_book_ratio_bps = config.recommendation.data_quality.max_stale_book_ratio_bps;
-        let max_open_intents = config.execution_risk.capital.max_open_intents;
-        let max_reserved_usd = Usd::new(config.execution_risk.capital.max_reserved_usd.value);
+        let max_open_intents = config
+            .execution_risk
+            .portfolio
+            .exposure_limits
+            .max_open_recommendations;
+        let max_reserved_usd = Usd::new(
+            config
+                .execution_risk
+                .portfolio
+                .budget
+                .max_open_capital_usd
+                .value,
+        );
 
         let fetched = self
             .fetch_parallel_sources(&recommendation, intent, budget_total_usd, now)

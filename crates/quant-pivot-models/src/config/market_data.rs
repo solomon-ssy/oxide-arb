@@ -4,15 +4,16 @@
 //! the Gamma catalog client. Staleness thresholds are runtime configuration
 //! (`runtime_config::MarketDataRuntimeConfig`).
 
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 /// Absolute reconciliation input cap enforced at config validation and the
 /// native-SQL repository boundary.
 pub const MAX_TRADE_TAPE_RECONCILIATION_ROWS: usize = 1_000_000;
 
 /// Market-data connections (CLOB WebSocket + Gamma catalog + Data API).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MarketDataDeployConfig {
     /// Polymarket CLOB WebSocket sharding and reconnect policy.
     pub websocket: WebSocketConfig,
@@ -26,11 +27,10 @@ pub struct MarketDataDeployConfig {
 
 /// Polymarket CLOB WebSocket sharding and reconnect policy.
 ///
-/// Transport heartbeats are owned by `polymarket_client_sdk_v2` (workspace
-/// feature `heartbeats`). This struct does not expose ping intervals — they
-/// are not configurable at the application layer.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+/// The transport adapter owns the market channel's official text heartbeat.
+/// Its protocol cadence is not an application business-policy tunable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WebSocketConfig {
     /// Initial reconnect backoff (ms) after a dropped connection.
     /// Default: `1000`.
@@ -77,8 +77,8 @@ const fn default_subscription_window() -> u64 {
 }
 
 /// Polymarket Gamma API configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GammaConfig {
     /// Gamma REST base URL. Default: `https://gamma-api.polymarket.com`.
     pub base_url: String,
@@ -124,8 +124,8 @@ const fn default_gamma_requests() -> u32 {
 /// The Data API serves the venue position ledger (`GET /positions?user=<funder>`)
 /// used to mark the report capital base. No credentials are required — only the
 /// proxy/funder address (configured under `[quant.account]`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DataApiConfig {
     /// Data API base URL. Default: `https://data-api.polymarket.com`.
     pub base_url: String,
@@ -156,8 +156,8 @@ const fn default_api_size_limit() -> u32 {
 }
 
 /// On-chain trade-tape ingestion configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TradeTapeOnChainConfig {
     /// Enable periodic on-chain `OrderFilled` ingestion. Default: true.
     pub enabled: bool,

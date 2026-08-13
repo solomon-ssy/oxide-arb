@@ -132,11 +132,12 @@ pub use quant_recommendation::{
 pub use quant_report::{
     CurrentReportQuery, QuantReportDetailView, QuantReportDiagnosticsView, QuantReportFunnelView,
     QuantReportListQuery, QuantReportView, RecommendationChangedFieldView, RecommendationDeltaView,
-    RecommendationDiffSnapshotView, ReportCurrentHealthView, ReportDiagnosticsSubject,
-    ReportDiffView, ReportFactDeliveryView, ReportFunnelMarketListQuery, ReportFunnelMarketView,
-    ReportFunnelStageView, ReportRunListQuery, ReportRunView, ReportScheduleGapListQuery,
-    ReportScheduleGapView, ReportScheduleHealthView, ReportScheduleStateView, ReportTimelineQuery,
-    RetryReportRequest, RevokeReportRequest, RunReportRequest,
+    RecommendationDiffSnapshotView, ReportCurrentHealthView, ReportDiffView,
+    ReportEvidenceDiagnosticsView, ReportFactDeliveryView, ReportFunnelMarketListQuery,
+    ReportFunnelMarketView, ReportFunnelStageView, ReportRouteDiagnosticsView, ReportRunListQuery,
+    ReportRunView, ReportScheduleGapListQuery, ReportScheduleGapView, ReportScheduleHealthView,
+    ReportScheduleStateView, ReportTimelineQuery, RetryReportRequest, RevokeReportRequest,
+    RunReportRequest,
 };
 pub use reconciliation::{
     ReconciliationListQuery, ReconciliationView, ResolveReconciliationCommand,
@@ -156,10 +157,8 @@ pub use role::{
 pub use runtime_config::{
     ActivatePolicyDraftRequest, ApprovePolicyDraftRequest, ConfigActivityQuery, ConfigActivityView,
     ConfigApiContractSchema, ConfigResourceSummaryView, ConfigResourcesView,
-    ConfigSnapshotOptionsQuery, CreatePolicyDraftRequest, CredentialHealthView,
-    CurrentPolicyResourceView, DecisionPolicySnapshotOptionView, DeploymentConfigSnapshotView,
-    DeploymentConfigView, DeploymentEndpointView, DeploymentIdentityView,
-    DeploymentResourceBudgetView, DeploymentResourceLimitView, PolicyActivationResultView,
+    ConfigSnapshotOptionsQuery, CreatePolicyDraftRequest, CurrentPolicyResourceView,
+    DecisionPolicySnapshotOptionView, DeploymentConfigView, PolicyActivationResultView,
     PolicyActivationView, PolicyActorView, PolicyApprovalView, PolicyResourceSchemaView,
     PolicyRevisionListQuery, PolicyRevisionView, PolicyValidationView, SchedulePreviewRequest,
     SchedulePreviewView, ValidatePolicyDraftRequest,

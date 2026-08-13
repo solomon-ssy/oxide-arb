@@ -308,7 +308,7 @@ impl ModelDatasetLedgerFixture {
         Self::persist_ledger(db, store, ledger, &examples).await
     }
 
-    fn bind_trade_policy(
+    pub(super) fn bind_trade_policy(
         ledger: &mut DatasetLedgerFixture,
         trade_policy: Option<ModelServingTradePolicyBinding>,
     ) -> QuantResult<()> {
@@ -596,7 +596,7 @@ impl ModelDatasetLedgerFixture {
             .collect()
     }
 
-    fn labels(
+    pub(super) fn labels(
         strength: Decimal,
         matured_at: DateTime<Utc>,
         include_trade_policy: bool,

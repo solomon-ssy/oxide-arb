@@ -6,8 +6,8 @@
 //! into a per-market [`RawFactor`] (pure, no normalization, no cross-section).
 //! The [`FactorEngine`] owns the governed [`FactorRegistry`], runs the
 //! cross-section normalization stage (or the small-cross-section policy), and
-//! resolves the runtime confidence floor / `missing_factor_policy` into a
-//! [`MarketFactorOutcome`].
+//! resolves the runtime confidence floor plus each frozen factor definition's
+//! requiredness into a [`MarketFactorOutcome`].
 //!
 //! A factor score is **not** a recommendation score — it is an explainable model
 //! input. There is no silent neutral: a too-small or degenerate cross-section

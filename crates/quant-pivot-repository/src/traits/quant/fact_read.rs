@@ -20,7 +20,7 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
-        RecommendationReportId, ResearchProfileRef, TokenId,
+        RecommendationReportId, TokenId,
     },
 };
 use uuid::Uuid;
@@ -56,12 +56,11 @@ pub trait QuantFactReadRepository: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Complete conserved funnel rows for one immutable profile and decision
-    /// window. Dataset materialization joins these rows to committed Postgres
-    /// report headers before admitting any serving sample.
+    /// Complete conserved funnel rows for one decision window. Dataset
+    /// materialization joins Route-run ids to immutable Postgres lineage before
+    /// applying a research-profile cohort filter.
     async fn report_funnel_between(
         &self,
-        _profile_ref: &ResearchProfileRef,
         _from_ms: i64,
         _to_ms: i64,
     ) -> Result<Vec<ReportMarketFunnelRow>, StorageError> {

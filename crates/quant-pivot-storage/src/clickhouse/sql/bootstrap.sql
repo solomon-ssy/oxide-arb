@@ -454,7 +454,6 @@ CREATE TABLE IF NOT EXISTS quant_model_input_event (
     `knowledge_cutoff` DateTime64(3, 'UTC'),
     `model_run_id` String,
     `model_version_id` String,
-    `recommendation_report_id` Nullable(String),
     `market_id` String,
     `feature_vector_id` String,
     `model_family` LowCardinality(String),
@@ -512,11 +511,10 @@ CREATE TABLE IF NOT EXISTS quant_report_market_funnel (
     `event_time` DateTime64(3, 'UTC'),
     `recommendation_report_id` String,
     `market_selection_id` String,
-    `profile_id` LowCardinality(String),
-    `profile_version` UInt32,
-    `profile_content_hash` String,
     `decision_policy_snapshot_id` String,
-    `model_version_id` String,
+    `report_route_run_id` Nullable(String),
+    `route` LowCardinality(Nullable(String)),
+    `model_version_id` Nullable(String),
     `model_run_id` Nullable(String),
     `market_id` String,
     `event_id` String,
@@ -535,14 +533,21 @@ CREATE TABLE IF NOT EXISTS quant_report_recommendation_fact (
     `event_time` DateTime64(3, 'UTC'),
     `recommendation_report_id` String,
     `recommendation_id` String,
+    `report_route_run_id` String,
+    `economic_tier_id` String,
+    `route` LowCardinality(String),
     `rank` UInt32,
     `market_id` String,
     `token_id` String,
     `side` Enum8('yes' = 1, 'no' = 2),
-    `score` Decimal(18, 8),
-    `risk_adjusted_score` Decimal(18, 8),
-    `trade_plan_available` Bool,
-    `suggested_usd` Nullable(Decimal(38, 18)),
+    `profit_probability_bps` Int64,
+    `nominal_expected_net_usd` Decimal(38, 18),
+    `robust_expected_net_usd` Decimal(38, 18),
+    `max_loss_usd` Decimal(38, 18),
+    `cvar_contribution_usd` Decimal(38, 18),
+    `capital_occupancy_usd_hours` Decimal(38, 18),
+    `marginal_portfolio_value_usd` Decimal(38, 18),
+    `suggested_usd` Decimal(38, 18),
     `valid_until` DateTime64(3, 'UTC')
 ) ENGINE = ReplacingMergeTree(event_time)
 ORDER BY (recommendation_report_id, recommendation_id) SETTINGS index_granularity = 8192;
@@ -573,10 +578,10 @@ CREATE TABLE IF NOT EXISTS quant_signal_candidate_event (
     `entry_price` Decimal(18, 8),
     `target_price` Decimal(18, 8),
     `stop_price` Decimal(18, 8),
-    `rank_before_portfolio` UInt32,
+    `route_rank` UInt32,
     `rejection_reason` LowCardinality(String)
 ) ENGINE = MergeTree
-ORDER BY (model_run_id, rank_before_portfolio, market_id) SETTINGS index_granularity = 8192;
+ORDER BY (model_run_id, route_rank, market_id) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS quant_trade_tape (
     `market_id` String,
     `token_id` String,

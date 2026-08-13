@@ -250,13 +250,13 @@ pub async fn ensure_default_policy_bundle(
             &snapshot,
             ConfigResourceKind::ReportSchedule,
         )?,
-        operational_control_revision_id: required_revision(
+        operations_policy_revision_id: required_revision(
             &snapshot,
-            ConfigResourceKind::OperationalControl,
+            ConfigResourceKind::OperationsPolicy,
         )?,
-        execution_authorization_revision_id: required_revision(
+        execution_automation_policy_revision_id: required_revision(
             &snapshot,
-            ConfigResourceKind::ExecutionAuthorization,
+            ConfigResourceKind::ExecutionAutomationPolicy,
         )?,
         source: DecisionPolicySnapshotSource::Bootstrap,
         created_by_kind: PolicyActorKind::System,

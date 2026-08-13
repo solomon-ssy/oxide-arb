@@ -14,15 +14,22 @@ use quant_pivot_models::{
         governance::{NewOperationLog, RuntimeControlUpdate},
         market::fee::BuilderFeeAttribution,
         quant::{
-            ApproveOrderIntent, CalibrationArtifactPayload, CapitalSettlement, EntryConditionClaim,
-            ExecutionIdentityRefs, ExitLedgerWrite, MarketSelectionModel,
+            ApproveOrderIntent, CalibrationArtifactPayload, CapitalOccupancyBucket,
+            CapitalSettlement, DiscountCurvePoint, EntryConditionClaim, EntryEconomics,
+            ExactVerificationEvidence, ExecutableEconomicTier, ExecutionIdentityRefs,
+            ExistingPortfolioState, ExitLedgerWrite, GlobalPortfolioPlan, MarketSelectionModel,
             ModelScoreCalibrationCommit, ModelVersionInfo, NewAccountSnapshot,
             NewCalibrationArtifact, NewCapitalAllocation, NewEntryConditionArtifact,
             NewEntryConditionInstance, NewEquitySnapshot, NewExecutionAccount, NewExecutionOrder,
             NewFactorDefinition, NewFeatureParityState, NewMarketSelection,
             NewMarketSelectionMember, NewModelRun, NewModelVersion, NewOrderIntent,
             NewPortfolioPlan, NewRecommendation, NewRecommendationReport, NewReconciliation,
-            NewReportDataQualitySnapshot, NewReportTransaction, PositionExit, PositionFill,
+            NewReportDataQualitySnapshot, NewReportRouteRun, NewReportTransaction,
+            PortfolioConstraintEvidence, PortfolioDecisionResult, PortfolioObjectiveEvidence,
+            PortfolioScenario, PortfolioScenarioArtifact, PortfolioScenarioKind,
+            PortfolioScenarioVisibility, PositionExit, PositionFill, RecommendationEconomics,
+            RepresentedRouteSet, RouteCandidateFunnel, RouteModelLineage, RouteRunOutcome,
+            ScenarioCashflow, ScenarioDistribution, ScenarioWeight, SolverEvidence,
             SubmissionLedgerWrite, TrainingDatasetInfo,
         },
         query::TimeWindow,
@@ -47,49 +54,50 @@ use quant_pivot_models::{
         model::ModelFamily,
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, BindingConstraint, CalibrationKind, DatasetPurpose,
-            DownsideSource, EmptyReportReason, EntryConditionState, ExecutionOrderState,
-            ExecutionWalletKind, ExitSettlementMode, FeatureParityLatchState,
-            FeatureParityStateTransition, FillRequirement, ModelRunKind, OrderIntentStatus,
-            OutcomeSide, PriceComparison, QuantRuntimeMode, RecommendationReportStatus,
-            RecommendationStatus, RedeemPolicy, ReportKind, SizingModelKind,
+            AccountSource, ApprovalStatus, CalibrationKind, DatasetPurpose, DownsideSource,
+            EmptyReportReason, EntryConditionState, ExecutionOrderState, ExecutionWalletKind,
+            ExitSettlementMode, FeatureParityLatchState, FeatureParityStateTransition,
+            FillRequirement, ModelRunKind, OrderIntentStatus, OutcomeSide, PriceComparison,
+            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
+            ReportKind,
         },
         rbac::ResourceType,
     },
     hashing::CanonicalDigest,
     runtime_config::{
         BuyModelRoute, BuyRouteBinding, DecimalValue, DecisionPolicySnapshot, FactorHeadConfig,
-        ModelBinding, ModelBindingSource,
+        ModelBinding, ModelBindingSource, PortfolioConfig,
     },
     types::{
         AccountPositions, AccountSnapshotId, ArtifactUri, BookSnapshotRef, Bps,
-        CalibrationArtifactId, CapitalAllocationId, ConditionTruth, ConfidenceSummary,
-        ConfirmationPolicy, ContentHash, DataQualitySummary, DecisionPolicySnapshotId,
-        ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION, EligibilitySummary,
-        EntryConditionArtifactId, EntryConditionArtifactV1, EntryConditionBinding,
-        EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan, EntryConditionV1,
-        EntryOrderPolicy, EntryOrderSpec, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
-        EvmAddress, ExecutionAccountId, ExecutionEligibility, ExecutionOrderId, ExitPlan,
-        ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
-        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelVersionId, OperationDetailDocument, OperationLogId,
-        OpportunisticExitPolicy, OrderAmount, OrderId, OrderIntentId, PendingScaleOut,
-        PolicyBundleGeneration, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
-        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot,
+        CalibrationArtifactId, CapitalAllocationId, ConditionTruth, ConfirmationPolicy,
+        ContentHash, DataQualitySummary, DecisionPolicySnapshotId,
+        ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION, EconomicTierId,
+        EligibilitySummary, EntryConditionArtifactId, EntryConditionArtifactV1,
+        EntryConditionBinding, EntryConditionFoldState, EntryConditionInstanceId,
+        EntryConditionPlan, EntryConditionV1, EntryOrderPolicy, EntryOrderSpec, EntryPlan,
+        EquitySnapshotId, EventId, EvidenceRefs, EvmAddress, ExecutionAccountId,
+        ExecutionEligibility, ExecutionOrderId, ExitPlan, ExitPolicySpec, ExposureBreakdown,
+        FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId, MarketContext, MarketId,
+        MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelVersionId,
+        OperationDetailDocument, OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId,
+        OrderIntentId, PayoutRatio, PendingScaleOut, PolicyBundleGeneration, PortfolioPlanId,
+        PortfolioScenarioArtifactId, PortfolioScenarioModelArtifactId, PositionSnapshot,
         PreparedFeeSchedule, PreparedVenueOrder, Price, PriceCondition, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportSummary, ResearchEvaluationTrack, ResearchProfileRef,
-        RiskEnvelope, RoleCode, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, SourceSliceManifestRef, ThesisInvalidationPolicy, TokenId,
-        TradePolicyCohortProvenance, TrainingDatasetId, Usd, UserId, VenueOrderAmount,
-        builtin_research_profiles,
+        ReportDataQualityTokens, ReportRouteRunId, ReportRunId, ReportSummary, ResearchProfileRef,
+        ResearchProfileSpec, RiskEnvelope, RoleCode, SchemaVersion, SelectionExclusionSummary,
+        Shares, SignalCandidateId, SizingPlan, SourceSliceManifestRef, ThesisInvalidationPolicy,
+        TokenId, TradePolicyCohortProvenance, TrainingDatasetId, Usd, UsdHours, UserId,
+        VenueOrderAmount, builtin_research_profiles,
         calibration::{
             IsotonicKnot, MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
             ModelScoreCalibrationDatasetBinding, ModelScoreCalibrationFitContract,
             ModelScoreCalibrationModelBinding, ModelScoreCalibrationPayload,
             ModelScoreCalibrationPolicyBinding, MonotoneMapping, ReliabilityBin, ReliabilityReport,
+            SplitPayoutRateEvidence,
         },
         factor::{FactorDefinitionRef, FactorExplanation, FactorServingPlane},
         model_lineage::ModelVersionDerivation,
@@ -123,6 +131,7 @@ use quant_pivot_research::{
     features::FeatureSchema,
     hashing::ResearchHasher,
     model::{CalibratedReturnModel, ModelArtifact, ReturnModelSpec},
+    portfolio::CapitalTimeBucketContract,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -134,17 +143,18 @@ use sea_orm::{
 use crate::postgres::PostgresClock;
 
 use super::{
+    SelectorFixture,
     catalog_fixtures::{make_event, make_market},
     model_serving_fixtures::{
         ModelArtifactFixtureSeed, ModelBindingFixture, ModelDatasetLedgerFixture,
         ModelDatasetLedgerSeed, ModelPayloadFixture, ModelVersionFixture, SealedModelFixture,
     },
-    model_spec_fixtures::{new_model_spec_fixture, weather_horizon_secs},
+    model_spec_fixtures::new_model_spec_fixture,
     policy_fixtures::bootstrap_policy_bundle,
     report_fixtures,
     report_lifecycle_seed::{materialize_report_facts, persist_and_publish_report},
     seeded_uuid,
-    trade_policy_fixtures::PublishedTradePolicyFixture,
+    trade_policy_fixtures::{PublishedTradePolicyFixture, PublishedTradePolicyFixtureInput},
 };
 
 /// Total cash budget: 40 shares * 0.60 gross price + 1.00 observed fee.
@@ -274,6 +284,7 @@ pub struct ExecutionTxnIds {
     pub recommendation: RecommendationId,
     pub condition_instance: EntryConditionInstanceId,
     pub model_version: ModelVersionId,
+    pub calibration_artifact: CalibrationArtifactId,
     pub model_run: ModelRunId,
     pub market_selection: MarketSelectionId,
     pub decision_policy_snapshot: DecisionPolicySnapshotId,
@@ -289,6 +300,7 @@ pub struct SharedDemoInfra {
     pub feature_parity_state_id: FeatureParityStateId,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
+    pub calibration_artifact_id: CalibrationArtifactId,
     pub model_run_id: ModelRunId,
     pub trade_policy: TradePolicyCohortProvenance,
     pub factor_serving_plane: FactorServingPlane,
@@ -299,6 +311,111 @@ pub struct SharedDemoInfra {
 pub struct GovernedFeedbackInfra {
     pub template: SharedDemoInfra,
     pub champion_model_version_id: ModelVersionId,
+}
+
+/// Explicit production-stack workset and financial limits for one governed
+/// feedback serving fixture.
+pub struct FeedbackServingFixtureConfig {
+    pub required_shadow_window_secs: u64,
+    pub shadow_diff_threshold: Decimal,
+    pub feedback_budget_usd: Decimal,
+    pub outcome_reconciliation_enabled: bool,
+    pub ad_hoc_report_enabled: bool,
+}
+
+impl FeedbackServingFixtureConfig {
+    fn apply_runtime_controls(&self, snapshot: &mut DecisionPolicySnapshot) {
+        snapshot.operations_policy.outcome_reconciliation.enabled =
+            self.outcome_reconciliation_enabled;
+        if self.outcome_reconciliation_enabled {
+            snapshot.operations_policy.outcome_reconciliation.sweep_secs = 1;
+        }
+        snapshot
+            .profile_artifacts
+            .research_method
+            .model_promotion
+            .required_shadow_window_secs = self.required_shadow_window_secs;
+        snapshot.execution_risk.portfolio = self.portfolio_policy();
+        snapshot.recommendation.selection.enabled_categories = Vec::new();
+        snapshot.recommendation.reports.ad_hoc_report_enabled = self.ad_hoc_report_enabled;
+        for schedule in &mut snapshot.report_schedule.schedules {
+            schedule.enabled = false;
+        }
+        snapshot.model_routing.model.shadow_diff_threshold =
+            DecimalValue::new(self.shadow_diff_threshold);
+    }
+
+    fn portfolio_policy(&self) -> PortfolioConfig {
+        let profile = fixture_profile_ref()
+            .resolve_builtin_research_profile()
+            .expect("resolve governed-feedback ResearchProfile");
+        let cash_budget_tier = profile
+            .spec
+            .allowed_cash_budget_tiers
+            .iter()
+            .copied()
+            .max()
+            .expect("governed-feedback ResearchProfile cash-budget tier");
+        let cash_reserve = self.feedback_budget_usd * dec!(0.10);
+        let max_open_capital = self.feedback_budget_usd - cash_reserve;
+        let total_budget = self.feedback_budget_usd;
+        let mut portfolio = PortfolioConfig::default();
+        let tier_capacity = cash_budget_tier
+            .inner()
+            .checked_mul(Decimal::from(
+                portfolio.exposure_limits.max_open_recommendations,
+            ))
+            .expect("governed-feedback tier capacity must fit Decimal");
+        assert!(
+            max_open_capital >= tier_capacity,
+            "governed-feedback budget must fund every concurrently open ResearchProfile cash tier after reserve"
+        );
+        portfolio.budget.total_budget_usd = DecimalValue::new(total_budget);
+        portfolio.budget.cash_reserve_usd = DecimalValue::new(cash_reserve);
+        portfolio.budget.max_open_capital_usd = DecimalValue::new(max_open_capital);
+
+        // Use the exact immutable cash tier fitted into the serving Trade
+        // Policy. A fixture-only dollar cap would make every venue-executable
+        // tier ineligible before optimization and would no longer exercise the
+        // production report path it claims to verify.
+        portfolio.exposure_limits.max_single_recommendation_usd =
+            DecimalValue::new(cash_budget_tier.inner());
+        let governed_capacity = tier_capacity;
+        portfolio.exposure_limits.max_market_exposure_usd = DecimalValue::new(governed_capacity);
+        portfolio.exposure_limits.max_event_exposure_usd = DecimalValue::new(governed_capacity);
+        portfolio.exposure_limits.max_category_exposure_usd = DecimalValue::new(governed_capacity);
+        portfolio.exposure_limits.max_route_exposure_usd = DecimalValue::new(governed_capacity);
+
+        // Every fixture position is a fully funded long outcome token. Its
+        // worst one-horizon loss, including executable fees, is bounded by
+        // entry cash, so the concurrent tier capacity is the exact conservative
+        // aggregate cap for scenario loss, CVaR, and every disjoint lock bucket.
+        // Drawdown is different: it is a peak-to-current wealth-path loss and
+        // can accumulate across sequentially settled/reopened positions. In the
+        // self-financing, no-leverage replay its exact absolute ceiling is the
+        // funded total budget, not the concurrent open-position capacity.
+        portfolio.tail_risk.max_cvar_usd = DecimalValue::new(governed_capacity);
+        portfolio.tail_risk.max_scenario_loss_usd = DecimalValue::new(governed_capacity);
+        portfolio.tail_risk.max_drawdown_usd = DecimalValue::new(total_budget);
+        for (bucket, cap) in portfolio
+            .tail_risk
+            .capital_time_buckets
+            .iter_mut()
+            .zip([governed_capacity; 3])
+        {
+            bucket.max_capital_usd = DecimalValue::new(cap);
+        }
+        portfolio
+    }
+}
+
+/// Complete persisted lineage for one Route-owned calibrated serving model.
+pub(super) struct SeededRouteModel {
+    pub model_version_id: ModelVersionId,
+    pub calibration_artifact_id: CalibrationArtifactId,
+    pub model_run_id: ModelRunId,
+    pub trade_policy: TradePolicyCohortProvenance,
+    pub factor_serving_plane: FactorServingPlane,
 }
 
 /// Immutable inputs for one calibrated system-test model chain.
@@ -319,6 +436,22 @@ pub enum CalibratedModelHead {
 }
 
 impl CalibratedModelHead {
+    /// Canonical governed control head for feedback-closure fixtures.
+    pub(super) fn feedback_control() -> Self {
+        Self::alpha_simplex([
+            (FactorName::new("momentum_ema_slope"), dec!(0.03)),
+            (FactorName::new("momentum_macd"), dec!(0.15)),
+            (FactorName::new("momentum_roc"), dec!(0.03)),
+            (FactorName::new("momentum_vol_adjusted"), dec!(0.18)),
+            (
+                FactorName::new("struct.resolution_proximity_regime"),
+                dec!(0.17),
+            ),
+            (FactorName::new("struct.reversal_after_shock"), dec!(0.44)),
+        ])
+        .expect("governed-feedback control head")
+    }
+
     /// Validate and freeze an explicit alpha-factor simplex.
     pub fn alpha_simplex(weights: impl IntoIterator<Item = (FactorName, Decimal)>) -> Result<Self> {
         let mut simplex = BTreeMap::new();
@@ -459,6 +592,9 @@ pub struct ReportBuildOptions {
     pub summary: ReportSummary,
     pub as_of: DateTime<Utc>,
     pub runtime_mode: QuantRuntimeMode,
+    /// Optional governed capital scale for historical fixtures that share the
+    /// live account's equity high-water ledger.
+    pub account_capital_usd: Option<Usd>,
 }
 
 impl ReportBuildOptions {
@@ -479,18 +615,20 @@ impl ReportBuildOptions {
             summary: report_summary(),
             as_of: ids.decision_at,
             runtime_mode: QuantRuntimeMode::AutoExecution,
+            account_capital_usd: None,
         }
     }
 
     /// Published report with zero recommendations and an explicit empty reason.
     #[must_use]
-    pub fn empty_report() -> Self {
+    pub fn empty_report(ids: &ExecutionTxnIds) -> Self {
         Self {
             recommendations: Vec::new(),
             entry_condition_artifacts: Vec::new(),
             summary: empty_report_summary(),
-            as_of: Utc::now(),
+            as_of: ids.decision_at,
             runtime_mode: QuantRuntimeMode::AutoExecution,
+            account_capital_usd: None,
         }
     }
 }
@@ -513,14 +651,8 @@ pub async fn seed_demo_with_store(
 pub async fn seed_feedback_serving_infra(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
-    required_shadow_window_secs: u64,
-    shadow_diff_threshold: Decimal,
-    feedback_budget_usd: Decimal,
+    config: FeedbackServingFixtureConfig,
 ) -> GovernedFeedbackInfra {
-    assert!(
-        feedback_budget_usd > Decimal::ZERO,
-        "governed-feedback budget must be positive"
-    );
     let policy = PgPolicyRepository::new(db.clone());
     assert!(
         policy
@@ -532,33 +664,7 @@ pub async fn seed_feedback_serving_infra(
     );
     let champion_model_version_id = ModelVersionId::from_v7();
     let mut snapshot = DecisionPolicySnapshot::default();
-    snapshot
-        .profile_artifacts
-        .research_method
-        .model_promotion
-        .required_shadow_window_secs = required_shadow_window_secs;
-    // Governed feedback evidence must exercise executable CPCV/comparison
-    // economics. A small per-observation notional funds the complete frozen
-    // cohort without weakening any sample-count or quality gate.
-    snapshot.execution_risk.portfolio.budget.total_budget_usd =
-        DecimalValue::new(feedback_budget_usd);
-    snapshot
-        .execution_risk
-        .portfolio
-        .budget
-        .min_recommendation_usd = DecimalValue::new(dec!(1));
-    snapshot
-        .execution_risk
-        .portfolio
-        .budget
-        .max_single_recommendation_usd = DecimalValue::new(dec!(1));
-    snapshot
-        .execution_risk
-        .portfolio
-        .kelly_safety
-        .max_aggregate_exposure_pct = DecimalValue::new(Decimal::ONE);
-    snapshot.recommendation.selection.enabled_categories = vec![MarketCategory::Weather];
-    snapshot.model_routing.model.shadow_diff_threshold = DecimalValue::new(shadow_diff_threshold);
+    config.apply_runtime_controls(&mut snapshot);
     snapshot.model_routing.model.buy_routes.insert(
         BuyModelRoute::Weather,
         BuyRouteBinding {
@@ -579,23 +685,27 @@ pub async fn seed_feedback_serving_infra(
         "publish an exact Weather serving route for governed feedback",
     )
     .await;
-    let (template_model_version_id, model_run_id, trade_policy, factor_serving_plane) =
-        Box::pin(seed_model_version_named(
-            db,
-            &decision_policy_snapshot_id,
-            ModelVersionId::from_v7(),
-            "governed-feedback-model",
-            Some(artifact_store),
-        ))
-        .await;
+    let seeded = Box::pin(seed_model_version_named(
+        db,
+        SeedModelVersionInput {
+            decision_policy_snapshot_id,
+            model_version_id: champion_model_version_id,
+            model_name: "governed-feedback-model",
+            profile_ref: fixture_profile_ref(),
+            artifact_store: Some(artifact_store),
+            head: CalibratedModelHead::feedback_control(),
+        },
+    ))
+    .await;
     GovernedFeedbackInfra {
         template: SharedDemoInfra {
             feature_parity_state_id: clear_parity_state(db).await,
             decision_policy_snapshot_id,
-            model_version_id: template_model_version_id,
-            model_run_id,
-            trade_policy,
-            factor_serving_plane,
+            model_version_id: seeded.model_version_id,
+            calibration_artifact_id: seeded.calibration_artifact_id,
+            model_run_id: seeded.model_run_id,
+            trade_policy: seeded.trade_policy,
+            factor_serving_plane: seeded.factor_serving_plane,
         },
         champion_model_version_id,
     }
@@ -621,22 +731,26 @@ async fn seed_demo_inner(
         return infra;
     }
 
-    let (model_version_id, model_run_id, trade_policy, factor_serving_plane) =
-        Box::pin(seed_model_version_named(
-            db,
-            &decision_policy_snapshot_id,
-            ModelVersionId::from_v7(),
-            "ui-demo-seed-model",
+    let seeded = Box::pin(seed_model_version_named(
+        db,
+        SeedModelVersionInput {
+            decision_policy_snapshot_id,
+            model_version_id: ModelVersionId::from_v7(),
+            model_name: "ui-demo-seed-model",
+            profile_ref: fixture_profile_ref(),
             artifact_store,
-        ))
-        .await;
+            head: CalibratedModelHead::Policy,
+        },
+    ))
+    .await;
     SharedDemoInfra {
         feature_parity_state_id: clear_parity_state(db).await,
         decision_policy_snapshot_id,
-        model_version_id,
-        model_run_id,
-        trade_policy,
-        factor_serving_plane,
+        model_version_id: seeded.model_version_id,
+        calibration_artifact_id: seeded.calibration_artifact_id,
+        model_run_id: seeded.model_run_id,
+        trade_policy: seeded.trade_policy,
+        factor_serving_plane: seeded.factor_serving_plane,
     }
 }
 
@@ -673,6 +787,13 @@ async fn find_existing_demo_infra(
         .ok()??;
     let artifact_id = version.trade_policy_artifact_id?;
     let artifact_hash = version.trade_policy_hash?;
+    let calibration_artifact_id = version
+        .serving_contract
+        .bindings()
+        .model
+        .calibration
+        .as_ref()?
+        .artifact_id;
     let artifact = PgTradePolicyRepository::new(db.clone())
         .find(&artifact_id)
         .await
@@ -682,6 +803,7 @@ async fn find_existing_demo_infra(
         feature_parity_state_id: clear_parity_state(db).await,
         decision_policy_snapshot_id: run.decision_policy_snapshot_id,
         model_version_id: version.model_version_id,
+        calibration_artifact_id,
         model_run_id: run.model_run_id,
         trade_policy: TradePolicyCohortProvenance {
             artifact_id,
@@ -796,15 +918,9 @@ async fn seed_price_by_mode(
         artifact_id: artifact.artifact_id,
         content_hash: artifact.content_hash,
     };
-    match &mut recommendation.trade_plan {
-        RecommendationTradePlan::Frozen { entry, .. } => {
-            entry.condition = condition;
-            "wait for executable ask at or below 0.62".clone_into(&mut entry.entry_reason);
-        }
-        RecommendationTradePlan::Unavailable { .. } => {
-            panic!("conditional report recommendation must have a frozen trade plan")
-        }
-    }
+    recommendation.trade_plan.entry.condition = condition;
+    "wait for executable ask at or below 0.62"
+        .clone_into(&mut recommendation.trade_plan.entry.entry_reason);
     options.entry_condition_artifacts.push(artifact);
     ids.complete_model_run(db).await;
     persist_and_publish_report(
@@ -920,6 +1036,7 @@ async fn finish_report_lineage(
         recommendation: RecommendationId::from_v7(),
         condition_instance: EntryConditionInstanceId::from_v7(),
         model_version: infra.model_version_id,
+        calibration_artifact: infra.calibration_artifact_id,
         model_run: model_run_id,
         market_selection: market_selection_id,
         decision_policy_snapshot: infra.decision_policy_snapshot_id,
@@ -990,15 +1107,10 @@ pub async fn seed_feedback_scale(
         r"
         UPDATE quant_recommendation_report
         SET top_n = 1000
-        WHERE research_profile_artifact_id = $1
-          AND decision_at >= $2
-          AND decision_at <= $3
+        WHERE decision_at >= $1
+          AND decision_at <= $2
         ",
-        [
-            profile_artifact_id.clone().into(),
-            window_start.into(),
-            report_cutoff.into(),
-        ],
+        [window_start.into(), report_cutoff.into()],
     ))
     .await
     .expect("align scale report cardinality");
@@ -1012,40 +1124,54 @@ pub async fn seed_feedback_scale(
                 INNER JOIN quant_recommendation_report AS report
                     ON report.recommendation_report_id =
                        recommendation.recommendation_report_id
-                WHERE recommendation.research_profile_artifact_id = $1
+                INNER JOIN quant_report_route_run AS route_run
+                    ON route_run.report_route_run_id =
+                       recommendation.report_route_run_id
+                WHERE route_run.research_profile_artifact_id = $1
                   AND recommendation.rank = 1
                   AND report.decision_at >= $2
                   AND report.decision_at <= $3
             )
             INSERT INTO quant_recommendation (
-                recommendation_id, research_profile_artifact_id,
-                recommendation_report_id, rank, market_id, event_id, token_id,
-                outcome_side, composite_score, risk_adjusted_score, confidence,
-                expected_return_bps, downside_bps, identity, market_context,
-                rank_before_portfolio, liquidity_score, data_quality_score,
-                model_score_percentile, trade_plan, factor_breakdown, evidence_refs,
-                execution_eligibility, valid_from, valid_until, status, created_at
+                recommendation_id, recommendation_report_id,
+                report_route_run_id, portfolio_plan_id, economic_tier_id,
+                rank, route, market_id, event_id, token_id, outcome_side,
+                economics_json, economic_tier_json, identity, market_context,
+                trade_plan, factor_breakdown, evidence_refs, execution_eligibility,
+                valid_from, valid_until, status, status_changed_at, created_at
             )
             SELECT
                 md5(template.recommendation_report_id::text || ':' || ordinal)::uuid,
-                template.research_profile_artifact_id,
                 template.recommendation_report_id,
+                template.report_route_run_id,
+                template.portfolio_plan_id,
+                md5(template.recommendation_report_id::text || ':' || ordinal || ':tier')::uuid,
                 ordinal,
+                template.route,
                 'feedback-scale-market-' || ordinal,
                 $4,
                 'feedback-scale-yes-' || ordinal,
                 template.outcome_side,
-                template.composite_score,
-                template.risk_adjusted_score,
-                template.confidence,
-                template.expected_return_bps,
-                template.downside_bps,
+                template.economics_json,
+                jsonb_set(
+                    jsonb_set(
+                        jsonb_set(
+                            jsonb_set(
+                                template.economic_tier_json,
+                                '{economic_tier_id}',
+                                to_jsonb((md5(template.recommendation_report_id::text || ':' || ordinal || ':tier')::uuid)::text)
+                            ),
+                            '{market_id}',
+                            to_jsonb('feedback-scale-market-' || ordinal)
+                        ),
+                        '{event_id}',
+                        to_jsonb($4::text)
+                    ),
+                    '{token_id}',
+                    to_jsonb('feedback-scale-yes-' || ordinal)
+                ),
                 template.identity,
                 template.market_context,
-                ordinal,
-                template.liquidity_score,
-                template.data_quality_score,
-                template.model_score_percentile,
                 template.trade_plan,
                 template.factor_breakdown,
                 template.evidence_refs,
@@ -1053,6 +1179,7 @@ pub async fn seed_feedback_scale(
                 template.valid_from,
                 template.valid_until,
                 template.status,
+                template.status_changed_at,
                 template.created_at
             FROM templates AS template
             CROSS JOIN generate_series(2, 1000) AS ordinal
@@ -1185,34 +1312,120 @@ pub fn demo_recommendation(
     event_id: &str,
     token_id: &str,
 ) -> NewRecommendation {
+    let created_at = Utc::now();
     let token_id = TokenId::new(token_id);
+    let economic_tier_id = EconomicTierId::new(recommendation_id.as_uuid());
+    let report_route_run_id = ReportRouteRunId::new(report_id.as_uuid());
+    let economics = fixture_recommendation_economics();
+    let evidence_refs = ids.evidence_refs(&token_id);
+    let economic_tier = fixture_economic_tier(
+        economic_tier_id,
+        report_route_run_id,
+        evidence_refs.signal_candidate_id,
+        market_id,
+        event_id,
+        token_id.clone(),
+        economics,
+    );
     NewRecommendation {
         recommendation_id,
-        research_profile_artifact_id: fixture_profile_ref().artifact_id(),
         recommendation_report_id: report_id,
+        report_route_run_id,
+        portfolio_plan_id: ids.portfolio_plan,
+        economic_tier_id,
         rank,
+        route: BuyModelRoute::Weather,
         market_id: MarketId::new(market_id),
         event_id: EventId::new(event_id),
-        token_id: token_id.clone(),
+        token_id,
         outcome_side: OutcomeSide::Yes,
-        composite_score: Probability::new(dec!(0.7)),
-        risk_adjusted_score: Probability::new(dec!(0.65)),
-        confidence: Probability::new(dec!(0.72)),
-        expected_return_bps: Bps::new(dec!(150)),
-        downside_bps: Bps::new(dec!(80)),
+        economics_json: economics,
+        economic_tier_json: economic_tier,
         identity: recommendation_identity(),
         market_context: market_context(),
-        rank_before_portfolio: rank,
-        liquidity_score: Probability::new(dec!(0.8)),
-        data_quality_score: Probability::new(dec!(0.9)),
-        model_score_percentile: Probability::new(dec!(0.75)),
-        trade_plan: trade_plan(&ids.trade_policy),
+        trade_plan: trade_plan(&ids.trade_policy, economic_tier_id),
         factor_breakdown: ids.factor_breakdown(),
-        evidence_refs: ids.evidence_refs(&token_id),
+        evidence_refs,
         execution_eligibility: execution_eligibility(),
-        valid_from: Utc::now(),
-        valid_until: Utc::now() + Duration::hours(1),
+        valid_from: created_at,
+        valid_until: created_at + Duration::hours(1),
         status: RecommendationStatus::Prepared,
+        created_at,
+    }
+}
+
+const fn fixture_recommendation_economics() -> RecommendationEconomics {
+    RecommendationEconomics {
+        profit_probability_bps: Bps::new(dec!(7000)),
+        nominal_expected_net_usd: Usd::new(dec!(19.5)),
+        robust_expected_net_usd: Usd::new(dec!(11.5)),
+        max_loss_usd: Usd::new(dec!(25)),
+        cvar_contribution_usd: Usd::new(dec!(25)),
+        capital_occupancy_usd_hours: UsdHours::new(dec!(25)),
+        marginal_portfolio_value_usd: Usd::new(dec!(11.5)),
+    }
+}
+
+fn fixture_economic_tier(
+    economic_tier_id: EconomicTierId,
+    report_route_run_id: ReportRouteRunId,
+    candidate_id: SignalCandidateId,
+    market_id: &str,
+    event_id: &str,
+    token_id: TokenId,
+    economics: RecommendationEconomics,
+) -> ExecutableEconomicTier {
+    ExecutableEconomicTier {
+        economic_tier_id,
+        report_route_run_id,
+        candidate_id,
+        tier_ordinal: 1,
+        route: BuyModelRoute::Weather,
+        market_id: MarketId::new(market_id),
+        event_id: EventId::new(event_id),
+        category: MarketCategory::Weather,
+        token_id,
+        outcome_side: OutcomeSide::Yes,
+        shares: Shares::new(ENTRY_FILLED_SHARES),
+        entry: EntryEconomics {
+            notional_usd: Usd::new(EXECUTION_NOTIONAL),
+            entry_vwap: Price::new(ENTRY_PRICE),
+            fee_usd: Usd::new(ENTRY_FEE_USD),
+            slippage_usd: Usd::ZERO,
+            visible_liquidity_usd: Usd::new(dec!(5000)),
+        },
+        profit_probability_lower_bps: 6_500,
+        probability_interval_width_bps: 1_000,
+        scenario_cashflows: vec![
+            ScenarioCashflow {
+                scenario_index: 0,
+                discounted_net_usd: Usd::new(dec!(50)),
+            },
+            ScenarioCashflow {
+                scenario_index: 1,
+                discounted_net_usd: Usd::new(dec!(-25)),
+            },
+            ScenarioCashflow {
+                scenario_index: 2,
+                discounted_net_usd: Usd::new(dec!(10)),
+            },
+        ],
+        capital_occupancy: vec![
+            CapitalOccupancyBucket {
+                end_secs: 3_600,
+                locked_usd: Usd::new(EXECUTION_NOTIONAL),
+            },
+            CapitalOccupancyBucket {
+                end_secs: 86_400,
+                locked_usd: Usd::ZERO,
+            },
+            CapitalOccupancyBucket {
+                end_secs: 604_800,
+                locked_usd: Usd::ZERO,
+            },
+        ],
+        economics,
+        lineage_hash: content_hash('l'),
     }
 }
 
@@ -1597,7 +1810,7 @@ pub(super) fn new_order_intent(
             thesis_invalidation: ThesisInvalidationPolicy {
                 min_score_retention: dec!(0.6),
                 min_expected_return_bps: Bps::ZERO,
-                require_execution_eligibility: true,
+                require_route_gate_eligibility: true,
             },
             opportunistic_exit: opportunistic_exit_policy(),
             scale_out_targets: Vec::new(),
@@ -1642,10 +1855,8 @@ pub fn fixture_profile_ref() -> ResearchProfileRef {
     builtin_research_profiles()
         .expect("research profiles")
         .into_iter()
-        .find(|profile| {
-            profile.spec.activation_eligibility == ResearchEvaluationTrack::SemiAutoCandidate
-        })
-        .expect("weather profile")
+        .find(|profile| profile.spec.category == Some(MarketCategory::Weather))
+        .expect("Weather ResearchProfile")
         .profile_ref
 }
 
@@ -2116,6 +2327,14 @@ impl ScoreCalibrationFixture {
                     ece: dec!(0.02),
                     n_samples: 500,
                 },
+                split_payout_rate: SplitPayoutRateEvidence {
+                    total_sample_count: 500,
+                    split_sample_count: 0,
+                    empirical_probability: Probability::ZERO,
+                    wilson_ci: (Probability::ZERO, Probability::new(dec!(0.007624))),
+                    split_payout_ratio: PayoutRatio::try_new(dec!(0.5))
+                        .expect("split payout ratio"),
+                },
             },
         }
     }
@@ -2328,32 +2547,113 @@ pub async fn seed_calibrated_model(
     }
 }
 
-async fn seed_model_version_named(
+pub(super) struct SeedModelVersionInput<'a> {
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub model_version_id: ModelVersionId,
+    pub model_name: &'a str,
+    pub profile_ref: ResearchProfileRef,
+    pub artifact_store: Option<&'a Arc<dyn ArtifactStore>>,
+    pub head: CalibratedModelHead,
+}
+
+fn execution_model_window(spec: &ResearchProfileSpec) -> (DateTime<Utc>, DateTime<Utc>) {
+    let evaluation_days = i64::from(spec.feedback_policy.evaluation_window_days);
+    let fit_days = i64::from(spec.fit_span_days);
+    let horizon_secs = i64::try_from(spec.target_horizon_secs)
+        .expect("execution ResearchProfile horizon fits i64");
+    let purge_embargo_secs =
+        i64::try_from(spec.purge_embargo_secs).expect("execution ResearchProfile embargo fits i64");
+    let cadence_secs = i64::try_from(spec.feedback_policy.feedback_cadence_secs)
+        .expect("execution ResearchProfile cadence fits i64");
+    let governed_history = Duration::days(
+        fit_days
+            .checked_add(
+                evaluation_days
+                    .checked_mul(2)
+                    .expect("execution feedback evaluation span fits i64"),
+            )
+            .and_then(|days| days.checked_add(2))
+            .expect("execution feedback day horizon fits i64"),
+    ) + Duration::seconds(
+        horizon_secs
+            .checked_add(
+                purge_embargo_secs
+                    .checked_mul(2)
+                    .expect("execution feedback embargo span fits i64"),
+            )
+            .and_then(|seconds| seconds.checked_add(cadence_secs))
+            .expect("execution feedback second horizon fits i64"),
+    );
+    let window_start_raw = Utc::now() - governed_history;
+    let window_start = DateTime::from_timestamp_millis(window_start_raw.timestamp_millis())
+        .expect("execution model window must fit millisecond precision");
+    (window_start, window_start + Duration::days(1))
+}
+
+async fn seed_fixture_evaluation_run(
     db: &DatabaseConnection,
-    rc_id: &DecisionPolicySnapshotId,
     model_version_id: ModelVersionId,
-    model_name: &str,
-    artifact_store: Option<&Arc<dyn ArtifactStore>>,
-) -> (
-    ModelVersionId,
-    ModelRunId,
-    TradePolicyCohortProvenance,
-    FactorServingPlane,
-) {
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+) -> ModelRunId {
+    let model_run_id = ModelRunId::from_v7();
+    let runs = PgModelRunRepository::new(db.clone());
+    let window_end = Utc::now();
+    let window_start = window_end - Duration::milliseconds(1);
+    // This handle exists only for repository fixtures that need completed
+    // model lineage before a report-specific decision exists. Classifying it
+    // as LiveInference would fabricate a serving decision without a frozen
+    // market selection and poison the automatic 24-hour parity window. Every
+    // real fixture report creates its own exact LiveInference run later.
+    runs.create(NewModelRun {
+        model_run_id,
+        run_kind: ModelRunKind::Backtest,
+        model_version_id: Some(model_version_id),
+        decision_policy_snapshot_id,
+        market_selection_id: None,
+        window_start,
+        window_end,
+        input_hash: content_hash('d'),
+    })
+    .await
+    .expect("create model run");
+    runs.succeed(&model_run_id, content_hash('e'), None)
+        .await
+        .expect("finish model run");
+    model_run_id
+}
+
+pub(super) async fn seed_model_version_named(
+    db: &DatabaseConnection,
+    input: SeedModelVersionInput<'_>,
+) -> SeededRouteModel {
+    let SeedModelVersionInput {
+        decision_policy_snapshot_id,
+        model_version_id,
+        model_name,
+        profile_ref,
+        artifact_store,
+        head,
+    } = input;
+    let profile = profile_ref
+        .resolve_builtin_research_profile()
+        .expect("resolve execution ResearchProfile");
+    let prediction_horizon_secs = i64::try_from(profile.spec.target_horizon_secs)
+        .expect("execution ResearchProfile horizon fits i64");
     let registry = PgModelRegistryRepository::new(db.clone());
     let dataset_store_fallback = ModelDatasetLedgerFixture::local_store();
     let dataset_store = artifact_store.unwrap_or(&dataset_store_fallback);
-    let window_end_raw = Utc::now() - Duration::days(30);
-    let window_end = DateTime::from_timestamp_millis(window_end_raw.timestamp_millis())
-        .expect("execution model window must fit millisecond precision");
-    let window_start = window_end - Duration::days(1);
+    // Every serving preimage must predate the complete future feedback program.
+    let (window_start, window_end) = execution_model_window(&profile.spec);
     let policy_scope = format!("execution-{model_name}");
     let trade_policy_fixture = Box::pin(PublishedTradePolicyFixture::persist(
         db,
         dataset_store,
-        *rc_id,
-        &policy_scope,
-        window_start,
+        PublishedTradePolicyFixtureInput {
+            decision_policy_snapshot_id,
+            profile_ref: profile_ref.clone(),
+            scope: &policy_scope,
+            training_window_start: window_start,
+        },
     ))
     .await
     .expect("persist complete execution TradePolicy preimage");
@@ -2372,26 +2672,22 @@ async fn seed_model_version_named(
             model_spec_id,
             model_name,
             ModelFamily::WeightedFactor,
-            weather_horizon_secs(),
+            prediction_horizon_secs,
             input_contract,
-            trade_policy_fixture.target_training_contract(),
+            trade_policy_fixture.outcome_training_contract(),
         );
         let definition_hash = spec.definition_hash;
         registry.create_model_spec(spec).await.expect("model spec");
         (model_spec_id, definition_hash)
     };
     let policy = PgPolicyRepository::new(db.clone())
-        .load_snapshot(rc_id)
+        .load_snapshot(&decision_policy_snapshot_id)
         .await
         .expect("load demo policy snapshot")
         .expect("demo policy snapshot");
     let features = &policy.snapshot.profile_artifacts.features.definition;
     let factors = &policy.snapshot.profile_artifacts.scoring.definition;
     let domain = &policy.snapshot.profile_artifacts.domain.definition;
-    let profile_ref = fixture_profile_ref();
-    let profile = profile_ref
-        .resolve_builtin_research_profile()
-        .expect("resolve execution ResearchProfile");
     let factor_engine =
         FactorEngine::for_model_scope(factors, features, domain, profile.spec.category, None);
     let factor_plane = factor_engine.serving_plane().expect("demo factor plane");
@@ -2420,8 +2716,8 @@ async fn seed_model_version_named(
             factor_serving_plane: factor_plane.clone(),
             feature_schema_version: SchemaVersion::FIRST,
             feature_schema_hash,
-            decision_policy_snapshot_id: *rc_id,
-            profile_ref,
+            decision_policy_snapshot_id,
+            profile_ref: profile_ref.clone(),
             prediction_horizon_secs: profile.spec.target_horizon_secs,
             purpose: DatasetPurpose::Training,
             window_start,
@@ -2449,7 +2745,7 @@ async fn seed_model_version_named(
             model_version_id,
             training_dataset_id: dataset.training_dataset_id,
             training_input_hash: content_hash('7'),
-            head: CalibratedModelHead::Policy,
+            head,
         },
     ))
     .await;
@@ -2460,30 +2756,15 @@ async fn seed_model_version_named(
     ModelVersionFixture::persist_route_candidate(db, fixture.version(model_spec_id, version))
         .await
         .expect("publish model version through exact parity proof");
-    let model_run_id = ModelRunId::from_v7();
-    let runs = PgModelRunRepository::new(db.clone());
-    let window_at = Utc::now();
-    runs.create(NewModelRun {
-        model_run_id,
-        run_kind: ModelRunKind::LiveInference,
-        model_version_id: Some(model_version_id),
-        decision_policy_snapshot_id: *rc_id,
-        market_selection_id: None,
-        window_start: window_at,
-        window_end: window_at,
-        input_hash: content_hash('d'),
-    })
-    .await
-    .expect("create model run");
-    runs.succeed(&model_run_id, content_hash('e'), None)
-        .await
-        .expect("finish model run");
-    (
+    let model_run_id =
+        seed_fixture_evaluation_run(db, model_version_id, decision_policy_snapshot_id).await;
+    SeededRouteModel {
         model_version_id,
+        calibration_artifact_id: fixture.calibration_artifact_id,
         model_run_id,
         trade_policy,
-        factor_plane.clone(),
-    )
+        factor_serving_plane: factor_plane.clone(),
+    }
 }
 
 async fn seed_market_selection(
@@ -2505,6 +2786,7 @@ async fn seed_market_selection(
                 decision_at,
                 decision_policy_snapshot_id: *rc_id,
                 selector_hash: content_hash('b'),
+                selector_evidence: SelectorFixture::evidence(content_hash('b')),
                 market_count,
                 exclusion_summary: SelectionExclusionSummary::default(),
             },
@@ -2526,13 +2808,58 @@ fn build_report_transaction_inner(
     options: ReportBuildOptions,
 ) -> NewReportTransaction {
     let equity_snapshot_id = EquitySnapshotId::from_v7();
-    let (report, allocated_usd) = fixture_report(ids, &options, &equity_snapshot_id);
     let ReportBuildOptions {
-        recommendations,
+        mut recommendations,
         entry_condition_artifacts,
+        summary,
         as_of,
-        ..
+        runtime_mode,
+        account_capital_usd,
     } = options;
+    let recommendation_created_at = as_of + Duration::seconds(2);
+    for recommendation in &mut recommendations {
+        recommendation.created_at = recommendation_created_at;
+    }
+    let report_run_id = ReportRunId::new(ids.report.as_uuid());
+    let represented_routes =
+        RepresentedRouteSet::from_routes([BuyModelRoute::Weather]).expect("fixture Route set");
+    let portfolio_policy = PortfolioConfig::default();
+    let scenario_artifact =
+        fixture_scenario_artifact(&represented_routes, &portfolio_policy, as_of);
+    let mut account_snapshot = ids.new_account_snapshot();
+    account_snapshot.account_snapshot_id = ids.account_snapshot;
+    if let Some(capital) = account_capital_usd {
+        let invested = account_snapshot
+            .positions_json
+            .0
+            .iter()
+            .map(|position| position.current_value)
+            .sum::<Usd>();
+        assert!(
+            capital >= invested,
+            "historical fixture capital must cover its marked positions"
+        );
+        account_snapshot.venue_net_liquidation_usd = capital;
+        account_snapshot.capital_base_usd = capital;
+        account_snapshot.available_usd = capital - invested;
+    }
+    let capital_base_usd = account_snapshot.capital_base_usd;
+    let venue_net_liquidation_usd = account_snapshot.venue_net_liquidation_usd;
+    let available_usd = account_snapshot.available_usd;
+    let report = fixture_report(
+        ids,
+        FixtureReportInput {
+            equity_snapshot_id: &equity_snapshot_id,
+            report_run_id,
+            represented_routes: represented_routes.clone(),
+            scenario_artifact: &scenario_artifact,
+            summary,
+            as_of,
+            runtime_mode,
+            capital_base_usd,
+        },
+    );
+    let route_runs = fixture_route_runs(ids, &report, &recommendations);
     let sampled_feature_parity = report_fixtures::sampled_parity(&report);
     let entry_condition_instances = recommendations
         .iter()
@@ -2540,21 +2867,18 @@ fn build_report_transaction_inner(
         .collect();
     NewReportTransaction {
         feature_parity_state_id: Some(ids.feature_parity_state_id),
-        account_snapshot: NewAccountSnapshot {
-            account_snapshot_id: ids.account_snapshot,
-            ..ids.new_account_snapshot()
-        },
+        account_snapshot,
         equity_snapshot: NewEquitySnapshot {
             equity_snapshot_id,
             as_of,
             source: AccountSource::Polymarket,
-            venue_net_liquidation_usd: Usd::new(dec!(10000)),
-            capital_base_usd: Usd::new(dec!(10000)),
-            available_usd: Usd::new(dec!(9000)),
+            venue_net_liquidation_usd,
+            capital_base_usd,
+            available_usd,
             reserved_usd: Usd::ZERO,
             realized_pnl_cumulative_usd: Usd::ZERO,
             unrealized_pnl_usd: Usd::ZERO,
-            high_water_mark_usd: Usd::new(dec!(10000)),
+            high_water_mark_usd: capital_base_usd,
             drawdown_pct: Decimal::ZERO,
             account_snapshot_ref: Some(ids.account_snapshot),
         },
@@ -2566,17 +2890,20 @@ fn build_report_transaction_inner(
         },
         portfolio_plan: NewPortfolioPlan {
             portfolio_plan_id: ids.portfolio_plan,
-            model_run_id: Some(ids.model_run),
+            account_snapshot_id: ids.account_snapshot,
+            decision_policy_snapshot_id: ids.decision_policy_snapshot,
             market_selection_id: ids.market_selection,
             decision_at: as_of,
-            budget_usd: Usd::new(dec!(10000)),
-            allocated_usd,
-            risk_budget_json: PortfolioRiskBudget::default(),
-            constraints_json: PortfolioConstraintsSnapshot::default(),
-            rejected_summary: PortfolioRejectedSummary::default(),
-            optimizer_meta_json: PortfolioOptimizerMeta::default(),
+            represented_routes_json: represented_routes,
+            scenario_artifact_id: Some(scenario_artifact.portfolio_scenario_artifact_id),
+            scenario_artifact_hash: Some(scenario_artifact.content_hash),
+            scenario_artifact_json: Some(scenario_artifact),
+            portfolio_policy_json: portfolio_policy,
+            existing_state_json: fixture_existing_state(),
+            decision_json: fixture_portfolio_decision(ids.portfolio_plan, &recommendations),
         },
         report,
+        route_runs,
         recommendations,
         entry_condition_artifacts,
         entry_condition_instances,
@@ -2592,29 +2919,24 @@ fn fixture_condition_instance(
     published_at: DateTime<Utc>,
 ) -> NewEntryConditionInstance {
     let (artifact_id, artifact_hash, state, truth, next_evaluation_at) =
-        match &recommendation.trade_plan {
-            RecommendationTradePlan::Frozen { entry, .. } => match &entry.condition {
-                EntryConditionPlan::Immediate => (
-                    None,
-                    None,
-                    EntryConditionState::NotRequired,
-                    Some(ConditionTruth::Satisfied),
-                    None,
-                ),
-                EntryConditionPlan::Conditional {
-                    artifact_id,
-                    content_hash,
-                } => (
-                    Some(*artifact_id),
-                    Some(*content_hash),
-                    EntryConditionState::Waiting,
-                    None,
-                    Some(published_at),
-                ),
-            },
-            RecommendationTradePlan::Unavailable { .. } => {
-                (None, None, EntryConditionState::Invalidated, None, None)
-            }
+        match &recommendation.trade_plan.entry.condition {
+            EntryConditionPlan::Immediate => (
+                None,
+                None,
+                EntryConditionState::NotRequired,
+                Some(ConditionTruth::Satisfied),
+                None,
+            ),
+            EntryConditionPlan::Conditional {
+                artifact_id,
+                content_hash,
+            } => (
+                Some(*artifact_id),
+                Some(*content_hash),
+                EntryConditionState::Waiting,
+                None,
+                Some(published_at),
+            ),
         };
     NewEntryConditionInstance {
         condition_instance_id: if recommendation.recommendation_id == ids.recommendation {
@@ -2692,46 +3014,352 @@ impl ExecutionTxnIds {
     }
 }
 
-fn fixture_report(
-    ids: &ExecutionTxnIds,
-    options: &ReportBuildOptions,
-    equity_snapshot_id: &EquitySnapshotId,
-) -> (NewRecommendationReport, Usd) {
-    let allocated_usd = options
-        .recommendations
-        .iter()
-        .filter_map(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd))
-        .sum();
-    let report = NewRecommendationReport {
+struct FixtureReportInput<'a> {
+    equity_snapshot_id: &'a EquitySnapshotId,
+    report_run_id: ReportRunId,
+    represented_routes: RepresentedRouteSet,
+    scenario_artifact: &'a PortfolioScenarioArtifact,
+    summary: ReportSummary,
+    as_of: DateTime<Utc>,
+    runtime_mode: QuantRuntimeMode,
+    capital_base_usd: Usd,
+}
+
+fn fixture_report(ids: &ExecutionTxnIds, input: FixtureReportInput<'_>) -> NewRecommendationReport {
+    let FixtureReportInput {
+        equity_snapshot_id,
+        report_run_id,
+        represented_routes,
+        scenario_artifact,
+        summary,
+        as_of,
+        runtime_mode,
+        capital_base_usd,
+    } = input;
+    NewRecommendationReport {
         recommendation_report_id: ids.report,
-        research_profile_artifact_id: fixture_profile_ref().artifact_id(),
+        report_run_id,
         report_kind: ReportKind::TopN,
-        decision_at: options.as_of,
-        horizon_secs: 86_400,
-        runtime_mode: options.runtime_mode,
+        decision_at: as_of,
+        runtime_mode,
         decision_policy_snapshot_id: ids.decision_policy_snapshot,
-        model_run_id: Some(ids.model_run),
-        model_version_id: ids.model_version,
         market_selection_id: ids.market_selection,
         portfolio_plan_id: ids.portfolio_plan,
+        represented_routes_json: represented_routes,
+        scenario_artifact_id: Some(scenario_artifact.portfolio_scenario_artifact_id),
+        scenario_artifact_hash: Some(scenario_artifact.content_hash),
         top_n: 20,
         status: RecommendationReportStatus::Prepared,
         account_source: AccountSource::Polymarket,
-        capital_base_usd: Usd::new(dec!(10000)),
+        capital_base_usd,
         account_snapshot_ref: ids.account_snapshot,
         equity_snapshot_ref: *equity_snapshot_id,
         data_quality_snapshot_ref: ids.data_quality_snapshot,
-        summary_json: options.summary.clone(),
+        summary_json: summary,
         published_at: None,
         successor_report_id: None,
         superseded_at: None,
         obsoleted_at: None,
-        valid_until: Some(options.as_of + Duration::hours(1)),
+        valid_until: Some(as_of + Duration::hours(1)),
         revoked_at: None,
         expired_at: None,
         status_reason: None,
+        created_at: as_of + Duration::seconds(1),
+    }
+}
+
+fn fixture_route_runs(
+    ids: &ExecutionTxnIds,
+    report: &NewRecommendationReport,
+    recommendations: &[NewRecommendation],
+) -> Vec<NewReportRouteRun> {
+    let profile_ref = fixture_profile_ref();
+    let lineage = RouteModelLineage {
+        model_version_id: ids.model_version,
+        model_run_id: Some(ids.model_run),
+        calibration_artifact_id: ids.calibration_artifact,
+        trade_policy_artifact_id: ids.trade_policy.artifact_id,
+        research_profile_artifact_id: profile_ref.artifact_id(),
+        research_profile_ref: profile_ref,
+        prediction_horizon_secs: 86_400,
+        feature_contract_digest: content_hash('h'),
+        pit_lineage_digest: content_hash('i'),
+        serving_contract_digest: content_hash('j'),
     };
-    (report, allocated_usd)
+    let selected_recommendations =
+        u32::try_from(recommendations.len()).expect("fixture recommendation count fits u32");
+    vec![NewReportRouteRun {
+        report_route_run_id: ReportRouteRunId::new(ids.report.as_uuid()),
+        report_run_id: report.report_run_id,
+        route: BuyModelRoute::Weather,
+        outcome: if recommendations.is_empty() {
+            RouteRunOutcome::ZeroCandidates
+        } else {
+            RouteRunOutcome::Ready
+        },
+        model_version_id: Some(lineage.model_version_id),
+        model_run_id: lineage.model_run_id,
+        calibration_artifact_id: Some(lineage.calibration_artifact_id),
+        trade_policy_artifact_id: Some(lineage.trade_policy_artifact_id),
+        research_profile_artifact_id: Some(lineage.research_profile_artifact_id.clone()),
+        lineage_json: Some(lineage),
+        funnel_json: RouteCandidateFunnel {
+            eligible_markets: 1,
+            feature_complete_markets: 1,
+            calibrated_candidates: selected_recommendations,
+            admitted_economic_tiers: selected_recommendations,
+            selected_recommendations,
+        },
+        diagnostic_code: None,
+        finished_at: report.decision_at,
+    }]
+}
+
+fn fixture_scenario_artifact(
+    represented_routes: &RepresentedRouteSet,
+    policy: &PortfolioConfig,
+    as_of: DateTime<Utc>,
+) -> PortfolioScenarioArtifact {
+    let mut scenarios = vec![
+        PortfolioScenario {
+            scenario_index: 0,
+            kind: PortfolioScenarioKind::PitBootstrap,
+            label: "fixture_pit".to_owned(),
+            scenario_model_state_hash: content_hash('3'),
+            scenario_state_hash: content_hash('0'),
+            market_outcomes: Vec::new(),
+        },
+        PortfolioScenario {
+            scenario_index: 1,
+            kind: PortfolioScenarioKind::CalibrationUncertainty,
+            label: "fixture_calibration".to_owned(),
+            scenario_model_state_hash: content_hash('4'),
+            scenario_state_hash: content_hash('1'),
+            market_outcomes: Vec::new(),
+        },
+        PortfolioScenario {
+            scenario_index: 2,
+            kind: PortfolioScenarioKind::StructuralStress,
+            label: "fixture_stress".to_owned(),
+            scenario_model_state_hash: content_hash('5'),
+            scenario_state_hash: content_hash('2'),
+            market_outcomes: Vec::new(),
+        },
+    ];
+    for scenario in &mut scenarios {
+        scenario.scenario_state_hash = scenario
+            .recomputed_state_hash()
+            .expect("fixture scenario state hash");
+    }
+    let capital_time_bucket_contract_digest =
+        CapitalTimeBucketContract::try_from(policy.tail_risk.capital_time_buckets.as_slice())
+            .expect("fixture capital-time grid")
+            .content_hash()
+            .expect("fixture capital-time contract hash");
+    let scenario_model_content_hash = content_hash('n');
+    let scenario_model_artifact_id =
+        PortfolioScenarioModelArtifactId::from_content_hash(&scenario_model_content_hash);
+    let mut artifact = PortfolioScenarioArtifact {
+        portfolio_scenario_artifact_id: PortfolioScenarioArtifactId::from_v7(),
+        portfolio_scenario_model_artifact_id: scenario_model_artifact_id,
+        scenario_model_content_hash,
+        schema_version: SchemaVersion::FIRST,
+        decision_at: as_of,
+        visibility: PortfolioScenarioVisibility::PointInTime,
+        input_universe_hash: content_hash('o'),
+        ordered_routes: represented_routes.routes.clone(),
+        route_set_digest: represented_routes.digest,
+        serving_contract_digest: content_hash('j'),
+        calibration_contract_digest: content_hash('k'),
+        trade_policy_contract_digest: content_hash('m'),
+        capital_time_bucket_contract_digest,
+        scenarios,
+        distributions: vec![
+            ScenarioDistribution {
+                distribution_id: "nominal".to_owned(),
+                nominal: true,
+                weights: vec![
+                    ScenarioWeight {
+                        scenario_index: 0,
+                        probability_bps: 5_000,
+                    },
+                    ScenarioWeight {
+                        scenario_index: 1,
+                        probability_bps: 3_000,
+                    },
+                    ScenarioWeight {
+                        scenario_index: 2,
+                        probability_bps: 2_000,
+                    },
+                ],
+            },
+            ScenarioDistribution {
+                distribution_id: "robust".to_owned(),
+                nominal: false,
+                weights: vec![
+                    ScenarioWeight {
+                        scenario_index: 0,
+                        probability_bps: 3_000,
+                    },
+                    ScenarioWeight {
+                        scenario_index: 1,
+                        probability_bps: 3_000,
+                    },
+                    ScenarioWeight {
+                        scenario_index: 2,
+                        probability_bps: 4_000,
+                    },
+                ],
+            },
+        ],
+        structural_exclusivity: Vec::new(),
+        discount_curve: policy
+            .tail_risk
+            .capital_time_buckets
+            .iter()
+            .map(|bucket| DiscountCurvePoint {
+                end_secs: bucket.end_secs,
+                annualized_cost_bps: 500,
+            })
+            .collect(),
+        content_hash: content_hash('q'),
+    };
+    artifact.content_hash = artifact
+        .recomputed_hash()
+        .expect("fixture scenario artifact hash");
+    artifact.portfolio_scenario_artifact_id =
+        PortfolioScenarioArtifactId::from_content_hash(&artifact.content_hash);
+    artifact
+}
+
+fn fixture_existing_state() -> ExistingPortfolioState {
+    ExistingPortfolioState {
+        existing_open_capital_usd: Usd::ZERO,
+        existing_open_recommendations: 0,
+        current_drawdown_usd: Usd::ZERO,
+        scenario_cashflows: (0_u32..3)
+            .map(|scenario_index| ScenarioCashflow {
+                scenario_index,
+                discounted_net_usd: Usd::ZERO,
+            })
+            .collect(),
+        capital_occupancy: [3_600_u64, 86_400, 604_800]
+            .into_iter()
+            .map(|end_secs| CapitalOccupancyBucket {
+                end_secs,
+                locked_usd: Usd::ZERO,
+            })
+            .collect(),
+    }
+}
+
+fn fixture_portfolio_decision(
+    portfolio_plan_id: PortfolioPlanId,
+    recommendations: &[NewRecommendation],
+) -> PortfolioDecisionResult {
+    if recommendations.is_empty() {
+        return PortfolioDecisionResult::ZeroCandidates {
+            rejected_tier_count: 0,
+            evidence_hash: content_hash('r'),
+        };
+    }
+    let selected_tier_ids = recommendations
+        .iter()
+        .map(|recommendation| recommendation.economic_tier_id)
+        .collect::<Vec<_>>();
+    let economics = recommendations
+        .iter()
+        .map(|recommendation| recommendation.economics_json)
+        .collect::<Vec<_>>();
+    let objectives = PortfolioObjectiveEvidence {
+        robust_expected_net_usd: economics
+            .iter()
+            .map(|value| value.robust_expected_net_usd)
+            .sum(),
+        nominal_expected_net_usd: economics
+            .iter()
+            .map(|value| value.nominal_expected_net_usd)
+            .sum(),
+        cvar_usd: economics
+            .iter()
+            .map(|value| value.cvar_contribution_usd)
+            .sum(),
+        capital_occupancy_usd_hours: UsdHours::new(
+            economics
+                .iter()
+                .map(|value| value.capital_occupancy_usd_hours.inner())
+                .sum(),
+        ),
+        stable_tie_break_stages: 1,
+    };
+    let allocated_usd = recommendations
+        .iter()
+        .map(|recommendation| recommendation.economic_tier_json.entry.notional_usd)
+        .sum();
+    let selected_recommendation_count =
+        u32::try_from(recommendations.len()).expect("fixture recommendation count fits u32");
+    let constraints = PortfolioConstraintEvidence {
+        available_cash_used_usd: allocated_usd,
+        open_capital_usd: allocated_usd,
+        selected_recommendation_count,
+        maximum_scenario_loss_usd: economics.iter().map(|value| value.max_loss_usd).sum(),
+        checked_constraint_count: 1,
+        evidence_hash: content_hash('s'),
+    };
+    let solver = SolverEvidence {
+        backend: "highs".to_owned(),
+        lexicographic_model_build_count: 1,
+        lexicographic_solve_count: 6,
+        tie_break_proof_count: 1,
+        lexicographic_warm_start_count: 5,
+        marginal_model_build_count: 0,
+        marginal_solve_count: selected_recommendation_count,
+        marginal_model_reuse_count: selected_recommendation_count,
+        configured_deadline_secs: 30,
+        deterministic_threads: 1,
+        coefficient_scale: 1_000_000,
+        bound_scale_exponent: 0,
+        optimal: true,
+    };
+    let exact_verification = ExactVerificationEvidence {
+        passed: true,
+        selected_tier_digest: CanonicalDigest::content_hash_typed(
+            "quant-pivot/selected-economic-tiers",
+            1,
+            &selected_tier_ids,
+        )
+        .expect("fixture tier digest"),
+        recomputed_economics_hash: CanonicalDigest::content_hash_typed(
+            "quant-pivot/recomputed-recommendation-economics",
+            1,
+            &economics,
+        )
+        .expect("fixture economics digest"),
+    };
+    let content_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/global-portfolio-plan",
+        1,
+        &(
+            portfolio_plan_id,
+            &selected_tier_ids,
+            &objectives,
+            &constraints,
+            &solver,
+            &exact_verification,
+        ),
+    )
+    .expect("fixture global plan digest");
+    PortfolioDecisionResult::Optimized {
+        plan: Box::new(GlobalPortfolioPlan {
+            portfolio_plan_id,
+            selected_tier_ids,
+            objectives,
+            constraints,
+            solver,
+            exact_verification,
+            content_hash,
+        }),
+    }
 }
 
 pub fn content_hash(seed: char) -> ContentHash {
@@ -2792,29 +3420,19 @@ fn entry_plan() -> EntryPlan {
     }
 }
 
-fn sizing_plan() -> SizingPlan {
+fn sizing_plan(economic_tier_id: EconomicTierId) -> SizingPlan {
     SizingPlan {
+        economic_tier_id,
         suggested_usd: Usd::new(EXECUTION_NOTIONAL),
         suggested_shares: Shares::new(ENTRY_FILLED_SHARES),
-        max_usd: Usd::new(dec!(500)),
-        min_usd: Usd::new(dec!(10)),
+        entry_vwap: Price::new(ENTRY_PRICE),
         portfolio_weight_pct: dec!(0.025),
         market_exposure_after_usd: Usd::new(EXECUTION_NOTIONAL),
         event_exposure_after_usd: Usd::new(EXECUTION_NOTIONAL),
         category_exposure_after_usd: Usd::new(EXECUTION_NOTIONAL),
-        binding_constraint: BindingConstraint::KellyCap,
-        sizing_reason: "kelly".to_owned(),
-        sizing_model: SizingModelKind::Kelly,
-        edge_bps: Some(Bps::new(dec!(100))),
-        kelly_fraction_applied: Some(dec!(0.5)),
-        edge_uncertainty_shrink_applied: None,
-        correlation_shrink_applied: None,
-        f_star_applied: None,
-        kelly_fraction_config_applied: None,
-        confidence_shrink_applied: None,
-        drawdown_shrink_applied: None,
-        raw_fraction_applied: None,
-        position_cap_fraction_applied: None,
+        route_exposure_after_usd: Usd::new(EXECUTION_NOTIONAL),
+        capital_occupancy_usd_hours: UsdHours::new(EXECUTION_NOTIONAL),
+        sizing_reason: "selected executable tier from the exact global MILP".to_owned(),
     }
 }
 
@@ -2831,7 +3449,7 @@ fn exit_plan() -> ExitPlan {
         thesis_invalidation: ThesisInvalidationPolicy {
             min_score_retention: dec!(0.6),
             min_expected_return_bps: Bps::ZERO,
-            require_execution_eligibility: true,
+            require_route_gate_eligibility: true,
         },
         opportunistic_exit: opportunistic_exit_policy(),
         settlement_mode: ExitSettlementMode::HoldToResolution,
@@ -2851,11 +3469,14 @@ const fn opportunistic_exit_policy() -> OpportunisticExitPolicy {
     }
 }
 
-fn trade_plan(policy: &TradePolicyCohortProvenance) -> RecommendationTradePlan {
-    RecommendationTradePlan::Frozen {
+fn trade_plan(
+    policy: &TradePolicyCohortProvenance,
+    economic_tier_id: EconomicTierId,
+) -> RecommendationTradePlan {
+    RecommendationTradePlan {
         policy: Box::new(policy.clone()),
         entry: entry_plan(),
-        sizing: Box::new(sizing_plan()),
+        sizing: Box::new(sizing_plan(economic_tier_id)),
         exit: Box::new(exit_plan()),
         risk_envelope: Box::new(risk_envelope()),
     }
@@ -2869,6 +3490,10 @@ fn risk_envelope() -> RiskEnvelope {
         max_market_exposure_usd: Usd::new(dec!(500)),
         max_event_exposure_usd: Usd::new(dec!(750)),
         max_category_exposure_usd: Usd::new(dec!(1500)),
+        max_route_exposure_usd: Usd::new(dec!(1500)),
+        cvar_contribution_usd: Usd::new(dec!(25)),
+        portfolio_cvar_cap_usd: Usd::new(dec!(1500)),
+        maximum_scenario_loss_cap_usd: Usd::new(dec!(2500)),
         requires_approval: true,
         auto_execution_allowed: true,
         risk_notes: Vec::new(),
@@ -2961,24 +3586,26 @@ fn execution_eligibility() -> ExecutionEligibility {
         ineligibility_reasons: Vec::new(),
         approval_required: false,
         auto_policy_id: None,
-        uncalibrated_watermark: false,
     }
 }
 
 fn report_summary() -> ReportSummary {
     ReportSummary {
         market_selection_count: 1,
+        represented_route_count: 1,
         candidate_count: 1,
-        rejected_count: 0,
+        rejected_tier_count: 0,
         published_recommendation_count: 1,
         total_suggested_usd: Usd::new(EXECUTION_NOTIONAL),
         max_single_recommendation_usd: Usd::new(EXECUTION_NOTIONAL),
-        aggregate_exposure_cap_usd: None,
+        robust_expected_net_usd: Usd::new(dec!(11.5)),
+        nominal_expected_net_usd: Usd::new(dec!(19.5)),
+        cvar_usd: Usd::new(dec!(25)),
+        maximum_scenario_loss_usd: Usd::new(dec!(25)),
+        capital_occupancy_usd_hours: UsdHours::new(dec!(25)),
         category_allocation: BTreeMap::new(),
         event_allocation: BTreeMap::new(),
-        average_score: Probability::new(dec!(0.7)),
-        min_score: Probability::new(dec!(0.7)),
-        model_confidence_summary: ConfidenceSummary::default(),
+        route_allocation: BTreeMap::from([(BuyModelRoute::Weather, Usd::new(EXECUTION_NOTIONAL))]),
         data_quality_summary: DataQualitySummary::default(),
         top_rejection_reasons: Vec::new(),
         execution_eligibility_summary: EligibilitySummary::default(),
@@ -2992,21 +3619,109 @@ fn report_summary() -> ReportSummary {
 pub fn empty_report_summary() -> ReportSummary {
     ReportSummary {
         market_selection_count: 1,
+        represented_route_count: 1,
         candidate_count: 12,
-        rejected_count: 12,
+        rejected_tier_count: 12,
         published_recommendation_count: 0,
         total_suggested_usd: Usd::ZERO,
         max_single_recommendation_usd: Usd::ZERO,
-        aggregate_exposure_cap_usd: None,
+        robust_expected_net_usd: Usd::ZERO,
+        nominal_expected_net_usd: Usd::ZERO,
+        cvar_usd: Usd::ZERO,
+        maximum_scenario_loss_usd: Usd::ZERO,
+        capital_occupancy_usd_hours: UsdHours::ZERO,
         category_allocation: BTreeMap::new(),
         event_allocation: BTreeMap::new(),
-        average_score: Probability::new(dec!(0)),
-        min_score: Probability::new(dec!(0)),
-        model_confidence_summary: ConfidenceSummary::default(),
+        route_allocation: BTreeMap::new(),
         data_quality_summary: DataQualitySummary::default(),
         top_rejection_reasons: Vec::new(),
         execution_eligibility_summary: EligibilitySummary::default(),
         empty_reason: Some(EmptyReportReason::NoPositiveSignal),
         warnings: vec!["ui-demo: no positive signal above threshold".to_owned()],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_models::runtime_config::DecisionPolicySnapshot;
+    use rust_decimal_macros::dec;
+
+    use super::FeedbackServingFixtureConfig;
+
+    #[test]
+    fn feedback_policy_is_valid() {
+        for (budget, reserve, max_open, capacity, ad_hoc_enabled) in [
+            (dec!(555.56), dec!(55.556), dec!(500.004), dec!(500), true),
+            (dec!(5000), dec!(500), dec!(4500), dec!(500), false),
+        ] {
+            let config = FeedbackServingFixtureConfig {
+                required_shadow_window_secs: 60,
+                shadow_diff_threshold: dec!(1),
+                feedback_budget_usd: budget,
+                outcome_reconciliation_enabled: true,
+                ad_hoc_report_enabled: ad_hoc_enabled,
+            };
+            let mut snapshot = DecisionPolicySnapshot::default();
+            config.apply_runtime_controls(&mut snapshot);
+            let portfolio = &snapshot.execution_risk.portfolio;
+            assert_eq!(portfolio.budget.cash_reserve_usd.value, reserve);
+            assert_eq!(portfolio.budget.max_open_capital_usd.value, max_open);
+            assert_eq!(
+                portfolio
+                    .exposure_limits
+                    .max_single_recommendation_usd
+                    .value,
+                dec!(25)
+            );
+            for cap in [
+                portfolio.exposure_limits.max_market_exposure_usd.value,
+                portfolio.exposure_limits.max_event_exposure_usd.value,
+                portfolio.exposure_limits.max_category_exposure_usd.value,
+                portfolio.exposure_limits.max_route_exposure_usd.value,
+                portfolio.tail_risk.max_cvar_usd.value,
+                portfolio.tail_risk.max_scenario_loss_usd.value,
+            ] {
+                assert_eq!(cap, capacity);
+            }
+            assert_eq!(portfolio.tail_risk.max_drawdown_usd.value, budget);
+            assert_eq!(
+                portfolio
+                    .tail_risk
+                    .capital_time_buckets
+                    .iter()
+                    .map(|bucket| bucket.max_capital_usd.value)
+                    .collect::<Vec<_>>(),
+                [capacity; 3]
+            );
+            assert_eq!(
+                snapshot.recommendation.reports.ad_hoc_report_enabled,
+                ad_hoc_enabled
+            );
+            assert!(
+                snapshot
+                    .report_schedule
+                    .schedules
+                    .iter()
+                    .all(|schedule| !schedule.enabled)
+            );
+            let validation = snapshot.validate_runtime_config();
+            assert!(
+                !validation.has_errors(),
+                "governed feedback policy must be valid: {validation}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "fund every concurrently open ResearchProfile cash tier")]
+    fn underfunded_policy_rejected() {
+        let config = FeedbackServingFixtureConfig {
+            required_shadow_window_secs: 60,
+            shadow_diff_threshold: dec!(1),
+            feedback_budget_usd: dec!(100),
+            outcome_reconciliation_enabled: true,
+            ad_hoc_report_enabled: true,
+        };
+        config.apply_runtime_controls(&mut DecisionPolicySnapshot::default());
     }
 }

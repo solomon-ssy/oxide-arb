@@ -55,8 +55,8 @@ pub struct DsrInput {
     /// Population (non-excess) kurtosis (`γ4`) of the representative path's
     /// per-period returns (a normal distribution has `γ4 = 3`).
     pub kurtosis: Decimal,
-    /// Number of independent trials (`N`) in the governed hyperparameter grid
-    /// — the multiple-testing correction's sample size.
+    /// Conservative integer estimate of independent trials (`N`) derived from
+    /// the governed grid's complete pairwise return-dependence evidence.
     pub trial_count: u32,
     /// Variance of the Sharpe ratio across those `N` trials (`V`) — the
     /// multiple-testing correction's dispersion estimate. This is
@@ -89,15 +89,12 @@ fn expected_max_sharpe(trial_count: u32, trial_sharpe_variance: Decimal) -> Quan
         return Ok(0.0);
     }
     let n = f64::from(trial_count);
-    // When every trial Sharpe is identical, V=0 would erase the multiple-testing
-    // correction. Floor V at a tiny positive value so SR* still rises with N.
     let variance = decimal_to_f64(trial_sharpe_variance, "trial_sharpe_variance")?;
     if variance < 0.0 {
         return Err(methodology(
             "trial_sharpe_variance must be non-negative".to_owned(),
         ));
     }
-    let variance = variance.max(1e-12);
     let term_a = (1.0 - EULER_MASCHERONI) * stats::normal_inverse_cdf(1.0 - 1.0 / n);
     let term_b = EULER_MASCHERONI * stats::normal_inverse_cdf(1.0 - 1.0 / (n * E));
     let benchmark = variance.sqrt() * (term_a + term_b);
@@ -356,6 +353,32 @@ mod tests {
     }
 
     #[test]
+    fn behavioral_classes_pass_gate() {
+        // Frozen evidence from the production-stack diagnosis: eight governed
+        // parameterizations produced the same profitable OOS return column and
+        // eight produced the same no-trade column. The two representatives are
+        // the complete non-redundant population, so their population variance
+        // is x^2 / 4 and N is two. This guards the financial gate without
+        // weakening the governed 95% threshold or deleting any raw trial.
+        let profitable_sharpe = dec!(2.465495593172);
+        let half_sharpe = profitable_sharpe / dec!(2);
+        let report = DsrInput {
+            observed_sharpe: profitable_sharpe,
+            returns_period_count: 32,
+            period_length: Duration::days(1),
+            skewness: dec!(-0.769503388306713),
+            kurtosis: dec!(3.322540258905),
+            trial_count: 2,
+            trial_sharpe_variance: half_sharpe * half_sharpe,
+        }
+        .deflated_sharpe_ratio()
+        .expect("behavioral-class DSR");
+
+        assert!(report.benchmark_sharpe < profitable_sharpe);
+        assert!(report.deflated_sharpe >= dec!(0.95), "report={report:?}");
+    }
+
+    #[test]
     fn deflated_sharpe_increases_further() {
         let fifty = normal_input(dec!(2.0), 50)
             .deflated_sharpe_ratio()
@@ -365,6 +388,21 @@ mod tests {
             .expect("DSR");
         assert!(five_hundred.benchmark_sharpe > fifty.benchmark_sharpe);
         assert!(five_hundred.deflated_sharpe <= fifty.deflated_sharpe);
+    }
+
+    #[test]
+    fn zero_dispersion_zero_benchmark() {
+        let report = DsrInput {
+            trial_sharpe_variance: Decimal::ZERO,
+            ..normal_input(dec!(0.3), 50)
+        }
+        .deflated_sharpe_ratio()
+        .expect("DSR");
+        assert_eq!(
+            report.benchmark_sharpe,
+            Decimal::ZERO,
+            "the DSR equation must preserve V=0 instead of injecting an artificial floor"
+        );
     }
 
     #[test]
@@ -405,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn negative_trial_rejected_floored() {
+    fn negative_trial_variance_rejected() {
         let input = DsrInput {
             trial_sharpe_variance: dec!(-0.01),
             ..normal_input(dec!(1), 10)

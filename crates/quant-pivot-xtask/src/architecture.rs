@@ -903,6 +903,10 @@ fn validate_model_category_routes(workspace_root: &Path) -> Result<Vec<String>> 
         workspace_root,
         "crates/quant-pivot-models/src/runtime_config/validation.rs",
     )?;
+    let (route_set_path, route_set) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-models/src/domain/quant/represented_route.rs",
+    )?;
     let (runner_path, runner) = read_architecture_source(
         workspace_root,
         "crates/quant-pivot-core/src/service/model_runner.rs",
@@ -952,8 +956,14 @@ fn validate_model_category_routes(workspace_root: &Path) -> Result<Vec<String>> 
     let production_generation = generation
         .split_once("#[cfg(test)]")
         .map_or(generation.as_str(), |(production, _)| production);
-    let mut violations =
-        validate_category_owner(&owner_path, &owner, &validation_path, &validation);
+    let mut violations = validate_category_owner(
+        &owner_path,
+        &owner,
+        &route_set_path,
+        &route_set,
+        &validation_path,
+        &validation,
+    );
     violations.extend(validate_category_runtime(
         &runner_path,
         &runner,
@@ -1011,6 +1021,8 @@ fn validate_model_category_routes(workspace_root: &Path) -> Result<Vec<String>> 
 fn validate_category_owner(
     owner_path: &Path,
     owner: &str,
+    route_set_path: &Path,
+    route_set: &str,
     validation_path: &Path,
     validation: &str,
 ) -> Vec<String> {
@@ -1024,11 +1036,25 @@ fn validate_category_owner(
             "pooled and vertical Buy routing must have one canonical nominal owner",
         ),
         (
-            owner_path,
-            owner,
-            "impl TryFrom<&SelectionConfig> for BuyModelRoute",
+            route_set_path,
+            route_set,
+            "pub fn from_enabled_categories(",
             1,
-            "report scope must resolve through the canonical selection conversion",
+            "configured categories must resolve through one canonical represented Route-set owner",
+        ),
+        (
+            route_set_path,
+            route_set,
+            "Self::from_categories(MarketCategory::ALL_VARIANTS)",
+            1,
+            "an empty category filter must mean every supported category",
+        ),
+        (
+            route_set_path,
+            route_set,
+            "impl From<MarketCategory> for BuyModelRoute",
+            1,
+            "market categories must map deterministically into the closed Route universe",
         ),
         (
             owner_path,
@@ -1044,16 +1070,25 @@ fn validate_category_owner(
             1,
             "exact route champion lookup must belong to ModelConfig",
         ),
-        (
-            validation_path,
-            validation,
-            "let route = BuyModelRoute::try_from(selection);",
-            1,
-            "runtime-config validation must consume the canonical route owner",
-        ),
     ] {
         require_exact_occurrences(&mut violations, path, source, needle, expected, invariant);
     }
+    require_exact_occurrences(
+        &mut violations,
+        owner_path,
+        owner,
+        "impl TryFrom<&SelectionConfig> for BuyModelRoute",
+        0,
+        "selection must not collapse a global report into one model Route",
+    );
+    require_exact_occurrences(
+        &mut violations,
+        validation_path,
+        validation,
+        "BuyModelRoute::try_from(selection)",
+        0,
+        "runtime validation must not reintroduce single-Route report scope",
+    );
     require_exact_occurrences(
         &mut violations,
         owner_path,
@@ -1101,9 +1136,16 @@ fn validate_category_runtime(
         (
             runner_path,
             runner,
-            ".resolve_route(ModelServingGenerationRequest::from(request.policy))",
+            ".resolve_routes(",
             1,
-            "pre-selection requirements must resolve one exact immutable route generation",
+            "pre-selection readiness must atomically resolve the complete represented Route set",
+        ),
+        (
+            runner_path,
+            runner,
+            "request.represented_routes,",
+            1,
+            "the atomic serving resolver must consume the frozen ordered Route set",
         ),
         (
             runner_path,
@@ -1115,16 +1157,23 @@ fn validate_category_runtime(
         (
             report_path,
             report,
-            "policy: &version,",
+            "active_route_requirements(ActiveRouteRequirementsRequest {",
+            1,
+            "the report must resolve all represented Routes before model-dependent filtering",
+        ),
+        (
+            report_path,
+            report,
+            "policy: &context.version,",
             1,
             "the report must resolve serving from the frozen durable policy artifact",
         ),
         (
             report_path,
             report,
-            "serving: &context.active.serving,",
+            "serving: &route.active.serving,",
             1,
-            "model execution must retain the pre-selection generation across the full report",
+            "each Route inference must retain its pre-selection generation snapshot",
         ),
         (
             generation_path,
@@ -1147,7 +1196,6 @@ fn validate_category_runtime(
         "resolve_active_version",
         "load_shadow_runtime",
         "request.model",
-        "request.route",
     ] {
         require_exact_occurrences(
             &mut violations,
@@ -1329,9 +1377,19 @@ fn validate_generation_consumers(sources: &AtomicGenerationSources<'_>) -> Vec<S
             "durable parity must share the production generation resolver",
         ),
         (
-            ".resolve_route(ModelServingGenerationRequest {",
+            ".resolve_routes(",
             1,
-            "durable parity must resolve the frozen policy's exact route",
+            "durable report parity must atomically resolve the frozen represented Route set",
+        ),
+        (
+            "&context.represented_routes,",
+            1,
+            "durable report parity must pass its immutable ordered Route set to the resolver",
+        ),
+        (
+            ".resolve_route(",
+            1,
+            "single-model parity replay may resolve only its explicitly bound model Route",
         ),
         (
             "let runtime = request.serving.active_runtime().runtime();",
@@ -1348,6 +1406,14 @@ fn validate_generation_consumers(sources: &AtomicGenerationSources<'_>) -> Vec<S
             invariant,
         );
     }
+    require_exact_occurrences(
+        &mut violations,
+        sources.parity.path,
+        sources.parity.text,
+        "for route in context.represented_routes.routes",
+        0,
+        "durable report parity must not resolve one Route generation at a time",
+    );
     for source in [
         sources.generation,
         sources.applicator,
@@ -1437,30 +1503,51 @@ fn validate_category_readiness(
         (
             preflight_path,
             preflight,
-            "BuyModelRoute::try_from(&config.recommendation.selection)",
-            3,
-            "mode preflight must check the exact governed report route",
+            "RepresentedRouteSet::from_enabled_categories(",
+            1,
+            "mode preflight must derive the complete configured Route set",
         ),
         (
             preflight_path,
             preflight,
-            ".champion(",
+            "self.check_route_champions(&config",
             2,
-            "mode preflight must not accept an unrelated route champion",
+            "both execution upgrades must verify every configured Route champion",
+        ),
+        (
+            preflight_path,
+            preflight,
+            ".champion(*route)",
+            1,
+            "mode preflight must inspect each represented Route without fallback",
         ),
         (
             capability_path,
             capability,
-            "BuyModelRoute::try_from(&runtime_config.recommendation.selection)",
-            1,
-            "system readiness must resolve the exact governed report route",
+            "RepresentedRouteSet::from_enabled_categories(",
+            0,
+            "pre-discovery capability must not guess the represented Route set from category filters",
         ),
         (
             capability_path,
             capability,
-            ".champion(",
+            "model.champion(*route).is_ok()",
+            0,
+            "pre-discovery capability must not require champions for Routes absent from venue eligibility",
+        ),
+        (
+            capability_path,
+            capability,
+            "let has_active_model_pointer = has_serving_entry(&runtime_config);",
             1,
-            "system readiness must not infer capability from an unrelated route champion",
+            "system readiness must gate report discovery on an explicit serving-entry capability",
+        ),
+        (
+            capability_path,
+            capability,
+            "!runtime_config.model_routing.model.buy_routes.is_empty()",
+            1,
+            "system readiness must fail closed when the serving map has no active entry",
         ),
     ] {
         require_exact_occurrences(&mut violations, path, source, needle, expected, invariant);
@@ -2086,8 +2173,11 @@ fn parallel_kernel_allowed(path: &Path, function_name: Option<&str>) -> bool {
     matches!(
         (path.to_str(), function_name),
         (
-            Some("crates/quant-pivot-core/src/service/cpcv_backtest.rs"),
-            Some("run_trial_grid")
+            Some(
+                "crates/quant-pivot-core/src/service/cpcv_backtest.rs"
+                    | "crates/quant-pivot-research/src/validation/cpcv.rs"
+            ),
+            Some("run")
         ) | (
             Some("crates/quant-pivot-research/src/features/builder.rs"),
             Some("build_batch")
@@ -2095,11 +2185,8 @@ fn parallel_kernel_allowed(path: &Path, function_name: Option<&str>) -> bool {
             Some("crates/quant-pivot-research/src/parallel.rs"),
             Some("par_try_map" | "par_map_with_index" | "par_try_map_index")
         ) | (
-            Some("crates/quant-pivot-research/src/validation/cpcv.rs"),
-            Some("run")
-        ) | (
             Some("crates/quant-pivot-research/src/validation/pbo.rs"),
-            Some("probability_of_backtest_overfitting")
+            Some("analyze_selection_bias")
         )
     )
 }
@@ -2475,7 +2562,8 @@ fn validate_performance_evidence_contract(root: &Path, violations: &mut Vec<Stri
                 "const FULL_KERNEL_REPETITIONS: u16 = 10;",
                 "name: \"training_matrix_gate\"",
                 "name: \"cpcv_orchestration_gate\"",
-                "name: \"report_compute_gate\"",
+                "name: \"portfolio_compute_gate\"",
+                "name: \"report_funnel_gate\"",
                 "name: \"model_train_replay_gate\"",
                 "peak_rss_bytes: Option<u64>",
             ][..],
@@ -2485,6 +2573,13 @@ fn validate_performance_evidence_contract(root: &Path, violations: &mut Vec<Stri
             &[
                 "const MAX_RSS_BYTES: u64 = 8 * 1_024 * 1_024 * 1_024;",
                 "enforce_linux_peak_rss(peak_rss, MAX_RSS_BYTES, \"training matrix\")?;",
+            ][..],
+        ),
+        (
+            "crates/quant-pivot-bench/src/bin/portfolio_compute_gate.rs",
+            &[
+                "const MAX_RSS_BYTES: u64 = 8 * 1_024 * 1_024 * 1_024;",
+                "enforce_linux_peak_rss(peak_rss, MAX_RSS_BYTES, \"global portfolio\")?;",
             ][..],
         ),
         (

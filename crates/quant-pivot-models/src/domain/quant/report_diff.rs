@@ -16,25 +16,27 @@ use crate::{
     domain::quant::{RecommendationInfo, RecommendationReportInfo},
     enums::quant::OutcomeSide,
     types::{
-        Bps, EligibilitySummary, ExecutionEligibility, MarketId, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
-        RecommendationTradePlan, Usd,
+        EligibilitySummary, ExecutionEligibility, MarketId, RecommendationFactorBreakdown,
+        RecommendationId, RecommendationReportId, RecommendationTradePlan, Usd,
     },
 };
+
+use super::RecommendationEconomics;
 
 /// A typed field whose decision semantics changed between two snapshots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecommendationChangedField {
     Rank,
-    CompositeScore,
-    RiskAdjustedScore,
-    Confidence,
-    ExpectedReturn,
-    Downside,
+    ProfitProbability,
+    NominalExpectedNetUsd,
+    RobustExpectedNetUsd,
+    MaximumLossUsd,
+    CvarContributionUsd,
+    CapitalOccupancyUsdHours,
+    MarginalPortfolioValueUsd,
     Sizing,
     Validity,
     Eligibility,
-    TradePlanAvailability,
     Entry,
     Exit,
     FactorBreakdown,
@@ -45,11 +47,7 @@ pub enum RecommendationChangedField {
 pub struct RecommendationDiffSnapshot {
     pub recommendation_id: RecommendationId,
     pub rank: i32,
-    pub composite_score: Probability,
-    pub risk_adjusted_score: Probability,
-    pub confidence: Probability,
-    pub expected_return_bps: Bps,
-    pub downside_bps: Bps,
+    pub economics: RecommendationEconomics,
     pub valid_from: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
     pub execution_eligibility: ExecutionEligibility,
@@ -62,11 +60,7 @@ impl From<&RecommendationInfo> for RecommendationDiffSnapshot {
         Self {
             recommendation_id: rec.recommendation_id,
             rank: rec.rank,
-            composite_score: rec.composite_score,
-            risk_adjusted_score: rec.risk_adjusted_score,
-            confidence: rec.confidence,
-            expected_return_bps: rec.expected_return_bps,
-            downside_bps: rec.downside_bps,
+            economics: rec.economics_json,
             valid_from: rec.valid_from,
             valid_until: rec.valid_until,
             execution_eligibility: rec.execution_eligibility.clone(),
@@ -136,7 +130,7 @@ impl RecommendationInfo {
 
 fn total_suggested(recs: &[RecommendationInfo]) -> Usd {
     recs.iter()
-        .filter_map(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd))
+        .map(|rec| rec.trade_plan.sizing.suggested_usd)
         .sum()
 }
 
@@ -208,9 +202,8 @@ fn recommendation_delta(
     let ((Some(anchor), _) | (None, Some(anchor))) = (base, compare) else {
         return None;
     };
-    let base_usd = base.and_then(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd));
-    let compare_usd =
-        compare.and_then(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd));
+    let base_usd = base.map(|rec| rec.trade_plan.sizing.suggested_usd);
+    let compare_usd = compare.map(|rec| rec.trade_plan.sizing.suggested_usd);
     let delta = compare_usd.unwrap_or(Usd::ZERO) - base_usd.unwrap_or(Usd::ZERO);
     Some(RecommendationDelta {
         market_id: anchor.market_id.clone(),
@@ -229,15 +222,16 @@ fn recommendation_changed_fields(
     let (Some(base), Some(compare)) = (base, compare) else {
         return vec![
             RecommendationChangedField::Rank,
-            RecommendationChangedField::CompositeScore,
-            RecommendationChangedField::RiskAdjustedScore,
-            RecommendationChangedField::Confidence,
-            RecommendationChangedField::ExpectedReturn,
-            RecommendationChangedField::Downside,
+            RecommendationChangedField::ProfitProbability,
+            RecommendationChangedField::NominalExpectedNetUsd,
+            RecommendationChangedField::RobustExpectedNetUsd,
+            RecommendationChangedField::MaximumLossUsd,
+            RecommendationChangedField::CvarContributionUsd,
+            RecommendationChangedField::CapitalOccupancyUsdHours,
+            RecommendationChangedField::MarginalPortfolioValueUsd,
             RecommendationChangedField::Sizing,
             RecommendationChangedField::Validity,
             RecommendationChangedField::Eligibility,
-            RecommendationChangedField::TradePlanAvailability,
             RecommendationChangedField::Entry,
             RecommendationChangedField::Exit,
             RecommendationChangedField::FactorBreakdown,
@@ -252,32 +246,46 @@ fn recommendation_changed_fields(
     );
     push_if_changed(
         &mut changed,
-        base.composite_score != compare.composite_score,
-        RecommendationChangedField::CompositeScore,
+        base.economics_json.profit_probability_bps != compare.economics_json.profit_probability_bps,
+        RecommendationChangedField::ProfitProbability,
     );
     push_if_changed(
         &mut changed,
-        base.risk_adjusted_score != compare.risk_adjusted_score,
-        RecommendationChangedField::RiskAdjustedScore,
+        base.economics_json.nominal_expected_net_usd
+            != compare.economics_json.nominal_expected_net_usd,
+        RecommendationChangedField::NominalExpectedNetUsd,
     );
     push_if_changed(
         &mut changed,
-        base.confidence != compare.confidence,
-        RecommendationChangedField::Confidence,
+        base.economics_json.robust_expected_net_usd
+            != compare.economics_json.robust_expected_net_usd,
+        RecommendationChangedField::RobustExpectedNetUsd,
     );
     push_if_changed(
         &mut changed,
-        base.expected_return_bps != compare.expected_return_bps,
-        RecommendationChangedField::ExpectedReturn,
+        base.economics_json.max_loss_usd != compare.economics_json.max_loss_usd,
+        RecommendationChangedField::MaximumLossUsd,
     );
     push_if_changed(
         &mut changed,
-        base.downside_bps != compare.downside_bps,
-        RecommendationChangedField::Downside,
+        base.economics_json.cvar_contribution_usd != compare.economics_json.cvar_contribution_usd,
+        RecommendationChangedField::CvarContributionUsd,
     );
     push_if_changed(
         &mut changed,
-        base.trade_plan.sizing() != compare.trade_plan.sizing(),
+        base.economics_json.capital_occupancy_usd_hours
+            != compare.economics_json.capital_occupancy_usd_hours,
+        RecommendationChangedField::CapitalOccupancyUsdHours,
+    );
+    push_if_changed(
+        &mut changed,
+        base.economics_json.marginal_portfolio_value_usd
+            != compare.economics_json.marginal_portfolio_value_usd,
+        RecommendationChangedField::MarginalPortfolioValueUsd,
+    );
+    push_if_changed(
+        &mut changed,
+        base.trade_plan.sizing != compare.trade_plan.sizing,
         RecommendationChangedField::Sizing,
     );
     push_if_changed(
@@ -292,20 +300,12 @@ fn recommendation_changed_fields(
     );
     push_if_changed(
         &mut changed,
-        base.trade_plan.is_available() != compare.trade_plan.is_available(),
-        RecommendationChangedField::TradePlanAvailability,
-    );
-    let base_frozen = base.trade_plan.frozen();
-    let compare_frozen = compare.trade_plan.frozen();
-    push_if_changed(
-        &mut changed,
-        base_frozen.map(|(_, entry, _, _, _)| entry)
-            != compare_frozen.map(|(_, entry, _, _, _)| entry),
+        base.trade_plan.entry != compare.trade_plan.entry,
         RecommendationChangedField::Entry,
     );
     push_if_changed(
         &mut changed,
-        base_frozen.map(|(_, _, _, exit, _)| exit) != compare_frozen.map(|(_, _, _, exit, _)| exit),
+        base.trade_plan.exit != compare.trade_plan.exit,
         RecommendationChangedField::Exit,
     );
     push_if_changed(

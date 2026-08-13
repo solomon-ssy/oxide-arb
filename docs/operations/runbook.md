@@ -109,14 +109,14 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
 | 项 | 是否必须 | 用于 | 配置位置 | 说明 |
 |----|----------|------|----------|------|
 | Polygon / Polymarket signer private key | 所有 mode 必须 | CLOB auth、账户读取、可执行模式签订单 | `[keys].private_key = "REPLACE_WITH_PRIVATE_KEY"` | 明文仅写入 gitignored 或权限 `0600` 的 deploy TOML；解析后由 `SecretText` 持有 |
-| `quant.account.funder` | 所有 mode 必须 | 读取 collateral、positions、计算 capital base | `QUANT_PIVOT__QUANT__ACCOUNT__FUNDER` | EOA 必须等于 signer；contract wallet 必须是 signer/有效 session signer 控制的官方派生钱包 |
-| `quant.account.wallet_kind` | 所有 mode 必须 | 决定签名类型和 funder 校验 | `QUANT_PIVOT__QUANT__ACCOUNT__WALLET_KIND` | 支持 `eoa`、`proxy`、`gnosis_safe`、`deposit_wallet`；fresh boot 的 Deposit Wallet 只接受当前官方 `BeaconProxy` |
+| `quant.account.funder` | 所有 mode 必须 | 读取 collateral、positions、计算 capital base | explicit deploy TOML 的 `[quant.account].funder` | EOA 必须等于 signer；contract wallet 必须是 signer/有效 session signer 控制的官方派生钱包 |
+| `quant.account.wallet_kind` | 所有 mode 必须 | 决定签名类型和 funder 校验 | explicit deploy TOML 的 `[quant.account].wallet_kind` | 支持 `eoa`、`proxy`、`gnosis_safe`、`deposit_wallet`；fresh boot 的 Deposit Wallet 只接受当前官方 `BeaconProxy` |
 | CLOB L2 credentials | 不单独配置 | CLOB trading endpoints | 自动派生 | SDK connect 时由 private key 和 wallet topology 派生 |
-| Polygon RPC URL | 所有 mode 必须 | on-chain 读写、结算、赎回 | `QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL` | 生产必须使用可靠 RPC，配置超时 |
+| Polygon RPC URL | 所有 mode 必须 | on-chain 读写、结算、赎回 | explicit deploy TOML 的 `[polymarket.onchain].rpc_endpoint` | 生产必须使用 protected endpoint variant 与可靠 RPC，配置超时 |
 | Gasless relayer key/address | proxy/safe/deposit_wallet 且会提交链上交易时必须 | gasless wallet-create/approval/redeem/settlement | `[polymarket.relayer].api_key = "REPLACE_WITH_RELAYER_API_KEY"`；address 为非敏感配置 | EOA 可直接付 gas；relayer key 不得暴露到前端 |
 | JWT signing key | Web API 必须 | HS256 登录和 API 认证 | `[web.jwt].signing_key = "REPLACE_WITH_JWT_SIGNING_KEY"` | 值为 Base64URL-no-pad 编码的恰好 32 个随机字节；轮换立即使所有旧 JWT 失效 |
 | Evidence signing key | 研究证据生产必须 | BLAKE3 keyed attestation | `[research.evidence_attestation].signing_key = "REPLACE_WITH_EVIDENCE_SIGNING_KEY"` | 值为 64 个小写 hex；历史 key 同样由 `SecretText` 持有，禁止与 JWT key 复用 |
-| Telegram / webhook secrets | 可选 | 通知 | deploy TOML 的 `SecretText` 字段；`operational_control.notifications` 只管事件路由 | Config API 永不返回 secret value |
+| Telegram / webhook secrets | 可选 | 通知 | deploy TOML 的 `SecretText` 字段；`operations_policy.notifications` 只管事件路由 | Config API 永不返回 secret value |
 
 Deposit Wallet 的 CLOB 身份固定使用 `POLY_1271`；settlement 只接受当前官方 factory 派生的
 `BeaconProxy`、固定 beacon/implementation code hash 和 owner/session-signer 证据。旧 UUPS 钱包不属于本系统
@@ -135,14 +135,9 @@ fresh boot 的输入域，不提供 reader、兼容分支或历史兜底。
 
 ### 4.3 Deploy Config 与 governed policy 分工
 
-Deploy Config 只包含启动时才能决定的内容：服务 endpoint、bind/CORS、deployment identity、PostgreSQL/ClickHouse/Redis/artifact store 连接位置、Polymarket/provider binding、日志/TLS/JWT metadata 与七组主机资源预算。来源固定为：
+Deploy Config 只包含启动时才能决定的内容：服务 endpoint、bind/CORS、deployment identity、PostgreSQL/ClickHouse/Redis/artifact store 连接位置、Polymarket/provider binding、日志/TLS/JWT metadata 与主机资源预算。进程只接受一个由 `--config-file <absolute-path>` 指定的完整 TOML，并要求 `--expected-environment` 与文件内环境精确一致；不存在 compiled-default merge、目录发现、local overlay、环境变量 leaf override 或缺字段回填。
 
-1. compiled defaults；
-2. source-controlled non-secret `quant-pivot.toml`；
-3. gitignored 或部署主机上的权限 `0600` TOML；
-4. 环境变量只允许选择 config directory、deployment identity 等极少数部署元数据，禁止覆盖业务策略或直接承载 secret。
-
-Runtime 热更新由六个强类型 policy resource 负责：`recommendation_policy`、`execution_risk_policy`、`model_routing`、`report_schedule`、`operational_control`、`execution_authorization`。每个资源独立 revision、固定 boot `schema_version = 1`，必须经过 Draft → Validate/Preflight → Approve → Activate；不存在旧巨型 Runtime Config parser 或自动回滚。
+Runtime 热更新由六个强类型 policy resource 负责：`recommendation_policy`、`execution_risk_policy`、`model_routing`、`report_schedule`、`operations_policy`、`execution_automation_policy`。每个资源独立 revision、固定 clean-install `schema_version = 1`，必须经过 Draft → Validate/Preflight → Approve → Activate；不存在旧资源名、兼容 parser、双读双写或自动回滚。
 
 Feature、factor、domain 语义和 research/training methodology 属于 content-addressed immutable profile/job artifact，不从 Deploy Config 或热配置读取。详细操作见 §7。
 
@@ -156,7 +151,7 @@ install -m 0600 config/quant-pivot.production.example.toml /etc/quant-pivot/quan
 ${EDITOR:?set EDITOR} /etc/quant-pivot/quant-pivot.toml
 ```
 
-systemd unit 只设置 `Environment=QUANT_PIVOT_CONFIG_DIR=/etc/quant-pivot`，不设置 secret environment。启动前检查所有 `REPLACE_WITH_*` 已替换、文件 owner 是 service user、mode 精确为 `0600`。
+systemd unit 的 `ExecStart` 必须显式传入 `--config-file /etc/quant-pivot/quant-pivot.toml --expected-environment production`，且不设置任何 secret environment。启动前检查所有 `REPLACE_WITH_*` 已替换、文件 owner 是 service user、mode 精确为 `0600`。
 
 PostgreSQL 与 ClickHouse 各自只配置一组 `user + password`，由 runtime、schema CLI 与 Fresh Boot 复用。所有
 schema mutation 与 pre-production reset 必须持有同一跨进程 advisory lock；应用启动仍只执行 verify，绝不
@@ -279,21 +274,25 @@ Polymarket 当前文档描述 taker fee 与成交额、fee rate 和价格相关�
 开发或单机验证：
 
 ```bash
-cargo run -p quant-pivot-bin -- --config-dir config
+cargo run -p quant-pivot-bin -- \
+  --config-file "$(pwd)/config/quant-pivot.toml" \
+  --expected-environment local-development
 ```
 
 生产建议先构建 release binary，再由 systemd、Nomad、Kubernetes 或同等进程管理器托管：
 
 ```bash
 cargo build --release -p quant-pivot-bin
-./target/release/quant-pivot --config-dir /etc/quant-pivot
+./target/release/quant-pivot \
+  --config-file /etc/quant-pivot/quant-pivot.toml \
+  --expected-environment production
 ```
 
 启动失败常见原因：
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
-| deploy config validation failed | 缺 private key、funder、JWT signing key、relayer config，或 production runtime 配置混入 migration DDL password | 补齐环境变量/TOML；DDL password 只挂载给 deploy/xtask profile |
+| deploy config validation failed | 缺 required leaf、private key、funder、JWT signing key、relayer config，或 expected environment 不匹配 | 修正显式 TOML；不使用环境变量、overlay 或默认补值 |
 | authenticated CLOB client failed | private key 无效、wallet topology 不匹配、CLOB endpoint 不通 | 校验 signer/funder，检查网络和 CLOB auth |
 | account provider unavailable | `funder` 缺失或 Data API/CLOB collateral 读取失败 | 修复账户配置，不能降级为模拟资金 |
 | policy revision rejected | typed schema、semantic constraint、dependency preflight 或 CAS 失败 | 读取 resource schema/validation evidence，修正 typed draft 后重新 review |
@@ -599,7 +598,7 @@ curl -sS "$BASE/api/config/$KIND/schema" \
   -H "Accept-Api-Version: v1" | jq .
 ```
 
-合法 `KIND` 只有：`recommendation_policy`、`execution_risk_policy`、`model_routing`、`report_schedule`、`operational_control`、`execution_authorization`。不要拼接自由字符串或旧 section path。
+合法 `KIND` 只有：`recommendation_policy`、`execution_risk_policy`、`model_routing`、`report_schedule`、`operations_policy`、`execution_automation_policy`。不要拼接自由字符串或旧 section path。
 
 ### 7.2 Draft → Validate/Preflight → Approve → Activate
 
@@ -706,13 +705,13 @@ curl -sS -X POST \
 | 变更意图 | Resource | 生效边界 |
 |----------|----------|----------|
 | selection、data quality、Top-N、report TTL | `recommendation_policy` | 新 claim 的 ReportRun |
-| budget、Kelly、exposure、entry/exit、breaker | `execution_risk_policy` | 新 OrderIntent / admission |
-| active/shadow/exit model artifact | `model_routing` | 新 model evaluation claim |
+| budget、economic admission、exposure、tail risk、entry/exit、breaker | `execution_risk_policy` | 新 ReportRun / OrderIntent / admission |
+| Route champion/shadow/exit 与 scenario-model artifact binding | `model_routing` | 新 model evaluation / ReportRun claim |
 | timezone、cadence、enabled | `report_schedule` | reconcile 未 claim future runs |
-| pause/halt、worker admission、notification routing | `operational_control` | operational admission gate |
-| SemiAuto/AutoExecution capability | `execution_authorization` | mode preflight 后的新 admission |
+| halt、worker/outcome admission、notification routing | `operations_policy` | operational admission gate |
+| SemiAuto approval TTL / AutoExecution report caps | `execution_automation_policy` | mode preflight 后的新 admission |
 
-立即停止新执行使用 `operational_control` 的 halt 动作；不要靠缩小 risk threshold 模拟紧急停机。切换 mode 使用 `execution_authorization`；不要把 mode 当 Deploy Config。
+立即停止新执行使用 `operations_policy` 的 kill-switch 动作；不要靠缩小 risk threshold 模拟紧急停机。`execution_automation_policy` 只管理自动化授权边界，runtime mode 由独立 governed action 切换；不要把 mode 当 Deploy Config。
 
 ### 7.5 Fresh Boot 与后续 schema 演进
 
@@ -729,11 +728,17 @@ CLI；应用运行时和 Web API 都不会自动清库、自动 DDL 或替操作
 
 ```bash
 cargo run -p quant-pivot-xtask -- \
-  postgres-schema plan --config-dir config
+  postgres-schema plan \
+  --config-file "$(pwd)/config/quant-pivot.toml" \
+  --expected-environment local-development
 cargo run -p quant-pivot-xtask -- \
-  postgres-schema apply --config-dir config
+  postgres-schema apply \
+  --config-file "$(pwd)/config/quant-pivot.toml" \
+  --expected-environment local-development
 cargo run -p quant-pivot-xtask -- \
-  postgres-schema verify --config-dir config
+  postgres-schema verify \
+  --config-file "$(pwd)/config/quant-pivot.toml" \
+  --expected-environment local-development
 ```
 
 `apply` 在同一 schema mutation lease 内完成唯一 boot migration、catalog/admin finalize、immutable research
@@ -742,9 +747,7 @@ bundle generation/snapshot identity；默认 `system_runtime_control.settlement_
 `disabled`。应用 runtime 不会补 seed，也不会把缺失 active policy 当成可恢复状态；因此漏掉 deploy-only
 bootstrap 会使启动 fail closed，而不是静默生成策略。
 
-首次部署后，所有 schema/data/format 变化直接使用正常 forward migration、备份、回滚与数据验证流程；这是一条
-部署纪律，不再由不可逆 seal、文件开关或额外数据库状态阻断正常演进。资金写入则独立由 runtime mode、
-kill switch、`SettlementWritePolicy` 与 money-path admission 控制。
+本项目当前没有生产历史。本轮 schema/data/format 只维护一个 clean-install boot truth；变更后重新创建受控、可销毁的开发/验收数据库并 fresh boot，不实现升级 migration、旧 schema 共享、双写或兼容回滚。任何真实数据库销毁或 production cutover 都必须另行获得操作者明确授权。资金写入仍独立由 runtime mode、kill switch、`SettlementWritePolicy` 与 money-path admission 控制。
 ## 8. 生成与阅读报告
 
 ### 8.0 前置条件（冷启动必读）
@@ -789,14 +792,18 @@ verify；两者与 PostgreSQL schema mutation / pre-production reset 共用同�
 
 ```bash
 cargo run -p quant-pivot-xtask -- \
-  clickhouse-schema apply-online --config-dir config
+  clickhouse-schema apply-online \
+  --config-file "$(pwd)/config/quant-pivot.toml" \
+  --expected-environment local-development
 cargo run -p quant-pivot-xtask -- \
-  clickhouse-schema verify --config-dir config
+  clickhouse-schema verify \
+  --config-file "$(pwd)/config/quant-pivot.toml" \
+  --expected-environment local-development
 ```
 
 若发现未知 migration history、未知非空 schema、manifest checksum 或 schema fingerprint 不一致，命令立即
 fail closed；不会搬运旧 rows、创建兼容 view 或让 runtime startup 自动 DDL。只有明确授权的
-pre-production reset 可以销毁未投产环境；正常演进始终使用正式 forward migration。
+pre-production reset 可以销毁未投产环境，并从唯一 boot schema 重新创建。
 
 ### 8.1 从冷启动到第一份报告（完整流程）
 
@@ -1195,11 +1202,12 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
 | 块 | 关键字段 | 操作意义 |
 |----|----------|----------|
 | Identity | report id、rank、market id、token id、outcome side、runtime mode | 买什么，来自哪份报告 |
-| Signal | score、confidence、expected return、model version、factor breakdown | 为什么买，信号是否足够强 |
+| Route lineage | Route、route run、model/calibration/trade-policy/profile generations 与 hashes | 哪条 Route 产生了概率/现金流，契约是否完整 |
 | Entry plan | trigger kind、limit price、max slippage、valid window、min depth、max book age | 什么时候买、以什么价格买 |
-| Sizing plan | suggested USD、shares、Kelly cap、budget cap、binding constraints | 买多少，为什么不能更多 |
+| Economics | nominal/robust expected net USD、profit-probability lower bound、max loss、CVaR contribution、capital USD-hours、marginal portfolio value | 为什么在跨 Route 全局组合中选它 |
+| Global portfolio plan | selected executable tier、shares、capital buckets、scenario artifact、lexicographic objective、binding constraints | 买多少，为什么不能更多 |
 | Exit plan | take profit、stop loss、time exit、signal invalidation、hold-to-resolution / redeem policy | 什么时候卖，卖多少 |
-| Risk envelope | market/event/category/correlation exposure、liquidity usage、downside bps | 这笔单的风险边界 |
+| Risk envelope | market/event/category/Route exposure、liquidity、scenario loss、CVaR、drawdown | 这笔单的风险边界 |
 | Evidence | feature snapshot、book age、data quality、model/factor refs | 审计依据 |
 | Execution eligibility | eligible modes、auto ineligibility reasons、approval required | 能否在当前 mode 执行 |
 
@@ -1243,21 +1251,23 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
 
 ### 9.3 买多少
 
-只有 `trade_plan.kind = frozen` 才存在可操作 sizing，并以 `trade_plan.sizing.suggested_usd` 与
-`suggested_shares` 为上限。生产 Kelly 使用校准 `P(win)` 与市场价 `p` 直接计算
-`f* = (q − p) / (1 − p)`（Phase 11.3）。未校准 return model 生成 `Unavailable`，没有金额，也不能创建 intent。
+只有经过 exact post-solve verification 的 `GlobalPortfolioPlan` 才存在可操作 sizing，并以所选
+`ExecutableEconomicTier` 的 USD 与 shares 为上限。Route 内模型先产生校准概率及不确定性，Trade Policy、
+真实 L2 walk、费用/滑点、退出/结算和资本时间桶再把候选转换为统一贴现净 USD 场景现金流。raw score、
+confidence 和 category rank 不参与跨 Route 排序或执行准入。
 
 计算链路：
 
 ```mermaid
 flowchart LR
-    A["venue collateral + positions"] --> B["capital_base = min(venue NLV, runtime budget)"]
-    B --> C["available cash after reservations"]
-    C --> D["Kelly f* from calibrated P(win) + shrink layers"]
-    D --> E["per-rec max, market/event/category exposure caps"]
-    E --> F["liquidity usage and slippage caps"]
-    F --> G["correlation cap and optimizer"]
-    G --> H["suggested_usd / shares"]
+    A["venue collateral + positions"] --> B["available cash + reserve + open capital"]
+    C["Route calibrated probability interval"] --> D["joint PIT/stress scenario cashflows"]
+    E["L2 walk + fees + Trade Policy"] --> D
+    D --> F["discrete executable tiers"]
+    B --> G["global lexicographic MILP"]
+    F --> G
+    G --> H["Decimal/newtype exact verifier"]
+    H --> I["selected USD / shares + economics"]
 ```
 
 人工审批时只能拒绝，或以 tagged `override_amount` 缩小冻结 USD/shares，并以 side-aware
@@ -1272,8 +1282,8 @@ Shares override 按最终 `shares × price` 原子重算资本预留。审批即
 每笔买入至少要能回答：
 
 1. **数据依据**：Gamma market metadata、CLOB L2 book、Data API positions、ClickHouse facts 是否新鲜；
-2. **信号依据**：factor breakdown、model score、confidence、expected return、downside；
-3. **组合依据**：Kelly cap、budget cap、exposure cap、correlation cap、liquidity cap；
+2. **模型依据**：Route-specific model、calibration、probability interval、Trade Policy 与 PIT lineage；
+3. **组合依据**：nominal/robust net USD、profit-probability lower bound、budget/exposure/time-bucket、scenario-loss/CVaR/drawdown 与 liquidity constraints；
 4. **治理依据**：runtime mode、kill switch、admission checks、operation log；
 5. **执行依据**：entry plan、order type、limit price、valid window。
 
@@ -1420,8 +1430,8 @@ curl -sS "$BASE/api/quant/positions?order_intent_id=$INTENT_ID" \
 - private key、funder、wallet topology、relayer 配置通过 preflight；
 - 六类 active policy resource 与 immutable profile/model/dataset boot schema 1 有效；
 - feature parity latch clear，最近 sampled/full run 均为 `passed`，`parity_age_secs` 未超出运维时效；
-- `execution_authorization.auto_execution.enabled=true`；
-- `execution_authorization.auto_execution.max_orders_per_report`、`max_total_usd_per_report`、`min_score`、`min_confidence` 保守；
+- `execution_automation_policy.auto_execution.max_orders_per_report` 与 `max_total_usd_per_report` 保守且大于零；
+- `execution_risk_policy.portfolio.admission` 的 robust/nominal net USD、profit probability lower bound 与 uncertainty width 门槛已经通过 OOS/backtest 证据治理；
 - `execution_risk_policy.portfolio.budget.total_budget_usd > 0` 且 account live snapshot 可用；
 - 已有 route Champion，且 ReportOnly shadow period / quality gate 通过；
 - data quality healthy；
@@ -1433,17 +1443,14 @@ curl -sS "$BASE/api/quant/positions?order_intent_id=$INTENT_ID" \
 
 ### 12.2 启用策略批准
 
-先在 Config 控制台编辑 `execution_authorization`，建议使用极小上限并完整执行 Review、preflight、approval 与 activation：
+先在 Config 控制台编辑 `execution_automation_policy`，建议使用极小上限并完整执行 Review、preflight、approval 与 activation：
 
-在 `/system/config/execution_authorization` 设置：
+在 `/system/config/execution_automation_policy` 设置：
 
-- `auto_execution.enabled = true`；
 - `max_orders_per_report = 1`；
 - `max_total_usd_per_report = "20"`；
-- `min_score = "0.75"`；
-- `min_confidence = "0.70"`。
 
-资金与入场风险上限属于 `execution_risk_policy`，不要混入这次 authorization revision。CLI 自动化按 §7.2 使用 `KIND=execution_authorization` 的完整 typed document，并保留 activation CAS expectation。
+资金、经济准入与入场风险上限属于 `execution_risk_policy`，不要混入 automation revision。CLI 自动化按 §7.2 使用 `KIND=execution_automation_policy` 的完整 typed document，并保留 activation CAS expectation。
 
 激活后再切 mode：
 

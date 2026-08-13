@@ -38,13 +38,18 @@ use quant_pivot_models::{
         DATASET_COHORT_MANIFEST_FORMAT_VERSION, DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
         DatasetCohortArtifactRef, DatasetCohortCounts, DatasetCohortManifest, DatasetCoverage,
         DatasetManifest, DatasetSourceLineage, DecisionCaptureEvidence, DecisionPolicySnapshotId,
-        DecisionSnapshotEvidence, EvmBlockHash, EvmTransactionHash, MarketContext, ModelSpecId,
-        PayoutRatio, Price, Probability, ReaderContractVersion, RecommendationIdentity,
-        ResearchEvaluationTrack, ResearchProfileArtifact, ResearchProfileDataSource,
-        ResearchProfileRef, SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SchemaContractVersion,
-        SchemaVersion, Shares, SourceSliceCatalogProof, SourceSliceId, SourceSliceManifest,
-        SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs,
-        TokenId, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources, Usd,
+        DecisionSnapshotEvidence, EvmBlockHash, EvmTransactionHash, FeatureValue, MarketContext,
+        ModelSpecId, PayoutRatio, Price, Probability, ReaderContractVersion,
+        RecommendationIdentity, ResearchEvaluationTrack, ResearchProfileArtifact,
+        ResearchProfileDataSource, ResearchProfileRef, SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
+        SchemaContractVersion, SchemaVersion, Shares, SourceSliceCatalogProof, SourceSliceId,
+        SourceSliceManifest, SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef,
+        SourceSlicePitCutoffs, TokenId, TradeTapeSourceEvidence, TrainingDatasetId,
+        TrainingHorizonsSecs, TrainingSampleSources, Usd,
+        backtest::{
+            BacktestPortfolioFunnel, CscvSelectionEvidence, CscvTrialDescriptor,
+            CscvTrialGridBinding,
+        },
         factor::{
             FactorAlphaOrientation, FactorComputationContract, FactorDefinitionDocument,
             FactorDefinitionRef, FactorOutputSemantics, FactorServingPlane,
@@ -63,14 +68,92 @@ use quant_pivot_repository::{
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
+    features::names::book::{BEST_ASK, MID},
     source_slice::{SourceSliceParquetCodec, SourceSliceRecord},
     training::TrainingExample,
+    validation::{TrialPerformanceMatrix, analyze_selection_bias},
 };
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 
 use super::seeded_uuid;
+
+/// Build a complete deterministic CSCV fixture from synchronous OOS trial columns.
+///
+/// The returned methodology binding and evidence are produced by the same
+/// production algorithm used by CPCV; tests never hand-author PBO or DSR
+/// dispersion scalars.
+pub fn cscv_selection_fixture(
+    scope: &str,
+    periods: &[DateTime<Utc>],
+    trial_columns: &[Vec<Decimal>],
+    block_count: u32,
+) -> (CscvTrialGridBinding, CscvSelectionEvidence) {
+    let descriptors = trial_columns
+        .iter()
+        .enumerate()
+        .map(|(trial_id, _)| CscvTrialDescriptor {
+            trial_id: u32::try_from(trial_id).expect("fixture CSCV trial id fits u32"),
+            label: format!("{scope}-trial-{trial_id}"),
+            config_hash: CanonicalDigest::content_hash_typed(
+                "quant-pivot/test-cscv-trial-config",
+                1,
+                &(scope, trial_id),
+            )
+            .expect("fixture CSCV trial hash"),
+        })
+        .collect();
+    let grid = CscvTrialGridBinding::try_new(block_count, descriptors)
+        .expect("valid fixture CSCV trial grid");
+    let matrix = TrialPerformanceMatrix::from_columns(periods.to_vec(), trial_columns)
+        .expect("valid fixture CSCV performance matrix");
+    let evidence =
+        analyze_selection_bias(&matrix, &grid).expect("valid fixture CSCV selection evidence");
+    (grid, evidence)
+}
+
+/// Build a count-conserving fixture where every emitted candidate yields one
+/// admitted tier, is selected, executes, and resolves.
+pub fn fully_resolved_backtest_funnel(
+    decision_tick_count: u64,
+    allocation_count: u64,
+) -> BacktestPortfolioFunnel {
+    assert!(
+        allocation_count == 0 || decision_tick_count <= allocation_count,
+        "a selected decision tick requires at least one allocation"
+    );
+    let no_candidate_tick_count = if allocation_count == 0 {
+        decision_tick_count
+    } else {
+        0
+    };
+    let selected_tick_count = if allocation_count == 0 {
+        0
+    } else {
+        decision_tick_count
+    };
+    let funnel = BacktestPortfolioFunnel {
+        schema_version: 1,
+        decision_tick_count,
+        emitted_candidate_count: allocation_count,
+        candidate_without_executable_tier_count: 0,
+        executable_tier_count: allocation_count,
+        admission_rejected_tier_count: 0,
+        admitted_tier_count: allocation_count,
+        selected_tier_count: allocation_count,
+        executed_entry_count: allocation_count,
+        resolved_allocation_count: allocation_count,
+        no_candidate_tick_count,
+        no_executable_tier_tick_count: 0,
+        no_selection_tick_count: 0,
+        selected_tick_count,
+        tier_exclusion_reasons: Vec::new(),
+    };
+    funnel.validate().expect("valid backtest fixture funnel");
+    funnel
+}
 
 fn source_hash(example: &TrainingExample, role: &str) -> ContentHash {
     CanonicalDigest::content_hash_typed(
@@ -84,6 +167,66 @@ fn source_hash(example: &TrainingExample, role: &str) -> ContentHash {
         ),
     )
     .expect("canonical decision-capture source hash")
+}
+
+#[derive(Clone, Copy)]
+struct FixtureBookTop {
+    bid: Price,
+    ask: Price,
+    mid: Price,
+    depth_usd: Usd,
+}
+
+fn feature_probability(example: &TrainingExample, name: &str) -> Option<Decimal> {
+    example
+        .feature_vector
+        .generic
+        .iter()
+        .find(|(feature, _)| feature.as_str() == name)
+        .and_then(|(_, cell)| cell.value.as_ref())
+        .and_then(|value| match value {
+            FeatureValue::Probability(probability) => Some(probability.inner()),
+            _ => None,
+        })
+}
+
+fn fixture_book_top(example: &TrainingExample) -> FixtureBookTop {
+    let mid = feature_probability(example, MID.as_str())
+        .expect("replayable fixture requires an observed mid probability");
+    let ask = feature_probability(example, BEST_ASK.as_str()).unwrap_or(mid + dec!(0.01));
+    let half_spread = ask - mid;
+    let bid = mid - half_spread;
+    assert!(
+        dec!(0.01) < bid && bid < ask && ask < Decimal::ONE,
+        "replayable fixture book must satisfy 0.01 < bid < ask < 1"
+    );
+    FixtureBookTop {
+        bid: Price::new(bid),
+        ask: Price::new(ask),
+        mid: Price::new(mid),
+        depth_usd: example
+            .selected_market
+            .liquidity_usd
+            .unwrap_or_else(|| Usd::new(dec!(100))),
+    }
+}
+
+fn token_book_top(example: &TrainingExample, token_id: &TokenId) -> FixtureBookTop {
+    let yes = fixture_book_top(example);
+    if token_id == &example.selected_market.primary_token_id {
+        return yes;
+    }
+    assert_eq!(
+        example.selected_market.secondary_token_id.as_ref(),
+        Some(token_id),
+        "replayable fixture requested an unknown market token"
+    );
+    FixtureBookTop {
+        bid: Price::new(Decimal::ONE - yes.ask.inner()),
+        ask: Price::new(Decimal::ONE - yes.bid.inner()),
+        mid: Price::new(Decimal::ONE - yes.mid.inner()),
+        depth_usd: yes.depth_usd,
+    }
 }
 
 /// Bind a complete capture to an already frozen training example.
@@ -105,6 +248,8 @@ pub fn bind_fixture_decision_capture(example: &mut TrainingExample) {
         decision_at.timestamp_micros()
     );
     let token_id = example.token_id.clone();
+    let top = fixture_book_top(example);
+    let spread_bps = (top.ask.inner() - top.bid.inner()) * dec!(10000) / top.mid.inner();
     example.decision_capture = Some(DecisionCaptureEvidence {
         snapshot: DecisionSnapshotEvidence {
             boundary,
@@ -146,20 +291,18 @@ pub fn bind_fixture_decision_capture(example: &mut TrainingExample) {
             book_available_at: decision_at,
             selection: (&example.selected_market).into(),
         },
+        trade_tape_source: TradeTapeSourceEvidence::not_required(),
         identity: RecommendationIdentity {
             category: example.selected_market.category,
             question: "Fixture market?".to_owned(),
             outcome_name: "Yes".to_owned(),
         },
         market_context: MarketContext {
-            best_bid: Some(Price::new(dec!(0.49))),
-            best_ask: Some(Price::new(dec!(0.51))),
-            mid_price: Some(Price::new(dec!(0.50))),
-            spread_bps: Some(Bps::new(dec!(400))),
-            depth_usd: example
-                .selected_market
-                .liquidity_usd
-                .unwrap_or_else(|| Usd::new(dec!(100))),
+            best_bid: Some(top.bid),
+            best_ask: Some(top.ask),
+            mid_price: Some(top.mid),
+            spread_bps: Some(Bps::new(spread_bps)),
+            depth_usd: top.depth_usd,
             volume_24h_usd: example.selected_market.volume_24h_usd,
             book_age_ms,
             time_to_resolution_secs: None,
@@ -857,6 +1000,7 @@ impl ReplayableSourceRecords {
             &event_change,
         )?);
 
+        let top = fixture_book_top(example);
         let market = MarketRegistryInfo {
             market_id: market_id.clone(),
             event_id: example.selected_market.event_id.clone(),
@@ -872,8 +1016,8 @@ impl ReplayableSourceRecords {
             neg_risk: false,
             tick_size: TickSize::Hundredth,
             tokens: Vec::new(),
-            best_bid: Some(dec!(0.49)),
-            best_ask: Some(dec!(0.51)),
+            best_bid: Some(top.bid.inner()),
+            best_ask: Some(top.ask.inner()),
             depth_usd: example.selected_market.liquidity_usd,
             min_order_size: dec!(1),
             liquidity_usd: example.selected_market.liquidity_usd,
@@ -928,6 +1072,9 @@ impl ReplayableSourceRecords {
     ) -> QuantResult<()> {
         let example = context.example;
         let market_id = &example.market_id;
+        let top = token_book_top(example, token_id);
+        let bid_size = Shares::new(top.depth_usd.inner() / top.bid.inner());
+        let ask_size = Shares::new(top.depth_usd.inner() / top.ask.inner());
         let stream_session_id =
             seeded_uuid(&format!("{}:{token_id}:stream-session", context.scope));
         let event = BookL2LedgerRow {
@@ -937,10 +1084,10 @@ impl ReplayableSourceRecords {
             market_id: Some(market_id.clone()),
             token_sequence: 1,
             event_type: ChCanonicalBookEventType::Snapshot,
-            bid_prices: vec![ChPrice::from(Price::new(dec!(0.49)))],
-            bid_sizes: vec![ChShares::from(Shares::new(dec!(100)))],
-            ask_prices: vec![ChPrice::from(Price::new(dec!(0.51)))],
-            ask_sizes: vec![ChShares::from(Shares::new(dec!(100)))],
+            bid_prices: vec![ChPrice::from(top.bid)],
+            bid_sizes: vec![ChShares::from(bid_size)],
+            ask_prices: vec![ChPrice::from(top.ask)],
+            ask_sizes: vec![ChShares::from(ask_size)],
             old_tick_size: None,
             new_tick_size: None,
             trade_price: None,
@@ -980,26 +1127,30 @@ impl ReplayableSourceRecords {
             context.decision_at,
             &session,
         )?);
+        let terminal_bid = Price::new(top.bid.inner() - dec!(0.01));
+        let terminal_ask = Price::new(top.ask.inner() - dec!(0.01));
+        let terminal_midpoint = Price::new(top.mid.inner() - dec!(0.01));
+        let depth = top.depth_usd.inner();
         let microstructure = BookMicrostructureRow {
             token_id: token_id.clone(),
             market_id: Some(market_id.clone()),
             bucket_time: context.event_at_ms,
-            best_bid_open: Some(ChPrice::from(Price::new(dec!(0.49)))),
-            best_bid_high: Some(ChPrice::from(Price::new(dec!(0.49)))),
-            best_bid_low: Some(ChPrice::from(Price::new(dec!(0.49)))),
-            best_bid_close: Some(ChPrice::from(Price::new(dec!(0.49)))),
-            best_ask_open: Some(ChPrice::from(Price::new(dec!(0.51)))),
-            best_ask_high: Some(ChPrice::from(Price::new(dec!(0.51)))),
-            best_ask_low: Some(ChPrice::from(Price::new(dec!(0.51)))),
-            best_ask_close: Some(ChPrice::from(Price::new(dec!(0.51)))),
+            best_bid_open: Some(ChPrice::from(top.bid)),
+            best_bid_high: Some(ChPrice::from(top.bid)),
+            best_bid_low: Some(ChPrice::from(top.bid)),
+            best_bid_close: Some(ChPrice::from(top.bid)),
+            best_ask_open: Some(ChPrice::from(top.ask)),
+            best_ask_high: Some(ChPrice::from(top.ask)),
+            best_ask_low: Some(ChPrice::from(top.ask)),
+            best_ask_close: Some(ChPrice::from(top.ask)),
             spread_bps_min: None,
             spread_bps_avg: None,
             spread_bps_max: None,
-            mid_price_open: Some(ChPrice::from(Price::new(dec!(0.5)))),
-            mid_price_close: Some(ChPrice::from(Price::new(dec!(0.5)))),
-            top1_depth_usd_avg: Some(ChUsd::from(dec!(100))),
-            top5_depth_usd_avg: Some(ChUsd::from(dec!(200))),
-            top20_depth_usd_avg: Some(ChUsd::from(dec!(300))),
+            mid_price_open: Some(ChPrice::from(top.mid)),
+            mid_price_close: Some(ChPrice::from(top.mid)),
+            top1_depth_usd_avg: Some(ChUsd::from(depth)),
+            top5_depth_usd_avg: Some(ChUsd::from(depth)),
+            top20_depth_usd_avg: Some(ChUsd::from(depth)),
             imbalance_avg: None,
             update_count: 1,
             snapshot_count: 1,
@@ -1021,16 +1172,16 @@ impl ReplayableSourceRecords {
         )?);
         let terminal = BookMicrostructureRow {
             bucket_time: context.downside_at_ms,
-            best_bid_open: Some(ChPrice::from(Price::new(dec!(0.48)))),
-            best_bid_high: Some(ChPrice::from(Price::new(dec!(0.49)))),
-            best_bid_low: Some(ChPrice::from(Price::new(dec!(0.48)))),
-            best_bid_close: Some(ChPrice::from(Price::new(dec!(0.48)))),
-            best_ask_open: Some(ChPrice::from(Price::new(dec!(0.50)))),
-            best_ask_high: Some(ChPrice::from(Price::new(dec!(0.51)))),
-            best_ask_low: Some(ChPrice::from(Price::new(dec!(0.50)))),
-            best_ask_close: Some(ChPrice::from(Price::new(dec!(0.50)))),
-            mid_price_open: Some(ChPrice::from(Price::new(dec!(0.49)))),
-            mid_price_close: Some(ChPrice::from(Price::new(dec!(0.49)))),
+            best_bid_open: Some(ChPrice::from(terminal_bid)),
+            best_bid_high: Some(ChPrice::from(top.bid)),
+            best_bid_low: Some(ChPrice::from(terminal_bid)),
+            best_bid_close: Some(ChPrice::from(terminal_bid)),
+            best_ask_open: Some(ChPrice::from(terminal_ask)),
+            best_ask_high: Some(ChPrice::from(top.ask)),
+            best_ask_low: Some(ChPrice::from(terminal_ask)),
+            best_ask_close: Some(ChPrice::from(terminal_ask)),
+            mid_price_open: Some(ChPrice::from(terminal_midpoint)),
+            mid_price_close: Some(ChPrice::from(terminal_midpoint)),
             available_at: context.downside_at_ms,
             ..microstructure
         };
@@ -1099,7 +1250,10 @@ impl ReplayableSourceRecords {
         let example = context.example;
         let market_id = &example.market_id;
         let token_id = &example.token_id;
-        if let Some(label) = example.labels.first()
+        if let Some(label) = example
+            .labels
+            .iter()
+            .find(|label| label.label_name.as_str() == "token_payout_ratio")
             && let Ok(payout) = PayoutRatio::try_new(label.value)
         {
             let source_ordinal =

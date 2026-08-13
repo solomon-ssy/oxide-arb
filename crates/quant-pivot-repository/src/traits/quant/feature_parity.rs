@@ -100,6 +100,11 @@ pub trait FeatureParityRepository: Send + Sync {
         kind: FeatureParityRunKind,
     ) -> Result<Option<FeatureParityRunInfo>, StorageError>;
 
+    /// Oldest queued/running runtime replay whose result can still change the
+    /// global serving latch. Frozen model/dataset proofs are offline evidence
+    /// and are deliberately excluded from this barrier.
+    async fn find_unsettled_runtime(&self) -> Result<Option<FeatureParityRunInfo>, StorageError>;
+
     /// Latest unbound runtime full replay. Subject-bound dataset/model proofs
     /// must never suppress the 24-hour serving replay scheduler or replace its
     /// top-level integrity summary.

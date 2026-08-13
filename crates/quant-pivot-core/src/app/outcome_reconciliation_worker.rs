@@ -73,7 +73,7 @@ impl AppContext {
                     move || {
                         let secs = cadence_config
                             .current()
-                            .operational_control
+                            .operations_policy
                             .outcome_reconciliation
                             .sweep_secs
                             .max(1);
@@ -86,7 +86,7 @@ impl AppContext {
                         let worker = Arc::clone(&worker);
                         let snapshot = pass_config.current();
                         async move {
-                            let policy = &snapshot.operational_control.outcome_reconciliation;
+                            let policy = &snapshot.operations_policy.outcome_reconciliation;
                             if !policy.enabled {
                                 return Ok(());
                             }

@@ -1,6 +1,6 @@
 //! Sharded WebSocket connection manager for Polymarket CLOB.
 //!
-//! Each shard manages one SDK WebSocket connection to Polymarket,
+//! Each shard owns one WebSocket connection to Polymarket,
 //! subscribing to up to `max_subscriptions_per_connection` tokens.
 //! All events are normalized into [`PipelineEvent`] and dispatched to a
 //! unified bounded channel.
@@ -221,14 +221,6 @@ impl ClobWsManager {
         let last_message_tick = Arc::new(AtomicU64::new(0));
         let session_epoch = Arc::new(AtomicU64::new(0));
         let health = Arc::new(ShardHealthBoard::default());
-        // `[market_data.websocket]` reconnect knobs drive both backoff layers:
-        // the shard loop and the SDK-internal reconnect.
-        let initial_backoff = Duration::from_millis(ws_config.reconnect_delay_ms.max(1));
-        let max_backoff = Duration::from_millis(
-            ws_config
-                .max_reconnect_delay_ms
-                .max(ws_config.reconnect_delay_ms),
-        );
         let reconnect_policy = ReconnectPolicy::new(RetryPolicy {
             max_attempts: None,
             initial_interval_ms: ws_config.reconnect_delay_ms.max(1),
@@ -254,8 +246,6 @@ impl ClobWsManager {
                 on_book_level_rejected,
                 ingress_enqueue_observer,
                 reconnect_policy,
-                sdk_initial_backoff: initial_backoff,
-                sdk_max_backoff: max_backoff,
                 connect_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTS)),
                 health: Arc::clone(&health),
             },

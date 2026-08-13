@@ -1,12 +1,13 @@
-//! Fire-and-forget CH writer for token-level book facts.
+//! Durability-aware `ClickHouse` writer for token-level book facts.
 
 use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChBps, ChDecimal64, ChDigest,
-        ChPrice, ChSchemaVersion, ChShares, ChUsd,
+        BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS, BookL2LedgerRow, BookMicrostructureRow,
+        BookStreamSessionRow, ChBps, ChDecimal64, ChDigest, ChPrice, ChSchemaVersion, ChShares,
+        ChUsd,
     },
     domain::{
         data_plane::pipeline::{BookSnapshotCmd, IngressTrace, PriceDeltaCmd},
@@ -21,19 +22,19 @@ use quant_pivot_models::{
     },
     types::{Bps, ContentHash, MarketId, PartitionId, Price, Shares, TokenId, Usd},
 };
-use quant_pivot_storage::write::{AsyncWriter, DurableWriter};
+use quant_pivot_storage::write::{DurableWriteError, DurableWriter};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use super::ledger_persistence::{LedgerPersistenceHandle, PartitionLedgerClient};
 
-const CANONICAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const CANONICAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const L2_SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(1);
 
 pub struct BookFactWriter {
     ledger: LedgerPersistenceHandle,
     sessions: Arc<DurableWriter<BookStreamSessionRow>>,
-    microstructure_1s: Arc<AsyncWriter<BookMicrostructureRow>>,
+    microstructure_1s: Arc<DurableWriter<BookMicrostructureRow>>,
 }
 
 /// Partition-owned one-second telemetry accumulator for one token.
@@ -57,7 +58,7 @@ impl BookFactWriter {
     pub const fn new(
         ledger: LedgerPersistenceHandle,
         session_writer: Arc<DurableWriter<BookStreamSessionRow>>,
-        microstructure_1s_writer: Arc<AsyncWriter<BookMicrostructureRow>>,
+        microstructure_1s_writer: Arc<DurableWriter<BookMicrostructureRow>>,
     ) -> Self {
         Self {
             ledger,
@@ -135,8 +136,13 @@ impl BookFactWriter {
         seal_ledger_row(row)
     }
 
-    pub(crate) fn write_microstructure_row(&self, row: BookMicrostructureRow) {
-        self.microstructure_1s.write(row);
+    pub(crate) async fn write_microstructure_rows(
+        &self,
+        rows: Vec<BookMicrostructureRow>,
+    ) -> Result<(), DurableWriteError> {
+        self.microstructure_1s
+            .write_batch_async_timeout(rows, CANONICAL_WRITE_TIMEOUT)
+            .await
     }
 
     pub(crate) fn tick_size_ledger_row(
@@ -269,7 +275,7 @@ impl MicrostructureAccumulator {
             snapshot,
             event_type,
             delete_count,
-            bucket_ms(now_ms, 1_000),
+            bucket_ms(now_ms, BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS),
             now_ms,
         );
         match self.pending.as_mut() {
@@ -290,11 +296,11 @@ impl MicrostructureAccumulator {
     }
 
     pub(crate) fn flush_elapsed(&mut self, now_ms: i64) -> Option<BookMicrostructureRow> {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|row| row.bucket_time.saturating_add(1_000) <= now_ms)
-        {
+        if self.pending.as_ref().is_some_and(|row| {
+            row.bucket_time
+                .saturating_add(BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS)
+                <= now_ms
+        }) {
             self.pending.take()
         } else {
             None

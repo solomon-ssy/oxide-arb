@@ -2,14 +2,15 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use url::{ParseError, Url};
 
 use super::secret::SecretText;
 
 /// Tiered cache (in-process Moka L1 + Redis L2) policy.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CacheConfig {
     /// Platform Redis connection. One shared pool backs both the cache L2 and
     /// the JWT revocation blacklist (split by key namespace), so this
@@ -33,7 +34,7 @@ pub struct CacheConfig {
 }
 
 /// Per-domain cache policy override.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DomainCacheConfig {
     /// Override operation timeout for this domain (ms).
@@ -41,7 +42,6 @@ pub struct DomainCacheConfig {
     /// Override fail-open for this domain.
     pub fail_open: Option<bool>,
     /// Disable caching for this domain entirely.
-    #[serde(default)]
     pub disabled: bool,
 }
 
@@ -67,17 +67,18 @@ impl Default for CacheConfig {
 
 /// Platform Redis connection — a single shared pool serving the cache L2 and
 /// the JWT revocation blacklist, separated only by key namespace.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RedisConfig {
     /// Server host. Default: `localhost`.
     pub host: String,
-    /// Server port. Default: `6379`.
+    /// Redis TCP port used by cache, revocation, and coordination clients. Default: `6379`.
     pub port: u16,
     /// ACL username. Leave empty when the server uses password-only auth
     /// (`requirepass`). Default: empty.
     pub user: String,
     /// Redis authentication secret source.
+    #[serde(serialize_with = "super::secret::serialize_empty")]
     pub password: SecretText,
     /// Logical database index (`SELECT`). Default: `0`.
     pub database: u8,
@@ -185,8 +186,8 @@ fn default_redis_key_prefix() -> String {
 ///
 /// TTLs are per-entry and chosen by each call site — there is no global
 /// time-to-live/time-to-idle knob by design.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MokaConfig {
     /// Maximum number of cached entries. Default: `10000`.
     pub max_capacity: u64,

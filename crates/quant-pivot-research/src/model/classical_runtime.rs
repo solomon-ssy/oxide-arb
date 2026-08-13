@@ -19,10 +19,7 @@ use quant_pivot_models::{
         quant::{ModelSerializationFormat, OutcomeSide},
     },
     hashing::CanonicalDigest,
-    types::{
-        ContentHash, ModelRunId, ModelVersionId, Price, Probability, SignalCandidateId, TokenId,
-        Usd,
-    },
+    types::{ContentHash, ModelRunId, ModelVersionId, Price, Probability, TokenId, Usd},
 };
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 use smartcore::linalg::basic::matrix::DenseMatrix;
@@ -361,9 +358,16 @@ impl ClassicalRuntime {
             ClassicalOutputSemantics::ForwardReturnBps => "forward_return_bps",
             ClassicalOutputSemantics::FullPayoutProbability => "full_payout_probability",
         };
+        let signal_candidate_id = SignalCandidate::id_for(
+            *model_run_id,
+            decision_at,
+            &row.market_id,
+            &projection.token_id,
+            projection.outcome_side,
+        )?;
 
         Ok(Some(SignalCandidate {
-            signal_candidate_id: SignalCandidateId::from_v7(),
+            signal_candidate_id,
             model_run_id: *model_run_id,
             market_id: row.market_id.clone(),
             token_id: projection.token_id,
@@ -374,7 +378,7 @@ impl ClassicalRuntime {
             downside_bps: Decimal::from(MAX_LONG_DOWNSIDE_BPS),
             // Classical is explicitly ShadowOnly until it binds an independently
             // validated probability/return/downside calibration.
-            win_probability: None,
+            payout_distribution: None,
             entry_price_ref: projection.entry_price_ref,
             suggested_horizon_secs: projection.suggested_horizon_secs,
             factor_breakdown: Vec::new(),
@@ -389,7 +393,7 @@ impl ClassicalRuntime {
                 top_negative: Vec::new(),
             },
             rejection_warnings: (context).candidate_warnings(),
-            rank_before_portfolio: 0,
+            route_rank: 0,
             liquidity_score: projection.liquidity_score,
             data_quality_score: projection.data_quality_score,
             model_score_percentile: Probability::ZERO,
@@ -583,7 +587,7 @@ impl QuantModelRuntime for ClassicalRuntime {
                 .then_with(|| a.market_id.as_str().cmp(b.market_id.as_str()))
         });
         for (index, candidate) in candidates.iter_mut().enumerate() {
-            candidate.rank_before_portfolio =
+            candidate.route_rank =
                 u32::try_from(index + 1).map_err(|error| ResearchError::Inference {
                     detail: format!("classical candidate rank does not fit u32: {error}"),
                 })?;

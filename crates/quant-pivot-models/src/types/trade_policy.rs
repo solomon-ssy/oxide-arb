@@ -63,7 +63,7 @@ impl TradePolicyQualityGate {
             min_eligible_market_coverage: Decimal::new(95, 2),
             min_cpcv_paths: 21,
             min_deflated_sharpe_ratio: Decimal::new(95, 2),
-            max_probability_of_backtest_overfitting: Decimal::new(5, 1),
+            max_probability_of_backtest_overfitting: Decimal::new(5, 2),
             max_ambiguous_touch_rate: Decimal::new(5, 2),
             max_depth_failure_rate: Decimal::new(5, 2),
             min_lower_confidence_utility_bps: Bps::ZERO,
@@ -144,8 +144,8 @@ impl TradePolicyQualityGate {
         if self.min_deflated_sharpe_ratio < Decimal::new(95, 2) {
             return Err("min_deflated_sharpe_ratio cannot be lower than 0.95".to_owned());
         }
-        if self.max_probability_of_backtest_overfitting > Decimal::new(5, 1) {
-            return Err("max_probability_of_backtest_overfitting cannot exceed 0.5".to_owned());
+        if self.max_probability_of_backtest_overfitting > Decimal::new(5, 2) {
+            return Err("max_probability_of_backtest_overfitting cannot exceed 0.05".to_owned());
         }
         if self.max_ambiguous_touch_rate > Decimal::new(5, 2)
             || self.max_depth_failure_rate > Decimal::new(5, 2)
@@ -488,7 +488,7 @@ pub struct TradePolicyExitTemplate {
     pub trailing_stop: Option<TrailingStopTemplate>,
     pub min_score_retention: Decimal,
     pub min_expected_return_bps: Bps,
-    pub require_execution_eligibility: bool,
+    pub require_route_gate_eligibility: bool,
     pub opportunistic_exit: OpportunisticExitPolicy,
     pub settlement_mode: ExitSettlementMode,
     pub redeem_policy: RedeemPolicy,
@@ -539,7 +539,7 @@ pub struct TradePolicyCohort {
     pub trailing_stop: Option<TrailingStopTemplate>,
     pub min_score_retention: Decimal,
     pub min_expected_return_bps: Bps,
-    pub require_execution_eligibility: bool,
+    pub require_route_gate_eligibility: bool,
     pub opportunistic_exit: OpportunisticExitPolicy,
     pub settlement_mode: ExitSettlementMode,
     pub redeem_policy: RedeemPolicy,

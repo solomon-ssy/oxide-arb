@@ -15,7 +15,7 @@ use quant_pivot_models::{
     enums::clickhouse::{ChTradeReconciliationStatus, ChTradeTapeSource},
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
-        RecommendationReportId, ResearchProfileRef, TokenId,
+        RecommendationReportId, TokenId,
     },
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
@@ -149,7 +149,6 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
 
     async fn report_funnel_between(
         &self,
-        profile_ref: &ResearchProfileRef,
         from_ms: i64,
         to_ms: i64,
     ) -> Result<Vec<ReportMarketFunnelRow>, StorageError> {
@@ -157,15 +156,10 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .query(
                 self.pool.client(),
                 "SELECT ?fields FROM quant_report_market_funnel FINAL \
-                 WHERE profile_id = ? AND profile_version = ? \
-                   AND profile_content_hash = ? \
-                   AND event_time >= fromUnixTimestamp64Milli(?) \
+                 WHERE event_time >= fromUnixTimestamp64Milli(?) \
                    AND event_time < fromUnixTimestamp64Milli(?) \
                  ORDER BY recommendation_report_id, market_id",
             )
-            .bind(profile_ref.id.as_str())
-            .bind(profile_ref.version)
-            .bind(profile_ref.content_hash.to_string())
             .bind(from_ms)
             .bind(to_ms)
             .fetch_all::<ReportMarketFunnelRow>()
@@ -456,11 +450,13 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                      WHERE token_id IN ? \
                      AND bucket_time >= fromUnixTimestamp64Milli(?) \
                      AND bucket_time < fromUnixTimestamp64Milli(?) \
+                     AND bucket_time + toIntervalSecond(1) <= fromUnixTimestamp64Milli(?) \
                      AND available_at <= fromUnixTimestamp64Milli(?) \
                      ORDER BY token_id, bucket_time",
                 )
                 .bind(tokens.to_vec())
                 .bind(from_ms)
+                .bind(to_ms)
                 .bind(to_ms)
                 .bind(decision_at_ms)
                 .fetch_all::<BookMicrostructureRow>()
@@ -494,6 +490,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
              WHERE token_id IN ? \
              AND bucket_time >= fromUnixTimestamp64Milli(?) \
              AND bucket_time < fromUnixTimestamp64Milli(?) \
+             AND bucket_time + toIntervalMinute(1) <= fromUnixTimestamp64Milli(?) \
              AND available_at <= fromUnixTimestamp64Milli(?) \
              ORDER BY token_id, bucket_time"
         } else {
@@ -501,6 +498,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
              WHERE token_id IN ? \
              AND bucket_time >= fromUnixTimestamp64Milli(?) \
              AND bucket_time < fromUnixTimestamp64Milli(?) \
+             AND bucket_time + toIntervalSecond(1) <= fromUnixTimestamp64Milli(?) \
              AND available_at <= fromUnixTimestamp64Milli(?) \
              ORDER BY token_id, bucket_time"
         };
@@ -514,6 +512,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                 .query(self.pool.client(), sql)
                 .bind(tokens.to_vec())
                 .bind(from_ms)
+                .bind(to_ms)
                 .bind(to_ms)
                 .bind(available_by_ms)
                 .fetch_all::<BookMicrostructureRow>()
@@ -694,6 +693,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                      WHERE token_id IN ? \
                      AND bucket_time >= fromUnixTimestamp64Milli(?) \
                      AND bucket_time < fromUnixTimestamp64Milli(?) \
+                     AND bucket_time + toIntervalSecond(1) <= fromUnixTimestamp64Milli(?) \
                      AND available_at <= fromUnixTimestamp64Milli(?) \
                      GROUP BY token_id, bucket_ms \
                      ORDER BY token_id, bucket_ms",
@@ -702,6 +702,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                 .bind(bucket_secs)
                 .bind(tokens.to_vec())
                 .bind(from_ms)
+                .bind(to_ms)
                 .bind(to_ms)
                 .bind(decision_at_ms)
                 .fetch_all::<MidPriceBucketRow>()

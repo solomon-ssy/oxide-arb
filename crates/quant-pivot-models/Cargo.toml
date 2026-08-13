@@ -28,8 +28,8 @@ tokio-util = { workspace = true }
 flume = { workspace = true }
 validator = { workspace = true }
 tracing = { workspace = true }
-config-rs = { workspace = true }
 toml = { workspace = true }
+nix = { workspace = true }
 url = { workspace = true }
 zeroize = { workspace = true }
 base64 = { workspace = true }
@@ -49,6 +49,7 @@ bincode = { workspace = true }
 bitcode = { workspace = true }
 insta = { workspace = true }
 proptest = { workspace = true }
+tempfile = { workspace = true }
 uuid = { workspace = true, features = ["v5"] }
 
 [features]

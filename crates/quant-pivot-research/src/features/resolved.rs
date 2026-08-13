@@ -21,7 +21,7 @@ use quant_pivot_models::{
         },
     },
     enums::market::MarketStatus,
-    types::{Bps, MarketId, MicroUsd, Price, TokenId, Usd},
+    types::{Bps, MarketId, MicroUsd, Price, TokenId, TradeTapeSourceEvidence, Usd},
 };
 use rust_decimal::Decimal;
 
@@ -38,6 +38,8 @@ pub struct TradeTapeWindowSnapshot {
     pub knowledge_cutoff: DateTime<Utc>,
     /// Whether the trade-tape source was queried and considered available.
     pub source_available: bool,
+    /// Raw source-state evidence used to derive `source_available`.
+    pub source_evidence: TradeTapeSourceEvidence,
     /// Participant rows ascending by event time, all before the PIT cutoff.
     pub prints: Vec<TradeTapePrint>,
 }
@@ -54,6 +56,7 @@ impl TradeTapeWindowSnapshot {
             decision_at,
             knowledge_cutoff,
             source_available: false,
+            source_evidence: TradeTapeSourceEvidence::not_required(),
             prints: Vec::new(),
         }
     }
@@ -70,6 +73,7 @@ impl TradeTapeWindowSnapshot {
             decision_at,
             knowledge_cutoff,
             source_available: true,
+            source_evidence: TradeTapeSourceEvidence::materialized(decision_at),
             prints,
         }
     }
@@ -99,7 +103,12 @@ impl TradeTapeWindowSnapshot {
 
     /// Re-label ingest availability without discarding prefetched prints.
     #[must_use]
-    pub const fn with_source_available(mut self, source_available: bool) -> Self {
+    pub fn with_source_evidence(
+        mut self,
+        source_evidence: TradeTapeSourceEvidence,
+        source_available: bool,
+    ) -> Self {
+        self.source_evidence = source_evidence;
         self.source_available = source_available;
         self
     }
@@ -363,7 +372,7 @@ impl From<MarketContextAt> for ResolvedMarketContext {
 /// builders distinguish "no quote" from a real zero.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MicrostructureBucket {
-    /// Bucket start time (`<=` the frozen microstructure source cutoff).
+    /// Bucket start time (`<` the frozen microstructure source cutoff).
     pub bucket_time: DateTime<Utc>,
     /// Latest ingestion time of facts contributing to this bucket.
     pub available_at: DateTime<Utc>,
@@ -392,8 +401,8 @@ pub struct MicrostructureBucket {
 }
 
 /// A pre-fetched, point-in-time-bounded window of microstructure buckets for one
-/// token, ascending by `bucket_time`. Every bucket satisfies the frozen
-/// microstructure source cutoff.
+/// token, ascending by `bucket_time`. Every bucket is inside the frozen
+/// half-open microstructure window.
 #[derive(Debug, Clone)]
 pub struct MarketWindowSnapshot {
     /// Token the window describes.
@@ -402,7 +411,7 @@ pub struct MarketWindowSnapshot {
     pub decision_at: DateTime<Utc>,
     /// Already-derived source knowledge cutoff.
     pub knowledge_cutoff: DateTime<Utc>,
-    /// Buckets ascending by time, all at or before the PIT cutoff.
+    /// Buckets ascending by time, all strictly before the PIT cutoff.
     pub buckets: Vec<MicrostructureBucket>,
 }
 
@@ -459,7 +468,7 @@ impl MarketWindowSnapshot {
         };
         self.buckets
             .iter()
-            .filter(|bucket| bucket.bucket_time >= start && bucket.bucket_time <= cutoff)
+            .filter(|bucket| bucket.bucket_time >= start && bucket.bucket_time < cutoff)
             .collect()
     }
 

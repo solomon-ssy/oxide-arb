@@ -8,9 +8,10 @@ use thiserror::Error;
 
 use crate::{
     domain::quant::{
-        RecommendationExecutionRollupContractError, RecommendationExecutionRollupInfo,
-        RecommendationInfo, RecommendationReportInfo, RecommendationResolutionOutcomeContractError,
-        RecommendationResolutionOutcomeInfo,
+        RecommendationEconomics, RecommendationExecutionRollupContractError,
+        RecommendationExecutionRollupInfo, RecommendationInfo, RecommendationReportInfo,
+        RecommendationResolutionOutcomeContractError, RecommendationResolutionOutcomeInfo,
+        ReportRouteRunInfo,
     },
     enums::{
         common::MarketCategory,
@@ -20,12 +21,13 @@ use crate::{
             RecommendationStatus, ReportKind,
         },
     },
+    runtime_config::BuyModelRoute,
     types::{
         BookSnapshotRef, ContentHash, DecisionPolicySnapshotId, EventId, FactorDefinitionId,
         FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
-        PayoutRatio, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationIdentity, RecommendationReportId, ReportDataQualitySnapshotId,
-        ResearchProfileRef, Shares, TokenId, Usd,
+        PayoutRatio, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, ReportDataQualitySnapshotId, ReportRouteRunId, ResearchProfileRef,
+        Shares, TokenId, Usd,
     },
 };
 
@@ -155,7 +157,9 @@ impl From<FeedbackCohortWindow> for FeedbackCohortWindowDocument {
 pub struct FeedbackRecommendationContext {
     recommendation_id: RecommendationId,
     recommendation_report_id: RecommendationReportId,
+    report_route_run_id: ReportRouteRunId,
     profile_ref: ResearchProfileRef,
+    route: BuyModelRoute,
     report_kind: ReportKind,
     runtime_mode: QuantRuntimeMode,
     category: MarketCategory,
@@ -164,9 +168,8 @@ pub struct FeedbackRecommendationContext {
     token_id: TokenId,
     outcome_side: OutcomeSide,
     rank: i32,
-    rank_before_portfolio: i32,
-    composite_score: Probability,
-    confidence: Probability,
+    route_tier_ordinal: u32,
+    economics: RecommendationEconomics,
     top_n: i32,
     horizon_secs: i64,
     decision_at: DateTime<Utc>,
@@ -190,6 +193,7 @@ impl FeedbackRecommendationContext {
     pub fn try_from_report(
         recommendation: &RecommendationInfo,
         report: &RecommendationReportInfo,
+        route_run: &ReportRouteRunInfo,
     ) -> Result<Self, FeedbackCohortContractError> {
         if recommendation.recommendation_report_id != report.recommendation_report_id {
             return Err(FeedbackCohortContractError::RecommendationReportMismatch {
@@ -197,20 +201,24 @@ impl FeedbackRecommendationContext {
                 report_id: report.recommendation_report_id,
             });
         }
-        if report.profile_id != report.profile_ref.id {
-            return Err(FeedbackCohortContractError::ReportProfileIdentityMismatch);
+        if recommendation.report_route_run_id != route_run.report_route_run_id
+            || route_run.report_run_id != report.report_run_id
+        {
+            return Err(FeedbackCohortContractError::RouteRunMismatch);
         }
-        if recommendation.profile_ref != report.profile_ref {
-            return Err(FeedbackCohortContractError::RecommendationProfileMismatch);
-        }
-
-        let model_run_id = report
+        let lineage = route_run
+            .lineage_json
+            .as_ref()
+            .ok_or(FeedbackCohortContractError::MissingRouteLineage)?;
+        let model_run_id = route_run
             .model_run_id
             .ok_or(FeedbackCohortContractError::MissingReportModelRun)?;
         if recommendation.evidence_refs.model_run_id != model_run_id {
             return Err(FeedbackCohortContractError::ModelRunMismatch);
         }
-        if recommendation.evidence_refs.model_version_id != report.model_version_id {
+        if recommendation.evidence_refs.model_version_id != lineage.model_version_id
+            || route_run.model_version_id != Some(lineage.model_version_id)
+        {
             return Err(FeedbackCohortContractError::ModelVersionMismatch);
         }
         if recommendation.evidence_refs.market_selection_id != report.market_selection_id {
@@ -231,7 +239,9 @@ impl FeedbackRecommendationContext {
         Ok(Self {
             recommendation_id: recommendation.recommendation_id,
             recommendation_report_id: recommendation.recommendation_report_id,
-            profile_ref: recommendation.profile_ref.clone(),
+            report_route_run_id: recommendation.report_route_run_id,
+            profile_ref: lineage.research_profile_ref.clone(),
+            route: recommendation.route,
             report_kind: report.report_kind,
             runtime_mode: report.runtime_mode,
             category: recommendation.identity.category,
@@ -240,17 +250,16 @@ impl FeedbackRecommendationContext {
             token_id: recommendation.token_id.clone(),
             outcome_side: recommendation.outcome_side,
             rank: recommendation.rank,
-            rank_before_portfolio: recommendation.rank_before_portfolio,
-            composite_score: recommendation.composite_score,
-            confidence: recommendation.confidence,
+            route_tier_ordinal: recommendation.economic_tier_json.tier_ordinal,
+            economics: recommendation.economics_json,
             top_n: report.top_n,
-            horizon_secs: report.horizon_secs,
+            horizon_secs: lineage.prediction_horizon_secs,
             decision_at: report.decision_at,
             available_at: recommendation.created_at,
             published_at: report.published_at,
             decision_policy_snapshot_id: report.decision_policy_snapshot_id,
             model_run_id,
-            model_version_id: report.model_version_id,
+            model_version_id: lineage.model_version_id,
             market_selection_id: report.market_selection_id,
             feature_vector_id: recommendation.evidence_refs.feature_vector_id,
             factor_definition_versions: recommendation
@@ -276,8 +285,18 @@ impl FeedbackRecommendationContext {
     }
 
     #[must_use]
+    pub const fn report_route_run_id(&self) -> ReportRouteRunId {
+        self.report_route_run_id
+    }
+
+    #[must_use]
     pub const fn profile_ref(&self) -> &ResearchProfileRef {
         &self.profile_ref
+    }
+
+    #[must_use]
+    pub const fn route(&self) -> BuyModelRoute {
+        self.route
     }
 
     #[must_use]
@@ -321,18 +340,13 @@ impl FeedbackRecommendationContext {
     }
 
     #[must_use]
-    pub const fn rank_before_portfolio(&self) -> i32 {
-        self.rank_before_portfolio
+    pub const fn route_tier_ordinal(&self) -> u32 {
+        self.route_tier_ordinal
     }
 
     #[must_use]
-    pub const fn composite_score(&self) -> Probability {
-        self.composite_score
-    }
-
-    #[must_use]
-    pub const fn confidence(&self) -> Probability {
-        self.confidence
+    pub const fn economics(&self) -> RecommendationEconomics {
+        self.economics
     }
 
     #[must_use]
@@ -762,10 +776,10 @@ pub enum FeedbackCohortContractError {
         recommendation_report_id: RecommendationReportId,
         report_id: RecommendationReportId,
     },
-    #[error("report profile_id does not match its immutable profile reference")]
-    ReportProfileIdentityMismatch,
-    #[error("recommendation profile reference does not match its report")]
-    RecommendationProfileMismatch,
+    #[error("recommendation/report/Route-run identity mismatch")]
+    RouteRunMismatch,
+    #[error("represented Route run is missing its frozen lineage")]
+    MissingRouteLineage,
     #[error("report with recommendations is missing its model run")]
     MissingReportModelRun,
     #[error("recommendation model run does not match its report")]
@@ -823,7 +837,10 @@ mod tests {
         FeedbackCohortSnapshot, FeedbackCohortWindow, FeedbackRecommendationContext,
     };
     use crate::{
-        domain::quant::{NewRecommendationExecutionRollup, RecommendationExecutionRollupInfo},
+        domain::quant::{
+            NewRecommendationExecutionRollup, RecommendationEconomics,
+            RecommendationExecutionRollupInfo,
+        },
         enums::{
             common::{MarketCategory, TickSize},
             market::MarketStatus,
@@ -832,12 +849,13 @@ mod tests {
                 QuantRuntimeMode, ReportKind,
             },
         },
+        runtime_config::BuyModelRoute,
         types::{
-            BookSnapshotRef, BookSnapshotSource, ContentHash, DecisionPolicySnapshotId, EventId,
-            FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelRunId,
-            ModelVersionId, Probability, RecommendationFactorBreakdown, RecommendationId,
-            RecommendationIdentity, RecommendationReportId, ReportDataQualitySnapshotId, TokenId,
-            Usd, builtin_research_profiles,
+            BookSnapshotRef, BookSnapshotSource, Bps, ContentHash, DecisionPolicySnapshotId,
+            EventId, FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelRunId,
+            ModelVersionId, RecommendationFactorBreakdown, RecommendationId,
+            RecommendationIdentity, RecommendationReportId, ReportDataQualitySnapshotId,
+            ReportRouteRunId, TokenId, Usd, UsdHours, builtin_research_profiles,
         },
     };
 
@@ -853,7 +871,9 @@ mod tests {
         FeedbackRecommendationContext {
             recommendation_id: RecommendationId::from_v7(),
             recommendation_report_id: RecommendationReportId::from_v7(),
+            report_route_run_id: ReportRouteRunId::from_v7(),
             profile_ref,
+            route: BuyModelRoute::Crypto,
             report_kind: ReportKind::TopN,
             runtime_mode: QuantRuntimeMode::SemiAuto,
             category: MarketCategory::Crypto,
@@ -862,9 +882,16 @@ mod tests {
             token_id: token_id.clone(),
             outcome_side: OutcomeSide::Yes,
             rank: 1,
-            rank_before_portfolio: 1,
-            composite_score: Probability::ZERO,
-            confidence: Probability::ZERO,
+            route_tier_ordinal: 1,
+            economics: RecommendationEconomics {
+                profit_probability_bps: Bps::ZERO,
+                nominal_expected_net_usd: Usd::ZERO,
+                robust_expected_net_usd: Usd::ZERO,
+                max_loss_usd: Usd::ZERO,
+                cvar_contribution_usd: Usd::ZERO,
+                capital_occupancy_usd_hours: UsdHours::ZERO,
+                marginal_portfolio_value_usd: Usd::ZERO,
+            },
             top_n: 10,
             horizon_secs: 3_600,
             decision_at: available_at - Duration::minutes(1),

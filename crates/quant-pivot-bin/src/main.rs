@@ -1,10 +1,13 @@
-use std::{env, error::Error, sync::Arc};
+use std::{env, error::Error, path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use quant_pivot_allocator as _;
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::app::bootstrap;
-use quant_pivot_models::config::{DeployConfig, ObservabilityConfig};
+use quant_pivot_models::{
+    config::{DeployConfig, DeployConfigLoadRequest, ObservabilityConfig},
+    types::DeploymentEnvironment,
+};
 use rustls::crypto::aws_lc_rs;
 use tokio::runtime::Builder;
 use tracing_subscriber::EnvFilter;
@@ -18,9 +21,12 @@ const TOKIO_MAX_BLOCKING_THREADS: usize = 4;
     about = "Polymarket quantitative report and execution platform"
 )]
 struct Cli {
-    /// Directory containing quant-pivot.toml
-    #[arg(long, env = "QUANT_PIVOT_CONFIG_DIR", default_value = "config")]
-    config_dir: String,
+    /// Absolute path to the single deploy configuration file.
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    config_file: PathBuf,
+    /// Environment identity that must exactly match `[deployment].environment`.
+    #[arg(long, value_name = "ENVIRONMENT")]
+    expected_environment: DeploymentEnvironment,
 }
 
 /// SDK internals are capped at error: recoverable transport failures and the
@@ -77,7 +83,8 @@ fn init_crypto_provider() {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
-    let deploy = Arc::new(DeployConfig::load(&cli.config_dir)?);
+    let request = DeployConfigLoadRequest::new(cli.config_file, cli.expected_environment);
+    let deploy = Arc::new(DeployConfig::load(&request)?);
     init_tracing(&deploy.observability);
     init_crypto_provider();
     let compute = Arc::new(ComputeExecutor::new()?);
@@ -87,7 +94,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         .thread_name("quant-tokio")
         .enable_all()
         .build()?;
-    tracing::info!(config_dir = %cli.config_dir, "deploy config loaded");
+    tracing::info!(
+        config_file = %request.config_file.display(),
+        expected_environment = request.expected_environment.as_str(),
+        "deploy config loaded"
+    );
     runtime.block_on(bootstrap::run(deploy, compute))?;
     Ok(())
 }

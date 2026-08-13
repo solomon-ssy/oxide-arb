@@ -16,7 +16,7 @@ use crate::{
     types::{
         ContentHash, CorrelationId, DecisionPolicySnapshotId, DiagnosticCode,
         RecommendationReportId, ReportRunId, ReportScheduleGapId, ReportScheduleId,
-        ReportTriggerKey, ResearchProfileId, WorkerId,
+        ReportTriggerKey, WorkerId,
     },
 };
 
@@ -177,7 +177,6 @@ pub struct ReportScheduleHealthInfo {
 #[derive(Debug, Clone, sea_orm::FromQueryResult)]
 pub struct ReportCurrentHealthInfo {
     pub recommendation_report_id: RecommendationReportId,
-    pub profile_id: ResearchProfileId,
     pub report_kind: ReportKind,
     pub published_at: Option<DateTime<Utc>>,
     pub valid_until: Option<DateTime<Utc>>,
@@ -187,7 +186,6 @@ impl From<Model> for ReportCurrentHealthInfo {
     fn from(model: Model) -> Self {
         Self {
             recommendation_report_id: model.recommendation_report_id,
-            profile_id: model.research_profile_artifact_id.profile_ref().id,
             report_kind: model.report_kind,
             published_at: model.published_at,
             valid_until: model.valid_until,

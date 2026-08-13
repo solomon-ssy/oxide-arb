@@ -15,7 +15,6 @@ use quant_pivot_models::{
 
 use crate::{
     features::FeatureSchema,
-    hashing::ResearchHasher,
     selection::{
         ExcludedMarket, FilterChain, FilterOutcome, MarketCandidateCtx,
         MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector, SelectedMarket,
@@ -113,19 +112,47 @@ impl MarketSelector for ConfiguredMarketSelector {
             exclusion_summary,
         } = self.select_markets(&request, &candidates)?;
 
-        let selector_hash = ResearchHasher::canonical(&SelectorHashInput::new(
+        let hash_input = SelectorHashInput::new(
             &request,
             &candidates,
             &included,
             &excluded,
             exclusion_summary,
-        )?)?;
+        )?;
+        let selector_evidence = hash_input.evidence()?;
+        let selector_hash = selector_evidence.selector_hash;
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!(
+                decision_at_ms = hash_input.decision_at,
+                decision_policy_snapshot_id = %hash_input.decision_policy_snapshot_id,
+                selector_hash = %selector_evidence.selector_hash,
+                contract_hash = %selector_evidence.contract_hash,
+                boundary_hash = %selector_evidence.boundary_hash,
+                selection_policy_hash = %selector_evidence.selection_policy_hash,
+                data_quality_policy_hash = %selector_evidence.data_quality_policy_hash,
+                feature_schema_hash = %selector_evidence.feature_schema_hash,
+                model_requirements_hash = %selector_evidence.model_requirements_hash,
+                candidates_hash = %selector_evidence.candidates_hash,
+                candidate_catalog_hash = %selector_evidence.candidate_catalog_hash,
+                candidate_book_hash = %selector_evidence.candidate_book_hash,
+                candidate_domain_hash = %selector_evidence.candidate_domain_hash,
+                candidate_decision_hash = %selector_evidence.candidate_decision_hash,
+                included_hash = %selector_evidence.included_hash,
+                excluded_hash = %selector_evidence.excluded_hash,
+                exclusion_summary_hash = %selector_evidence.exclusion_summary_hash,
+                candidate_count = hash_input.candidates.len(),
+                included_count = hash_input.included.len(),
+                excluded_count = hash_input.excluded.len(),
+                "selection determinism evidence",
+            );
+        }
 
         Ok(MarketSelectionSnapshot {
             market_selection_id: MarketSelectionId::from_v7(),
             decision_at: request.decision_at,
             decision_policy_snapshot_id: request.decision_policy_snapshot_id,
             selector_hash,
+            selector_evidence,
             included,
             excluded,
             exclusion_summary,
@@ -135,6 +162,8 @@ impl MarketSelector for ConfiguredMarketSelector {
 
 #[cfg(test)]
 mod tests {
+    use std::slice::from_ref;
+
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         domain::quant::{DomainAvailability, MarketCandidate, MarketDataHealth},
@@ -152,7 +181,7 @@ mod tests {
         },
         selection::{
             ExclusionReason, MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector,
-            ModelFeatureRequirements,
+            ModelFeatureRequirements, SelectorHashInput,
         },
     };
 
@@ -454,6 +483,8 @@ mod tests {
             .expect("snapshot");
 
         assert_eq!(first.selector_hash, second.selector_hash);
+        assert_eq!(first.selector_evidence, second.selector_evidence);
+        assert_eq!(first.selector_evidence.selector_hash, first.selector_hash);
         assert_ne!(
             first.market_selection_id, second.market_selection_id,
             "snapshot id is fresh per build"
@@ -537,6 +568,101 @@ mod tests {
             .await
             .expect("contract-changed snapshot");
         assert_eq!(baseline.included, contract_changed.included);
+        assert_ne!(baseline.selector_hash, contract_changed.selector_hash);
+    }
+
+    #[tokio::test]
+    async fn selector_evidence_isolates() {
+        let selector = ConfiguredMarketSelector::new();
+        let request = request_with(selection_config());
+        let candidate = healthy_candidate("0xevidence");
+        let baseline = selector
+            .select_markets(&request, from_ref(&candidate))
+            .expect("baseline selection");
+        let baseline = SelectorHashInput::new(
+            &request,
+            from_ref(&candidate),
+            &baseline.included,
+            &baseline.excluded,
+            baseline.exclusion_summary,
+        )
+        .expect("baseline hash input")
+        .evidence()
+        .expect("baseline evidence");
+
+        let mut changed_candidate = candidate.clone();
+        changed_candidate.depth_usd = Some(Usd::new(Decimal::from(3_000)));
+        let source_changed = selector
+            .select_markets(&request, from_ref(&changed_candidate))
+            .expect("source-changed selection");
+        let source_changed = SelectorHashInput::new(
+            &request,
+            from_ref(&changed_candidate),
+            &source_changed.included,
+            &source_changed.excluded,
+            source_changed.exclusion_summary,
+        )
+        .expect("source-changed hash input")
+        .evidence()
+        .expect("source-changed evidence");
+        assert_eq!(baseline.contract_hash, source_changed.contract_hash);
+        assert_ne!(baseline.candidates_hash, source_changed.candidates_hash);
+        assert_eq!(
+            baseline.candidate_catalog_hash,
+            source_changed.candidate_catalog_hash
+        );
+        assert_ne!(
+            baseline.candidate_book_hash,
+            source_changed.candidate_book_hash
+        );
+        assert_eq!(
+            baseline.candidate_domain_hash,
+            source_changed.candidate_domain_hash
+        );
+        assert_eq!(
+            baseline.candidate_decision_hash,
+            source_changed.candidate_decision_hash
+        );
+        assert_eq!(baseline.included_hash, source_changed.included_hash);
+        assert_eq!(baseline.excluded_hash, source_changed.excluded_hash);
+        assert_ne!(baseline.selector_hash, source_changed.selector_hash);
+
+        let mut changed_request = request;
+        changed_request.data_quality.max_book_age_ms += 1;
+        let contract_changed = selector
+            .select_markets(&changed_request, from_ref(&candidate))
+            .expect("contract-changed selection");
+        let contract_changed = SelectorHashInput::new(
+            &changed_request,
+            from_ref(&candidate),
+            &contract_changed.included,
+            &contract_changed.excluded,
+            contract_changed.exclusion_summary,
+        )
+        .expect("contract-changed hash input")
+        .evidence()
+        .expect("contract-changed evidence");
+        assert_ne!(baseline.contract_hash, contract_changed.contract_hash);
+        assert_eq!(baseline.boundary_hash, contract_changed.boundary_hash);
+        assert_eq!(
+            baseline.selection_policy_hash,
+            contract_changed.selection_policy_hash
+        );
+        assert_ne!(
+            baseline.data_quality_policy_hash,
+            contract_changed.data_quality_policy_hash
+        );
+        assert_eq!(
+            baseline.feature_schema_hash,
+            contract_changed.feature_schema_hash
+        );
+        assert_eq!(
+            baseline.model_requirements_hash,
+            contract_changed.model_requirements_hash
+        );
+        assert_eq!(baseline.candidates_hash, contract_changed.candidates_hash);
+        assert_eq!(baseline.included_hash, contract_changed.included_hash);
+        assert_eq!(baseline.excluded_hash, contract_changed.excluded_hash);
         assert_ne!(baseline.selector_hash, contract_changed.selector_hash);
     }
 

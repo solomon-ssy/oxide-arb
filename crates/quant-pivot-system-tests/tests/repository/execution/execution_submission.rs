@@ -5,9 +5,7 @@
 //! settlement (full fill → spent + position; ambiguous → hold + reconcile;
 //! rejected → release), plus boot recovery of in-flight orders.
 
-use std::{collections::BTreeMap, str::FromStr};
-
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::storage::{
     StorageError,
     entity::{QUANT_ORDER_INTENT, QUANT_RECOMMENDATION},
@@ -18,10 +16,8 @@ use quant_pivot_models::{
         quant::{
             ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalReconcileSettlement,
             CapitalSettlement, ExecutionIdentityEnrichment, ExecutionIdentityRefs,
-            ExecutionTradeObservation, ExitLedgerWrite, NewAccountSnapshot, NewCapitalAllocation,
-            NewEntryConditionInstance, NewEquitySnapshot, NewExecutionOrder, NewFeatureParityState,
-            NewMarketSelection, NewModelRun, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
-            NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
+            ExecutionTradeObservation, ExitLedgerWrite, NewCapitalAllocation, NewExecutionOrder,
+            NewFeatureParityState, NewMarketSelection, NewOrderIntent, NewReconciliation,
             NewReportTransaction, PositionExit, PositionFill, ReconciliationLedgerWrite,
             ReportRunClaim, SubmissionLedgerWrite,
         },
@@ -36,78 +32,65 @@ use quant_pivot_models::{
         quant_report_run::ActiveModel,
     },
     enums::{
-        common::{MarketCategory, OrderType, Side, TickSize},
+        common::{MarketCategory, OrderType, Side},
         execution::{
             CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, OrderIntentKind,
             OrderTypeKind, PositionLedgerState, ReconciliationEvidenceKind, ReconciliationResult,
             VenueOrderStatus, VenueTradeStatus,
         },
-        factor::{FactorFamily, FactorValueState, NormalizationSource},
-        market::MarketStatus,
-        model::ModelFamily,
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, BindingConstraint, EntryConditionState,
-            ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
-            FeatureParityStateTransition, ModelRunKind, OrderIntentStatus, OutcomeSide,
-            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
-            ReportFactDeliveryStatus, ReportKind, ReportRunStatus, ReportRunTerminalReason,
-            ReportTriggerKind, SizingModelKind,
+            AccountSource, ApprovalStatus, EntryConditionState, ExecutionOrderState,
+            ExitSettlementMode, FeatureParityLatchState, FeatureParityStateTransition,
+            OrderIntentStatus, OutcomeSide, QuantRuntimeMode, RecommendationReportStatus,
+            RecommendationStatus, RedeemPolicy, ReportFactDeliveryStatus, ReportKind,
+            ReportRunStatus, ReportRunTerminalReason, ReportTriggerKind,
         },
         rbac::ResourceType,
     },
     types::{
-        AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, CapitalAllocationId,
-        ConditionTruth, ConfidenceSummary, ContentHash, DataQualitySummary,
-        DecisionPolicySnapshotId, EligibilitySummary, EntryConditionFoldState,
-        EntryConditionInstanceId, EntryConditionPlan, EntryOrderPolicy, EntryOrderSpec, EntryPlan,
-        EquitySnapshotId, EventId, EvidenceRefs, EvmTransactionHash, ExecutionEligibility,
-        ExecutionOrderId, ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry,
-        FeatureParityStateId, FeatureVectorId, MarketContext, MarketId, MarketSelectionId,
-        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        AccountSnapshotId, Bps, CalibrationArtifactId, CapitalAllocationId, ContentHash,
+        DecisionPolicySnapshotId, EntryConditionInstanceId, EntryOrderSpec, EventId,
+        EvmTransactionHash, ExecutionAccountId, ExecutionOrderId, ExitPolicySpec,
+        FeatureParityStateId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
         OperationDetailDocument, OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId,
-        OrderIntentId, PendingScaleOut, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
-        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price,
-        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportRunId, ReportSummary, ReportTriggerKey, RiskEnvelope,
-        RoleCode, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan,
-        ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId, TradePolicyCohortDimension,
-        TradePolicyCohortKey, TradePolicyCohortProvenance, Usd, UserId, VenueOrderAmount,
-        VenueTradeId, WorkerId, builtin_research_profiles,
+        OrderIntentId, PendingScaleOut, PortfolioPlanId, Price, Probability, RecommendationId,
+        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
+        ReconciliationId, ReportDataQualitySnapshotId, ReportRunId, ReportTriggerKey, RoleCode,
+        SelectionExclusionSummary, Shares, ThesisInvalidationPolicy, TokenId,
+        TradePolicyCohortProvenance, Usd, UserId, VenueOrderAmount, VenueTradeId, WorkerId,
+        factor::FactorServingPlane,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgCapitalAllocationRepository, PgEntryConditionRepository, PgEventRepository,
         PgExecutionSubmissionRepository, PgMarketRepository, PgMarketSelectionRepository,
-        PgModelRegistryRepository, PgModelRunRepository, PgOrderIntentRepository,
-        PgPolicyRepository, PgPositionRepository, PgRecommendationReportRepository,
-        PgRecommendationRepository, PgReconciliationRepository, PgReportRunRepository,
+        PgOrderIntentRepository, PgPolicyRepository, PgPositionRepository,
+        PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
+        PgReportRunRepository,
     },
     traits::{
         CapitalAllocationRepository, EntryConditionRepository, EventRepository,
         ExecutionSubmissionRepository, MarketRepository, MarketSelectionRepository,
-        ModelRegistryRepository, ModelRunRepository, OrderIntentRepository, PolicyRepository,
-        PositionRepository, RecommendationReportRepository, RecommendationRepository,
-        ReconciliationRepository, ReportRunRepository,
+        OrderIntentRepository, PolicyRepository, PositionRepository,
+        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+        ReportRunRepository,
     },
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
+        SelectorFixture,
         catalog_fixtures::{make_event, make_market},
         execution_pg_seed,
         execution_pg_seed::{
-            ReportBuildOptions, ReportSeedConfig, claim_entry_for_test, enable_test_admission,
+            ExecutionTxnIds, ReportBuildOptions, ReportSeedConfig, SharedDemoInfra,
+            build_custom_report_transaction, claim_entry_for_test, enable_test_admission,
             entry_claim_for_test, fixture_profile_ref, prepared_order, seed_price_report,
             seed_shared_demo_infra,
         },
-        model_serving_fixtures::{ModelVersionFixture, ModelVersionFixtureSeed},
-        model_spec_fixtures,
         policy_fixtures::bootstrap_default_policy_bundle,
-        report_fixtures,
         report_lifecycle_seed::{persist_and_publish_report, persist_prepared_report},
     },
 };
@@ -599,7 +582,10 @@ pub async fn supersession_wins_before_capital() {
             &ids.feature_parity_state_id,
         )
         .await;
-    assert!(matches!(result, Err(StorageError::StateConflict { .. })));
+    assert!(
+        matches!(&result, Err(StorageError::StateConflict { .. })),
+        "expired exact report claim must fail as a state conflict: {result:?}"
+    );
     let intent = PgOrderIntentRepository::new(db.clone())
         .find_by_id(&intent_id)
         .await
@@ -673,7 +659,7 @@ pub async fn report_not_before_verification() {
     let reports = PgRecommendationReportRepository::new(db.clone());
 
     let current = reports
-        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .current(ReportKind::TopN)
         .await
         .expect("load current report")
         .expect("predecessor remains current");
@@ -716,7 +702,7 @@ pub async fn verified_publication_atomically_current() {
         predecessor.report
     );
     let current = reports
-        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .current(ReportKind::TopN)
         .await
         .expect("load current report")
         .expect("candidate is current");
@@ -742,7 +728,7 @@ pub async fn fact_failure_leaves_untouched() {
         .into_applied()
         .expect("failure settlement must retain its claim");
     let current = reports
-        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .current(ReportKind::TopN)
         .await
         .expect("load current report")
         .expect("predecessor remains current");
@@ -760,7 +746,7 @@ pub async fn concurrent_publications_leave_scope() {
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
     let (older, older_worker) = seed_successor_prepared(&db, &predecessor).await;
-    let (newer, newer_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let (newer, newer_worker) = seed_successor_prepared(&db, &older).await;
     let older_repo = PgRecommendationReportRepository::new(db.clone());
     let newer_repo = PgRecommendationReportRepository::new(db.clone());
 
@@ -781,7 +767,7 @@ pub async fn concurrent_publications_leave_scope() {
 
     let repo = PgRecommendationReportRepository::new(db);
     let current = repo
-        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .current(ReportKind::TopN)
         .await
         .expect("load current report")
         .expect("current report");
@@ -803,7 +789,7 @@ pub async fn out_order_verification_candidate() {
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
     let (older, older_worker) = seed_successor_prepared(&db, &predecessor).await;
-    let (newer, newer_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let (newer, newer_worker) = seed_successor_prepared(&db, &older).await;
     let repo = PgRecommendationReportRepository::new(db.clone());
 
     repo.verify_and_publish_report(&newer.report, newer_worker, Utc::now())
@@ -834,7 +820,7 @@ pub async fn out_order_verification_candidate() {
         .expect("cancelled delivery");
     assert_eq!(cancelled.status, ReportFactDeliveryStatus::Cancelled);
     let current = repo
-        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .current(ReportKind::TopN)
         .await
         .expect("load current report")
         .expect("current report");
@@ -846,7 +832,7 @@ pub async fn cancelled_delivery_returns_lost() {
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
     let (older, older_worker) = seed_successor_prepared(&db, &predecessor).await;
-    let (newer, newer_worker) = seed_successor_prepared(&db, &predecessor).await;
+    let (newer, newer_worker) = seed_successor_prepared(&db, &older).await;
     let repo = PgRecommendationReportRepository::new(db);
 
     repo.verify_and_publish_report(&newer.report, newer_worker, Utc::now())
@@ -899,7 +885,7 @@ pub async fn empty_report_published_current() {
     assert_eq!(old_report.status, RecommendationReportStatus::Superseded);
     assert_eq!(old_report.successor_report_id, Some(empty.report));
     let current = repo
-        .current(&fixture_profile_ref().id, ReportKind::TopN)
+        .current(ReportKind::TopN)
         .await
         .expect("load current report")
         .expect("current report");
@@ -910,13 +896,13 @@ pub async fn lost_lease_prevents_abandoned() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
-    let ids = predecessor.successor_ids();
+    let ids = predecessor.successor_ids(&db).await;
     let transaction = ids.build_report_transaction();
     let decision_at = transaction.report.decision_at;
     let worker_id = WorkerId::from_v7();
     let run_id = ReportRunId::from_v7();
-    let run_started_at = decision_at - Duration::minutes(1);
-    let lease_expires_at = run_started_at + Duration::seconds(30);
+    let run_started_at = decision_at;
+    let lease_expires_at = run_started_at + Duration::seconds(1);
     ActiveModel {
         report_run_id: ActiveValue::Set(run_id),
         trigger_kind: ActiveValue::Set(ReportTriggerKind::Scheduled),
@@ -931,7 +917,7 @@ pub async fn lost_lease_prevents_abandoned() {
         requested_at: ActiveValue::Set(run_started_at),
         status: ActiveValue::Set(ReportRunStatus::Running),
         started_at: ActiveValue::Set(Some(run_started_at)),
-        decision_at: ActiveValue::Set(Some(run_started_at)),
+        decision_at: ActiveValue::Set(Some(decision_at)),
         heartbeat_at: ActiveValue::Set(Some(lease_expires_at - Duration::seconds(1))),
         lease_expires_at: ActiveValue::Set(Some(lease_expires_at)),
         finished_at: ActiveValue::Set(None),
@@ -947,6 +933,27 @@ pub async fn lost_lease_prevents_abandoned() {
     .insert(&db)
     .await
     .expect("seed expired running report run");
+
+    let available_at = transaction
+        .recommendations
+        .iter()
+        .map(|recommendation| recommendation.created_at)
+        .fold(transaction.report.created_at, DateTime::max);
+    loop {
+        let database_now = PgReportRunRepository::new(db.clone())
+            .database_time()
+            .await
+            .expect("read database time before lost-lease assertion");
+        if database_now >= available_at {
+            break;
+        }
+        tokio::time::sleep(
+            (available_at - database_now)
+                .to_std()
+                .expect("positive report availability wait"),
+        )
+        .await;
+    }
 
     let reports = PgRecommendationReportRepository::new(db.clone());
     let result = reports
@@ -1575,7 +1582,7 @@ pub async fn restart_enrichment_backfills_identity() {
 
 pub async fn execution_atomic_unique_concurrent() {
     submission_persists_multi_atomically().await;
-    duplicate_trade_identity_outcome().await;
+    Box::pin(duplicate_trade_identity_outcome()).await;
     concurrent_orders_preserves_identity().await;
     restart_enrichment_backfills_identity().await;
 }
@@ -1841,7 +1848,7 @@ fn new_pending_intent_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> NewOrd
             thesis_invalidation: ThesisInvalidationPolicy {
                 min_score_retention: dec!(0.6),
                 min_expected_return_bps: Bps::ZERO,
-                require_execution_eligibility: true,
+                require_route_gate_eligibility: true,
             },
             opportunistic_exit: opportunistic_exit_policy(),
             scale_out_targets: Vec::new(),
@@ -1851,7 +1858,7 @@ fn new_pending_intent_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> NewOrd
             entry_reference_price: Price::new(dec!(0.6)),
             entry_composite_score: Probability::new(dec!(0.8)),
         },
-        risk_envelope_hash: content_hash('f'),
+        risk_envelope_hash: ids.risk_envelope_hash(),
         expires_at: Utc::now() + Duration::hours(1),
     }
 }
@@ -2475,7 +2482,7 @@ async fn seed_approved_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderInt
                     thesis_invalidation: ThesisInvalidationPolicy {
                         min_score_retention: dec!(0.6),
                         min_expected_return_bps: Bps::ZERO,
-                        require_execution_eligibility: true,
+                        require_route_gate_eligibility: true,
                     },
                     opportunistic_exit: opportunistic_exit_policy(),
                     scale_out_targets: Vec::new(),
@@ -2485,7 +2492,7 @@ async fn seed_approved_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderInt
                     entry_reference_price: Price::new(dec!(0.6)),
                     entry_composite_score: Probability::new(dec!(0.8)),
                 },
-                risk_envelope_hash: content_hash('f'),
+                risk_envelope_hash: ids.risk_envelope_hash(),
                 expires_at: Utc::now() + Duration::hours(1),
             },
             NewCapitalAllocation {
@@ -2531,26 +2538,19 @@ async fn clear_feature_parity(db: &DatabaseConnection) -> FeatureParityStateId {
 async fn seed_report_fixture(db: &DatabaseConnection) -> TxnIds {
     let feature_parity_state_id = clear_feature_parity(db).await;
     let rc_id = seed_runtime_config(db).await;
-    let (model_version_id, model_run_id) = seed_model_version(db, &rc_id).await;
+    let infra = seed_model_version(db, &rc_id).await;
     let event_id = "evt-1";
     let market_id = "0xmarket";
     seed_market_catalog(db, event_id, market_id).await;
-    let market_selection_id = seed_market_selection(db, &rc_id, market_id).await;
-    let ids = TxnIds {
+    let ids = TxnIds::seed(
+        db,
         feature_parity_state_id,
-        account_snapshot: AccountSnapshotId::from_v7(),
-        data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
-        portfolio_plan: PortfolioPlanId::from_v7(),
-        report: RecommendationReportId::from_v7(),
-        recommendation: RecommendationId::from_v7(),
-        condition_instance: EntryConditionInstanceId::from_v7(),
-        model_version: model_version_id,
-        model_run: model_run_id,
-        market_selection: market_selection_id,
-        decision_policy_snapshot: rc_id,
-        market: market_id.to_owned(),
-        event: event_id.to_owned(),
-    };
+        &rc_id,
+        &infra,
+        market_id,
+        event_id,
+    )
+    .await;
     persist_and_publish_report(
         db,
         ids.build_report_transaction(),
@@ -2565,7 +2565,7 @@ async fn seed_successor_prepared(
     db: &DatabaseConnection,
     predecessor: &TxnIds,
 ) -> (TxnIds, WorkerId) {
-    let ids = (predecessor).successor_ids();
+    let ids = predecessor.successor_ids(db).await;
     persist_prepared_report(
         db,
         ids.build_report_transaction(),
@@ -2584,22 +2584,53 @@ async fn seed_successor_prepared(
 }
 
 impl TxnIds {
-    fn successor_ids(&self) -> Self {
-        Self {
+    async fn successor_ids(&self, db: &DatabaseConnection) -> Self {
+        let now = DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+            .expect("successor decision time must fit epoch milliseconds");
+        let minimum = self.decision_at + Duration::milliseconds(1);
+        let decision_at = if now > minimum { now } else { minimum };
+        let market_selection = seed_market_selection(
+            db,
+            &self.decision_policy_snapshot,
+            decision_at,
+            &self.market,
+        )
+        .await;
+        let infra = SharedDemoInfra {
+            feature_parity_state_id: self.feature_parity_state_id,
+            decision_policy_snapshot_id: self.decision_policy_snapshot,
+            model_version_id: self.model_version,
+            calibration_artifact_id: self.calibration_artifact,
+            model_run_id: self.model_run,
+            trade_policy: self.trade_policy.clone(),
+            factor_serving_plane: self.factor_serving_plane.clone(),
+        };
+        let model_run =
+            execution_pg_seed::seed_report_model_run(db, &infra, &market_selection, decision_at)
+                .await;
+        let ids = Self {
+            decision_at,
             feature_parity_state_id: self.feature_parity_state_id,
             account_snapshot: AccountSnapshotId::from_v7(),
+            execution_account: self.execution_account,
             data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
             portfolio_plan: PortfolioPlanId::from_v7(),
             report: RecommendationReportId::from_v7(),
             recommendation: RecommendationId::from_v7(),
             condition_instance: EntryConditionInstanceId::from_v7(),
             model_version: self.model_version,
-            model_run: self.model_run,
-            market_selection: self.market_selection,
+            calibration_artifact: self.calibration_artifact,
+            model_run,
+            trade_policy: self.trade_policy.clone(),
+            factor_serving_plane: self.factor_serving_plane.clone(),
+            market_selection,
             decision_policy_snapshot: self.decision_policy_snapshot,
             market: self.market.clone(),
             event: self.event.clone(),
-        }
+            token: self.token.clone(),
+        };
+        ids.execution_ids().complete_model_run(db).await;
+        ids
     }
 }
 
@@ -2607,28 +2638,10 @@ async fn seed_empty_successor_prepared(
     db: &DatabaseConnection,
     predecessor: &TxnIds,
 ) -> (TxnIds, WorkerId) {
-    let ids = TxnIds {
-        feature_parity_state_id: predecessor.feature_parity_state_id,
-        account_snapshot: AccountSnapshotId::from_v7(),
-        data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
-        portfolio_plan: PortfolioPlanId::from_v7(),
-        report: RecommendationReportId::from_v7(),
-        recommendation: RecommendationId::from_v7(),
-        condition_instance: EntryConditionInstanceId::from_v7(),
-        model_version: predecessor.model_version,
-        model_run: predecessor.model_run,
-        market_selection: predecessor.market_selection,
-        decision_policy_snapshot: predecessor.decision_policy_snapshot,
-        market: predecessor.market.clone(),
-        event: predecessor.event.clone(),
-    };
-    let empty_options = ReportBuildOptions::empty_report();
-    let mut transaction = ids.build_report_transaction();
-    transaction.report.summary_json = empty_options.summary;
-    transaction.portfolio_plan.allocated_usd = Usd::ZERO;
-    transaction.recommendations.clear();
-    transaction.entry_condition_artifacts.clear();
-    transaction.entry_condition_instances.clear();
+    let ids = predecessor.successor_ids(db).await;
+    let execution_ids = ids.execution_ids();
+    let empty_options = ReportBuildOptions::empty_report(&execution_ids);
+    let transaction = build_custom_report_transaction(&execution_ids, empty_options);
     persist_prepared_report(
         db,
         transaction,
@@ -2693,59 +2706,19 @@ async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotI
 async fn seed_model_version(
     db: &DatabaseConnection,
     rc_id: &DecisionPolicySnapshotId,
-) -> (ModelVersionId, ModelRunId) {
-    let registry = PgModelRegistryRepository::new(db.clone());
-    let model_spec_id = ModelSpecId::from_v7();
-    registry
-        .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            model_spec_id,
-            "pg-exec-it",
-            ModelFamily::WeightedFactor,
-            model_spec_fixtures::pooled_horizon_secs(),
-            ModelInputContract::single_required("book.mid"),
-            ModelTrainingContract::settlement_default(),
-        ))
-        .await
-        .expect("model spec");
-    let model_version_id = ModelVersionId::from_v7();
-    let version = ModelVersionFixture::prepare(
-        db,
-        ModelVersionFixtureSeed::training(
-            format!("execution-submission:{model_version_id}"),
-            model_version_id,
-            model_spec_id,
-            content_hash('a'),
-        ),
-    )
-    .await
-    .expect("prepare exact model version");
-    ModelVersionFixture::persist_route_candidate(db, version)
-        .await
-        .expect("publish model version through exact parity proof");
-    let model_run_id = ModelRunId::from_v7();
-    let runs = PgModelRunRepository::new(db.clone());
-    let window_at = Utc::now();
-    runs.create(NewModelRun {
-        model_run_id,
-        run_kind: ModelRunKind::LiveInference,
-        model_version_id: Some(model_version_id),
-        decision_policy_snapshot_id: *rc_id,
-        market_selection_id: None,
-        window_start: window_at,
-        window_end: window_at,
-        input_hash: content_hash('d'),
-    })
-    .await
-    .expect("create model run");
-    runs.succeed(&model_run_id, content_hash('e'), None)
-        .await
-        .expect("finish model run");
-    (model_version_id, model_run_id)
+) -> SharedDemoInfra {
+    let infra = seed_shared_demo_infra(db).await;
+    assert_eq!(
+        infra.decision_policy_snapshot_id, *rc_id,
+        "shared execution lineage must use the active submission-test policy"
+    );
+    infra
 }
 
 async fn seed_market_selection(
     db: &DatabaseConnection,
     rc_id: &DecisionPolicySnapshotId,
+    decision_at: DateTime<Utc>,
     _market_id: &str,
 ) -> MarketSelectionId {
     let id = MarketSelectionId::from_v7();
@@ -2753,9 +2726,10 @@ async fn seed_market_selection(
         .create_snapshot(
             NewMarketSelection {
                 market_selection_id: id,
-                decision_at: Utc::now(),
+                decision_at,
                 decision_policy_snapshot_id: *rc_id,
                 selector_hash: content_hash('b'),
+                selector_evidence: SelectorFixture::evidence(content_hash('b')),
                 market_count: 1,
                 exclusion_summary: SelectionExclusionSummary::default(),
             },
@@ -2767,174 +2741,104 @@ async fn seed_market_selection(
 }
 
 struct TxnIds {
+    decision_at: DateTime<Utc>,
     feature_parity_state_id: FeatureParityStateId,
     account_snapshot: AccountSnapshotId,
+    execution_account: ExecutionAccountId,
     data_quality_snapshot: ReportDataQualitySnapshotId,
     portfolio_plan: PortfolioPlanId,
     report: RecommendationReportId,
     recommendation: RecommendationId,
     condition_instance: EntryConditionInstanceId,
     model_version: ModelVersionId,
+    calibration_artifact: CalibrationArtifactId,
     model_run: ModelRunId,
+    trade_policy: TradePolicyCohortProvenance,
+    factor_serving_plane: FactorServingPlane,
     market_selection: MarketSelectionId,
     decision_policy_snapshot: DecisionPolicySnapshotId,
     market: String,
     event: String,
+    token: String,
 }
 
 impl TxnIds {
-    fn build_report_transaction(&self) -> NewReportTransaction {
-        let equity_snapshot_id = EquitySnapshotId::from_v7();
-        let report = report_row(self, equity_snapshot_id);
-        let decision_at = report.decision_at;
-        let sampled_feature_parity = report_fixtures::sampled_parity(&report);
-        let recommendation = (self).report_recommendation();
-        let entry_condition_instance = NewEntryConditionInstance {
-            condition_instance_id: self.condition_instance,
-            recommendation_id: self.recommendation,
-            artifact_id: None,
-            artifact_hash: None,
-            state: EntryConditionState::NotRequired,
-            truth_json: Some(ConditionTruth::Satisfied),
-            revision: 0,
-            evaluation_hash: None,
-            input_fingerprint: None,
-            continuity_hash: None,
-            fold_state_json: EntryConditionFoldState::default(),
-            confirmation_started_at: None,
-            last_evaluated_at: None,
-            next_evaluation_at: None,
-            expires_at: recommendation.valid_until,
-            lease_owner: None,
-            lease_expires_at: None,
-            lease_epoch: 0,
-            claimed_by_intent_id: None,
-            claim_admission_state_version: None,
-            consumed_at: None,
+    async fn seed(
+        db: &DatabaseConnection,
+        feature_parity_state_id: FeatureParityStateId,
+        rc_id: &DecisionPolicySnapshotId,
+        infra: &SharedDemoInfra,
+        market_id: &str,
+        event_id: &str,
+    ) -> Self {
+        let decision_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+            .expect("report decision time must fit epoch milliseconds");
+        let market_selection = seed_market_selection(db, rc_id, decision_at, market_id).await;
+        let model_run =
+            execution_pg_seed::seed_report_model_run(db, infra, &market_selection, decision_at)
+                .await;
+        let ids = Self {
+            decision_at,
+            feature_parity_state_id,
+            account_snapshot: AccountSnapshotId::from_v7(),
+            execution_account: execution_pg_seed::fixture_execution_account().execution_account_id,
+            data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
+            portfolio_plan: PortfolioPlanId::from_v7(),
+            report: RecommendationReportId::from_v7(),
+            recommendation: RecommendationId::from_v7(),
+            condition_instance: EntryConditionInstanceId::from_v7(),
+            model_version: infra.model_version_id,
+            calibration_artifact: infra.calibration_artifact_id,
+            model_run,
+            trade_policy: infra.trade_policy.clone(),
+            factor_serving_plane: infra.factor_serving_plane.clone(),
+            market_selection,
+            decision_policy_snapshot: *rc_id,
+            market: market_id.to_owned(),
+            event: event_id.to_owned(),
+            token: "token-1".to_owned(),
         };
-        NewReportTransaction {
-            feature_parity_state_id: Some(self.feature_parity_state_id),
-            account_snapshot: NewAccountSnapshot {
-                account_snapshot_id: self.account_snapshot,
-                ..new_account_snapshot()
-            },
-            equity_snapshot: report_equity_snapshot(self, &equity_snapshot_id),
-            data_quality_snapshot: NewReportDataQualitySnapshot {
-                report_data_quality_snapshot_id: self.data_quality_snapshot,
-                decision_at,
-                decision_policy_snapshot_id: self.decision_policy_snapshot,
-                tokens_json: ReportDataQualityTokens(Vec::new()),
-            },
-            portfolio_plan: (self).report_portfolio_plan(),
-            report,
-            recommendations: vec![recommendation],
-            entry_condition_artifacts: Vec::new(),
-            entry_condition_instances: vec![entry_condition_instance],
-            sampled_feature_parity: Some(sampled_feature_parity),
-            fact_delivery: Some(report_fixtures::pending_fact_delivery(&self.report)),
-            operation_log: (self).report_operation_log(),
-        }
+        ids.execution_ids().complete_model_run(db).await;
+        ids
     }
-}
 
-fn report_equity_snapshot(
-    ids: &TxnIds,
-    equity_snapshot_id: &EquitySnapshotId,
-) -> NewEquitySnapshot {
-    NewEquitySnapshot {
-        equity_snapshot_id: *equity_snapshot_id,
-        as_of: Utc::now(),
-        source: AccountSource::Polymarket,
-        venue_net_liquidation_usd: Usd::new(dec!(10000)),
-        capital_base_usd: Usd::new(dec!(10000)),
-        available_usd: Usd::new(dec!(9000)),
-        reserved_usd: Usd::ZERO,
-        realized_pnl_cumulative_usd: Usd::ZERO,
-        unrealized_pnl_usd: Usd::ZERO,
-        high_water_mark_usd: Usd::new(dec!(10000)),
-        drawdown_pct: Decimal::ZERO,
-        account_snapshot_ref: Some(ids.account_snapshot),
+    fn build_report_transaction(&self) -> NewReportTransaction {
+        let ids = self.execution_ids();
+        build_custom_report_transaction(&ids, ReportBuildOptions::published_single(&ids))
     }
-}
 
-impl TxnIds {
-    fn report_portfolio_plan(&self) -> NewPortfolioPlan {
-        NewPortfolioPlan {
-            portfolio_plan_id: self.portfolio_plan,
-            model_run_id: Some(self.model_run),
-            market_selection_id: self.market_selection,
-            decision_at: Utc::now(),
-            budget_usd: Usd::new(dec!(10000)),
-            allocated_usd: Usd::new(NOTIONAL),
-            risk_budget_json: PortfolioRiskBudget::default(),
-            constraints_json: PortfolioConstraintsSnapshot::default(),
-            rejected_summary: PortfolioRejectedSummary::default(),
-            optimizer_meta_json: PortfolioOptimizerMeta::default(),
-        }
+    fn risk_envelope_hash(&self) -> ContentHash {
+        self.build_report_transaction()
+            .recommendations
+            .into_iter()
+            .next()
+            .expect("report fixture has one recommendation")
+            .trade_plan
+            .risk_envelope
+            .envelope_hash
     }
-}
 
-fn report_row(ids: &TxnIds, equity_snapshot_id: EquitySnapshotId) -> NewRecommendationReport {
-    NewRecommendationReport {
-        recommendation_report_id: ids.report,
-        research_profile_artifact_id: execution_pg_seed::fixture_profile_ref().artifact_id(),
-        report_kind: ReportKind::TopN,
-        decision_at: Utc::now(),
-        horizon_secs: 86_400,
-        runtime_mode: QuantRuntimeMode::AutoExecution,
-        decision_policy_snapshot_id: ids.decision_policy_snapshot,
-        model_run_id: None,
-        model_version_id: ids.model_version,
-        market_selection_id: ids.market_selection,
-        portfolio_plan_id: ids.portfolio_plan,
-        top_n: 20,
-        status: RecommendationReportStatus::Prepared,
-        account_source: AccountSource::Polymarket,
-        capital_base_usd: Usd::new(dec!(10000)),
-        account_snapshot_ref: ids.account_snapshot,
-        equity_snapshot_ref: equity_snapshot_id,
-        data_quality_snapshot_ref: ids.data_quality_snapshot,
-        summary_json: report_summary(),
-        published_at: None,
-        successor_report_id: None,
-        superseded_at: None,
-        obsoleted_at: None,
-        valid_until: Some(Utc::now() + Duration::hours(1)),
-        revoked_at: None,
-        expired_at: None,
-        status_reason: None,
-    }
-}
-
-impl TxnIds {
-    fn report_recommendation(&self) -> NewRecommendation {
-        NewRecommendation {
-            research_profile_artifact_id: execution_pg_seed::fixture_profile_ref().artifact_id(),
-            recommendation_id: self.recommendation,
-            recommendation_report_id: self.report,
-            rank: 1,
-            market_id: MarketId::new(&self.market),
-            event_id: EventId::new(&self.event),
-            token_id: TokenId::new("token-1"),
-            outcome_side: OutcomeSide::Yes,
-            composite_score: Probability::new(dec!(0.7)),
-            risk_adjusted_score: Probability::new(dec!(0.65)),
-            confidence: Probability::new(dec!(0.72)),
-            expected_return_bps: Bps::new(dec!(150)),
-            downside_bps: Bps::new(dec!(80)),
-            identity: recommendation_identity(),
-            market_context: market_context(),
-            rank_before_portfolio: 1,
-            liquidity_score: Probability::new(dec!(0.8)),
-            data_quality_score: Probability::new(dec!(0.9)),
-            model_score_percentile: Probability::new(dec!(0.75)),
-            trade_plan: trade_plan(),
-            factor_breakdown: factor_breakdown(),
-            evidence_refs: evidence_refs(),
-            execution_eligibility: execution_eligibility(),
-            valid_from: Utc::now(),
-            valid_until: Utc::now() + Duration::hours(1),
-            status: RecommendationStatus::Prepared,
+    fn execution_ids(&self) -> ExecutionTxnIds {
+        ExecutionTxnIds {
+            decision_at: self.decision_at,
+            feature_parity_state_id: self.feature_parity_state_id,
+            account_snapshot: self.account_snapshot,
+            execution_account: self.execution_account,
+            data_quality_snapshot: self.data_quality_snapshot,
+            portfolio_plan: self.portfolio_plan,
+            report: self.report,
+            recommendation: self.recommendation,
+            condition_instance: self.condition_instance,
+            model_version: self.model_version,
+            calibration_artifact: self.calibration_artifact,
+            model_run: self.model_run,
+            market_selection: self.market_selection,
+            decision_policy_snapshot: self.decision_policy_snapshot,
+            trade_policy: self.trade_policy.clone(),
+            factor_serving_plane: self.factor_serving_plane.clone(),
+            market: self.market.clone(),
+            event: self.event.clone(),
+            token: self.token.clone(),
         }
     }
 }
@@ -3007,99 +2911,6 @@ fn content_hash(seed: char) -> ContentHash {
     ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
-fn new_account_snapshot() -> NewAccountSnapshot {
-    let positions = vec![PositionSnapshot {
-        token_id: TokenId::new("token-1"),
-        market_id: MarketId::new("0xmarket"),
-        event_id: Some(EventId::new("evt-1")),
-        category: MarketCategory::Politics,
-        outcome: "Yes".to_owned(),
-        size: Shares::new(dec!(100)),
-        avg_price: Price::new(dec!(0.5)),
-        cur_price: Price::new(dec!(0.6)),
-        current_value: Usd::new(dec!(60)),
-        redeemable: false,
-    }];
-    NewAccountSnapshot {
-        account_snapshot_id: AccountSnapshotId::from_v7(),
-        execution_account_id: execution_pg_seed::fixture_execution_account().execution_account_id,
-        as_of: Utc::now(),
-        source: AccountSource::Polymarket,
-        venue_net_liquidation_usd: Usd::new(dec!(10000)),
-        capital_base_usd: Usd::new(dec!(10000)),
-        available_usd: Usd::new(dec!(9000)),
-        reserved_usd: Usd::new(dec!(0)),
-        positions_json: AccountPositions(positions.clone()),
-        exposures_json: ExposureBreakdown::from_positions(&positions),
-    }
-}
-
-fn entry_plan() -> EntryPlan {
-    EntryPlan {
-        condition: EntryConditionPlan::Immediate,
-        order_policy: EntryOrderPolicy::Passive {
-            limit_price: Price::new(dec!(0.6)),
-            post_only: true,
-        },
-        max_slippage_bps: Bps::new(dec!(50)),
-        valid_from: Utc::now(),
-        valid_until: Utc::now() + Duration::hours(1),
-        min_depth_usd: Usd::new(dec!(100)),
-        max_book_age_ms: 2_000,
-        cancel_if_not_triggered: true,
-        entry_reason: "immediate".to_owned(),
-    }
-}
-
-fn sizing_plan() -> SizingPlan {
-    SizingPlan {
-        suggested_usd: Usd::new(NOTIONAL),
-        suggested_shares: Shares::new(dec!(100)),
-        max_usd: Usd::new(dec!(500)),
-        min_usd: Usd::new(dec!(10)),
-        portfolio_weight_pct: dec!(0.025),
-        market_exposure_after_usd: Usd::new(NOTIONAL),
-        event_exposure_after_usd: Usd::new(NOTIONAL),
-        category_exposure_after_usd: Usd::new(NOTIONAL),
-        binding_constraint: BindingConstraint::KellyCap,
-        sizing_reason: "kelly".to_owned(),
-        sizing_model: SizingModelKind::Kelly,
-        edge_bps: Some(Bps::new(dec!(100))),
-        kelly_fraction_applied: Some(dec!(0.5)),
-        edge_uncertainty_shrink_applied: None,
-        correlation_shrink_applied: None,
-        f_star_applied: None,
-        kelly_fraction_config_applied: None,
-        confidence_shrink_applied: None,
-        drawdown_shrink_applied: None,
-        raw_fraction_applied: None,
-        position_cap_fraction_applied: None,
-    }
-}
-
-fn exit_plan() -> ExitPlan {
-    ExitPlan {
-        take_profit_price: Some(Price::new(dec!(0.8))),
-        take_profit_pct: None,
-        stop_loss_price: Some(Price::new(dec!(0.4))),
-        stop_loss_pct: None,
-        time_exit_at: None,
-        max_hold_secs: Some(86_400),
-        scale_out_targets: Vec::new(),
-        trailing_stop: None,
-        thesis_invalidation: ThesisInvalidationPolicy {
-            min_score_retention: dec!(0.6),
-            min_expected_return_bps: Bps::ZERO,
-            require_execution_eligibility: true,
-        },
-        opportunistic_exit: opportunistic_exit_policy(),
-        settlement_mode: ExitSettlementMode::HoldToResolution,
-        redeem_policy: RedeemPolicy::Manual,
-        manual_review_at: None,
-        exit_reason: "tp/sl".to_owned(),
-    }
-}
-
 const fn opportunistic_exit_policy() -> OpportunisticExitPolicy {
     OpportunisticExitPolicy {
         min_confidence: Probability::new(dec!(0.65)),
@@ -3107,154 +2918,6 @@ const fn opportunistic_exit_policy() -> OpportunisticExitPolicy {
         min_p_exit_better: Probability::new(dec!(0.5)),
         max_cumulative_exit_pct: dec!(1),
         min_incremental_exit_pct: dec!(0.1),
-    }
-}
-
-fn trade_plan() -> RecommendationTradePlan {
-    let artifact_hash = content_hash('f');
-    let dimension = TradePolicyCohortDimension {
-        methodology_id: "fixture-v1".to_owned(),
-        methodology_hash: artifact_hash,
-        bucket_id: "fixture".to_owned(),
-    };
-    RecommendationTradePlan::Frozen {
-        policy: Box::new(TradePolicyCohortProvenance {
-            artifact_id: TradePolicyArtifactId::from_content_hash(&artifact_hash),
-            artifact_hash,
-            cohort_index: 0,
-            cohort_key: TradePolicyCohortKey {
-                profile_ref: builtin_research_profiles()
-                    .expect("research profiles")
-                    .into_iter()
-                    .next()
-                    .expect("control profile")
-                    .profile_ref,
-                category: MarketCategory::Politics,
-                horizon_secs: 86_400,
-                entry_price_min: Price::new(dec!(0.01)),
-                entry_price_max: Price::new(dec!(0.99)),
-                cash_budget_tier: Usd::new(NOTIONAL),
-                liquidity: dimension.clone(),
-                volatility: dimension,
-            },
-        }),
-        entry: entry_plan(),
-        sizing: Box::new(sizing_plan()),
-        exit: Box::new(exit_plan()),
-        risk_envelope: Box::new(risk_envelope()),
-    }
-}
-
-fn risk_envelope() -> RiskEnvelope {
-    RiskEnvelope {
-        max_loss_usd: Usd::new(dec!(120)),
-        max_slippage_bps: Bps::new(dec!(50)),
-        max_position_usd: Usd::new(dec!(500)),
-        max_market_exposure_usd: Usd::new(dec!(500)),
-        max_event_exposure_usd: Usd::new(dec!(750)),
-        max_category_exposure_usd: Usd::new(dec!(1500)),
-        requires_approval: true,
-        auto_execution_allowed: true,
-        risk_notes: Vec::new(),
-        envelope_hash: content_hash('f'),
-    }
-}
-
-fn factor_breakdown() -> RecommendationFactorBreakdown {
-    RecommendationFactorBreakdown(vec![FactorBreakdownEntry {
-        factor_name: "liquidity_depth".to_owned(),
-        family: FactorFamily::Liquidity,
-        value_state: FactorValueState::Scored,
-        raw_value: Some(dec!(1234.5)),
-        normalized_score: Some(Probability::new(dec!(0.8))),
-        normalization_source: Some(NormalizationSource::CrossSection),
-        indeterminate_reason: None,
-        weight: dec!(0.4),
-        contribution: dec!(0.32),
-        confidence: Probability::new(dec!(0.75)),
-        direction: FactorDirection::Positive,
-        explanation: "deep".to_owned(),
-        source_refs: Vec::new(),
-    }])
-}
-
-fn recommendation_identity() -> RecommendationIdentity {
-    RecommendationIdentity {
-        category: MarketCategory::Politics,
-        question: "Will the event resolve Yes?".to_owned(),
-        outcome_name: "Yes".to_owned(),
-    }
-}
-
-const fn market_context() -> MarketContext {
-    MarketContext {
-        best_bid: Some(Price::new(dec!(0.41))),
-        best_ask: Some(Price::new(dec!(0.43))),
-        mid_price: Some(Price::new(dec!(0.42))),
-        spread_bps: Some(Bps::new(dec!(50))),
-        depth_usd: Usd::new(dec!(5000)),
-        volume_24h_usd: Some(Usd::new(dec!(10000))),
-        book_age_ms: 500,
-        time_to_resolution_secs: Some(86_400),
-        market_status: MarketStatus::Active,
-        neg_risk: false,
-        tick_size: TickSize::Hundredth,
-        fee_rate: None,
-    }
-}
-
-fn evidence_refs() -> EvidenceRefs {
-    EvidenceRefs {
-        signal_candidate_id: SignalCandidateId::from_v7(),
-        feature_vector_id: FeatureVectorId::from_v7(),
-        model_run_id: ModelRunId::from_v7(),
-        market_selection_id: MarketSelectionId::from_v7(),
-        book_snapshot_ref: BookSnapshotRef::from_str(&format!(
-            "book:l2|token-1|00000000-0000-0000-0000-000000000001|1|blake3:{}|1700000000|1700000000@blake3:{}",
-            "1".repeat(64),
-            "0".repeat(64),
-        ))
-        .expect("book ref"),
-        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-        model_version_id: ModelVersionId::from_v7(),
-        factor_definition_versions: Vec::new(),
-        data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
-    }
-}
-
-fn execution_eligibility() -> ExecutionEligibility {
-    ExecutionEligibility {
-        eligible_modes: vec![
-            QuantRuntimeMode::ReportOnly,
-            QuantRuntimeMode::SemiAuto,
-            QuantRuntimeMode::AutoExecution,
-        ],
-        ineligibility_reasons: Vec::new(),
-        approval_required: false,
-        auto_policy_id: None,
-        uncalibrated_watermark: false,
-    }
-}
-
-fn report_summary() -> ReportSummary {
-    ReportSummary {
-        market_selection_count: 1,
-        candidate_count: 1,
-        rejected_count: 0,
-        published_recommendation_count: 1,
-        total_suggested_usd: Usd::new(NOTIONAL),
-        max_single_recommendation_usd: Usd::new(NOTIONAL),
-        aggregate_exposure_cap_usd: None,
-        category_allocation: BTreeMap::new(),
-        event_allocation: BTreeMap::new(),
-        average_score: Probability::new(dec!(0.7)),
-        min_score: Probability::new(dec!(0.7)),
-        model_confidence_summary: ConfidenceSummary::default(),
-        data_quality_summary: DataQualitySummary::default(),
-        top_rejection_reasons: Vec::new(),
-        execution_eligibility_summary: EligibilitySummary::default(),
-        empty_reason: None,
-        warnings: Vec::new(),
     }
 }
 

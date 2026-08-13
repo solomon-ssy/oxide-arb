@@ -290,10 +290,11 @@ fn build_analytics_writers(
     }
 }
 
-/// Assemble the book fact-writer plane: one `AsyncWriter` per `ClickHouse` fact
-/// table, each flushing through the shared `ChWriteManager` (permit + retry +
-/// metrics). Returns the producer-facing writer plus a queue of flush workers
-/// to register on the runner (shutdown stage `Analytics`).
+/// Assemble the book fact-writer plane through the shared `ChWriteManager`.
+/// Canonical sessions and model-input microstructure facts use acknowledged,
+/// bounded writers; the L2 ledger retains its partition commit coordinator.
+/// Returns the producer-facing writer plus the flush workers registered at the
+/// `Analytics` shutdown stage.
 fn build_book_fact_writer(
     ch_pool: &Arc<ClickHousePool>,
     write_manager: &Arc<ChWriteManager>,
@@ -305,20 +306,12 @@ fn build_book_fact_writer(
 
     let queue = PendingTaskQueue::default();
     let capacity = ch.batch_size.saturating_mul(4).max(8_192);
-    let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
-    let async_config = |name: &'static str| {
-        AsyncWriterConfig::new(name)
-            .capacity(capacity)
-            .batch_size(ch.batch_size)
-            .flush_interval(flush_interval)
-    };
     let durable_config = |name: &'static str| {
         DurableWriterConfig::new(name)
             .capacity(capacity)
             .max_batch_size(ch.batch_size.min(256))
             .max_batch_delay(Duration::from_millis(5))
     };
-    let drops = |name: &'static str| metrics.async_writer_dropped.with_label_values(&[name]);
     // Observability that also feeds the enqueue→flush pipeline lag into the
     // shared tracker (data-quality plane) and the Prometheus histogram.
     let lag_obs = |name: &'static str| {
@@ -354,7 +347,7 @@ fn build_book_fact_writer(
     queue.push(TaskId::BookL2LedgerWriter, move |token| {
         ledger_coordinator.run(token)
     });
-    let microstructure = spawn_fact_stream::<BookMicrostructureRow>(
+    let microstructure = spawn_durable_fact_stream::<BookMicrostructureRow>(
         &queue,
         TaskId::BookMicrostructure1sWriter,
         Arc::new(ChFactWriter::new(
@@ -362,9 +355,8 @@ fn build_book_fact_writer(
             Arc::clone(write_manager),
             "book_microstructure_1s",
         )),
-        drops("book_microstructure_1s"),
         lag_obs("book_microstructure_1s"),
-        async_config("book_microstructure_1s"),
+        durable_config("book_microstructure_1s").max_batch_size(ch.batch_size),
     );
     let writer = Arc::new(BookFactWriter::new(ledger, sessions, microstructure));
     (writer, queue)

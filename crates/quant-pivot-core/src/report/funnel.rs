@@ -1,382 +1,360 @@
-//! Conserved report-market funnel construction.
+//! Conserved, report-scoped market funnel for global portfolio reports.
 
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
+};
 
-use crate::service::{feature_pipeline::RejectedMarket, model_runner::ModelMarketDecision};
-use ahash::AHashMap;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
     clickhouse::ReportMarketFunnelRow,
-    enums::quant::RejectionReason,
+    domain::quant::{ExecutableEconomicTier, NewReportRouteRun},
+    runtime_config::BuyModelRoute,
     types::{
-        DecisionPolicySnapshotId, EventId, FeatureVectorId, MarketId, MissingFeatureDiagnostic,
-        ModelRunId, ModelVersionId, RecommendationId, RecommendationReportId,
-        ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage, ResearchProfileRef,
-        SignalCandidateId, TokenId, stable_name::FeatureName,
+        DecisionPolicySnapshotId, EconomicTierId, EventId, FeatureVectorId, MarketId,
+        MissingFeatureDiagnostic, ModelRunId, ModelVersionId, RecommendationId,
+        RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
+        ReportRouteRunId, SignalCandidateId, TokenId,
     },
 };
 use quant_pivot_research::{
-    portfolio::RejectedCandidate,
+    portfolio::TierAdmissionRejectionCode,
     selection::{ExcludedMarket, ExclusionReason, MarketSelectionSnapshot, SelectedMarket},
 };
 
-#[derive(Clone, Copy)]
-pub struct ReportFunnelInput<'a> {
-    pub report_id: &'a RecommendationReportId,
-    pub profile_ref: &'a ResearchProfileRef,
-    pub decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
-    pub model_version_id: &'a ModelVersionId,
-    pub model_run_id: Option<&'a ModelRunId>,
-    pub selection: &'a MarketSelectionSnapshot,
-    pub feature_rejected: &'a [RejectedMarket],
-    pub feature_vector_by_market: &'a HashMap<MarketId, FeatureVectorId>,
-    pub model_decisions: &'a [ModelMarketDecision],
-    pub planner_rejected: &'a [RejectedCandidate],
-    pub recommendations: &'a [PublishedRecommendationRef],
-    pub early_terminal: Option<(ReportFunnelStage, ReportFunnelReason)>,
-    pub event_time: DateTime<Utc>,
-}
+use super::types::ReportTierRejection;
+use crate::service::{feature_pipeline::RejectedMarket, model_runner::ModelMarketDecision};
 
-/// Minimal published lineage consumed by the conserved funnel. Keeping the
-/// full persistence DTO out of this pure kernel avoids cloning trade plans and
-/// evidence graphs that the funnel never reads.
+/// Published recommendation identity used to close a market funnel row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedRecommendationRef {
     pub recommendation_id: RecommendationId,
     pub market_id: MarketId,
+    pub report_route_run_id: ReportRouteRunId,
+    pub route: BuyModelRoute,
 }
 
-struct DraftDecision {
+/// Frozen inputs for the complete catalog-visible market funnel.
+#[derive(Clone, Copy)]
+pub struct ReportFunnelInput<'a> {
+    pub report_id: &'a RecommendationReportId,
+    pub decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
+    pub selection: &'a MarketSelectionSnapshot,
+    pub route_runs: &'a [NewReportRouteRun],
+    pub feature_rejected: &'a [RejectedMarket],
+    pub feature_vector_by_market: &'a HashMap<MarketId, FeatureVectorId>,
+    pub model_decisions: &'a [ModelMarketDecision],
+    pub tiers: &'a [ExecutableEconomicTier],
+    pub tier_rejections: &'a [ReportTierRejection],
+    pub recommendations: &'a [PublishedRecommendationRef],
+    pub event_time: DateTime<Utc>,
+}
+
+/// Build exactly one terminal row for every catalog-visible market in the
+/// persisted selection snapshot. Every row is sealed before it leaves Core.
+pub fn build_report_market_funnel(
+    input: ReportFunnelInput<'_>,
+) -> QuantResult<Vec<ReportMarketFunnelRow>> {
+    validate_unique_inputs(&input)?;
+    let route_runs = input
+        .route_runs
+        .iter()
+        .map(|run| (run.route, run))
+        .collect::<HashMap<_, _>>();
+    let included = input
+        .selection
+        .included
+        .iter()
+        .map(|market| (market.market_id.clone(), market))
+        .collect::<HashMap<_, _>>();
+    let rejected_features = input
+        .feature_rejected
+        .iter()
+        .map(|market| (market.market_id.clone(), market))
+        .collect::<HashMap<_, _>>();
+    let decisions = input
+        .model_decisions
+        .iter()
+        .map(|decision| (decision.market_id.clone(), decision))
+        .collect::<HashMap<_, _>>();
+    let recommendations = input
+        .recommendations
+        .iter()
+        .map(|recommendation| (recommendation.market_id.clone(), recommendation))
+        .collect::<HashMap<_, _>>();
+    let tiers_by_market = group_tiers(input.tiers);
+    let rejected_tiers = input
+        .tier_rejections
+        .iter()
+        .map(|rejection| (rejection.economic_tier_id, rejection.code))
+        .collect::<HashMap<_, _>>();
+
+    let mut rows =
+        Vec::with_capacity(input.selection.included.len() + input.selection.excluded.len());
+    for excluded in &input.selection.excluded {
+        rows.push(excluded_row(&input, excluded)?);
+    }
+    for market in &input.selection.included {
+        let route = BuyModelRoute::from(market.category);
+        let route_run =
+            route_runs
+                .get(&route)
+                .copied()
+                .ok_or_else(|| ReportError::InvariantViolation {
+                    stage: "report_funnel",
+                    detail: format!("included market {} has no Route run", market.market_id),
+                })?;
+        let state = IncludedFunnelState {
+            input: &input,
+            market,
+            route_run,
+            rejected_feature: rejected_features.get(&market.market_id).copied(),
+            feature_vector_id: input
+                .feature_vector_by_market
+                .get(&market.market_id)
+                .copied(),
+            model_decision: decisions.get(&market.market_id).copied(),
+            tiers: tiers_by_market
+                .get(&market.market_id)
+                .map_or(&[][..], Vec::as_slice),
+            rejected_tiers: &rejected_tiers,
+            recommendation: recommendations.get(&market.market_id).copied(),
+        };
+        rows.push(included_row(state)?);
+    }
+    rows.sort_by(|left, right| left.market_id.as_str().cmp(right.market_id.as_str()));
+    if rows.len() != included.len() + input.selection.excluded.len() {
+        return Err(ReportError::InvariantViolation {
+            stage: "report_funnel",
+            detail: "catalog-visible funnel conservation failed".to_owned(),
+        }
+        .into());
+    }
+    Ok(rows)
+}
+
+#[derive(Clone, Copy)]
+struct IncludedFunnelState<'a> {
+    input: &'a ReportFunnelInput<'a>,
+    market: &'a SelectedMarket,
+    route_run: &'a NewReportRouteRun,
+    rejected_feature: Option<&'a RejectedMarket>,
+    feature_vector_id: Option<FeatureVectorId>,
+    model_decision: Option<&'a ModelMarketDecision>,
+    tiers: &'a [&'a ExecutableEconomicTier],
+    rejected_tiers: &'a HashMap<EconomicTierId, TierAdmissionRejectionCode>,
+    recommendation: Option<&'a PublishedRecommendationRef>,
+}
+
+fn included_row(state: IncludedFunnelState<'_>) -> QuantResult<ReportMarketFunnelRow> {
+    let lineage = state.route_run.lineage_json.as_ref();
+    let route = BuyModelRoute::from(state.market.category);
+    if state.route_run.route != route {
+        return Err(ReportError::InvariantViolation {
+            stage: "report_funnel",
+            detail: format!(
+                "market {} Route does not match its Route run",
+                state.market.market_id
+            ),
+        }
+        .into());
+    }
+
+    let mut signal_candidate_id = state
+        .model_decision
+        .map(|decision| decision.signal_candidate_id);
+    let (terminal_stage, primary_reason, diagnostics, recommendation_id) =
+        if let Some(published) = state.recommendation {
+            if published.route != route
+                || published.report_route_run_id != state.route_run.report_route_run_id
+            {
+                return Err(ReportError::InvariantViolation {
+                    stage: "report_funnel",
+                    detail: format!(
+                        "published market {} disagrees with Route lineage",
+                        state.market.market_id
+                    ),
+                }
+                .into());
+            }
+            (
+                ReportFunnelStage::Published,
+                ReportFunnelReason::Published,
+                ReportFunnelDiagnostics::None {},
+                Some(published.recommendation_id),
+            )
+        } else if let Some(rejected) = state.rejected_feature {
+            (
+                ReportFunnelStage::FeatureReady,
+                ReportFunnelReason::FeatureDataQualityRejected,
+                ReportFunnelDiagnostics::FeatureDataQuality {
+                    missing: rejected
+                        .missing_required
+                        .iter()
+                        .map(|(feature_name, reason)| MissingFeatureDiagnostic {
+                            feature_name: feature_name.clone(),
+                            reason: *reason,
+                        })
+                        .collect(),
+                },
+                None,
+            )
+        } else if state.feature_vector_id.is_none() {
+            return Err(ReportError::InvariantViolation {
+                stage: "report_funnel",
+                detail: format!(
+                    "market {} has neither a feature vector nor typed rejection evidence",
+                    state.market.market_id
+                ),
+            }
+            .into());
+        } else if let Some(decision) = state
+            .model_decision
+            .filter(|decision| !decision.gate_passed)
+        {
+            (
+                ReportFunnelStage::ModelGatePassed,
+                model_gate_reason(decision.primary_reason.as_deref()),
+                ReportFunnelDiagnostics::None {},
+                None,
+            )
+        } else if state.model_decision.is_none() {
+            signal_candidate_id = None;
+            (
+                ReportFunnelStage::ModelScored,
+                ReportFunnelReason::MissingModelOutput,
+                ReportFunnelDiagnostics::None {},
+                None,
+            )
+        } else if state.tiers.is_empty() {
+            (
+                ReportFunnelStage::PolicyReady,
+                ReportFunnelReason::ExecutableEntryUnavailable,
+                ReportFunnelDiagnostics::None {},
+                None,
+            )
+        } else {
+            let admitted = state
+                .tiers
+                .iter()
+                .filter(|tier| !state.rejected_tiers.contains_key(&tier.economic_tier_id))
+                .count();
+            if admitted > 0 {
+                (
+                    ReportFunnelStage::PortfolioFunded,
+                    ReportFunnelReason::NotSelectedByGlobalOptimum,
+                    ReportFunnelDiagnostics::PlannerRejection {
+                        detail: "admitted executable tier was not selected by the global optimum"
+                            .to_owned(),
+                    },
+                    None,
+                )
+            } else {
+                let code = state
+                    .tiers
+                    .iter()
+                    .filter_map(|tier| state.rejected_tiers.get(&tier.economic_tier_id).copied())
+                    .min_by_key(|code| tier_rejection_rank(*code))
+                    .ok_or_else(|| ReportError::InvariantViolation {
+                        stage: "report_funnel",
+                        detail: format!(
+                            "market {} has tiers but neither admission nor rejection evidence",
+                            state.market.market_id
+                        ),
+                    })?;
+                let reason = tier_rejection_reason(code);
+                (
+                    ReportFunnelStage::SizingEligible,
+                    reason,
+                    rejection_diagnostics(reason, code),
+                    None,
+                )
+            }
+        };
+
+    sealed_row(RowInput {
+        report: state.input,
+        market_id: state.market.market_id.clone(),
+        event_id: state.market.event_id.clone(),
+        primary_token_id: state.market.primary_token_id.clone(),
+        route_run: Some(state.route_run),
+        model_version_id: lineage.map(|lineage| lineage.model_version_id),
+        model_run_id: lineage.and_then(|lineage| lineage.model_run_id),
+        terminal_stage,
+        primary_reason,
+        diagnostics,
+        feature_vector_id: state.feature_vector_id,
+        signal_candidate_id,
+        recommendation_id,
+    })
+}
+
+fn excluded_row(
+    input: &ReportFunnelInput<'_>,
+    market: &ExcludedMarket,
+) -> QuantResult<ReportMarketFunnelRow> {
+    let (stage, reason, diagnostics) = exclusion_terminal(&market.reason);
+    sealed_row(RowInput {
+        report: input,
+        market_id: market.market_id.clone(),
+        event_id: market.event_id.clone(),
+        primary_token_id: market.primary_token_id.clone(),
+        route_run: None,
+        model_version_id: None,
+        model_run_id: None,
+        terminal_stage: stage,
+        primary_reason: reason,
+        diagnostics,
+        feature_vector_id: None,
+        signal_candidate_id: None,
+        recommendation_id: None,
+    })
+}
+
+struct RowInput<'a> {
+    report: &'a ReportFunnelInput<'a>,
+    market_id: MarketId,
     event_id: EventId,
     primary_token_id: TokenId,
-    secondary_token_id: Option<TokenId>,
-    terminal_stage: Option<ReportFunnelStage>,
-    primary_reason: Option<ReportFunnelReason>,
-    secondary_diagnostics: ReportFunnelDiagnostics,
+    route_run: Option<&'a NewReportRouteRun>,
+    model_version_id: Option<ModelVersionId>,
+    model_run_id: Option<ModelRunId>,
+    terminal_stage: ReportFunnelStage,
+    primary_reason: ReportFunnelReason,
+    diagnostics: ReportFunnelDiagnostics,
     feature_vector_id: Option<FeatureVectorId>,
     signal_candidate_id: Option<SignalCandidateId>,
     recommendation_id: Option<RecommendationId>,
 }
 
-impl DraftDecision {
-    fn included(market: &SelectedMarket) -> Self {
-        Self {
-            event_id: market.event_id.clone(),
-            primary_token_id: market.primary_token_id.clone(),
-            secondary_token_id: market.secondary_token_id.clone(),
-            terminal_stage: None,
-            primary_reason: None,
-            secondary_diagnostics: ReportFunnelDiagnostics::None {},
-            feature_vector_id: None,
-            signal_candidate_id: None,
-            recommendation_id: None,
-        }
-    }
-
-    fn excluded(market: &ExcludedMarket) -> Self {
-        let (terminal_stage, primary_reason) = selection_terminal(&market.reason);
-        let secondary_diagnostics = match &market.reason {
-            ExclusionReason::ModelFeatureUnavailable { missing } => {
-                ReportFunnelDiagnostics::MissingModelFeatures {
-                    features: missing
-                        .iter()
-                        .map(|name| FeatureName::new(name.as_str()))
-                        .collect(),
-                }
-            }
-            ExclusionReason::NotOpen
-            | ExclusionReason::CategoryDisabled
-            | ExclusionReason::InsufficientLiquidity
-            | ExclusionReason::SpreadTooWide
-            | ExclusionReason::StaleBook
-            | ExclusionReason::IngestLagExceeded
-            | ExclusionReason::ResolutionAmbiguous
-            | ExclusionReason::ManuallyBlocked => ReportFunnelDiagnostics::None {},
-        };
-        Self {
-            event_id: market.event_id.clone(),
-            primary_token_id: market.primary_token_id.clone(),
-            secondary_token_id: None,
-            terminal_stage: Some(terminal_stage),
-            primary_reason: Some(primary_reason),
-            secondary_diagnostics,
-            feature_vector_id: None,
-            signal_candidate_id: None,
-            recommendation_id: None,
-        }
-    }
-
-    fn terminate(
-        &mut self,
-        stage: ReportFunnelStage,
-        reason: ReportFunnelReason,
-        diagnostics: ReportFunnelDiagnostics,
-    ) -> QuantResult<()> {
-        if self.terminal_stage.is_some() {
-            return Err(ReportError::InvariantViolation {
-                stage: "report_funnel",
-                detail: "market received more than one terminal decision".to_owned(),
-            }
-            .into());
-        }
-        self.terminal_stage = Some(stage);
-        self.primary_reason = Some(reason);
-        self.secondary_diagnostics = diagnostics;
-        Ok(())
-    }
-
-    fn recognizes_token(&self, token_id: &TokenId) -> bool {
-        self.primary_token_id == *token_id || self.secondary_token_id.as_ref() == Some(token_id)
-    }
-}
-
-pub fn build_report_market_funnel(
-    input: ReportFunnelInput<'_>,
-) -> QuantResult<Vec<ReportMarketFunnelRow>> {
-    let mut decisions = AHashMap::with_capacity(
-        input
-            .selection
-            .included
-            .len()
-            .saturating_add(input.selection.excluded.len()),
-    );
-    for market in &input.selection.included {
-        insert_unique(
-            &mut decisions,
-            &market.market_id,
-            DraftDecision::included(market),
-        )?;
-    }
-    for market in &input.selection.excluded {
-        insert_unique(
-            &mut decisions,
-            &market.market_id,
-            DraftDecision::excluded(market),
-        )?;
-    }
-
-    for rejected in input.feature_rejected {
-        let decision = require_pending(&mut decisions, &rejected.market_id)?;
-        decision.terminate(
-            ReportFunnelStage::FeatureReady,
-            ReportFunnelReason::FeatureDataQualityRejected,
-            ReportFunnelDiagnostics::FeatureDataQuality {
-                missing: rejected
-                    .missing_required
-                    .iter()
-                    .map(|(name, reason)| MissingFeatureDiagnostic {
-                        feature_name: FeatureName::new(name.as_str()),
-                        reason: *reason,
-                    })
-                    .collect(),
-            },
-        )?;
-    }
-    for (market_id, feature_vector_id) in input.feature_vector_by_market {
-        let decision = require_pending(&mut decisions, market_id)?;
-        decision.feature_vector_id = Some(*feature_vector_id);
-    }
-    for model in input.model_decisions {
-        let decision = require_pending(&mut decisions, &model.market_id)?;
-        if !decision.recognizes_token(&model.token_id) {
-            return Err(ReportError::InvariantViolation {
-                stage: "report_funnel",
-                detail: format!(
-                    "model decision for market {} references token {} outside its frozen selection",
-                    model.market_id, model.token_id
-                ),
-            }
-            .into());
-        }
-        if decision.feature_vector_id.is_none() {
-            return Err(ReportError::InvariantViolation {
-                stage: "report_funnel",
-                detail: format!(
-                    "model decision for market {} has no feature-vector lineage",
-                    model.market_id
-                ),
-            }
-            .into());
-        }
-        decision.signal_candidate_id = Some(model.signal_candidate_id);
-        if !model.gate_passed {
-            decision.terminate(
-                ReportFunnelStage::ModelGatePassed,
-                model_gate_reason(model.primary_reason.as_deref())?,
-                ReportFunnelDiagnostics::None {},
-            )?;
-        }
-    }
-    for rejected in input.planner_rejected {
-        let decision = require_pending(&mut decisions, &rejected.market_id)?;
-        let (stage, reason) = planner_terminal(rejected.reason);
-        decision.terminate(
-            stage,
-            reason,
-            ReportFunnelDiagnostics::PlannerRejection {
-                detail: rejected.detail.clone(),
-            },
-        )?;
-    }
-    for recommendation in input.recommendations {
-        let decision = require_pending(&mut decisions, &recommendation.market_id)?;
-        decision.recommendation_id = Some(recommendation.recommendation_id);
-        decision.terminate(
-            ReportFunnelStage::Published,
-            ReportFunnelReason::Published,
-            ReportFunnelDiagnostics::None {},
-        )?;
-    }
-
-    for (market_id, decision) in &mut decisions {
-        if decision.terminal_stage.is_some() {
-            continue;
-        }
-        if let Some((stage, reason)) = input.early_terminal {
-            decision.terminate(stage, reason, ReportFunnelDiagnostics::None {})?;
-        } else if decision.feature_vector_id.is_some()
-            && input.model_run_id.is_some()
-            && decision.signal_candidate_id.is_none()
-        {
-            decision.terminate(
-                ReportFunnelStage::ModelScored,
-                ReportFunnelReason::MissingModelOutput,
-                ReportFunnelDiagnostics::None {},
-            )?;
-        } else {
-            return Err(ReportError::InvariantViolation {
-                stage: "report_funnel",
-                detail: format!("market {market_id} has no terminal funnel decision"),
-            }
-            .into());
-        }
-    }
-
-    let expected = input
-        .selection
-        .included
-        .len()
-        .checked_add(input.selection.excluded.len())
-        .ok_or_else(|| ReportError::NumericOverflow {
-            field: "report_funnel.catalog_visible_count",
-            detail: "catalog-visible count overflow".to_owned(),
-        })?;
-    if decisions.len() != expected {
-        return Err(ReportError::InvariantViolation {
+fn sealed_row(input: RowInput<'_>) -> QuantResult<ReportMarketFunnelRow> {
+    let diagnostics = serde_json::to_string(&input.diagnostics).map_err(|error| {
+        ReportError::InvariantViolation {
             stage: "report_funnel",
-            detail: "catalog-visible markets do not form a unique included/excluded partition"
-                .to_owned(),
+            detail: format!("encode canonical diagnostics: {error}"),
         }
-        .into());
-    }
-    let published_count = decisions
-        .values()
-        .filter(|decision| decision.terminal_stage == Some(ReportFunnelStage::Published))
-        .count();
-    if published_count != input.recommendations.len() {
-        return Err(ReportError::InvariantViolation {
-            stage: "report_funnel",
-            detail: "published funnel count does not equal recommendation count".to_owned(),
-        }
-        .into());
-    }
-
-    let mut rows = decisions
-        .into_iter()
-        .map(|(market_id, decision)| row_from_decision(&input, &market_id, decision))
-        .collect::<QuantResult<Vec<_>>>()?;
-    rows.sort_unstable_by(|left, right| left.market_id.as_str().cmp(right.market_id.as_str()));
-    Ok(rows)
-}
-
-fn insert_unique(
-    decisions: &mut AHashMap<MarketId, DraftDecision>,
-    market_id: &MarketId,
-    decision: DraftDecision,
-) -> QuantResult<()> {
-    if decisions.insert(market_id.clone(), decision).is_some() {
-        return Err(ReportError::InvariantViolation {
-            stage: "report_funnel",
-            detail: format!("duplicate catalog-visible market {market_id}"),
-        }
-        .into());
-    }
-    Ok(())
-}
-
-fn require_pending<'a>(
-    decisions: &'a mut AHashMap<MarketId, DraftDecision>,
-    market_id: &MarketId,
-) -> QuantResult<&'a mut DraftDecision> {
-    let decision = decisions
-        .get_mut(market_id)
-        .ok_or_else(|| ReportError::InvariantViolation {
-            stage: "report_funnel",
-            detail: format!("downstream decision references non-catalog market {market_id}"),
-        })?;
-    if decision.terminal_stage.is_some() {
-        return Err(ReportError::InvariantViolation {
-            stage: "report_funnel",
-            detail: format!("downstream decision references terminal market {market_id}"),
-        }
-        .into());
-    }
-    Ok(decision)
-}
-
-fn row_from_decision(
-    input: &ReportFunnelInput<'_>,
-    market_id: &MarketId,
-    decision: DraftDecision,
-) -> QuantResult<ReportMarketFunnelRow> {
-    let terminal_stage =
-        decision
-            .terminal_stage
-            .ok_or_else(|| ReportError::InvariantViolation {
-                stage: "report_funnel",
-                detail: format!("market {market_id} has no terminal stage"),
-            })?;
-    let primary_reason =
-        decision
-            .primary_reason
-            .ok_or_else(|| ReportError::InvariantViolation {
-                stage: "report_funnel",
-                detail: format!("market {market_id} has no primary reason"),
-            })?;
-    decision
-        .secondary_diagnostics
-        .validate_for(primary_reason)
-        .map_err(|detail| ReportError::InvariantViolation {
-            stage: "report_funnel",
-            detail: detail.to_owned(),
-        })?;
-    let secondary_diagnostics_json = serde_json::to_string(&decision.secondary_diagnostics)
-        .map_err(|error| ReportError::InvariantViolation {
-            stage: "report_funnel",
-            detail: format!("funnel diagnostics serialization failed: {error}"),
-        })?;
+    })?;
     let mut row = ReportMarketFunnelRow {
-        event_time: input.event_time.timestamp_millis(),
-        recommendation_report_id: *input.report_id,
-        market_selection_id: input.selection.market_selection_id,
-        profile_id: input.profile_ref.id.to_string(),
-        profile_version: input.profile_ref.version,
-        profile_content_hash: input.profile_ref.content_hash.to_string(),
-        decision_policy_snapshot_id: *input.decision_policy_snapshot_id,
-        model_version_id: *input.model_version_id,
-        model_run_id: input.model_run_id.copied(),
-        market_id: market_id.clone(),
-        event_id: decision.event_id,
-        primary_token_id: decision.primary_token_id,
-        terminal_stage: terminal_stage.as_str().to_owned(),
-        primary_reason: primary_reason.as_str().to_owned(),
-        secondary_diagnostics_json,
-        feature_vector_id: decision.feature_vector_id,
-        signal_candidate_id: decision.signal_candidate_id,
-        recommendation_id: decision.recommendation_id,
+        event_time: input.report.event_time.timestamp_millis(),
+        recommendation_report_id: *input.report.report_id,
+        market_selection_id: input.report.selection.market_selection_id,
+        decision_policy_snapshot_id: *input.report.decision_policy_snapshot_id,
+        report_route_run_id: input.route_run.map(|run| run.report_route_run_id),
+        route: input.route_run.map(|run| run.route.as_str().to_owned()),
+        model_version_id: input.model_version_id,
+        model_run_id: input.model_run_id,
+        market_id: input.market_id,
+        event_id: input.event_id,
+        primary_token_id: input.primary_token_id,
+        terminal_stage: input.terminal_stage.as_str().to_owned(),
+        primary_reason: input.primary_reason.as_str().to_owned(),
+        secondary_diagnostics_json: diagnostics,
+        feature_vector_id: input.feature_vector_id,
+        signal_candidate_id: input.signal_candidate_id,
+        recommendation_id: input.recommendation_id,
         row_hash: String::new(),
-        ingestion_time: input.event_time.timestamp_millis(),
+        ingestion_time: input.report.event_time.timestamp_millis(),
     };
     row.seal_hash()
         .map_err(|error| ReportError::InvariantViolation {
@@ -386,318 +364,227 @@ fn row_from_decision(
     Ok(row)
 }
 
-const fn selection_terminal(reason: &ExclusionReason) -> (ReportFunnelStage, ReportFunnelReason) {
+fn validate_unique_inputs(input: &ReportFunnelInput<'_>) -> QuantResult<()> {
+    ensure_unique(
+        input
+            .selection
+            .included
+            .iter()
+            .map(|market| &market.market_id),
+        "included market",
+    )?;
+    ensure_unique(
+        input
+            .selection
+            .excluded
+            .iter()
+            .map(|market| &market.market_id),
+        "excluded market",
+    )?;
+    let included = input
+        .selection
+        .included
+        .iter()
+        .map(|market| &market.market_id)
+        .collect::<HashSet<_>>();
+    if input
+        .selection
+        .excluded
+        .iter()
+        .any(|market| included.contains(&market.market_id))
+    {
+        return Err(ReportError::InvariantViolation {
+            stage: "report_funnel",
+            detail: "selection includes and excludes the same market".to_owned(),
+        }
+        .into());
+    }
+    ensure_unique(input.route_runs.iter().map(|run| run.route), "Route run")?;
+    ensure_unique(
+        input
+            .model_decisions
+            .iter()
+            .map(|decision| &decision.market_id),
+        "model decision",
+    )?;
+    ensure_unique(
+        input.recommendations.iter().map(|item| &item.market_id),
+        "published recommendation market",
+    )?;
+    ensure_unique(
+        input
+            .tier_rejections
+            .iter()
+            .map(|rejection| rejection.economic_tier_id),
+        "tier rejection",
+    )
+}
+
+fn ensure_unique<T>(items: impl IntoIterator<Item = T>, label: &'static str) -> QuantResult<()>
+where
+    T: Eq + Hash,
+{
+    let mut seen = HashSet::new();
+    if items.into_iter().any(|item| !seen.insert(item)) {
+        return Err(ReportError::InvariantViolation {
+            stage: "report_funnel",
+            detail: format!("duplicate {label} identity"),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn group_tiers(
+    tiers: &[ExecutableEconomicTier],
+) -> HashMap<MarketId, Vec<&ExecutableEconomicTier>> {
+    let mut grouped = HashMap::<MarketId, Vec<&ExecutableEconomicTier>>::new();
+    for tier in tiers {
+        grouped
+            .entry(tier.market_id.clone())
+            .or_default()
+            .push(tier);
+    }
+    grouped
+}
+
+fn exclusion_terminal(
+    reason: &ExclusionReason,
+) -> (
+    ReportFunnelStage,
+    ReportFunnelReason,
+    ReportFunnelDiagnostics,
+) {
     match reason {
-        ExclusionReason::NotOpen => (
+        ExclusionReason::NotOpen => terminal(
             ReportFunnelStage::BusinessEligible,
             ReportFunnelReason::NotOpen,
         ),
-        ExclusionReason::CategoryDisabled => (
+        ExclusionReason::CategoryDisabled => terminal(
             ReportFunnelStage::BusinessEligible,
             ReportFunnelReason::CategoryDisabled,
         ),
-        ExclusionReason::ResolutionAmbiguous => (
-            ReportFunnelStage::BusinessEligible,
-            ReportFunnelReason::ResolutionAmbiguous,
-        ),
-        ExclusionReason::ManuallyBlocked => (
-            ReportFunnelStage::BusinessEligible,
-            ReportFunnelReason::ManuallyBlocked,
-        ),
-        ExclusionReason::InsufficientLiquidity => (
+        ExclusionReason::InsufficientLiquidity => terminal(
             ReportFunnelStage::ExecutableDataEligible,
             ReportFunnelReason::InsufficientLiquidity,
         ),
-        ExclusionReason::SpreadTooWide => (
+        ExclusionReason::SpreadTooWide => terminal(
             ReportFunnelStage::ExecutableDataEligible,
             ReportFunnelReason::SpreadTooWide,
         ),
-        ExclusionReason::StaleBook => (
+        ExclusionReason::StaleBook => terminal(
             ReportFunnelStage::ExecutableDataEligible,
             ReportFunnelReason::StaleBook,
         ),
-        ExclusionReason::IngestLagExceeded => (
+        ExclusionReason::IngestLagExceeded => terminal(
             ReportFunnelStage::ExecutableDataEligible,
             ReportFunnelReason::IngestLagExceeded,
         ),
-        ExclusionReason::ModelFeatureUnavailable { .. } => (
+        ExclusionReason::ResolutionAmbiguous => terminal(
+            ReportFunnelStage::BusinessEligible,
+            ReportFunnelReason::ResolutionAmbiguous,
+        ),
+        ExclusionReason::ManuallyBlocked => terminal(
+            ReportFunnelStage::BusinessEligible,
+            ReportFunnelReason::ManuallyBlocked,
+        ),
+        ExclusionReason::ModelFeatureUnavailable { missing } => (
             ReportFunnelStage::FeatureReady,
             ReportFunnelReason::ModelFeatureUnavailable,
+            ReportFunnelDiagnostics::MissingModelFeatures {
+                features: missing.clone(),
+            },
         ),
     }
 }
 
-fn model_gate_reason(reason: Option<&str>) -> QuantResult<ReportFunnelReason> {
+const fn terminal(
+    stage: ReportFunnelStage,
+    reason: ReportFunnelReason,
+) -> (
+    ReportFunnelStage,
+    ReportFunnelReason,
+    ReportFunnelDiagnostics,
+) {
+    (stage, reason, ReportFunnelDiagnostics::None {})
+}
+
+fn model_gate_reason(reason: Option<&str>) -> ReportFunnelReason {
     match reason {
-        Some("score_below_floor") => Ok(ReportFunnelReason::ScoreBelowFloor),
-        Some("low_confidence") => Ok(ReportFunnelReason::LowConfidence),
-        _ => Err(ReportError::InvariantViolation {
-            stage: "report_funnel",
-            detail: format!("unknown model-gate reason {reason:?}"),
+        Some("score_below_floor") => ReportFunnelReason::ScoreBelowFloor,
+        Some("low_confidence") => ReportFunnelReason::LowConfidence,
+        _ => ReportFunnelReason::NoPositiveSignal,
+    }
+}
+
+const fn tier_rejection_rank(code: TierAdmissionRejectionCode) -> u8 {
+    match code {
+        TierAdmissionRejectionCode::ScenarioExitCapacity => 0,
+        TierAdmissionRejectionCode::NominalExpectedNetFloor => 1,
+        TierAdmissionRejectionCode::RobustExpectedNetFloor => 2,
+        TierAdmissionRejectionCode::ProfitProbabilityFloor => 3,
+        TierAdmissionRejectionCode::ProbabilityIntervalWidth => 4,
+        TierAdmissionRejectionCode::LiquidityBuffer => 5,
+        TierAdmissionRejectionCode::SingleRecommendationExposure => 6,
+        TierAdmissionRejectionCode::ExistingStructuralConflict => 7,
+    }
+}
+
+const fn tier_rejection_reason(code: TierAdmissionRejectionCode) -> ReportFunnelReason {
+    match code {
+        TierAdmissionRejectionCode::ScenarioExitCapacity => {
+            ReportFunnelReason::ScenarioExitCapacityInsufficient
         }
-        .into()),
+        TierAdmissionRejectionCode::NominalExpectedNetFloor => {
+            ReportFunnelReason::NominalExpectedNetBelowFloor
+        }
+        TierAdmissionRejectionCode::RobustExpectedNetFloor => {
+            ReportFunnelReason::RobustExpectedNetBelowFloor
+        }
+        TierAdmissionRejectionCode::ProfitProbabilityFloor => {
+            ReportFunnelReason::ProfitProbabilityBelowFloor
+        }
+        TierAdmissionRejectionCode::ProbabilityIntervalWidth => {
+            ReportFunnelReason::ProbabilityIntervalTooWide
+        }
+        TierAdmissionRejectionCode::LiquidityBuffer => {
+            ReportFunnelReason::LiquidityBufferInsufficient
+        }
+        TierAdmissionRejectionCode::SingleRecommendationExposure => {
+            ReportFunnelReason::SingleRecommendationExposureExceeded
+        }
+        TierAdmissionRejectionCode::ExistingStructuralConflict => {
+            ReportFunnelReason::ExistingStructuralConflict
+        }
     }
 }
 
-const fn planner_terminal(reason: RejectionReason) -> (ReportFunnelStage, ReportFunnelReason) {
-    match reason {
-        RejectionReason::NoPositiveSignal => (
-            ReportFunnelStage::SizingEligible,
-            ReportFunnelReason::NoPositiveSignal,
-        ),
-        RejectionReason::InvalidEdgeInputs => (
-            ReportFunnelStage::SizingEligible,
-            ReportFunnelReason::InvalidEdgeInputs,
-        ),
-        RejectionReason::ReturnModelUncalibrated => (
-            ReportFunnelStage::SizingEligible,
-            ReportFunnelReason::ReturnModelUncalibrated,
-        ),
-        RejectionReason::ExecutableEntryUnavailable => (
-            ReportFunnelStage::SizingEligible,
-            ReportFunnelReason::ExecutableEntryUnavailable,
-        ),
-        RejectionReason::BelowMinSize => (
-            ReportFunnelStage::SizingEligible,
-            ReportFunnelReason::BelowMinSize,
-        ),
-        RejectionReason::LiquidityInfeasible => (
-            ReportFunnelStage::SizingEligible,
-            ReportFunnelReason::LiquidityInfeasible,
-        ),
-        RejectionReason::BudgetExhausted => (
-            ReportFunnelStage::PortfolioFunded,
-            ReportFunnelReason::BudgetExhausted,
-        ),
-        RejectionReason::MarketCapExhausted => (
-            ReportFunnelStage::PortfolioFunded,
-            ReportFunnelReason::MarketCapExhausted,
-        ),
-        RejectionReason::EventCapExhausted => (
-            ReportFunnelStage::PortfolioFunded,
-            ReportFunnelReason::EventCapExhausted,
-        ),
-        RejectionReason::CategoryCapExhausted => (
-            ReportFunnelStage::PortfolioFunded,
-            ReportFunnelReason::CategoryCapExhausted,
-        ),
-        RejectionReason::CorrelationCapExhausted => (
-            ReportFunnelStage::PortfolioFunded,
-            ReportFunnelReason::CorrelationCapExhausted,
-        ),
-        RejectionReason::AvailableCashExhausted => (
-            ReportFunnelStage::PortfolioFunded,
-            ReportFunnelReason::AvailableCashExhausted,
-        ),
-        RejectionReason::AggregateExposureCapExhausted => (
-            ReportFunnelStage::PortfolioFunded,
-            ReportFunnelReason::AggregateExposureCapExhausted,
-        ),
-        RejectionReason::BeyondTopN => (
-            ReportFunnelStage::PortfolioFunded,
-            ReportFunnelReason::BeyondTopN,
+fn rejection_diagnostics(
+    reason: ReportFunnelReason,
+    code: TierAdmissionRejectionCode,
+) -> ReportFunnelDiagnostics {
+    ReportFunnelDiagnostics::PlannerRejection {
+        detail: format!(
+            "global tier admission rejected with {} ({code:?})",
+            reason.as_str()
         ),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use chrono::{TimeZone, Utc};
-    use quant_pivot_models::{
-        enums::common::MarketCategory,
-        types::{
-            ContentHash, DecisionPolicySnapshotId, EventId, FeatureVectorId, MarketId,
-            MarketSelectionId, ModelRunId, ModelVersionId, RecommendationId,
-            RecommendationReportId, ReportFunnelReason, ReportFunnelStage,
-            SelectionExclusionSummary, SignalCandidateId, TokenId,
-        },
-    };
-    use quant_pivot_research::selection::{
-        ExcludedMarket, ExclusionReason, MarketSelectionSnapshot, SelectedMarket,
-    };
-
-    use super::{PublishedRecommendationRef, ReportFunnelInput, build_report_market_funnel};
-    use crate::{
-        service::model_runner::ModelMarketDecision,
-        test_fixtures::execution_pg_seed::fixture_profile_ref,
-    };
-
-    fn selection() -> MarketSelectionSnapshot {
-        let decision_at = Utc
-            .with_ymd_and_hms(2026, 7, 14, 0, 0, 0)
-            .single()
-            .expect("time");
-        MarketSelectionSnapshot {
-            market_selection_id: MarketSelectionId::from_v7(),
-            decision_at,
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            selector_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
-            included: vec![SelectedMarket {
-                market_id: MarketId::new("included"),
-                event_id: EventId::new("event-included"),
-                category: MarketCategory::Weather,
-                primary_token_id: TokenId::new("token-included"),
-                secondary_token_id: None,
-                liquidity_usd: None,
-                volume_24h_usd: None,
-                source_refs: Vec::new(),
-            }],
-            excluded: vec![ExcludedMarket {
-                market_id: MarketId::new("excluded"),
-                event_id: EventId::new("event-excluded"),
-                primary_token_id: TokenId::new("token-excluded"),
-                reason: ExclusionReason::StaleBook,
-            }],
-            exclusion_summary: SelectionExclusionSummary::default(),
-        }
-    }
+    use super::model_gate_reason;
+    use quant_pivot_models::types::ReportFunnelReason;
 
     #[test]
-    fn catalog_market_gets_decision() {
-        let selection = selection();
-        let report_id = RecommendationReportId::from_v7();
-        let model_version_id = ModelVersionId::from_v7();
-        let profile = fixture_profile_ref();
-        let rows = build_report_market_funnel(ReportFunnelInput {
-            report_id: &report_id,
-            profile_ref: &profile,
-            decision_policy_snapshot_id: &selection.decision_policy_snapshot_id,
-            model_version_id: &model_version_id,
-            model_run_id: None,
-            selection: &selection,
-            feature_rejected: &[],
-            feature_vector_by_market: &HashMap::default(),
-            model_decisions: &[],
-            planner_rejected: &[],
-            recommendations: &[],
-            early_terminal: Some((
-                ReportFunnelStage::FeatureReady,
-                ReportFunnelReason::SystemDegraded,
-            )),
-            event_time: selection.decision_at,
-        })
-        .expect("conserved funnel");
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].market_id.as_str(), "excluded");
-        assert_eq!(rows[0].terminal_stage, "executable_data_eligible");
-        assert_eq!(rows[1].market_id.as_str(), "included");
-        assert_eq!(rows[1].terminal_stage, "feature_ready");
-        assert_ne!(rows[0].row_hash, rows[1].row_hash);
-    }
-
-    #[test]
-    fn unresolved_survivor_fails_closed() {
-        let selection = selection();
-        let report_id = RecommendationReportId::from_v7();
-        let model_version_id = ModelVersionId::from_v7();
-        let profile = fixture_profile_ref();
-        let result = build_report_market_funnel(ReportFunnelInput {
-            report_id: &report_id,
-            profile_ref: &profile,
-            decision_policy_snapshot_id: &selection.decision_policy_snapshot_id,
-            model_version_id: &model_version_id,
-            model_run_id: None,
-            selection: &selection,
-            feature_rejected: &[],
-            feature_vector_by_market: &HashMap::default(),
-            model_decisions: &[],
-            planner_rejected: &[],
-            recommendations: &[],
-            early_terminal: None,
-            event_time: selection.decision_at,
-        });
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn published_preserves_primary_token() {
-        let mut selection = selection();
-        let secondary_token = TokenId::new("token-secondary");
-        selection.included[0].secondary_token_id = Some(secondary_token.clone());
-        let report_id = RecommendationReportId::from_v7();
-        let model_version_id = ModelVersionId::from_v7();
-        let model_run_id = ModelRunId::from_v7();
-        let feature_vector_id = FeatureVectorId::from_v7();
-        let signal_candidate_id = SignalCandidateId::from_v7();
-        let recommendation_id = RecommendationId::from_v7();
-        let profile = fixture_profile_ref();
-        let feature_vectors = HashMap::from([(MarketId::new("included"), feature_vector_id)]);
-        let model_decisions = [ModelMarketDecision {
-            signal_candidate_id,
-            market_id: MarketId::new("included"),
-            token_id: secondary_token,
-            gate_passed: true,
-            primary_reason: None,
-        }];
-        let recommendations = [PublishedRecommendationRef {
-            recommendation_id,
-            market_id: MarketId::new("included"),
-        }];
-
-        let rows = build_report_market_funnel(ReportFunnelInput {
-            report_id: &report_id,
-            profile_ref: &profile,
-            decision_policy_snapshot_id: &selection.decision_policy_snapshot_id,
-            model_version_id: &model_version_id,
-            model_run_id: Some(&model_run_id),
-            selection: &selection,
-            feature_rejected: &[],
-            feature_vector_by_market: &feature_vectors,
-            model_decisions: &model_decisions,
-            planner_rejected: &[],
-            recommendations: &recommendations,
-            early_terminal: None,
-            event_time: selection.decision_at,
-        })
-        .expect("secondary-token recommendation should conserve its primary model token");
-
-        let published = rows
-            .iter()
-            .find(|row| row.market_id.as_str() == "included")
-            .expect("published market row");
-        assert_eq!(published.primary_token_id.as_str(), "token-included");
-        assert_eq!(published.terminal_stage, "published");
-        assert_eq!(published.signal_candidate_id, Some(signal_candidate_id));
-        assert_eq!(published.recommendation_id, Some(recommendation_id));
-    }
-
-    #[test]
-    fn unknown_model_token_fails() {
-        let selection = selection();
-        let report_id = RecommendationReportId::from_v7();
-        let model_version_id = ModelVersionId::from_v7();
-        let model_run_id = ModelRunId::from_v7();
-        let profile = fixture_profile_ref();
-        let feature_vectors =
-            HashMap::from([(MarketId::new("included"), FeatureVectorId::from_v7())]);
-        let model_decisions = [ModelMarketDecision {
-            signal_candidate_id: SignalCandidateId::from_v7(),
-            market_id: MarketId::new("included"),
-            token_id: TokenId::new("foreign-token"),
-            gate_passed: true,
-            primary_reason: None,
-        }];
-
-        let result = build_report_market_funnel(ReportFunnelInput {
-            report_id: &report_id,
-            profile_ref: &profile,
-            decision_policy_snapshot_id: &selection.decision_policy_snapshot_id,
-            model_version_id: &model_version_id,
-            model_run_id: Some(&model_run_id),
-            selection: &selection,
-            feature_rejected: &[],
-            feature_vector_by_market: &feature_vectors,
-            model_decisions: &model_decisions,
-            planner_rejected: &[],
-            recommendations: &[],
-            early_terminal: None,
-            event_time: selection.decision_at,
-        });
-
-        assert!(result.is_err());
+    fn model_gate_mapping_stable() {
+        assert_eq!(
+            model_gate_reason(Some("score_below_floor")),
+            ReportFunnelReason::ScoreBelowFloor
+        );
+        assert_eq!(
+            model_gate_reason(Some("low_confidence")),
+            ReportFunnelReason::LowConfidence
+        );
     }
 }

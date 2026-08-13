@@ -5,8 +5,8 @@
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
 > - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `post_deployment_behavior`: 本次实现只交付唯一终态 clean-install contract；不设计升级、降级、旧版本共存或历史数据转换。
+> - `rollback_and_data_verification`: 仅在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置需要操作者另行授权。
 
 > 状态：生产级目标设计（概念真理）
 >
@@ -15,6 +15,11 @@
 > **实施拆分**：本文件是 Phase 03 的概念规格。可执行的子phase实施契约（3.0–3.7）见
 > [`phase-03/README.md`](phase-03/README.md)，按子phase推进；本文件保持"概念真理"，
 > 子phase文档保持"可执行契约"。
+
+> **Cross-Route serving contract**：category 决定 Route-specific feature/model/calibration contract，但不
+> 决定报告分区。一次 report discovery 先形成 `RepresentedRouteSet`，再对每个 Route 原子解析 Champion、
+> calibration、Trade Policy、Research Profile 与联合 scenario binding；任一 represented Route 不完整或
+> active inference 失败时整份报告 fail closed。
 
 ## 0. 核心原则
 
@@ -69,7 +74,7 @@
 
 ### 2.1 输入
 
-- active runtime config v3。
+- active `RecommendationPolicy` clean-install contract 与 frozen policy bundle。
 - market catalog。
 - current book quality。
 - recent volume/liquidity facts。
@@ -79,12 +84,13 @@
 ### 2.2 过滤层级
 
 1. `MarketStatusFilter`：只保留 open/active market。
-2. `CategoryFilter`：按配置启用 category。
+2. `CategoryFilter`：按配置启用 category；空集合明确表示全部受支持分类。
 3. `LiquidityFilter`：最小 depth、volume、spread。
 4. `DataQualityFilter`：book age、WS health、fact lag。
 5. `ResolutionAmbiguityFilter`：过度模糊或规则不清市场可降权或排除。
 6. `MarketStatusFilter` 同时处理 `MarketStatus::ManuallyBlocked`：操作员 block。
-7. `ModelEligibilityFilter`：模型需要的 feature 可用性。
+7. 在上述不可变 venue/lifecycle eligibility 后形成 `RepresentedRouteSet`。
+8. `ModelEligibilityFilter`：按 Route 评估模型需要的 feature；该过滤不能隐藏缺失 Route artifact。
 
 ### 2.3 输出
 
@@ -808,30 +814,23 @@ return_to_horizon = (future_exit_price - entry_reference_price) / entry_referenc
 
 Settlement label 成熟前，相关样本不能进入监督训练。
 
-## 16. 训练目标函数
+## 16. 训练目标与经济决策的硬边界
 
-第一版目标：
+Buy 模型只学习 allocation-independent 的 terminal payout truth。`WeightedFactor` 与
+`ClassicalLogisticRegression` 的生产目标固定为 `ModelTrainingTarget::OutcomePayout`；Dataset label 是
+`token_payout_ratio`，原样保留 Polymarket 的 `0 / 0.5 / 1` 兑付语义。不能把只在被选中、已成交或命中某个
+Trade Policy 的样本上才可观测的 realized return 当作 Buy 模型 target，否则会同时引入 selection bias、
+policy leakage，并在下游再次应用价格、费用和退出策略时重复计算经济信息。
 
-```text
-maximize rank quality under liquidity and downside constraints
-```
+Weighted factor 的训练只优化对 terminal payout 的样本外排序/预测质量，并使用 purged rolling validation、
+复杂度约束和完整 trial ledger。raw score 不能被解释为概率或 USD return；它必须在独立 calibration partition
+上转换为受验证的 payout distribution。`ForwardReturn` 只允许用于明确标记的 research-only classical
+regressor，不能成为 production Buy Champion；`HoldVsExitAlpha` 只属于 sell-side model family。
 
-Weighted factor 模型可用以下目标：
-
-```text
-loss =
-  pairwise_rank_loss(predicted_score, realized_return)
-  + lambda_drawdown * tail_loss_penalty
-  + lambda_turnover * turnover_penalty
-  + lambda_complexity * weight_l2
-```
-
-如果第一版不实现优化器，至少支持：
-
-- 手工权重。
-- grid search。
-- rolling validation。
-- category-level weight override。
+Trade Policy 通过独立、prospective 或 cross-fitted OOS policy-evaluation evidence 评估 executable cashflow、
+fee、slippage、capital occupancy 与 tail loss。最终收益目标只存在于
+`ExecutableEconomicTier → PortfolioScenarioArtifact → GlobalPortfolioPlanner`，不回灌为 Buy target，
+也不与 proper-score/calibration 指标做无量纲加权。
 
 伪代码：
 
@@ -841,7 +840,7 @@ fn estimate_factor_weights(
     objective: TrainingObjective,
     regularization: Regularization,
 ) -> QuantResult<FactorWeights> {
-    let candidates = generate_weight_candidates(objective.search_space);
+    let candidates = generate_weight_candidates(objective.trial_universe);
     let mut best = None;
 
     for weights in candidates {
@@ -1088,7 +1087,8 @@ Phase 3/4 可选 classical ML：
 - `burn`：后续 Rust-native 深度学习训练。
 - `candle`：后续轻量推理或 domain text feature。
 - `ort`：后续 ONNX 推理；注意最新版本 MSRV 可能高于当前 workspace 1.91。
-- `good_lp`：组合优化复杂化后引入；第一版可用 deterministic greedy planner。
+- direct `highs` + HiGHS：由 Phase 04/05 global portfolio 模块无条件提供；训练/backtest 通过 production
+  `GlobalPortfolioPlanner` 复用，不建立 score-based allocator。
 
 ### 24.4 训练 Artifact
 
@@ -1187,7 +1187,7 @@ pub trait ClassicalModelAdapter {
 |---|---|---|---|---|
 | Weighted factor | Rust research crate | Rust core/report | JSON/bitcode weights | 主路径 |
 | Classical ML | Rust research crate | Rust report/model runner | serialized model + preprocessing | Shadow 候选 |
-| LP portfolio | Rust portfolio planner | Rust report builder | constraints config, no prediction model | 后续优化 |
+| Global MILP portfolio | Rust portfolio planner | Rust report/backtest | scenario + economic tier + verifier evidence | 唯一生产路径 |
 | ONNX | 外部或 Rust export | `ort` runtime | `.onnx` + schema | Phase 6+ |
 | Burn DL | Rust research crate | Burn/ONNX runtime | burn checkpoint/export | Phase 8+ |
 | Candle inference | Artifact from HF/custom | Candle runtime | safetensors + config | Phase 8+ domain feature |
@@ -1204,8 +1204,8 @@ pub trait ClassicalModelAdapter {
 是否只需要 baseline / linear sanity check？
   -> 是：Linfa linear/logistic/PCA
 
-是否组合约束导致 greedy 明显次优？
-  -> 是：good_lp portfolio optimizer
+是否需要生成 report/backtest portfolio？
+  -> 是：无条件使用 direct highs + HiGHS GlobalPortfolioPlanner
 
 是否已有外部训练模型且能导出 ONNX？
   -> 是：ort inference
@@ -1265,23 +1265,22 @@ let runtime: Arc<dyn QuantModelRuntime> = source.buy_runtime()?;
   不得提供 family override。
 - 加载失败时不能 panic，必须返回 typed error。
 
-## 28. 推理降级策略
+## 28. 推理失败策略
 
 推理失败按层级处理：
 
 | 失败 | 行为 |
 |---|---|
-| active weighted model load failed | 报告失败，critical alert |
+| active Champion load/inference failed | 整份报告失败，critical alert |
 | shadow model failed | active report 继续，记录 shadow failed |
 | classical shadow failed | active weighted 继续 |
-| ONNX runtime failed | fallback 到 active weighted/classical |
+| active ONNX runtime failed | 整份报告失败；不切换未冻结 model |
 | candle domain feature failed | domain feature missing，按 null policy |
-| burn model failed | 禁止 publish 或 fallback |
+| active burn model failed | 整份报告失败 |
 
-自动执行要求：
-
-- 不能使用 fallback model 自动执行，除非 fallback model 本身是 active published model。
-- fallback 必须写入 report summary。
+active Route 没有 runtime fallback。只有 frozen Champion 可以产生 production candidate；shadow failure 不
+改变 active result，但必须写入 Route diagnostics。model promotion/rollback 只能通过新的 governed serving
+generation 生效，不能在 report run 中途切换。
 
 ## 29. Artifact 发布与回滚闭环
 
@@ -1310,7 +1309,7 @@ train artifact
 - `burn` 负责 Rust-native DL 训练，不是第一版主路径。
 - `candle` 优先作为 domain/text feature extractor，不直接决定 recommendation。
 - `ort` 优先作为 ONNX inference runtime，不负责在线训练。
-- `good_lp` 负责 portfolio optimization，不负责模型训练。
+- direct `highs` 负责 portfolio optimization，不负责模型训练。
 - `smartcore`/`linfa` 负责 classical candidates，必须通过 adapter。
 
 这些边界如果不清楚，会导致 research、report、execution 三层耦合，必须禁止。

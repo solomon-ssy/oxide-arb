@@ -5,6 +5,8 @@
 //! activation must bind the exact approval, expected active revision,
 //! short-lived preflight proof, and idempotency key.
 
+use std::collections::BTreeMap;
+
 use actix_web::{
     http::Method,
     web::{Data, Path, Query},
@@ -14,18 +16,15 @@ use quant_pivot_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
 };
 use quant_pivot_models::{
-    config::DeployConfig,
     domain::{
         api::{
             ActivatePolicyDraftRequest, ApprovePolicyDraftRequest, ConfigActivityQuery,
             ConfigActivityView, ConfigResourceSummaryView, ConfigResourcesView,
-            ConfigSnapshotOptionsQuery, CreatePolicyDraftRequest, CredentialHealthView,
-            CurrentPolicyResourceView, DecisionPolicySnapshotOptionView,
-            DeploymentConfigSnapshotView, DeploymentConfigView, DeploymentEndpointView,
-            DeploymentIdentityView, DeploymentResourceBudgetView, DeploymentResourceLimitView,
-            PolicyActivationResultView, PolicyApprovalView, PolicyResourceSchemaView,
-            PolicyRevisionListQuery, PolicyRevisionView, PolicyValidationView,
-            SchedulePreviewRequest, SchedulePreviewView, ValidatePolicyDraftRequest,
+            ConfigSnapshotOptionsQuery, CreatePolicyDraftRequest, CurrentPolicyResourceView,
+            DecisionPolicySnapshotOptionView, DeploymentConfigView, PolicyActivationResultView,
+            PolicyApprovalView, PolicyResourceSchemaView, PolicyRevisionListQuery,
+            PolicyRevisionView, PolicyValidationView, SchedulePreviewRequest, SchedulePreviewView,
+            ValidatePolicyDraftRequest,
         },
         governance::{
             NewDecisionPolicySnapshot, NewPolicyActivation, NewPolicyRevision,
@@ -39,18 +38,18 @@ use quant_pivot_models::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
         runtime_config::{
-            CheckOutcome, ConfigAuditAction, ConfigResourceKind, CredentialHealthStatus,
-            CredentialKind, DecisionPolicySnapshotSource, DeploymentEndpointKind,
+            CheckOutcome, ConfigAuditAction, ConfigResourceKind, DecisionPolicySnapshotSource,
             PolicyActivationKind, PolicyActorKind, PolicyPreflightCheckKind,
             PolicyPreflightDetailCode, PolicyRevisionStatus, PolicyValidationCode,
-            PolicyValidationSeverity, ResourceBudgetKind, ResourceBudgetMetric, ResourceBudgetUnit,
+            PolicyValidationSeverity,
         },
     },
     hashing::CanonicalDigest,
     runtime_config::{
         DecisionPolicySnapshot, POLICY_RESOURCE_SCHEMA_VERSION, PolicyBundleIdentity,
         PolicyDocument, PolicyPreflightResult, PolicyRevisionBundle, PolicyValidationEvidence,
-        PolicyValidationIssue, PolicyValidationSubject, preview_fire_times,
+        PolicyValidationIssue, PolicyValidationSubject, RuntimeResourceDescriptor,
+        preview_fire_times,
     },
     types::{
         AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
@@ -243,10 +242,20 @@ pub async fn resource_schema(
     kind: Path<ConfigResourceKind>,
 ) -> Result<WebResponse<PolicyResourceSchemaView>, WebError> {
     let kind = kind.into_inner();
+    let document_schema = DecisionPolicySnapshot::resource_json_schema(kind);
+    let descriptor = RuntimeResourceDescriptor::from_schema(kind, &document_schema);
+    let audit_failures = descriptor.audit();
+    if !audit_failures.is_empty() {
+        return Err(WebError::Internal(format!(
+            "runtime descriptor audit failed for {kind}: {}",
+            audit_failures.join("; ")
+        )));
+    }
     Ok(WebResponse::ok(PolicyResourceSchemaView {
         kind,
         schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
-        json_schema: DecisionPolicySnapshot::resource_json_schema(kind),
+        document_schema,
+        fields: descriptor.fields,
         effective_boundary: kind.apply_boundary(),
         consumers: kind.consumers().to_vec(),
     }))
@@ -573,292 +582,15 @@ pub async fn schedule_preview(
 pub async fn deployment(
     state: Data<AppState>,
 ) -> Result<WebResponse<DeploymentConfigView>, WebError> {
-    let deploy = &state.deploy;
-    let artifact_store = &deploy.research.artifact_store;
-    let artifact_address = artifact_store.endpoint.clone().unwrap_or_else(|| {
-        if artifact_store.bucket.is_empty() {
-            artifact_store.prefix.clone()
-        } else {
-            format!("s3://{}/{}", artifact_store.bucket, artifact_store.prefix)
-        }
-    });
-    let endpoints = vec![
-        DeploymentEndpointView {
-            kind: DeploymentEndpointKind::WebBind,
-            address: format!("{}:{}", deploy.web.listen_host, deploy.web.listen_port),
-        },
-        DeploymentEndpointView {
-            kind: DeploymentEndpointKind::Postgres,
-            address: format!(
-                "{}:{}/{}",
-                deploy.db.postgres.host, deploy.db.postgres.port, deploy.db.postgres.database
-            ),
-        },
-        DeploymentEndpointView {
-            kind: DeploymentEndpointKind::Clickhouse,
-            address: format!(
-                "{}/{}",
-                deploy.db.clickhouse.url, deploy.db.clickhouse.database
-            ),
-        },
-        DeploymentEndpointView {
-            kind: DeploymentEndpointKind::Redis,
-            address: deploy.cache.redis.endpoint(),
-        },
-        DeploymentEndpointView {
-            kind: DeploymentEndpointKind::GammaApi,
-            address: deploy.market_data.gamma.base_url.clone(),
-        },
-        DeploymentEndpointView {
-            kind: DeploymentEndpointKind::ClobApi,
-            address: deploy.polymarket.clob_base_url.clone(),
-        },
-        DeploymentEndpointView {
-            kind: DeploymentEndpointKind::DataApi,
-            address: deploy.market_data.data_api.base_url.clone(),
-        },
-        DeploymentEndpointView {
-            kind: DeploymentEndpointKind::ArtifactStore,
-            address: artifact_address,
-        },
-        DeploymentEndpointView {
-            kind: DeploymentEndpointKind::DomainProvider,
-            address: deploy.domain_sources.binance.rest_url.clone(),
-        },
-    ];
+    let fields = state
+        .deploy
+        .safe_projection()
+        .map_err(|error| WebError::Internal(error.to_string()))?;
     Ok(WebResponse::ok(DeploymentConfigView {
-        environment: deploy.deployment.environment.clone(),
+        environment: state.deploy.deployment.environment.clone(),
         restart_required: true,
-        snapshot: DeploymentConfigSnapshotView {
-            endpoints,
-            identity: DeploymentIdentityView {
-                deployment_id: deploy.db.clickhouse.deployment_id.clone(),
-                instance_id: deploy.db.clickhouse.cluster_id.clone(),
-            },
-            resource_budgets: deployment_resource_budgets(deploy),
-        },
-        credential_health: deployment_credential_health(deploy),
+        fields,
     }))
-}
-
-fn deployment_resource_budgets(deploy: &DeployConfig) -> Vec<DeploymentResourceBudgetView> {
-    let postgres = &deploy.db.postgres;
-    let clickhouse = &deploy.db.clickhouse;
-    let research = &deploy.quant.research_jobs;
-    let reports = &deploy.quant.workers;
-    vec![
-        DeploymentResourceBudgetView {
-            kind: ResourceBudgetKind::Database,
-            limits: vec![
-                resource_limit(
-                    ResourceBudgetMetric::MaxConcurrency,
-                    u64::from(postgres.max_connections),
-                    ResourceBudgetUnit::Count,
-                ),
-                resource_limit(
-                    ResourceBudgetMetric::MinConcurrency,
-                    u64::from(postgres.min_connections),
-                    ResourceBudgetUnit::Count,
-                ),
-                resource_limit(
-                    ResourceBudgetMetric::OperationTimeout,
-                    postgres.acquire_timeout_secs.saturating_mul(1_000),
-                    ResourceBudgetUnit::Milliseconds,
-                ),
-            ],
-        },
-        DeploymentResourceBudgetView {
-            kind: ResourceBudgetKind::ClickhouseWriter,
-            limits: vec![
-                resource_limit(
-                    ResourceBudgetMetric::MaxConcurrency,
-                    usize_to_u64(clickhouse.max_concurrent_inserts),
-                    ResourceBudgetUnit::Count,
-                ),
-                resource_limit(
-                    ResourceBudgetMetric::BatchRows,
-                    usize_to_u64(clickhouse.batch_size),
-                    ResourceBudgetUnit::Rows,
-                ),
-                resource_limit(
-                    ResourceBudgetMetric::OperationTimeout,
-                    clickhouse.flush_interval_secs,
-                    ResourceBudgetUnit::Seconds,
-                ),
-            ],
-        },
-        DeploymentResourceBudgetView {
-            kind: ResourceBudgetKind::MarketDataIngest,
-            limits: vec![
-                resource_limit(
-                    ResourceBudgetMetric::SubscriptionCapacity,
-                    usize_to_u64(deploy.market_data.websocket.engine_max_subscription_tokens),
-                    ResourceBudgetUnit::Tokens,
-                ),
-                resource_limit(
-                    ResourceBudgetMetric::BatchRows,
-                    usize_to_u64(deploy.domain_sources.binance.batch_size),
-                    ResourceBudgetUnit::Rows,
-                ),
-            ],
-        },
-        DeploymentResourceBudgetView {
-            kind: ResourceBudgetKind::Cache,
-            limits: vec![
-                resource_limit(
-                    ResourceBudgetMetric::MaxConcurrency,
-                    u64::from(deploy.cache.redis.pool_size),
-                    ResourceBudgetUnit::Count,
-                ),
-                resource_limit(
-                    ResourceBudgetMetric::CacheEntries,
-                    deploy.cache.moka.max_capacity,
-                    ResourceBudgetUnit::Entries,
-                ),
-                resource_limit(
-                    ResourceBudgetMetric::OperationTimeout,
-                    deploy.cache.operation_timeout_ms,
-                    ResourceBudgetUnit::Milliseconds,
-                ),
-            ],
-        },
-        DeploymentResourceBudgetView {
-            kind: ResourceBudgetKind::ResearchJobs,
-            limits: vec![
-                resource_limit(
-                    ResourceBudgetMetric::MaxConcurrency,
-                    usize_to_u64(research.global_concurrency),
-                    ResourceBudgetUnit::Count,
-                ),
-                resource_limit(
-                    ResourceBudgetMetric::LeaseDuration,
-                    u64::try_from(research.lease_ttl_secs).unwrap_or_default(),
-                    ResourceBudgetUnit::Seconds,
-                ),
-                resource_limit(
-                    ResourceBudgetMetric::HeartbeatInterval,
-                    research.heartbeat_secs,
-                    ResourceBudgetUnit::Seconds,
-                ),
-            ],
-        },
-        DeploymentResourceBudgetView {
-            kind: ResourceBudgetKind::ReportExecution,
-            limits: vec![
-                resource_limit(
-                    ResourceBudgetMetric::QueueCapacity,
-                    reports.report_ad_hoc_queue_capacity,
-                    ResourceBudgetUnit::Count,
-                ),
-                resource_limit(
-                    ResourceBudgetMetric::LeaseDuration,
-                    reports.report_run_lease_secs,
-                    ResourceBudgetUnit::Seconds,
-                ),
-                resource_limit(
-                    ResourceBudgetMetric::HeartbeatInterval,
-                    reports.report_run_heartbeat_secs,
-                    ResourceBudgetUnit::Seconds,
-                ),
-            ],
-        },
-        DeploymentResourceBudgetView {
-            kind: ResourceBudgetKind::Web,
-            limits: vec![resource_limit(
-                ResourceBudgetMetric::ConfiguredOrigins,
-                usize_to_u64(deploy.web.cors_allowed_origins.len()),
-                ResourceBudgetUnit::Count,
-            )],
-        },
-    ]
-}
-
-const fn resource_limit(
-    metric: ResourceBudgetMetric,
-    value: u64,
-    unit: ResourceBudgetUnit,
-) -> DeploymentResourceLimitView {
-    DeploymentResourceLimitView {
-        metric,
-        value,
-        unit,
-    }
-}
-
-fn deployment_credential_health(deploy: &DeployConfig) -> Vec<CredentialHealthView> {
-    vec![
-        credential_health(
-            CredentialKind::PostgresRuntime,
-            !deploy.db.postgres.password.is_empty(),
-        ),
-        credential_health(
-            CredentialKind::ClickhouseRuntime,
-            !deploy.db.clickhouse.password.is_empty(),
-        ),
-        credential_health(
-            CredentialKind::RedisRuntime,
-            !deploy.cache.redis.password.is_empty(),
-        ),
-        credential_health(CredentialKind::JwtSigning, deploy.web.has_jwt_signing_key()),
-        credential_health(
-            CredentialKind::PolymarketPrivateKey,
-            deploy.keys.private_key_present(),
-        ),
-        credential_health(
-            CredentialKind::TelegramBotToken,
-            !deploy.notifications.telegram.bot_token.is_empty(),
-        ),
-        credential_health(
-            CredentialKind::WebhookAuthorization,
-            !deploy.notifications.webhook.authorization.is_empty(),
-        ),
-        credential_health(
-            CredentialKind::EvidenceAttestation,
-            !deploy.research.evidence_attestation.signing_key.is_empty(),
-        ),
-        credential_health(
-            CredentialKind::PolymarketRelayer,
-            deploy
-                .polymarket
-                .relayer
-                .api_key
-                .as_ref()
-                .is_some_and(|credential| !credential.is_empty()),
-        ),
-        credential_health(
-            CredentialKind::ChainlinkDataStreamsApiKey,
-            deploy
-                .domain_sources
-                .chainlink_data_streams
-                .api_key
-                .as_ref()
-                .is_some_and(|credential| !credential.is_empty()),
-        ),
-        credential_health(
-            CredentialKind::ChainlinkDataStreamsApiSecret,
-            deploy
-                .domain_sources
-                .chainlink_data_streams
-                .api_secret
-                .as_ref()
-                .is_some_and(|credential| !credential.is_empty()),
-        ),
-    ]
-}
-
-const fn credential_health(credential: CredentialKind, configured: bool) -> CredentialHealthView {
-    CredentialHealthView {
-        credential,
-        status: if configured {
-            CredentialHealthStatus::Available
-        } else {
-            CredentialHealthStatus::NotConfigured
-        },
-    }
-}
-
-fn usize_to_u64(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 struct PolicyTransitionContext<'a> {
@@ -1131,8 +863,9 @@ async fn validate_and_prepare(
             evidence.issues.push(PolicyValidationIssue {
                 severity: PolicyValidationSeverity::Error,
                 code: PolicyValidationCode::DependencyUnavailable,
-                path: "consumers".to_owned(),
-                message: error.to_string(),
+                pointer: "/consumers".to_owned(),
+                message_parameters: BTreeMap::from([("detail".to_owned(), error.to_string())]),
+                remediation: "Restore the affected consumer and run preflight again.".to_owned(),
             });
             evidence.preflight.push(PolicyPreflightResult {
                 check: PolicyPreflightCheckKind::ConsumerPreparation,
@@ -1152,15 +885,17 @@ fn validation_evidence(report: &ConfigValidationReport) -> PolicyValidationEvide
         .map(|error| PolicyValidationIssue {
             severity: PolicyValidationSeverity::Error,
             code: validation_error_code(error),
-            path: validation_error_path(error),
-            message: error.to_string(),
+            pointer: validation_error_pointer(error),
+            message_parameters: validation_error_parameters(error),
+            remediation: validation_error_remediation(error).to_owned(),
         })
         .collect::<Vec<_>>();
     issues.extend(report.warnings.iter().map(|warning| PolicyValidationIssue {
         severity: PolicyValidationSeverity::Warning,
         code: PolicyValidationCode::SemanticConstraint,
-        path: validation_warning_path(warning).to_owned(),
-        message: warning.to_string(),
+        pointer: field_pointer(validation_warning_path(warning)),
+        message_parameters: BTreeMap::from([("detail".to_owned(), warning.to_string())]),
+        remediation: "Review this value before activation.".to_owned(),
     }));
     PolicyValidationEvidence {
         subject: None,
@@ -1198,18 +933,64 @@ const fn validation_error_code(error: &ConfigValidationError) -> PolicyValidatio
     }
 }
 
-fn validation_error_path(error: &ConfigValidationError) -> String {
+fn validation_error_pointer(error: &ConfigValidationError) -> String {
     match error {
-        ConfigValidationError::InfeasibleRange { field_low, .. } => (*field_low).to_owned(),
-        ConfigValidationError::InvalidKellyFraction(_) => "portfolio.kelly_fraction".to_owned(),
-        ConfigValidationError::MissingCredentials { .. } => "credentials".to_owned(),
-        ConfigValidationError::InvalidValue { field, .. } => (*field).to_owned(),
+        ConfigValidationError::InfeasibleRange { field_low, .. } => field_pointer(field_low),
+        ConfigValidationError::MissingCredentials { .. } => "/credentials".to_owned(),
+        ConfigValidationError::InvalidValue { field, .. } => field_pointer(field),
     }
+}
+
+fn validation_error_parameters(error: &ConfigValidationError) -> BTreeMap<String, String> {
+    match error {
+        ConfigValidationError::InfeasibleRange {
+            field_low,
+            value_low,
+            field_high,
+            value_high,
+        } => BTreeMap::from([
+            ("field_low".to_owned(), (*field_low).to_owned()),
+            ("value_low".to_owned(), value_low.to_string()),
+            ("field_high".to_owned(), (*field_high).to_owned()),
+            ("value_high".to_owned(), value_high.to_string()),
+        ]),
+        ConfigValidationError::MissingCredentials { mode, missing } => BTreeMap::from([
+            ("mode".to_owned(), mode.clone()),
+            ("missing".to_owned(), missing.join(", ")),
+        ]),
+        ConfigValidationError::InvalidValue { detail, .. } => {
+            BTreeMap::from([("detail".to_owned(), detail.clone())])
+        }
+    }
+}
+
+const fn validation_error_remediation(error: &ConfigValidationError) -> &'static str {
+    match error {
+        ConfigValidationError::InfeasibleRange { .. } => {
+            "Set the lower bound below the upper bound."
+        }
+        ConfigValidationError::MissingCredentials { .. } => {
+            "Configure every required credential before activation."
+        }
+        ConfigValidationError::InvalidValue { .. } => {
+            "Use the field metadata to enter a valid value."
+        }
+    }
+}
+
+fn field_pointer(field: &str) -> String {
+    if field.starts_with('/') {
+        return field.to_owned();
+    }
+    let segments = field
+        .split('.')
+        .map(|segment| segment.replace('~', "~0").replace('/', "~1"))
+        .collect::<Vec<_>>();
+    format!("/{}", segments.join("/"))
 }
 
 const fn validation_warning_path(warning: &ConfigWarning) -> &'static str {
     match warning {
-        ConfigWarning::LargeKellyFraction(_) => "portfolio.kelly_fraction",
         ConfigWarning::JwtSigningKeyUnconfigured => "web.jwt.signing_key",
     }
 }
@@ -1275,9 +1056,9 @@ fn new_snapshot(
         execution_risk_policy_revision_id: revisions.execution_risk_policy.ok_or_else(missing)?,
         model_routing_revision_id: revisions.model_routing.ok_or_else(missing)?,
         report_schedule_revision_id: revisions.report_schedule.ok_or_else(missing)?,
-        operational_control_revision_id: revisions.operational_control.ok_or_else(missing)?,
-        execution_authorization_revision_id: revisions
-            .execution_authorization
+        operations_policy_revision_id: revisions.operations_policy.ok_or_else(missing)?,
+        execution_automation_policy_revision_id: revisions
+            .execution_automation_policy
             .ok_or_else(missing)?,
         snapshot: snapshot_document,
         source,

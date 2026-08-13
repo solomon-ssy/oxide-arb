@@ -56,6 +56,8 @@ pub struct FeedbackCycleKey {
     champion_model_spec_definition_hash: ContentHash,
     champion_model_family: ModelFamily,
     route: BuyModelRoute,
+    // Decision-time policy that published the Route. The Champion's distinct
+    // build-time policy preimage is committed by champion_serving_contract_hash.
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     decision_policy_snapshot_hash: ContentHash,
     policy_bundle_generation: PolicyBundleGeneration,
@@ -99,6 +101,10 @@ pub struct FeedbackCycleKeyInput {
     pub champion_model_spec_definition_hash: ContentHash,
     pub champion_model_family: ModelFamily,
     pub route: BuyModelRoute,
+    /// Decision-time policy that published the frozen Route generation.
+    ///
+    /// The Champion's build-time policy preimage is a separate immutable graph
+    /// committed by `champion_serving_contract_hash`.
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub decision_policy_snapshot_hash: ContentHash,
     pub policy_bundle_generation: PolicyBundleGeneration,

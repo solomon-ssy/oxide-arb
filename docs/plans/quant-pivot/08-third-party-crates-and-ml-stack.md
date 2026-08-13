@@ -5,8 +5,8 @@
 > - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
 > - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
+> - `post_deployment_behavior`: 本次实现只交付唯一终态 clean-install contract；不设计升级、降级、旧版本共存或历史数据转换。
+> - `rollback_and_data_verification`: 仅在 disposable 空基础设施执行 fresh-install 验证；任何真实数据重置需要操作者另行授权。
 
 > 状态：生产级技术选型设计
 >
@@ -33,7 +33,7 @@
 | Classical ML | `smartcore` | `linfa` | Phase 3/4 | tree/ensemble 覆盖更完整 |
 | 线性/逻辑模型 | `linfa` | `smartcore` | Phase 3 | scikit-learn-like API |
 | 权重优化 | `argmin` | grid search 自研 | Phase 3 | factor weight optimization |
-| 组合优化 | `good_lp` + solver | greedy 自研 | Phase 4/5 | LP/MILP 表达预算和约束 |
+| 组合优化 | direct `highs` + HiGHS | 无 | Phase 4/5 | 单模型多阶段 re-optimization；联合场景、离散 tiers、exact verifier |
 | 并行特征 | `rayon` | tokio tasks | Phase 3 | CPU-bound 特征/回测 |
 | Report occurrence | `croner` + PostgreSQL durable coordinator | 无 scheduler runtime crate | Phase 11.8 | cadence 计算与 durable run/gap/lease 分离 |
 | ONNX 推理 | `ort` | `candle` | Phase 6+ | 外部训练模型线上推理 |
@@ -266,34 +266,40 @@ score = Σ normalized_factor_i * weight_i * confidence_i
 - Phase 3 用于 `WeightedFactorTrainer`。
 - 保留 grid search 作为 deterministic fallback。
 
-### 6.2 `good_lp`
+### 6.2 direct `highs`
 
 用途：
 
-- portfolio allocation。
-- budget constraints。
-- per-category exposure。
-- per-event exposure。
-- integer TopN inclusion。
+- 跨 Route `ExecutableEconomicTier` 的 one-hot MILP selection；
+- budget、reserve、time-bucket capital 与 existing exposure；
+- recommendation/market/event/category/Route exposure；
+- joint scenario loss、CVaR、drawdown、TopN 与 structural exclusivity。
 
 规则：
 
-- `good_lp` 是建模层，不是 solver。
-- 第一版可以先用 deterministic greedy planner。
-- 若引入 solver，必须明确 solver backend：
-  - pure Rust / minimal native：优先小规模问题。
-  - HiGHS：性能强，但 native 依赖更复杂。
+- 安全 Rust `highs` API 直接构建并修改唯一 HiGHS production/backtest/replay model；
+- 每次 portfolio solve 只上传一次稀疏矩阵；后续 stage 只修改 objective、追加 exact lock 并 hot-start；
+- decision variable 是离散 tier identity，不从连续浮点解反推 USD/shares；
+- solver coefficient 使用经过范围证明的安全整数缩放；
+- 四阶段 lexicographic solve：robust net USD、nominal net USD、CVaR/capital-time、stable identity；
+- 只有 Optimal + Decimal exact post-check 才返回 `GlobalPortfolioPlan`；
+- timeout/non-optimal/numeric/infeasible/mismatch 使 report run 失败，无替代 planner。
 
 组合优化问题示例：
 
 ```text
-maximize Σ score_i * x_i
+stage 1: maximize min_distribution Σ discounted_net_cashflow[i,t,s] * x[i,t]
 subject to:
-  Σ usd_i * x_i <= total_budget
-  usd_i * x_i <= per_market_cap_i
-  Σ category_usd_c <= category_cap_c
-  x_i ∈ {0, 1}
+  Σ_t x[i,t] <= 1
+  capital[bucket] <= allowed_capital[bucket]
+  scenario_loss[s] <= maximum_scenario_loss
+  CVaR_alpha <= cvar_cap
+  market/event/category/route exposure <= explicit caps
+  x[i,t] ∈ {0, 1}
 ```
+
+完整公式与 determinism contract 见
+[`phase-05/05.8-portfolio-optimization-highs.md`](phase-05/05.8-portfolio-optimization-highs.md)。
 
 ## 7. 推理栈
 
@@ -422,9 +428,13 @@ smartcore
 
 ### Phase 5
 
-可新增：
+必须新增并进入唯一 production 路径：
 
-- `good_lp`，若 greedy portfolio planner 不够。
+- direct `highs` 作为唯一 MILP 边界；
+- HiGHS 作为唯一 production solver backend。
+
+production、backtest 与 replay 共享同一 `GlobalPortfolioPlanner`；不得保留 greedy、LP relaxation、
+backend selector 或 feature-off fallback。
 
 ### Phase 6+
 
@@ -453,7 +463,7 @@ ml-classical = ["dep:smartcore", "dep:linfa"]
 ml-onnx = ["dep:ort"]
 ml-deep = ["dep:burn", "dep:candle-core", "dep:candle-nn"]
 dataframe = ["dep:polars"]
-lp-solver = ["dep:good_lp"]
+portfolio-solver = ["dep:highs"]
 ```
 
 原则：
@@ -558,7 +568,7 @@ burn train
 - Polars Rust 文档：https://docs.pola.rs/
 - `ort` crate 与指南：https://ort.pyke.io/
 - `argmin` 文档：https://argmin-rs.org/
-- `good_lp` 仓库：https://github.com/rust-or/good_lp
+- `highs` Rust wrapper：https://github.com/rust-or/highs
 - `ndarray` / `ndarray-stats` / `statrs` docs.rs。
 
 ## 15. Classical ML 生产设计
@@ -666,110 +676,38 @@ TrainingDatasetArtifact
 ### 15.6 Production Guardrails
 
 - model inference 必须有 timeout。
-- inference failure 必须降级到 report empty 或 fallback model。
+- represented Route 的 active inference failure 必须使整份 report run 失败；不得切换未冻结 model 或伪装
+  成 empty report。shadow failure 只记录 diagnostics。
 - model artifact hash mismatch 时禁止加载。
 - feature schema mismatch 时禁止推理。
 - crate version mismatch 必须告警，并默认拒绝加载。
 
-## 16. `good_lp` 与组合优化设计
+## 16. direct `highs` + HiGHS 全局组合设计
 
-`good_lp` 不是模型训练框架，它是 portfolio planner 的优化建模层。它解决“选哪些 recommendation、每个分配多少资本、如何满足约束”。
+安全 Rust `highs` API 是唯一 modeling boundary，HiGHS 是唯一 production MILP backend。模型选择不是
+Runtime Config；production 与 backtest 使用同一实现。删除多余 modeling wrapper、microlp/greedy/relaxation/backend
+selector 和 feature-off path。单次 portfolio solve 只构建一个 immutable matrix；lexicographic stages 通过
+objective mutation、exact epsilon lock 与前一最优解 MIP start 完成，不重复构建模型。
 
-> **As-built（Phase 05.8）**：greedy allocator 已**彻底删除**，组合分配统一为单一 `good_lp` LP/MILP
-> 代码路径（`LinearProgrammingPortfolioAllocator`，生产与回测共用）。关键修正：`good_lp` 的纯 Rust
-> 后端 `microlp` **原生支持 integer/binary（完整 MILP）**——并非旧文本所述“microlp 仅连续 LP、MILP
-> 必须 HiGHS”。因此 `lp-solver`(microlp) 是 research 的**默认 feature**，零 native 依赖、可进
-> report_only build。失败阶梯（报告永不崩）：MILP（microlp 默认 / 可选 native HiGHS）→ 连续 LP
-> relaxation + 确定性取整（纯 microlp）→ 空 plan。目标函数定稿为
-> `maximize Σ wᵢ·uᵢ，wᵢ = scoreᵢ·(1+λ·ret_normᵢ)`，`uᵢ ≤ desired_usdᵢ·xᵢ`（Kelly 风险锚），
-> `Σ xᵢ ≤ top_n`（binary 基数，预算只被发布名消耗）。求解 provenance 落
-> `quant_portfolio_plan.optimizer_meta_json`（`PortfolioOptimizerMeta`）。详见
-> [`phase-05/05.8-portfolio-optimization-good-lp.md`](phase-05/05.8-portfolio-optimization-good-lp.md)。
+输入不是 raw `SignalCandidate`，而是已经完成真实 L2/fee/slippage/Trade Policy/scenario conversion 的离散
+`ExecutableEconomicTier`。每个 candidate 用 one-hot binary tier variables；solver 只返回 tier identity，
+金额由 Decimal/newtype exact verifier 重算。
 
-### 16.1 何时引入
+四阶段 lexicographic objective：
 
-历史背景（已被上方 As-built 取代）：第一版曾使用 deterministic greedy planner：
+1. maximize worst-distribution discounted expected net USD；
+2. maximize nominal expected net USD；
+3. minimize CVaR and capital USD-hours；
+4. deterministic identity tie-break。
 
-```text
-sort by risk_adjusted_score
- -> iterate
- -> apply budget/exposure/liquidity caps
- -> accept/reject
-```
+约束覆盖 real cash/reserve/existing positions、time-bucket capital、recommendation/market/event/category/Route、
+scenario loss、CVaR、drawdown、TopN 和 structural payout/exclusivity。联合 dependence 只来自 promoted
+`PortfolioScenarioArtifact`。
 
-`good_lp` 在 Phase 05.8 落地，因为：
-
-- TopN inclusion 需要全局最优。
-- category/event constraints 互相冲突。
-- 需要 binary decision。
-- 需要同时优化 capital 和 rank utility。
-
-### 16.2 Optimizer Trait
-
-```rust
-pub trait PortfolioOptimizer {
-    fn optimize(
-        &self,
-        input: PortfolioOptimizationInput,
-    ) -> QuantResult<PortfolioOptimizationOutput>;
-}
-
-pub struct PortfolioOptimizationInput {
-    pub candidates: Vec<SignalCandidate>,
-    pub budget: PortfolioBudget,
-    pub constraints: PortfolioConstraints,
-    pub objective: PortfolioObjective,
-}
-```
-
-实现：
-
-- `GreedyPortfolioOptimizer`
-- `LinearProgrammingPortfolioOptimizer`
-
-### 16.3 LP/MILP 建模
-
-变量：
-
-```text
-x_i ∈ {0, 1}   是否选择 candidate i
-u_i >= 0       分配 USD
-```
-
-目标：
-
-```text
-maximize Σ (risk_adjusted_score_i * x_i) + λ * expected_return_i * u_i
-```
-
-约束：
-
-```text
-Σ u_i <= total_budget
-u_i <= max_usd_i * x_i
-u_i >= min_usd_i * x_i
-Σ u_i where category=c <= category_cap_c
-Σ u_i where event=e <= event_cap_e
-u_i <= liquidity_cap_i
-Σ x_i <= top_n
-```
-
-### 16.4 Solver 选择
-
-| Solver | 优点 | 风险 | 建议 |
-|---|---|---|---|
-| greedy self-built | 无依赖、确定性 | 非全局最优 | 第一版默认 |
-| `good_lp` + pure Rust solver | 部署简单 | 能力/性能有限 | Phase 5 spike |
-| `good_lp` + HiGHS | 性能强 | native 依赖 | 大规模后再引入 |
-| CBC | MILP 成熟 | native/许可证/部署复杂 | 谨慎 |
-
-### 16.5 生产要求
-
-- 优化必须有 time limit。
-- 超时 fallback 到 greedy。
-- solver status 进入 report summary。
-- infeasible 必须输出 constraints conflict。
-- native solver 不得成为 report_only 启动硬依赖。
+HiGHS 使用固定 threads/seed/tolerance 与 canonical input order。只有 `Optimal` 且 exact post-solve verification
+通过才发布 plan；timeout、non-optimal、numeric issue、infeasible contract 或 post-check mismatch 使 report
+run 失败，不提供 fallback。完整规格见
+[`phase-05/05.8-portfolio-optimization-highs.md`](phase-05/05.8-portfolio-optimization-highs.md)。
 
 ## 17. `ort` / ONNX 推理生产设计
 
@@ -1016,7 +954,8 @@ pub trait UnifiedModelRunner {
 - model registry 决定 artifact 类型。
 - runtime config 决定 active model version。
 - feature schema mismatch 一律拒绝。
-- 推理失败可以 fallback，但 fallback 必须写入 report summary。
+- represented Route 的 active inference 失败必须使整份 report run 失败；不得切换模型或伪装为
+  zero-candidate Route。shadow inference failure 只写 diagnostics，不影响冻结的 active output。
 
 ### 20.1 退出侧模型编排（Opportunistic Sell — Phase 6）
 
@@ -1050,13 +989,12 @@ opportunistic Sell → [`phase-06/06.1-opportunistic-sell-exit-signal.md`](phase
 - `statrs`
 - `argmin`
 - self-built weighted scorer
-- greedy portfolio planner
+- direct `highs` + HiGHS global portfolio planner
 
 不使用：
 
 - `smartcore`
 - `linfa`
-- `good_lp`
 - `ort`
 - `burn`
 - `candle`
@@ -1073,16 +1011,13 @@ opportunistic Sell → [`phase-06/06.1-opportunistic-sell-exit-signal.md`](phase
 - 评估 feature importance。
 - 只在质量明显更好时 publish。
 
-### Stage C：组合优化升级
+### Stage C：组合优化容量与确定性加固
 
-增加：
+不引入第二 solver 或降级路径。目标是：
 
-- `good_lp`
-
-目标：
-
-- 替代 greedy portfolio planner。
-- 提升预算/约束冲突下的全局选择质量。
+- 在候选上限与联合 scenario 上证明 HiGHS MILP 的最优性、确定性和 SLO；
+- 用 brute-force oracle、exact Decimal verifier 与 input-reorder 测试证明经济和约束正确性；
+- 性能不足时优化 canonicalization、sparse matrix 与 scenario reduction，不降低求解语义。
 
 ### Stage D：ONNX 推理
 
@@ -1114,7 +1049,7 @@ opportunistic Sell → [`phase-06/06.1-opportunistic-sell-exit-signal.md`](phase
 - 每个 crate 都有明确 feature gate。
 - 每个模型族都有 artifact contract。
 - 每个模型族都能进入 model registry。
-- 每个推理 runtime 都能 timeout / fail / fallback。
+- 每个推理 runtime 都有 timeout 与 typed fail-closed 语义；active represented Route 禁止 fallback。
 - 每个训练 runtime 都写 dataset hash、feature schema hash、label schema hash。
 - 每个发布模型都有 quality gate report。
 - MSRV/native 依赖风险已在 CI 和 Docker 中验证。
@@ -1140,6 +1075,6 @@ opportunistic Sell → [`phase-06/06.1-opportunistic-sell-exit-signal.md`](phase
 | `argmin-math` | 0.5 | `optimize`（默认关） | 无 | MIT/Apache-2.0 | 引入 |
 | `smartcore` | 0.5 | `ml-classical`（默认关） | 无 | Apache-2.0 | 引入；artifact serde 能力在 3.6 spike 验证 |
 
-禁止本期引入（见 §2 / §30 父文档）：`good_lp`、`ort`、`burn`、`candle`、`tch-rs`。
+禁止本期引入（见 §2 / §30 父文档）：portfolio solver、`ort`、`burn`、`candle`、`tch-rs`。
 `smartcore` 的 model artifact 序列化能力（§15.2 风险）留 3.6 spike；本期仅声明依赖与
 `ModelArtifact::Classical` 外壳，不落实现。

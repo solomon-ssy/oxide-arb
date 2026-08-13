@@ -11,7 +11,7 @@ use crate::{
     hashing::CanonicalDigest,
     types::{
         CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, IcaoStation, ModelSpecId,
-        ModelVersionId, Price, Probability, ResearchProfileRef, TrainingDatasetId,
+        ModelVersionId, PayoutRatio, Price, Probability, ResearchProfileRef, TrainingDatasetId,
         WeatherTemperatureStatistic,
     },
 };
@@ -57,6 +57,125 @@ pub struct ReliabilityReport {
     pub log_loss: Decimal,
     pub ece: Decimal,
     pub n_samples: u64,
+}
+
+/// Frozen frequency evidence for Polymarket's non-binary split resolution.
+///
+/// The score calibrator estimates `P(win | winner_take_all)` on the binary
+/// subset. This separate Bernoulli event models whether the market resolves to
+/// an `Unknown/50-50` payout at all, so a split is never coerced to either win
+/// or loss and never disappears from scenario tail risk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitPayoutRateEvidence {
+    pub total_sample_count: u64,
+    pub split_sample_count: u64,
+    pub empirical_probability: Probability,
+    pub wilson_ci: (Probability, Probability),
+    pub split_payout_ratio: PayoutRatio,
+}
+
+impl SplitPayoutRateEvidence {
+    /// Validate the split ledger against the binary calibration population.
+    pub fn validate(&self, binary_sample_count: u64) -> Result<(), String> {
+        let expected_binary = self
+            .total_sample_count
+            .checked_sub(self.split_sample_count)
+            .ok_or_else(|| {
+                "split sample count exceeds the total calibration population".to_owned()
+            })?;
+        let probability = self.empirical_probability.inner();
+        let interval = (self.wilson_ci.0.inner(), self.wilson_ci.1.inner());
+        if self.total_sample_count == 0
+            || expected_binary != binary_sample_count
+            || probability < Decimal::ZERO
+            || probability > Decimal::ONE
+            || interval.0 < Decimal::ZERO
+            || interval.0 > probability
+            || interval.1 < probability
+            || interval.1 > Decimal::ONE
+            || self.split_payout_ratio.inner() != Decimal::new(5, 1)
+        {
+            return Err(
+                "split-payout rate evidence is incomplete or inconsistent with calibration samples"
+                    .to_owned(),
+            );
+        }
+        let empirical =
+            Decimal::from(self.split_sample_count) / Decimal::from(self.total_sample_count);
+        if probability != empirical.round_dp(18) {
+            return Err(
+                "split-payout empirical probability differs from its exact counts".to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Complete calibrated distribution over a binary token's terminal payout.
+///
+/// `winner_take_all_win_probability` is conditional on a non-split result.
+/// Combining it with the explicitly estimated split mass yields unconditional
+/// loss/split/win probabilities and expected payout without conflating either
+/// quantity with `P(profit)` after entry costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalibratedPayoutDistribution {
+    pub winner_take_all_win_probability: Probability,
+    pub split_probability: Probability,
+    pub split_probability_interval: (Probability, Probability),
+    pub split_payout_ratio: PayoutRatio,
+}
+
+impl CalibratedPayoutDistribution {
+    pub fn validate(&self) -> Result<(), String> {
+        let conditional_win = self.winner_take_all_win_probability.inner();
+        let split = self.split_probability.inner();
+        let interval = (
+            self.split_probability_interval.0.inner(),
+            self.split_probability_interval.1.inner(),
+        );
+        if conditional_win < Decimal::ZERO
+            || conditional_win > Decimal::ONE
+            || split < Decimal::ZERO
+            || split > Decimal::ONE
+            || interval.0 < Decimal::ZERO
+            || interval.0 > split
+            || interval.1 < split
+            || interval.1 > Decimal::ONE
+            || self.split_payout_ratio.inner() != Decimal::new(5, 1)
+        {
+            return Err("calibrated payout distribution is outside its valid simplex".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Unconditional terminal win probability.
+    #[must_use]
+    pub fn win_probability(self) -> Probability {
+        Probability::new(
+            (Decimal::ONE - self.split_probability.inner())
+                * self.winner_take_all_win_probability.inner(),
+        )
+    }
+
+    /// Unconditional terminal loss probability.
+    #[must_use]
+    pub fn loss_probability(self) -> Probability {
+        Probability::new(
+            (Decimal::ONE - self.split_probability.inner())
+                * (Decimal::ONE - self.winner_take_all_win_probability.inner()),
+        )
+    }
+
+    /// Expected terminal collateral received per token.
+    #[must_use]
+    pub fn expected_payout(self) -> Probability {
+        Probability::new(
+            self.win_probability().inner()
+                + self.split_probability.inner() * self.split_payout_ratio.inner(),
+        )
+    }
 }
 
 impl ReliabilityReport {
@@ -226,6 +345,7 @@ pub struct ModelScoreCalibrationPayload {
     pub fit_contract: ModelScoreCalibrationFitContract,
     pub mapping: MonotoneMapping,
     pub reliability: ReliabilityReport,
+    pub split_payout_rate: SplitPayoutRateEvidence,
 }
 
 impl ModelScoreCalibrationPayload {
@@ -245,6 +365,7 @@ impl ModelScoreCalibrationPayload {
         self.validate_contract()?;
         self.mapping.validate()?;
         self.reliability.validate(expected_samples)?;
+        self.split_payout_rate.validate(expected_samples)?;
         if self.reliability.bins.iter().any(|bin| {
             bin.mean_adverse_excursion_bps
                 .is_none_or(|value| value > Decimal::ZERO)
@@ -412,4 +533,53 @@ pub struct PublishedWeatherStationLeadBias {
     pub sample_count: i64,
     pub published_at: DateTime<Utc>,
     pub payload: WeatherStationLeadBiasArtifactV1,
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::Decimal;
+
+    use super::{CalibratedPayoutDistribution, SplitPayoutRateEvidence};
+    use crate::types::{PayoutRatio, Probability};
+
+    impl PayoutRatio {
+        fn split_fixture() -> Self {
+            Self::try_new(Decimal::new(5, 1)).expect("canonical split payout")
+        }
+    }
+
+    #[test]
+    fn split_evidence_binds_population() {
+        let evidence = SplitPayoutRateEvidence {
+            total_sample_count: 10,
+            split_sample_count: 1,
+            empirical_probability: Probability::new(Decimal::new(1, 1)),
+            wilson_ci: (
+                Probability::new(Decimal::new(1, 2)),
+                Probability::new(Decimal::new(3, 1)),
+            ),
+            split_payout_ratio: PayoutRatio::split_fixture(),
+        };
+
+        assert!(evidence.validate(9).is_ok());
+        assert!(evidence.validate(8).is_err());
+    }
+
+    #[test]
+    fn payout_preserves_three_states() {
+        let distribution = CalibratedPayoutDistribution {
+            winner_take_all_win_probability: Probability::new(Decimal::new(8, 1)),
+            split_probability: Probability::new(Decimal::new(1, 1)),
+            split_probability_interval: (
+                Probability::new(Decimal::new(5, 2)),
+                Probability::new(Decimal::new(2, 1)),
+            ),
+            split_payout_ratio: PayoutRatio::split_fixture(),
+        };
+
+        assert!(distribution.validate().is_ok());
+        assert_eq!(distribution.win_probability().inner(), Decimal::new(72, 2));
+        assert_eq!(distribution.loss_probability().inner(), Decimal::new(18, 2));
+        assert_eq!(distribution.expected_payout().inner(), Decimal::new(77, 2));
+    }
 }

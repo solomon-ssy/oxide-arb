@@ -13,7 +13,9 @@ mod trade_tape;
 mod types;
 
 pub use book_l2_ledger::{BookL2LedgerRow, BookLedgerReplayAnchor};
-pub use book_microstructure::{BookMicrostructureRow, MidPriceBucketRow};
+pub use book_microstructure::{
+    BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS, BookMicrostructureRow, MidPriceBucketRow,
+};
 pub use book_stream_session::BookStreamSessionRow;
 pub use domain_event::{
     CryptoPriceReportRow, DomainEventRow, EntryConditionEvaluationEventRow, WeatherForecastFactRow,

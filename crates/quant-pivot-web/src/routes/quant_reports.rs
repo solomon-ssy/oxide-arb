@@ -180,20 +180,15 @@ pub async fn list(
     Ok(WebResponse::ok(page.map(QuantReportView::from)))
 }
 
-/// `GET /api/quant/reports/current` — current authority in one exact scope.
+/// `GET /api/quant/reports/current` — current global authority for one report kind.
 pub async fn current(
     state: Data<AppState>,
     query: Query<CurrentReportQuery>,
 ) -> Result<WebResponse<QuantReportDetailView>, WebError> {
     let query = query.into_inner();
-    if query.profile_id.as_str().trim().is_empty() || query.profile_id.as_str().len() > 128 {
-        return Err(WebError::BadRequest(
-            "profile_id must contain 1..=128 characters".to_owned(),
-        ));
-    }
     let info = state
         .quant_reports
-        .current_report(&query.profile_id, query.kind)
+        .current_report(query.kind)
         .await?
         .ok_or_else(|| WebError::NotFound("no current report for scope".to_owned()))?;
     let delivery = state
@@ -208,11 +203,17 @@ pub async fn current(
         .quant_reports
         .find_report_predecessor_id(&info.recommendation_report_id)
         .await?;
+    let portfolio = state
+        .quant_reports
+        .find_portfolio_plan(&info.portfolio_plan_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound("report portfolio plan is missing".to_owned()))?;
     Ok(WebResponse::ok(QuantReportDetailView::from_parts(
         info,
         delivery,
         run,
         predecessor,
+        portfolio.decision_json,
     )))
 }
 
@@ -229,11 +230,17 @@ pub async fn detail(
     let delivery = state.quant_reports.find_report_fact_delivery(&id).await?;
     let run = state.quant_reports.find_report_run(&id).await?;
     let predecessor = state.quant_reports.find_report_predecessor_id(&id).await?;
+    let portfolio = state
+        .quant_reports
+        .find_portfolio_plan(&info.portfolio_plan_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("portfolio plan not found for report: {id}")))?;
     Ok(WebResponse::ok(QuantReportDetailView::from_parts(
         info,
         delivery,
         run,
         predecessor,
+        portfolio.decision_json,
     )))
 }
 
@@ -511,7 +518,35 @@ pub async fn revoke(
         "request_id": request_id.0,
         "reason": request.reason,
     }))?;
-    Ok(WebResponse::ok(QuantReportDetailView::from(report)))
+    let delivery = state
+        .quant_reports
+        .find_report_fact_delivery(&report.recommendation_report_id)
+        .await?;
+    let run = state
+        .quant_reports
+        .find_report_run(&report.recommendation_report_id)
+        .await?;
+    let predecessor = state
+        .quant_reports
+        .find_report_predecessor_id(&report.recommendation_report_id)
+        .await?;
+    let portfolio = state
+        .quant_reports
+        .find_portfolio_plan(&report.portfolio_plan_id)
+        .await?
+        .ok_or_else(|| {
+            WebError::NotFound(format!(
+                "portfolio plan not found for report: {}",
+                report.recommendation_report_id
+            ))
+        })?;
+    Ok(WebResponse::ok(QuantReportDetailView::from_parts(
+        report,
+        delivery,
+        run,
+        predecessor,
+        portfolio.decision_json,
+    )))
 }
 
 fn canonical_state_hash<T: Serialize>(state: &T) -> Result<ContentHash, WebError> {

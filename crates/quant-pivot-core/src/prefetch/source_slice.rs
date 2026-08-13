@@ -1250,8 +1250,11 @@ fn decode_records<T: DeserializeOwned>(records: Vec<SourceSliceRecord>) -> Quant
     records
         .into_iter()
         .map(|record| {
-            let payload = CanonicalDigest::canonical_json_bytes(&record.payload)?;
-            serde_json::from_slice(&payload).map_err(|error| {
+            // `read_objects` already verifies the immutable Parquet byte hash,
+            // schema, row count, ordering, and PIT bounds. Deserializing the
+            // borrowed JSON value directly preserves adapters that require a
+            // borrowed string without serializing and reparsing every row.
+            T::deserialize(&record.payload).map_err(|error| {
                 ResearchError::DatasetBuild {
                     detail: format!(
                         "Source Slice record {} payload cannot be decoded: {error}",
@@ -1317,11 +1320,13 @@ fn ensure_not_cancelled(cancel: &CancellationToken, stage: &'static str) -> Quan
 
 #[cfg(test)]
 mod tests {
-    use std::{env, path::Path, sync::Arc};
+    use std::{collections::BTreeMap, env, path::Path, sync::Arc};
 
     use chrono::{TimeZone, Utc};
-    use quant_pivot_error::{QuantError, research::ResearchError};
+    use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
     use quant_pivot_models::{
+        clickhouse::{BookL2LedgerRow, ChDigest},
+        enums::clickhouse::ChCanonicalBookEventType,
         hashing::CanonicalDigest,
         types::{
             ArtifactUri, CapabilityRegistryHashes, CatalogSyncBatchId, ContentHash,
@@ -1329,15 +1334,25 @@ mod tests {
             ReaderContractVersion, ResearchEvaluationTrack, SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
             SchemaContractVersion, SourceSliceCatalogProof, SourceSliceManifest,
             SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef,
-            SourceSlicePitCutoffs, builtin_research_profiles,
+            SourceSlicePitCutoffs, TokenId, builtin_research_profiles,
         },
     };
-    use quant_pivot_research::artifact::{
-        ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore,
+    use quant_pivot_research::{
+        artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
+        source_slice::SourceSliceRecord,
     };
+    use rust_decimal::Decimal;
+    use serde::Deserialize;
+    use serde_json::{json, to_value};
     use uuid::Uuid;
 
-    use super::{SourceSliceReader, require_catalog_coverage};
+    use super::{SourceSliceReader, decode_records, require_catalog_coverage};
+
+    #[derive(Debug, PartialEq, Eq, Deserialize)]
+    struct TypedSourceRecord {
+        amount: Decimal,
+        flags: BTreeMap<String, bool>,
+    }
 
     fn hash(byte: char) -> ContentHash {
         ContentHash::parse(&format!("blake3:{}", byte.to_string().repeat(64))).expect("hash")
@@ -1419,6 +1434,70 @@ mod tests {
             Err(QuantError::Research(ResearchError::DatasetBuild { detail }))
                 if detail.contains("missing-market")
         ));
+    }
+
+    #[test]
+    fn typed_records_decode_directly() -> QuantResult<()> {
+        let records = vec![SourceSliceRecord {
+            record_key: "fixture-record".to_owned(),
+            event_at: None,
+            available_at: None,
+            payload: json!({
+                "amount": "12.3400",
+                "flags": {"zeta": false, "alpha": true},
+            }),
+        }];
+
+        let decoded = decode_records::<TypedSourceRecord>(records)?;
+
+        assert_eq!(
+            decoded,
+            vec![TypedSourceRecord {
+                amount: Decimal::new(123_400, 4),
+                flags: BTreeMap::from([("alpha".to_owned(), true), ("zeta".to_owned(), false),]),
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn book_row_uuid_decodes() -> QuantResult<()> {
+        let stream_session_id = Uuid::from_u128(0x018f_1234_5678_7000_8000_0000_0000_0001);
+        let row = BookL2LedgerRow {
+            stream_session_id,
+            shard_id: 0,
+            token_id: TokenId::new("uuid-adapter-token"),
+            market_id: None,
+            token_sequence: 1,
+            event_type: ChCanonicalBookEventType::Snapshot,
+            bid_prices: Vec::new(),
+            bid_sizes: Vec::new(),
+            ask_prices: Vec::new(),
+            ask_sizes: Vec::new(),
+            old_tick_size: None,
+            new_tick_size: None,
+            trade_price: None,
+            trade_side: None,
+            trade_size: None,
+            fee_rate_bps: None,
+            venue_event_time: 1,
+            ingress_time: 2,
+            persisted_time: 3,
+            event_hash: ChDigest::new([7; 32]),
+            schema_version: BookL2LedgerRow::SCHEMA_VERSION,
+        };
+        let records = vec![SourceSliceRecord {
+            record_key: "uuid-adapter-record".to_owned(),
+            event_at: None,
+            available_at: None,
+            payload: to_value(row).expect("serialize ClickHouse ledger fixture"),
+        }];
+
+        let decoded = decode_records::<BookL2LedgerRow>(records)?;
+        let decoded = decoded.into_iter().next().expect("one decoded ledger row");
+
+        assert_eq!(decoded.stream_session_id, stream_session_id);
+        Ok(())
     }
 
     #[tokio::test]

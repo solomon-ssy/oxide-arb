@@ -6,7 +6,91 @@ use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use crate::types::TradePolicyArtifactId;
+use crate::{enums::model::ModelFamily, types::TradePolicyArtifactId};
+
+/// Closed supervised-task taxonomy for production model specifications.
+///
+/// A Buy model forecasts the selected token's terminal redemption fraction.
+/// Executable prices, fills, fees, exits, and capital costs belong to the
+/// independently frozen Trade Policy evaluation and global portfolio layers;
+/// they are never folded into this forecasting target. The sell-side scorer
+/// owns the only other supported task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelTrainingTarget {
+    /// Calibrated expected terminal payout in `[0, 1]` for a canonical token.
+    OutcomePayout,
+    /// Research-only forward mark-return regression target. It is valid for
+    /// offline model comparison but cannot become a promoted Buy Route because
+    /// it does not provide a calibrated payout distribution.
+    ForwardReturn {
+        /// Exact forward-label horizon in seconds.
+        horizon_secs: u64,
+    },
+    /// Executable advantage, in bps, of exiting a held lot instead of holding.
+    HoldVsExitAlpha,
+}
+
+impl ModelTrainingTarget {
+    /// Stable governed label name materialized in an immutable Dataset.
+    #[must_use]
+    pub const fn label_name(self) -> &'static str {
+        match self {
+            Self::OutcomePayout => "token_payout_ratio",
+            Self::ForwardReturn { .. } => "return_to_horizon",
+            Self::HoldVsExitAlpha => "hold_vs_exit_alpha_bps",
+        }
+    }
+
+    /// Exact governed label horizon for this target.
+    #[must_use]
+    pub const fn label_horizon_secs(self) -> u64 {
+        match self {
+            Self::ForwardReturn { horizon_secs } => horizon_secs,
+            Self::OutcomePayout | Self::HoldVsExitAlpha => 0,
+        }
+    }
+
+    fn validate_family(self, model_family: ModelFamily) -> Result<(), String> {
+        match (self, model_family) {
+            (
+                Self::OutcomePayout,
+                ModelFamily::WeightedFactor | ModelFamily::ClassicalLogisticRegression,
+            )
+            | (Self::HoldVsExitAlpha, ModelFamily::HoldVsExitWeighted) => Ok(()),
+            (
+                Self::ForwardReturn { horizon_secs },
+                ModelFamily::ClassicalGradientBoostedTrees
+                | ModelFamily::ClassicalRandomForest
+                | ModelFamily::ClassicalExtraTrees
+                | ModelFamily::ClassicalRidge
+                | ModelFamily::ClassicalLasso
+                | ModelFamily::ClassicalElasticNet,
+            ) if horizon_secs > 0 => Ok(()),
+            (
+                Self::ForwardReturn { horizon_secs: 0 },
+                ModelFamily::ClassicalGradientBoostedTrees
+                | ModelFamily::ClassicalRandomForest
+                | ModelFamily::ClassicalExtraTrees
+                | ModelFamily::ClassicalRidge
+                | ModelFamily::ClassicalLasso
+                | ModelFamily::ClassicalElasticNet,
+            ) => Err("forward-return target horizon must be positive".to_owned()),
+            (Self::OutcomePayout | Self::ForwardReturn { .. }, ModelFamily::HoldVsExitWeighted) => {
+                Err("hold-vs-exit model families cannot use a Buy target".to_owned())
+            }
+            (Self::HoldVsExitAlpha, _) => {
+                Err("Buy model families cannot use the sell-side hold-vs-exit target".to_owned())
+            }
+            (Self::OutcomePayout, family) => Err(format!(
+                "model family {family} cannot emit a calibrated outcome-payout forecast"
+            )),
+            (Self::ForwardReturn { .. }, family) => Err(format!(
+                "model family {family} cannot use the research-only forward-return target"
+            )),
+        }
+    }
+}
 
 /// Whether a raw feature may be imputed by the fitted model-input transform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -63,52 +147,48 @@ pub struct ModelInputContract {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelTrainingContract {
-    /// Governed label name materialized in the frozen dataset.
-    pub target_label_name: String,
-    /// Target horizon (`0` for horizon-independent labels).
-    pub target_label_horizon_secs: u64,
+    /// Closed task whose exact label name and horizon are derived, never typed
+    /// as an arbitrary string by an operator.
+    pub target: ModelTrainingTarget,
     /// Rolling validation fold count. Every fold fits its own transform.
     pub validation_folds: u32,
-    /// Required for executable policy-derived targets; absent for unrelated labels.
-    pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
+    /// Published policy used only for OOS executable evaluation and Route
+    /// readiness. It does not generate or redefine the supervised target.
+    pub evaluation_trade_policy_artifact_id: Option<TradePolicyArtifactId>,
 }
 
 impl ModelTrainingContract {
-    /// Common settlement classifier contract used by non-training fixtures.
+    /// Common Buy outcome-forecast contract used by fixtures and bootstrap.
     #[must_use]
-    pub fn settlement_default() -> Self {
+    pub const fn outcome_default() -> Self {
         Self {
-            target_label_name: "token_payout_ratio".to_owned(),
-            target_label_horizon_secs: 0,
+            target: ModelTrainingTarget::OutcomePayout,
             validation_folds: 3,
-            trade_policy_artifact_id: None,
+            evaluation_trade_policy_artifact_id: None,
+        }
+    }
+
+    /// Common Sell hold-vs-exit contract used by fixtures and bootstrap.
+    #[must_use]
+    pub const fn hold_vs_exit_default() -> Self {
+        Self {
+            target: ModelTrainingTarget::HoldVsExitAlpha,
+            validation_folds: 3,
+            evaluation_trade_policy_artifact_id: None,
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        let label = self.target_label_name.trim();
-        if label.is_empty() || label != self.target_label_name || label.len() > 128 {
-            return Err(
-                "target_label_name must be 1..=128 bytes without surrounding whitespace".to_owned(),
-            );
-        }
         if !(2..=20).contains(&self.validation_folds) {
             return Err("validation_folds must be in 2..=20".to_owned());
         }
-        let requires_policy = matches!(
-            self.target_label_name.as_str(),
-            "policy_net_return_bps"
-                | "policy_net_positive"
-                | "policy_entry_fill_ratio"
-                | "policy_exit_fill_ratio"
-        );
-        if requires_policy != self.trade_policy_artifact_id.is_some() {
-            return Err(
-                "trade_policy_artifact_id is required exactly for executable policy-derived labels"
-                    .to_owned(),
-            );
-        }
         Ok(())
+    }
+
+    /// Validate both generic training bounds and the task/family boundary.
+    pub fn validate_for(&self, model_family: ModelFamily) -> Result<(), String> {
+        self.validate()?;
+        self.target.validate_family(model_family)
     }
 }
 
@@ -162,7 +242,10 @@ impl ModelInputContract {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelInputContract, ModelInputSpec};
+    use serde_json::json;
+
+    use super::{ModelInputContract, ModelInputSpec, ModelTrainingContract, ModelTrainingTarget};
+    use crate::enums::model::ModelFamily;
 
     #[test]
     fn rejects_duplicate_encoded_columns() {
@@ -178,5 +261,76 @@ mod tests {
             inputs: vec![ModelInputSpec::optional("book.mid.__missing")],
         };
         assert!(encoded.validate().is_err());
+    }
+
+    #[test]
+    fn target_family_matrix() {
+        let contract = |target| ModelTrainingContract {
+            target,
+            validation_folds: 3,
+            evaluation_trade_policy_artifact_id: None,
+        };
+        assert!(
+            contract(ModelTrainingTarget::OutcomePayout)
+                .validate_for(ModelFamily::WeightedFactor)
+                .is_ok()
+        );
+        assert!(
+            contract(ModelTrainingTarget::OutcomePayout)
+                .validate_for(ModelFamily::ClassicalLogisticRegression)
+                .is_ok()
+        );
+        assert!(
+            contract(ModelTrainingTarget::OutcomePayout)
+                .validate_for(ModelFamily::ClassicalRidge)
+                .is_err()
+        );
+        assert!(
+            contract(ModelTrainingTarget::ForwardReturn {
+                horizon_secs: 3_600
+            })
+            .validate_for(ModelFamily::ClassicalRidge)
+            .is_ok()
+        );
+        assert!(
+            contract(ModelTrainingTarget::ForwardReturn { horizon_secs: 0 })
+                .validate_for(ModelFamily::ClassicalRidge)
+                .is_err()
+        );
+        assert!(
+            contract(ModelTrainingTarget::ForwardReturn {
+                horizon_secs: 3_600
+            })
+            .validate_for(ModelFamily::WeightedFactor)
+            .is_err()
+        );
+        assert!(
+            contract(ModelTrainingTarget::HoldVsExitAlpha)
+                .validate_for(ModelFamily::HoldVsExitWeighted)
+                .is_ok()
+        );
+        assert!(
+            contract(ModelTrainingTarget::HoldVsExitAlpha)
+                .validate_for(ModelFamily::WeightedFactor)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn freeform_target_rejected() {
+        let legacy = json!({
+            "target_label_name": "policy_net_return_bps",
+            "target_label_horizon_secs": 0,
+            "validation_folds": 3,
+            "trade_policy_artifact_id": null
+        });
+        assert!(serde_json::from_value::<ModelTrainingContract>(legacy).is_err());
+
+        let unknown = json!({
+            "target": { "kind": "policy_net_return" },
+            "validation_folds": 3,
+            "evaluation_trade_policy_artifact_id": null
+        });
+        assert!(serde_json::from_value::<ModelTrainingContract>(unknown).is_err());
     }
 }

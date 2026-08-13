@@ -3,10 +3,17 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::{quant_market_selection, quant_model_run};
-use crate::types::{
-    MarketSelectionId, ModelRunId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
-    PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, Usd,
+use super::{decision_policy_snapshot, quant_account_snapshot, quant_market_selection};
+use crate::{
+    domain::quant::{
+        ExistingPortfolioState, PortfolioDecisionResult, PortfolioScenarioArtifact,
+        RepresentedRouteSet,
+    },
+    runtime_config::PortfolioConfig,
+    types::{
+        AccountSnapshotId, ContentHash, DecisionPolicySnapshotId, MarketSelectionId,
+        PortfolioPlanId, PortfolioScenarioArtifactId,
+    },
 };
 
 #[sea_orm::model]
@@ -15,28 +22,38 @@ use crate::types::{
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub portfolio_plan_id: PortfolioPlanId,
-    pub model_run_id: Option<ModelRunId>,
+    pub account_snapshot_id: AccountSnapshotId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub market_selection_id: MarketSelectionId,
     pub decision_at: DateTime<Utc>,
-    pub budget_usd: Usd,
-    pub allocated_usd: Usd,
     #[sea_orm(column_type = "JsonBinary")]
-    pub risk_budget_json: PortfolioRiskBudget,
+    pub represented_routes_json: RepresentedRouteSet,
+    pub scenario_artifact_id: Option<PortfolioScenarioArtifactId>,
+    pub scenario_artifact_hash: Option<ContentHash>,
     #[sea_orm(column_type = "JsonBinary")]
-    pub constraints_json: PortfolioConstraintsSnapshot,
+    pub scenario_artifact_json: Option<PortfolioScenarioArtifact>,
     #[sea_orm(column_type = "JsonBinary")]
-    pub rejected_summary: PortfolioRejectedSummary,
+    pub portfolio_policy_json: PortfolioConfig,
     #[sea_orm(column_type = "JsonBinary")]
-    pub optimizer_meta_json: PortfolioOptimizerMeta,
+    pub existing_state_json: ExistingPortfolioState,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub decision_json: PortfolioDecisionResult,
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(
         belongs_to,
-        relation_enum = "ModelRun",
-        from = "model_run_id",
-        to = "model_run_id"
+        relation_enum = "AccountSnapshot",
+        from = "account_snapshot_id",
+        to = "account_snapshot_id"
     )]
-    pub model_run: BelongsTo<Option<quant_model_run::Entity>>,
+    pub account_snapshot: BelongsTo<quant_account_snapshot::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "DecisionPolicySnapshot",
+        from = "decision_policy_snapshot_id",
+        to = "decision_policy_snapshot_id"
+    )]
+    pub decision_policy_snapshot: BelongsTo<decision_policy_snapshot::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "MarketSelection",

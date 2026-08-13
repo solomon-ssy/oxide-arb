@@ -158,7 +158,7 @@ mod tests {
             thesis_invalidation: ThesisInvalidationPolicy {
                 min_score_retention: dec!(0.6),
                 min_expected_return_bps: Bps::ZERO,
-                require_execution_eligibility: true,
+                require_route_gate_eligibility: true,
             },
             opportunistic_exit: OpportunisticExitPolicy {
                 min_confidence: Probability::new(dec!(0.6)),

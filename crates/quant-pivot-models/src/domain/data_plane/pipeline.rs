@@ -188,6 +188,7 @@ pub enum PipelineEvent {
         shard_id: u32,
         subscription_token_hash: ContentHash,
         subscription_token_count: u32,
+        subscription_tokens: Arc<[TokenId]>,
         received_sequences: Arc<[(TokenKey, u64)]>,
         opened_at_ms: i64,
         closed_at_ms: i64,

@@ -29,16 +29,17 @@ use crate::{
         common::MarketCategory,
         factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
         quant::{
-            BindingConstraint, EmptyReportReason, ExitSettlementMode, FactorDirection,
-            FillRequirement, IneligibilityReason, QuantRuntimeMode, RedeemPolicy, SizingModelKind,
+            EmptyReportReason, ExitSettlementMode, FactorDirection, FillRequirement,
+            IneligibilityReason, QuantRuntimeMode, RedeemPolicy,
         },
     },
     hashing::CanonicalDigest,
+    runtime_config::BuyModelRoute,
     types::{
-        BookSnapshotRef, Bps, ContentHash, DecisionPolicySnapshotId, EntryConditionPlan, EventId,
-        FactorDefinitionId, FeatureVectorId, MarketSelectionId, ModelRunId, ModelVersionId, Price,
-        Probability, ReportDataQualitySnapshotId, Shares, SignalCandidateId, TradePolicyArtifactId,
-        TradePolicyCohortKey, Usd,
+        BookSnapshotRef, Bps, ContentHash, DecisionPolicySnapshotId, EconomicTierId,
+        EntryConditionPlan, EventId, FactorDefinitionId, FeatureVectorId, MarketSelectionId,
+        ModelRunId, ModelVersionId, Price, Probability, ReportDataQualitySnapshotId, Shares,
+        SignalCandidateId, TradePolicyArtifactId, TradePolicyCohortKey, Usd, UsdHours,
     },
 };
 
@@ -96,14 +97,14 @@ impl EntryOrderPolicy {
 /// How much capital a recommendation should deploy and the binding cap.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct SizingPlan {
+    /// Exact immutable tier selected by the global MILP.
+    pub economic_tier_id: EconomicTierId,
     /// Suggested allocation in USD.
     pub suggested_usd: Usd,
     /// Suggested allocation in shares at the reference price.
     pub suggested_shares: Shares,
-    /// Upper bound permitted by the caps.
-    pub max_usd: Usd,
-    /// Lower useful bound (below this the recommendation is dropped).
-    pub min_usd: Usd,
+    /// Exact executable entry VWAP produced by the frozen L2 walk.
+    pub entry_vwap: Price,
     /// Suggested allocation as a fraction of the capital base.
     pub portfolio_weight_pct: Decimal,
     /// Projected market exposure after this allocation.
@@ -112,49 +113,12 @@ pub struct SizingPlan {
     pub event_exposure_after_usd: Usd,
     /// Projected category exposure after this allocation.
     pub category_exposure_after_usd: Usd,
-    /// The cap that bound the final size.
-    pub binding_constraint: BindingConstraint,
+    /// Projected Route exposure after this allocation.
+    pub route_exposure_after_usd: Usd,
+    /// Discounted capital occupancy contributed by this tier.
+    pub capital_occupancy_usd_hours: UsdHours,
     /// Human explanation of the sizing decision.
     pub sizing_reason: String,
-    /// Which sizing model produced this size.
-    pub sizing_model: SizingModelKind,
-    /// Estimated edge over the entry price (Kelly provenance).
-    pub edge_bps: Option<Bps>,
-    /// The fractional-Kelly multiplier actually applied (the *merged* product
-    /// of every stage below — not the governed `portfolio.sizing.kelly_fraction`
-    /// config constant, which is `kelly_fraction_config_applied`).
-    pub kelly_fraction_applied: Option<Decimal>,
-    /// Edge-uncertainty shrink multiplier.
-    #[serde(default)]
-    pub edge_uncertainty_shrink_applied: Option<Decimal>,
-    /// Correlation-cluster shrink multiplier.
-    #[serde(default)]
-    pub correlation_shrink_applied: Option<Decimal>,
-    /// The raw, uncapped full-Kelly fraction (`edge / (gain · loss)`) —
-    /// the sizing waterfall's starting point.
-    #[serde(default)]
-    pub f_star_applied: Option<Decimal>,
-    /// The governed static fractional-Kelly constant (e.g. `0.5` for
-    /// half-Kelly) — distinct from `kelly_fraction_applied`, the merged
-    /// product of this and every shrink multiplier below.
-    #[serde(default)]
-    pub kelly_fraction_config_applied: Option<Decimal>,
-    /// Confidence-curve shrink multiplier.
-    #[serde(default)]
-    pub confidence_shrink_applied: Option<Decimal>,
-    /// Drawdown-scaling multiplier.
-    #[serde(default)]
-    pub drawdown_shrink_applied: Option<Decimal>,
-    /// `f_star_applied × kelly_fraction_config_applied × confidence_shrink_applied
-    /// × drawdown_shrink_applied × edge_uncertainty_shrink_applied ×
-    /// correlation_shrink_applied` — the fraction before the per-position
-    /// equity cap (`position_cap_fraction_applied`).
-    #[serde(default)]
-    pub raw_fraction_applied: Option<Decimal>,
-    /// The per-position equity cap (`portfolio.sizing.max_position_pct`)
-    /// `raw_fraction_applied` was clamped against.
-    #[serde(default)]
-    pub position_cap_fraction_applied: Option<Decimal>,
 }
 
 // ── Exit plan: when and how much to sell ─────────────────────────────────
@@ -213,81 +177,19 @@ pub struct TradePolicyCohortProvenance {
     pub cohort_key: TradePolicyCohortKey,
 }
 
-/// Why a recommendation has no executable capital/entry/exit plan.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TradePlanBlocker {
-    ModelPolicyBindingMissing,
-    ArtifactNotFound,
-    ArtifactNotPublished,
-    ArtifactHashMismatch,
-    ArtifactFormatUnsupported,
-    CohortNotFound,
-    CohortSelectorAmbiguous,
-    CashBudgetTierUnavailable,
-    CohortCoverageInsufficient,
-    LiquidityInsufficient,
-    FeeScheduleUnavailable,
-    TickMismatch,
-    PriceOutsideVenueRange,
-    ReturnModelUncalibrated,
-}
-
 /// The single authoritative recommendation trade-plan contract.
 ///
-/// `Unavailable` deliberately carries no amount, entry or exit fields: callers
-/// cannot accidentally execute a heuristic fallback. `Frozen` owns the only
-/// policy provenance used by intent admission and attribution.
+/// A published Recommendation always owns a complete, executable and globally
+/// verified plan. Missing calibration, policy, scenario or L2 evidence fails
+/// the report run before publication, so no unavailable wire variant exists.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum RecommendationTradePlan {
-    Unavailable {
-        blockers: Vec<TradePlanBlocker>,
-    },
-    Frozen {
-        policy: Box<TradePolicyCohortProvenance>,
-        entry: EntryPlan,
-        sizing: Box<SizingPlan>,
-        exit: Box<ExitPlan>,
-        risk_envelope: Box<RiskEnvelope>,
-    },
-}
-
-impl RecommendationTradePlan {
-    #[must_use]
-    pub const fn is_available(&self) -> bool {
-        matches!(self, Self::Frozen { .. })
-    }
-
-    #[must_use]
-    pub const fn sizing(&self) -> Option<&SizingPlan> {
-        match self {
-            Self::Frozen { sizing, .. } => Some(sizing),
-            Self::Unavailable { .. } => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn frozen(
-        &self,
-    ) -> Option<(
-        &TradePolicyCohortProvenance,
-        &EntryPlan,
-        &SizingPlan,
-        &ExitPlan,
-        &RiskEnvelope,
-    )> {
-        match self {
-            Self::Frozen {
-                policy,
-                entry,
-                sizing,
-                exit,
-                risk_envelope,
-            } => Some((policy, entry, sizing, exit, risk_envelope)),
-            Self::Unavailable { .. } => None,
-        }
-    }
+#[serde(deny_unknown_fields)]
+pub struct RecommendationTradePlan {
+    pub policy: Box<TradePolicyCohortProvenance>,
+    pub entry: EntryPlan,
+    pub sizing: Box<SizingPlan>,
+    pub exit: Box<ExitPlan>,
+    pub risk_envelope: Box<RiskEnvelope>,
 }
 
 /// One deterministic cumulative scale-out target.
@@ -325,8 +227,8 @@ pub struct ThesisInvalidationPolicy {
     pub min_score_retention: Decimal,
     /// Minimum executable expected return required to keep holding.
     pub min_expected_return_bps: Bps,
-    /// Whether fresh execution eligibility is required to keep holding.
-    pub require_execution_eligibility: bool,
+    /// Whether the frozen Route-local model gate must still pass to keep holding.
+    pub require_route_gate_eligibility: bool,
 }
 
 // ── Risk envelope: admission inputs ──────────────────────────────────────
@@ -346,6 +248,14 @@ pub struct RiskEnvelope {
     pub max_event_exposure_usd: Usd,
     /// Maximum category exposure in USD.
     pub max_category_exposure_usd: Usd,
+    /// Maximum model-Route exposure after admitting this recommendation.
+    pub max_route_exposure_usd: Usd,
+    /// This recommendation's exact contribution to portfolio `CVaR`.
+    pub cvar_contribution_usd: Usd,
+    /// Governed portfolio `CVaR` cap used by the exact solve.
+    pub portfolio_cvar_cap_usd: Usd,
+    /// Governed maximum loss over every promoted joint scenario.
+    pub maximum_scenario_loss_cap_usd: Usd,
     /// Whether human approval is required before execution.
     pub requires_approval: bool,
     /// Whether auto-execution is permitted by this envelope.
@@ -369,6 +279,10 @@ pub struct RiskEnvelopeHashInput {
     pub market_exposure_usd: Usd,
     pub event_exposure_usd: Usd,
     pub category_exposure_usd: Usd,
+    pub route_exposure_usd: Usd,
+    pub cvar_contribution_usd: Usd,
+    pub portfolio_cvar_cap_usd: Usd,
+    pub maximum_scenario_loss_cap_usd: Usd,
 }
 
 impl RiskEnvelope {
@@ -384,6 +298,10 @@ impl RiskEnvelope {
             market_exposure_usd: self.max_market_exposure_usd,
             event_exposure_usd: self.max_event_exposure_usd,
             category_exposure_usd: self.max_category_exposure_usd,
+            route_exposure_usd: self.max_route_exposure_usd,
+            cvar_contribution_usd: self.cvar_contribution_usd,
+            portfolio_cvar_cap_usd: self.portfolio_cvar_cap_usd,
+            maximum_scenario_loss_cap_usd: self.maximum_scenario_loss_cap_usd,
         })
     }
 }
@@ -498,13 +416,6 @@ pub struct ExecutionEligibility {
     pub approval_required: bool,
     /// Auto-execution policy id, when applicable.
     pub auto_policy_id: Option<String>,
-    /// Explicit "uncalibrated · experimental" watermark: `true` exactly when
-    /// [`Self::ineligibility_reasons`] contains
-    /// [`IneligibilityReason::ReturnModelUncalibrated`]. A first-class DTO field
-    /// — not something the UI must infer by scanning the reasons array — so a
-    /// `ReportOnly`-only sizing is never mistaken for a normal, executable one.
-    #[serde(default)]
-    pub uncalibrated_watermark: bool,
 }
 
 impl ExecutionEligibility {
@@ -512,8 +423,9 @@ impl ExecutionEligibility {
     ///
     /// [`QuantRuntimeMode::ReportOnly`] and [`QuantRuntimeMode::SemiAuto`] are
     /// eligible when listed in [`Self::eligible_modes`]. Auto-execution additionally
-    /// requires an empty [`Self::ineligibility_reasons`] (reasons document score /
-    /// confidence denials when auto mode is withheld).
+    /// requires an empty [`Self::ineligibility_reasons`] (the only frozen denial
+    /// is exhaustion of report-level automation caps; live risk is rechecked by
+    /// execution admission).
     #[must_use]
     pub fn is_eligible(&self, mode: QuantRuntimeMode) -> bool {
         if !self.eligible_modes.contains(&mode) {
@@ -531,34 +443,34 @@ impl ExecutionEligibility {
 pub struct ReportSummary {
     /// Number of markets in the selection snapshot.
     pub market_selection_count: u32,
+    /// Number of atomically ready Routes represented by this report.
+    pub represented_route_count: u32,
     /// Number of scored candidates considered.
     pub candidate_count: u32,
-    /// Number of candidates rejected before publication.
-    pub rejected_count: u32,
+    /// Number of executable tiers rejected before publication.
+    pub rejected_tier_count: u32,
     /// Number of published recommendations.
     pub published_recommendation_count: u32,
     /// Total suggested USD across published recommendations.
     pub total_suggested_usd: Usd,
     /// Largest single suggested USD.
     pub max_single_recommendation_usd: Usd,
-    /// The aggregate-exposure hard cap actually enforced by the LP
-    /// (`capital_base_usd × portfolio.kelly_safety.max_aggregate_exposure_pct`),
-    /// frozen from the exact account + runtime-config this report solved
-    /// against. `None` when the cap is disabled or the capital base is
-    /// non-positive — never re-derived client-side from a separately-fetched
-    /// runtime-config version, which may not even be the one this report used.
-    #[serde(default)]
-    pub aggregate_exposure_cap_usd: Option<Usd>,
+    /// Robust worst-distribution discounted expected net USD for the selected portfolio.
+    pub robust_expected_net_usd: Usd,
+    /// Nominal discounted expected net USD for the selected portfolio.
+    pub nominal_expected_net_usd: Usd,
+    /// Exact portfolio `CVaR` under the governed tail mass.
+    pub cvar_usd: Usd,
+    /// Maximum loss over every promoted scenario.
+    pub maximum_scenario_loss_usd: Usd,
+    /// Discounted capital occupation across the selected portfolio.
+    pub capital_occupancy_usd_hours: UsdHours,
     /// Suggested USD allocated per category.
     pub category_allocation: BTreeMap<MarketCategory, Usd>,
     /// Suggested USD allocated per event.
     pub event_allocation: BTreeMap<EventId, Usd>,
-    /// Mean composite score across published recommendations.
-    pub average_score: Probability,
-    /// Minimum composite score across published recommendations.
-    pub min_score: Probability,
-    /// Model confidence summary.
-    pub model_confidence_summary: ConfidenceSummary,
+    /// Suggested USD allocated per model Route.
+    pub route_allocation: BTreeMap<BuyModelRoute, Usd>,
     /// Data-quality summary.
     pub data_quality_summary: DataQualitySummary,
     /// Most common rejection reasons.
@@ -628,9 +540,24 @@ impl Sum for DataQualitySummary {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RejectionReasonCount {
     /// Rejection reason label.
-    pub reason: String,
+    pub reason: PortfolioRejectionReason,
     /// Number of candidates rejected for this reason.
     pub count: u32,
+}
+
+/// Stable economic admission or global-optimum exclusion reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortfolioRejectionReason {
+    ScenarioExitCapacity,
+    NominalExpectedNetFloor,
+    RobustExpectedNetFloor,
+    ProfitProbabilityFloor,
+    ProbabilityIntervalWidth,
+    LiquidityBuffer,
+    SingleRecommendationExposure,
+    ExistingStructuralConflict,
+    NotSelectedByGlobalOptimum,
 }
 
 /// Execution-eligibility roll-up across published recommendations.

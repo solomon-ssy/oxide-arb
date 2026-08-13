@@ -12,8 +12,10 @@ use quant_pivot_models::{
     domain::{
         api::{FeatureParityJobParams, RunFullFeatureParityRequest},
         quant::{
-            NewFeatureParityRun, NewRecommendationReport, NewReportFactDelivery,
-            NewReportFeatureParity, NewResearchJob, RecommendationInfo, RecommendationReportInfo,
+            CapitalOccupancyBucket, EntryEconomics, ExecutableEconomicTier, NewFeatureParityRun,
+            NewRecommendationReport, NewReportFactDelivery, NewReportFeatureParity, NewResearchJob,
+            RecommendationEconomics, RecommendationInfo, RecommendationReportInfo,
+            RepresentedRouteSet, ScenarioCashflow,
         },
     },
     enums::{
@@ -21,30 +23,29 @@ use quant_pivot_models::{
         factor::{FactorFamily, FactorValueState, NormalizationSource},
         market::MarketStatus,
         quant::{
-            AccountSource, BindingConstraint, ExitSettlementMode, FactorDirection,
-            FeatureParityRunKind, FeatureParityRunStatus, IneligibilityReason, OutcomeSide,
-            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
+            AccountSource, ExitSettlementMode, FactorDirection, FeatureParityRunKind,
+            FeatureParityRunStatus, IneligibilityReason, OutcomeSide, QuantRuntimeMode,
+            RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
             ReportFactDeliveryStatus, ReportKind, ResearchJobKind, ResearchJobStatus,
-            SizingModelKind,
         },
     },
+    runtime_config::BuyModelRoute,
     types::{
-        AccountSnapshotId, ArtifactUri, BookSnapshotRef, Bps, ConfidenceSummary, ContentHash,
-        DataQualitySummary, DecisionPolicySnapshotId, EligibilitySummary, EntryConditionPlan,
+        AccountSnapshotId, ArtifactUri, BookSnapshotRef, Bps, ContentHash, DataQualitySummary,
+        DecisionPolicySnapshotId, EconomicTierId, EligibilitySummary, EntryConditionPlan,
         EntryOrderPolicy, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility,
         ExitPlan, FactorBreakdownEntry, FeatureParityRunId, FeatureVectorId, MarketContext,
         MarketId, MarketSelectionId, ModelRunId, ModelVersionId, OpportunisticExitPolicy,
-        PortfolioPlanId, Price, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
-        ReportDataQualitySnapshotId, ReportSummary, ResearchJobId, ResearchJobParams, RiskEnvelope,
-        RoleCode, Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId,
-        TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
-        TradePolicyCohortProvenance, Usd, builtin_research_profiles,
+        PortfolioPlanId, PortfolioScenarioArtifactId, Price, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, RecommendationTradePlan, ReportDataQualitySnapshotId,
+        ReportRouteRunId, ReportRunId, ReportSummary, ResearchJobId, ResearchJobParams,
+        RiskEnvelope, RoleCode, Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy,
+        TokenId, TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
+        TradePolicyCohortProvenance, Usd, UsdHours, builtin_research_profiles,
     },
 };
 use rust_decimal_macros::dec;
-
-use super::execution_pg_seed::fixture_profile_ref;
 
 fn content_hash() -> ContentHash {
     ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("valid hash")
@@ -93,7 +94,7 @@ pub fn sampled_parity(report: &NewRecommendationReport) -> NewReportFeatureParit
         window_start: report.decision_at,
         window_end,
         report_id: Some(report.recommendation_report_id),
-        model_version_id: Some(report.model_version_id),
+        model_version_id: None,
         training_dataset_id: None,
         triggered_by: "test:fixture".to_owned(),
         requested_by: None,
@@ -143,20 +144,23 @@ pub fn report(
     kind: ReportKind,
     status: RecommendationReportStatus,
 ) -> RecommendationReportInfo {
-    let profile_ref = fixture_profile_ref();
+    let represented_routes =
+        RepresentedRouteSet::from_routes([BuyModelRoute::Pooled]).expect("Route set");
+    let scenario_hash = content_hash();
     RecommendationReportInfo {
         recommendation_report_id: id,
-        profile_id: profile_ref.id.clone(),
-        profile_ref,
+        report_run_id: ReportRunId::from_v7(),
         report_kind: kind,
         decision_at: Utc.timestamp_opt(1_699_999_880, 0).unwrap(),
-        horizon_secs: 86_400,
         runtime_mode: QuantRuntimeMode::ReportOnly,
         decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-        model_run_id: None,
-        model_version_id: ModelVersionId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
         portfolio_plan_id: PortfolioPlanId::from_v7(),
+        represented_routes_json: represented_routes,
+        scenario_artifact_id: Some(PortfolioScenarioArtifactId::from_content_hash(
+            &scenario_hash,
+        )),
+        scenario_artifact_hash: Some(scenario_hash),
         top_n: 20,
         status,
         account_source: AccountSource::Polymarket,
@@ -186,21 +190,20 @@ pub fn report_summary() -> ReportSummary {
     event_allocation.insert(EventId::new("evt-1"), Usd::new(dec!(250)));
     ReportSummary {
         market_selection_count: 12,
+        represented_route_count: 1,
         candidate_count: 8,
-        rejected_count: 3,
+        rejected_tier_count: 3,
         published_recommendation_count: 2,
         total_suggested_usd: Usd::new(dec!(500)),
         max_single_recommendation_usd: Usd::new(dec!(300)),
-        aggregate_exposure_cap_usd: Some(Usd::new(dec!(2500))),
+        robust_expected_net_usd: Usd::new(dec!(75)),
+        nominal_expected_net_usd: Usd::new(dec!(95)),
+        cvar_usd: Usd::new(dec!(120)),
+        maximum_scenario_loss_usd: Usd::new(dec!(140)),
+        capital_occupancy_usd_hours: UsdHours::new(dec!(12000)),
         category_allocation,
         event_allocation,
-        average_score: Probability::new(dec!(0.7)),
-        min_score: Probability::new(dec!(0.55)),
-        model_confidence_summary: ConfidenceSummary {
-            mean_confidence: Probability::new(dec!(0.72)),
-            min_confidence: Probability::new(dec!(0.6)),
-            max_confidence: Probability::new(dec!(0.9)),
-        },
+        route_allocation: BTreeMap::from([(BuyModelRoute::Pooled, Usd::new(dec!(500)))]),
         data_quality_summary: DataQualitySummary {
             fresh_count: 5,
             acceptable_count: 2,
@@ -229,27 +232,25 @@ pub fn recommendation(
     side: OutcomeSide,
     suggested_usd: Usd,
 ) -> RecommendationInfo {
+    let economics = recommendation_economics();
+    let tier = economic_tier(market, side, suggested_usd, economics);
     RecommendationInfo {
         recommendation_id: id,
-        profile_ref: fixture_profile_ref(),
         recommendation_report_id: report_id,
+        report_route_run_id: tier.report_route_run_id,
+        portfolio_plan_id: PortfolioPlanId::from_v7(),
+        economic_tier_id: tier.economic_tier_id,
         rank,
+        route: BuyModelRoute::Pooled,
         market_id: MarketId::new(market),
         event_id: EventId::new("evt-1"),
         token_id: TokenId::new(format!("token-{market}")),
         outcome_side: side,
-        composite_score: Probability::new(dec!(0.71)),
-        risk_adjusted_score: Probability::new(dec!(0.66)),
-        confidence: Probability::new(dec!(0.72)),
-        expected_return_bps: Bps::new(dec!(150)),
-        downside_bps: Bps::new(dec!(80)),
+        economics_json: economics,
+        economic_tier_json: tier,
         identity: recommendation_identity(),
         market_context: market_context(),
-        rank_before_portfolio: rank,
-        liquidity_score: Probability::new(dec!(0.8)),
-        data_quality_score: Probability::new(dec!(0.9)),
-        model_score_percentile: Probability::new(dec!(0.75)),
-        trade_plan: RecommendationTradePlan::Frozen {
+        trade_plan: RecommendationTradePlan {
             policy: Box::new(trade_policy_provenance()),
             entry: entry_plan(),
             sizing: Box::new(sizing_plan(suggested_usd)),
@@ -264,6 +265,65 @@ pub fn recommendation(
         status: RecommendationStatus::Published,
         status_changed_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
         created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+    }
+}
+
+const fn recommendation_economics() -> RecommendationEconomics {
+    RecommendationEconomics {
+        profit_probability_bps: Bps::new(dec!(6200)),
+        nominal_expected_net_usd: Usd::new(dec!(55)),
+        robust_expected_net_usd: Usd::new(dec!(42)),
+        max_loss_usd: Usd::new(dec!(120)),
+        cvar_contribution_usd: Usd::new(dec!(40)),
+        capital_occupancy_usd_hours: UsdHours::new(dec!(12000)),
+        marginal_portfolio_value_usd: Usd::new(dec!(38)),
+    }
+}
+
+fn economic_tier(
+    market: &str,
+    side: OutcomeSide,
+    suggested_usd: Usd,
+    economics: RecommendationEconomics,
+) -> ExecutableEconomicTier {
+    let lineage_hash = content_hash();
+    ExecutableEconomicTier {
+        economic_tier_id: EconomicTierId::from_content_hash(&lineage_hash),
+        report_route_run_id: ReportRouteRunId::from_v7(),
+        candidate_id: SignalCandidateId::from_v7(),
+        tier_ordinal: 1,
+        route: BuyModelRoute::Pooled,
+        market_id: MarketId::new(market),
+        event_id: EventId::new("evt-1"),
+        category: MarketCategory::Politics,
+        token_id: TokenId::new(format!("token-{market}")),
+        outcome_side: side,
+        shares: Shares::new(dec!(500)),
+        entry: EntryEconomics {
+            notional_usd: suggested_usd,
+            entry_vwap: Price::new(dec!(0.43)),
+            fee_usd: Usd::new(dec!(1.25)),
+            slippage_usd: Usd::new(dec!(2.50)),
+            visible_liquidity_usd: Usd::new(dec!(5000)),
+        },
+        profit_probability_lower_bps: 5_800,
+        probability_interval_width_bps: 800,
+        scenario_cashflows: vec![
+            ScenarioCashflow {
+                scenario_index: 0,
+                discounted_net_usd: Usd::new(dec!(90)),
+            },
+            ScenarioCashflow {
+                scenario_index: 1,
+                discounted_net_usd: Usd::new(dec!(-120)),
+            },
+        ],
+        capital_occupancy: vec![CapitalOccupancyBucket {
+            end_secs: 86_400,
+            locked_usd: suggested_usd,
+        }],
+        economics,
+        lineage_hash,
     }
 }
 
@@ -285,28 +345,19 @@ fn entry_plan() -> EntryPlan {
 }
 
 fn sizing_plan(suggested_usd: Usd) -> SizingPlan {
+    let tier_id = EconomicTierId::from_content_hash(&content_hash());
     SizingPlan {
+        economic_tier_id: tier_id,
         suggested_usd,
         suggested_shares: Shares::new(dec!(500)),
-        max_usd: Usd::new(dec!(500)),
-        min_usd: Usd::new(dec!(10)),
+        entry_vwap: Price::new(dec!(0.43)),
         portfolio_weight_pct: dec!(0.05),
         market_exposure_after_usd: suggested_usd,
         event_exposure_after_usd: suggested_usd,
         category_exposure_after_usd: suggested_usd,
-        binding_constraint: BindingConstraint::KellyCap,
-        sizing_reason: "half-kelly capped".to_owned(),
-        sizing_model: SizingModelKind::Kelly,
-        edge_bps: Some(Bps::new(dec!(120))),
-        kelly_fraction_applied: Some(dec!(0.5)),
-        edge_uncertainty_shrink_applied: None,
-        correlation_shrink_applied: None,
-        f_star_applied: Some(dec!(1.0)),
-        kelly_fraction_config_applied: Some(dec!(0.5)),
-        confidence_shrink_applied: Some(dec!(1.0)),
-        drawdown_shrink_applied: Some(dec!(1.0)),
-        raw_fraction_applied: Some(dec!(0.5)),
-        position_cap_fraction_applied: Some(dec!(0.05)),
+        route_exposure_after_usd: suggested_usd,
+        capital_occupancy_usd_hours: UsdHours::new(dec!(12000)),
+        sizing_reason: "selected executable tier from the exact global MILP".to_owned(),
     }
 }
 
@@ -323,7 +374,7 @@ fn exit_plan() -> ExitPlan {
         thesis_invalidation: ThesisInvalidationPolicy {
             min_score_retention: dec!(0.6),
             min_expected_return_bps: Bps::ZERO,
-            require_execution_eligibility: true,
+            require_route_gate_eligibility: true,
         },
         opportunistic_exit: OpportunisticExitPolicy {
             min_confidence: Probability::new(dec!(0.65)),
@@ -376,6 +427,10 @@ fn risk_envelope() -> RiskEnvelope {
         max_market_exposure_usd: Usd::new(dec!(500)),
         max_event_exposure_usd: Usd::new(dec!(750)),
         max_category_exposure_usd: Usd::new(dec!(1500)),
+        max_route_exposure_usd: Usd::new(dec!(1500)),
+        cvar_contribution_usd: Usd::new(dec!(40)),
+        portfolio_cvar_cap_usd: Usd::new(dec!(500)),
+        maximum_scenario_loss_cap_usd: Usd::new(dec!(750)),
         requires_approval: true,
         auto_execution_allowed: false,
         risk_notes: vec!["thin book".to_owned()],
@@ -455,6 +510,5 @@ fn execution_eligibility() -> ExecutionEligibility {
         ineligibility_reasons: vec![IneligibilityReason::ReportOnlyMode],
         approval_required: true,
         auto_policy_id: None,
-        uncalibrated_watermark: false,
     }
 }

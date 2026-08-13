@@ -23,11 +23,11 @@ use quant_pivot_repository::{
         ExecutionOrderRepository, FeatureParityEventRepository, FeatureRepository,
         FeedbackCycleRepository, FeedbackOutboxRepository, FeedbackSchedulerRepository,
         MenuRepository, ModelRouteShadowBindingRepository, OperationLogRepository,
-        OrderIntentRepository, PolicyRepository, PositionRepository, PromotionPermitRepository,
-        RecommendationExecutionRollupRepository, RecommendationReportRepository,
-        RecommendationRepository, ReconciliationRepository, ReportRunRepository,
-        ResolutionObservationRepository, RoleMenuRepository, RolePermissionRepository,
-        RoleRepository, ServingEvidenceRepository, TradePolicyRepository,
+        OrderIntentRepository, PolicyRepository, PortfolioPlanRepository, PositionRepository,
+        PromotionPermitRepository, RecommendationExecutionRollupRepository,
+        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+        ReportRunRepository, ResolutionObservationRepository, RoleMenuRepository,
+        RolePermissionRepository, RoleRepository, ServingEvidenceRepository, TradePolicyRepository,
         TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
         quant::settlement_redeem::SettlementRedeemRepository,
     },
@@ -282,6 +282,8 @@ async fn build_app_state(
             report_repo: Arc::clone(&repos.recommendation_report)
                 as Arc<dyn RecommendationReportRepository>,
             report_run_repo: Arc::clone(&repos.report_run) as Arc<dyn ReportRunRepository>,
+            portfolio_plan_repo: Arc::clone(&repos.portfolio_plan)
+                as Arc<dyn PortfolioPlanRepository>,
             recommendation_repo: Arc::clone(&repos.recommendation)
                 as Arc<dyn RecommendationRepository>,
             order_intent_repo: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,

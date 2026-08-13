@@ -1,15 +1,20 @@
 //! Governed, hot-reloadable configuration resources.
 
+pub mod descriptor;
 pub mod schedule_preview;
 pub mod sections;
 pub mod validation;
 pub mod wire;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt::{Display, Formatter, Result as FmtResult},
 };
 
+pub use descriptor::{
+    RuntimeFieldBounds, RuntimeFieldControl, RuntimeFieldDescriptor, RuntimeFieldRiskLevel,
+    RuntimeFieldUnit, RuntimeResourceDescriptor, RuntimeVisibilityCondition,
+};
 use quant_pivot_error::{
     QuantError,
     config::ConfigError,
@@ -23,14 +28,15 @@ pub use schedule_preview::{
 use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use sea_orm::FromJsonQueryResult;
 pub use sections::{
-    AutoExecutionConfig, BuyRouteBinding, CryptoCrossCheckConfig, CryptoDomainConfig,
-    DataQualityConfig, DomainConfig, EntryConditionWorkerConfig, ExecutionConfig,
+    AutoExecutionConfig, BuyRouteBinding, CapitalTimeBucketLimit, CryptoCrossCheckConfig,
+    CryptoDomainConfig, DataQualityConfig, DomainConfig, EntryConditionWorkerConfig,
     FactorCrossSectionConfig, FactorHeadConfig, FactorNormalizationConfig,
     FactorOrthogonalizeConfig, FactorsConfig, FavoriteLongshotConfig, FeaturesConfig,
-    KellySafetyConfig, MAX_REPORT_TOP_N, ModelBinding, ModelBindingSource, ModelCalibrationConfig,
-    ModelConfig, MomentumFeaturesConfig, NegRiskStructuralConfig, ParticipantConcentrationConfig,
-    PerFactorNormalization, PolicyValidationConfig, PortfolioBudget, PortfolioConfig,
-    PortfolioConstraints, QualityGateConfig, ReportScheduleConfig, ReportsConfig, ResearchConfig,
+    MAX_REPORT_TOP_N, ModelBinding, ModelBindingSource, ModelCalibrationConfig, ModelConfig,
+    MomentumFeaturesConfig, NegRiskStructuralConfig, ParticipantConcentrationConfig,
+    PerFactorNormalization, PolicyValidationConfig, PortfolioAdmission, PortfolioBudget,
+    PortfolioConfig, PortfolioExposureLimits, PortfolioScenarioModelArtifactBinding,
+    PortfolioTailRisk, QualityGateConfig, ReportScheduleConfig, ReportsConfig, ResearchConfig,
     ResearchTrainingConfig, ResearchValidationConfig, ResearchValidationCpcvConfig,
     ResearchValidationGatesConfig, ResearchValidationPboConfig, ResearchValidationPurgeConfig,
     ResearchValidationTrialsConfig, ReversalAfterShockConfig, SelectionConfig,
@@ -41,13 +47,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Error as SerdeJsonError, Value};
 use thiserror::Error;
 pub use wire::{
-    CapitalPolicy, ConfidenceSizeCurve, CorrelationConfig, DecimalValue, DrawdownMultiplierPolicy,
-    EmergencyExitKind, EmergencyExitPolicy, EntryOrderPolicy, ExecutionBreakerConfig,
+    DecimalValue, EmergencyExitKind, EmergencyExitPolicy, EntryOrderPolicy, ExecutionBreakerConfig,
     ExitMonitorPolicy, ExitSignalReinferencePolicy, FeatureFamily, FeatureStalenessPolicy,
-    KillSwitchPolicy, MASKED_SECRET, MissingFactorPolicy, ModelVersionRef, NeutralizeDimension,
-    NotificationPolicies, OpportunisticSellPolicy, OutcomeReconciliationPolicy,
-    PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy, ReportDeliveryPolicy,
-    ScheduleCadence, SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
+    KillSwitchPolicy, MASKED_SECRET, ModelVersionRef, NeutralizeDimension, NotificationPolicies,
+    OpportunisticSellPolicy, OutcomeReconciliationPolicy, RankLossKind, ReconciliationPolicy,
+    ReportDeliveryPolicy, ScheduleCadence, SmallCrossSectionPolicy, TrainingOptimizerKind,
 };
 
 use crate::{
@@ -61,17 +65,20 @@ use crate::{
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, DecisionPolicySnapshotId, PolicyBundleGeneration, PolicyRevisionId,
-        ProfileArtifactId, SchemaVersion,
+        ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration,
+        PolicyRevisionId, ProfileArtifactId, SchemaVersion,
     },
 };
 
-/// Boot schema shared by the six independent governed policy resources.
+/// The only clean-install schema accepted by the six governed policy resources.
+///
+/// This discriminator protects persisted-document integrity. It is not a compatibility
+/// dispatch point: no alternate schema parser or upgrade path exists.
 pub const POLICY_RESOURCE_SCHEMA_VERSION: SchemaVersion = SchemaVersion::FIRST;
 
 /// Market-selection, data-quality, and recommendation payload semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct RecommendationPolicy {
     #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
     pub schema_version: SchemaVersion,
@@ -93,14 +100,13 @@ impl Default for RecommendationPolicy {
 
 /// Capital, sizing, order, exit, reconciliation, and breaker policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionRiskPolicy {
     #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
     pub schema_version: SchemaVersion,
     pub portfolio: PortfolioConfig,
     pub entry_order_policy: EntryOrderPolicy,
     pub exit_monitor: ExitMonitorPolicy,
-    pub capital: CapitalPolicy,
     pub reconciliation: ReconciliationPolicy,
     pub breaker: ExecutionBreakerConfig,
 }
@@ -112,7 +118,6 @@ impl Default for ExecutionRiskPolicy {
             portfolio: PortfolioConfig::default(),
             entry_order_policy: EntryOrderPolicy::default(),
             exit_monitor: ExitMonitorPolicy::default(),
-            capital: CapitalPolicy::default(),
             reconciliation: ReconciliationPolicy::default(),
             breaker: ExecutionBreakerConfig::default(),
         }
@@ -121,7 +126,7 @@ impl Default for ExecutionRiskPolicy {
 
 /// Active, shadow, and exit artifact routing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ModelRouting {
     #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
     pub schema_version: SchemaVersion,
@@ -165,45 +170,20 @@ pub enum BuyModelRoute {
 
 impl BuyModelRoute {
     #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pooled => "pooled",
+            Self::Crypto => "crypto",
+            Self::Weather => "weather",
+        }
+    }
+
+    #[must_use]
     pub const fn category(self) -> Option<MarketCategory> {
         match self {
             Self::Pooled => None,
             Self::Crypto => Some(MarketCategory::Crypto),
             Self::Weather => Some(MarketCategory::Weather),
-        }
-    }
-}
-
-impl TryFrom<&SelectionConfig> for BuyModelRoute {
-    type Error = ConfigError;
-
-    fn try_from(selection: &SelectionConfig) -> Result<Self, Self::Error> {
-        let categories = selection
-            .enabled_categories
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        if categories.len() != selection.enabled_categories.len() {
-            return Err(ConfigError::InvalidValue {
-                field: "selection.enabled_categories".to_owned(),
-                reason: "duplicate categories are not a canonical report scope".to_owned(),
-            });
-        }
-        let verticals = categories
-            .iter()
-            .copied()
-            .filter(|category| matches!(category, MarketCategory::Crypto | MarketCategory::Weather))
-            .collect::<Vec<_>>();
-        match verticals.as_slice() {
-            [] => Ok(Self::Pooled),
-            [MarketCategory::Crypto] if categories.len() == 1 => Ok(Self::Crypto),
-            [MarketCategory::Weather] if categories.len() == 1 => Ok(Self::Weather),
-            _ => Err(ConfigError::InvalidValue {
-                field: "selection.enabled_categories".to_owned(),
-                reason: "Crypto or Weather must be the sole category in one report; vertical \
-                         contracts cannot share a pooled model run"
-                    .to_owned(),
-            }),
         }
     }
 }
@@ -228,6 +208,31 @@ impl TryFrom<Option<MarketCategory>> for BuyModelRoute {
 }
 
 impl ModelConfig {
+    /// Resolve the unique Route for which a model version is the active champion.
+    pub fn route_for_champion(
+        &self,
+        model_version_id: ModelVersionId,
+    ) -> Result<BuyModelRoute, ConfigError> {
+        let mut routes = self.buy_routes.iter().filter_map(|(route, binding)| {
+            (binding.champion.model_version_id == model_version_id).then_some(*route)
+        });
+        let route = routes.next().ok_or_else(|| ConfigError::InvalidValue {
+            field: "model.buy_routes".to_owned(),
+            reason: format!(
+                "model {model_version_id} is not an active champion in the frozen policy"
+            ),
+        })?;
+        if routes.next().is_some() {
+            return Err(ConfigError::InvalidValue {
+                field: "model.buy_routes".to_owned(),
+                reason: format!(
+                    "model {model_version_id} is bound as active champion for multiple Routes"
+                ),
+            });
+        }
+        Ok(route)
+    }
+
     /// Resolve the exact binding for one report route.
     ///
     /// # Errors
@@ -247,14 +252,43 @@ impl ModelConfig {
     pub fn champion(&self, route: BuyModelRoute) -> Result<&ModelBinding, ConfigError> {
         self.route_binding(route).map(|binding| &binding.champion)
     }
+
+    /// Resolve the one exact promoted scenario-model binding for a Route set.
+    pub fn scenario_model_binding(
+        &self,
+        routes: &[BuyModelRoute],
+        route_set_digest: &ContentHash,
+    ) -> Result<&PortfolioScenarioModelArtifactBinding, ConfigError> {
+        let matches = self
+            .portfolio_scenario_model_bindings
+            .iter()
+            .filter(|binding| {
+                binding.route_set_digest == *route_set_digest && binding.ordered_routes == routes
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [binding] => Ok(*binding),
+            [] => Err(ConfigError::MissingField {
+                section: "model.portfolio_scenario_model_bindings".to_owned(),
+                field: route_set_digest.to_string(),
+            }),
+            _ => Err(ConfigError::InvalidValue {
+                field: "model.portfolio_scenario_model_bindings".to_owned(),
+                reason: format!(
+                    "route-set digest {route_set_digest} has more than one exact scenario-model binding"
+                ),
+            }),
+        }
+    }
 }
 
 /// Durable report schedule resource, isolated from report decision semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ReportSchedule {
     #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
     pub schema_version: SchemaVersion,
+    /// Complete governed schedule list; each entry owns cadence, `TopN`, lag, and enabled state.
     pub schedules: Vec<ReportScheduleConfig>,
 }
 
@@ -269,8 +303,8 @@ impl Default for ReportSchedule {
 
 /// Immediate operational admission controls and notification routing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct OperationalControl {
+#[serde(deny_unknown_fields)]
+pub struct OperationsPolicy {
     #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
     pub schema_version: SchemaVersion,
     pub entry_condition: EntryConditionWorkerConfig,
@@ -279,7 +313,7 @@ pub struct OperationalControl {
     pub notifications: NotificationPolicies,
 }
 
-impl Default for OperationalControl {
+impl Default for OperationsPolicy {
     fn default() -> Self {
         Self {
             schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
@@ -293,15 +327,15 @@ impl Default for OperationalControl {
 
 /// Explicit authorization for semi-automatic and automatic execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct ExecutionAuthorization {
+#[serde(deny_unknown_fields)]
+pub struct ExecutionAutomationPolicy {
     #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
     pub schema_version: SchemaVersion,
     pub semi_auto: SemiAutoConfig,
     pub auto_execution: AutoExecutionConfig,
 }
 
-impl Default for ExecutionAuthorization {
+impl Default for ExecutionAutomationPolicy {
     fn default() -> Self {
         Self {
             schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
@@ -324,8 +358,8 @@ pub enum PolicyDocument {
     ExecutionRiskPolicy(Box<ExecutionRiskPolicy>),
     ModelRouting(ModelRouting),
     ReportSchedule(ReportSchedule),
-    OperationalControl(OperationalControl),
-    ExecutionAuthorization(ExecutionAuthorization),
+    OperationsPolicy(OperationsPolicy),
+    ExecutionAutomationPolicy(ExecutionAutomationPolicy),
 }
 
 impl PolicyDocument {
@@ -336,8 +370,8 @@ impl PolicyDocument {
             Self::ExecutionRiskPolicy(_) => ConfigResourceKind::ExecutionRiskPolicy,
             Self::ModelRouting(_) => ConfigResourceKind::ModelRouting,
             Self::ReportSchedule(_) => ConfigResourceKind::ReportSchedule,
-            Self::OperationalControl(_) => ConfigResourceKind::OperationalControl,
-            Self::ExecutionAuthorization(_) => ConfigResourceKind::ExecutionAuthorization,
+            Self::OperationsPolicy(_) => ConfigResourceKind::OperationsPolicy,
+            Self::ExecutionAutomationPolicy(_) => ConfigResourceKind::ExecutionAutomationPolicy,
         }
     }
 
@@ -348,8 +382,8 @@ impl PolicyDocument {
             Self::ExecutionRiskPolicy(policy) => policy.schema_version,
             Self::ModelRouting(policy) => policy.schema_version,
             Self::ReportSchedule(policy) => policy.schema_version,
-            Self::OperationalControl(policy) => policy.schema_version,
-            Self::ExecutionAuthorization(policy) => policy.schema_version,
+            Self::OperationsPolicy(policy) => policy.schema_version,
+            Self::ExecutionAutomationPolicy(policy) => policy.schema_version,
         }
     }
 }
@@ -360,10 +394,12 @@ impl PolicyDocument {
 pub struct PolicyValidationIssue {
     pub severity: PolicyValidationSeverity,
     pub code: PolicyValidationCode,
-    /// Canonical field path. A path is data, not a categorical state, so a
-    /// validated string is the correct representation.
-    pub path: String,
-    pub message: String,
+    /// Canonical RFC 6901 pointer to the exact field or document boundary.
+    pub pointer: String,
+    /// Stable interpolation inputs; UI copy is localized from `code`.
+    pub message_parameters: BTreeMap<String, String>,
+    /// Actionable, client-safe recovery guidance.
+    pub remediation: String,
 }
 
 /// One dependency or consumer preflight result.
@@ -422,8 +458,8 @@ impl ConfigResourceKind {
             Self::ExecutionRiskPolicy => PolicyApplyBoundary::OrderIntentCreation,
             Self::ModelRouting => PolicyApplyBoundary::ModelEvaluationClaim,
             Self::ReportSchedule => PolicyApplyBoundary::FutureReportRunReconcile,
-            Self::OperationalControl => PolicyApplyBoundary::OperationalAdmission,
-            Self::ExecutionAuthorization => PolicyApplyBoundary::ExecutionAuthorizationAdmission,
+            Self::OperationsPolicy => PolicyApplyBoundary::OperationalAdmission,
+            Self::ExecutionAutomationPolicy => PolicyApplyBoundary::ExecutionAutomationAdmission,
         }
     }
 
@@ -444,12 +480,12 @@ impl ConfigResourceKind {
             ],
             Self::ModelRouting => &[PolicyConsumer::ModelRunner],
             Self::ReportSchedule => &[PolicyConsumer::ReportScheduler],
-            Self::OperationalControl => &[
+            Self::OperationsPolicy => &[
                 PolicyConsumer::WorkerAdmission,
                 PolicyConsumer::ExecutionAdmission,
                 PolicyConsumer::AlertDispatcher,
             ],
-            Self::ExecutionAuthorization => &[
+            Self::ExecutionAutomationPolicy => &[
                 PolicyConsumer::RuntimeModeGate,
                 PolicyConsumer::ExecutionAdmission,
             ],
@@ -692,7 +728,7 @@ impl ImmutableProfileArtifacts {
 
 /// Revision identities frozen at a decision boundary.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyRevisionBundle {
     #[schemars(with = "Option<String>")]
     pub recommendation_policy: Option<PolicyRevisionId>,
@@ -703,9 +739,9 @@ pub struct PolicyRevisionBundle {
     #[schemars(with = "Option<String>")]
     pub report_schedule: Option<PolicyRevisionId>,
     #[schemars(with = "Option<String>")]
-    pub operational_control: Option<PolicyRevisionId>,
+    pub operations_policy: Option<PolicyRevisionId>,
     #[schemars(with = "Option<String>")]
-    pub execution_authorization: Option<PolicyRevisionId>,
+    pub execution_automation_policy: Option<PolicyRevisionId>,
 }
 
 /// Immutable aggregate read by decision pipelines. Each hot resource is still
@@ -713,15 +749,15 @@ pub struct PolicyRevisionBundle {
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult,
 )]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct DecisionPolicySnapshot {
     pub revisions: PolicyRevisionBundle,
     pub recommendation: RecommendationPolicy,
     pub execution_risk: ExecutionRiskPolicy,
     pub model_routing: ModelRouting,
     pub report_schedule: ReportSchedule,
-    pub operational_control: OperationalControl,
-    pub execution_authorization: ExecutionAuthorization,
+    pub operations_policy: OperationsPolicy,
+    pub execution_automation_policy: ExecutionAutomationPolicy,
     pub profile_artifacts: ImmutableProfileArtifacts,
 }
 
@@ -735,8 +771,8 @@ pub struct DecisionPolicySnapshotDocument {
     pub execution_risk: ExecutionRiskPolicy,
     pub model_routing: ModelRouting,
     pub report_schedule: ReportSchedule,
-    pub operational_control: OperationalControl,
-    pub execution_authorization: ExecutionAuthorization,
+    pub operations_policy: OperationsPolicy,
+    pub execution_automation_policy: ExecutionAutomationPolicy,
     pub profile_artifact_refs: ImmutableProfileArtifactReferences,
 }
 
@@ -755,9 +791,9 @@ impl DecisionPolicySnapshotDocument {
             }
             ConfigResourceKind::ModelRouting => self.revisions.model_routing.as_ref(),
             ConfigResourceKind::ReportSchedule => self.revisions.report_schedule.as_ref(),
-            ConfigResourceKind::OperationalControl => self.revisions.operational_control.as_ref(),
-            ConfigResourceKind::ExecutionAuthorization => {
-                self.revisions.execution_authorization.as_ref()
+            ConfigResourceKind::OperationsPolicy => self.revisions.operations_policy.as_ref(),
+            ConfigResourceKind::ExecutionAutomationPolicy => {
+                self.revisions.execution_automation_policy.as_ref()
             }
         }
     }
@@ -777,11 +813,11 @@ impl DecisionPolicySnapshotDocument {
             ConfigResourceKind::ReportSchedule => {
                 PolicyDocument::ReportSchedule(self.report_schedule.clone())
             }
-            ConfigResourceKind::OperationalControl => {
-                PolicyDocument::OperationalControl(self.operational_control.clone())
+            ConfigResourceKind::OperationsPolicy => {
+                PolicyDocument::OperationsPolicy(self.operations_policy.clone())
             }
-            ConfigResourceKind::ExecutionAuthorization => {
-                PolicyDocument::ExecutionAuthorization(self.execution_authorization.clone())
+            ConfigResourceKind::ExecutionAutomationPolicy => {
+                PolicyDocument::ExecutionAutomationPolicy(self.execution_automation_policy.clone())
             }
         }
     }
@@ -869,8 +905,8 @@ impl DecisionPolicySnapshotDocument {
             execution_risk: self.execution_risk,
             model_routing: self.model_routing,
             report_schedule: self.report_schedule,
-            operational_control: self.operational_control,
-            execution_authorization: self.execution_authorization,
+            operations_policy: self.operations_policy,
+            execution_automation_policy: self.execution_automation_policy,
             profile_artifacts: ImmutableProfileArtifacts {
                 features,
                 scoring,
@@ -1027,8 +1063,8 @@ impl DecisionPolicySnapshot {
             execution_risk: self.execution_risk.clone(),
             model_routing: self.model_routing.clone(),
             report_schedule: self.report_schedule.clone(),
-            operational_control: self.operational_control.clone(),
-            execution_authorization: self.execution_authorization.clone(),
+            operations_policy: self.operations_policy.clone(),
+            execution_automation_policy: self.execution_automation_policy.clone(),
             profile_artifact_refs: self.profile_artifacts.references()?,
         })
     }
@@ -1045,8 +1081,8 @@ impl DecisionPolicySnapshot {
             self.execution_risk.schema_version,
             self.model_routing.schema_version,
             self.report_schedule.schema_version,
-            self.operational_control.schema_version,
-            self.execution_authorization.schema_version,
+            self.operations_policy.schema_version,
+            self.execution_automation_policy.schema_version,
         ]
         .into_iter()
         .all(|version| version == POLICY_RESOURCE_SCHEMA_VERSION)
@@ -1067,9 +1103,9 @@ impl DecisionPolicySnapshot {
             }
             ConfigResourceKind::ModelRouting => self.revisions.model_routing.as_ref(),
             ConfigResourceKind::ReportSchedule => self.revisions.report_schedule.as_ref(),
-            ConfigResourceKind::OperationalControl => self.revisions.operational_control.as_ref(),
-            ConfigResourceKind::ExecutionAuthorization => {
-                self.revisions.execution_authorization.as_ref()
+            ConfigResourceKind::OperationsPolicy => self.revisions.operations_policy.as_ref(),
+            ConfigResourceKind::ExecutionAutomationPolicy => {
+                self.revisions.execution_automation_policy.as_ref()
             }
         }
     }
@@ -1084,9 +1120,9 @@ impl DecisionPolicySnapshot {
             ConfigResourceKind::ExecutionRiskPolicy => &mut self.revisions.execution_risk_policy,
             ConfigResourceKind::ModelRouting => &mut self.revisions.model_routing,
             ConfigResourceKind::ReportSchedule => &mut self.revisions.report_schedule,
-            ConfigResourceKind::OperationalControl => &mut self.revisions.operational_control,
-            ConfigResourceKind::ExecutionAuthorization => {
-                &mut self.revisions.execution_authorization
+            ConfigResourceKind::OperationsPolicy => &mut self.revisions.operations_policy,
+            ConfigResourceKind::ExecutionAutomationPolicy => {
+                &mut self.revisions.execution_automation_policy
             }
         };
         *target = Some(revision_id);
@@ -1107,11 +1143,11 @@ impl DecisionPolicySnapshot {
             ConfigResourceKind::ReportSchedule => {
                 PolicyDocument::ReportSchedule(self.report_schedule.clone())
             }
-            ConfigResourceKind::OperationalControl => {
-                PolicyDocument::OperationalControl(self.operational_control.clone())
+            ConfigResourceKind::OperationsPolicy => {
+                PolicyDocument::OperationsPolicy(self.operations_policy.clone())
             }
-            ConfigResourceKind::ExecutionAuthorization => {
-                PolicyDocument::ExecutionAuthorization(self.execution_authorization.clone())
+            ConfigResourceKind::ExecutionAutomationPolicy => {
+                PolicyDocument::ExecutionAutomationPolicy(self.execution_automation_policy.clone())
             }
         }
     }
@@ -1132,9 +1168,9 @@ impl DecisionPolicySnapshot {
             PolicyDocument::ExecutionRiskPolicy(policy) => self.execution_risk = *policy,
             PolicyDocument::ModelRouting(policy) => self.model_routing = policy,
             PolicyDocument::ReportSchedule(policy) => self.report_schedule = policy,
-            PolicyDocument::OperationalControl(policy) => self.operational_control = policy,
-            PolicyDocument::ExecutionAuthorization(policy) => {
-                self.execution_authorization = policy;
+            PolicyDocument::OperationsPolicy(policy) => self.operations_policy = policy,
+            PolicyDocument::ExecutionAutomationPolicy(policy) => {
+                self.execution_automation_policy = policy;
             }
         }
         if !self.uses_current_resource_schemas() {
@@ -1158,11 +1194,11 @@ impl DecisionPolicySnapshot {
             ConfigResourceKind::ReportSchedule => {
                 generator.into_root_schema_for::<ReportSchedule>()
             }
-            ConfigResourceKind::OperationalControl => {
-                generator.into_root_schema_for::<OperationalControl>()
+            ConfigResourceKind::OperationsPolicy => {
+                generator.into_root_schema_for::<OperationsPolicy>()
             }
-            ConfigResourceKind::ExecutionAuthorization => {
-                generator.into_root_schema_for::<ExecutionAuthorization>()
+            ConfigResourceKind::ExecutionAutomationPolicy => {
+                generator.into_root_schema_for::<ExecutionAutomationPolicy>()
             }
         }
     }

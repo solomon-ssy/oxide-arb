@@ -1,9 +1,12 @@
 //! Typed persistence corruption and decode system contracts.
 
-use quant_pivot_models::types::{
-    ArtifactVersion, AttestationKeyId, EvmAddress, EvmTransactionHash, OperationDetailDocument,
-    PortfolioRiskBudget, ReaderContractVersion, ReportRunId, ReportTriggerKey, ResearchJobParams,
-    SchemaContractVersion, TradePolicyCandidateId,
+use quant_pivot_models::{
+    domain::quant::PortfolioDecisionResult,
+    types::{
+        ArtifactVersion, AttestationKeyId, ContentHash, EvmAddress, EvmTransactionHash,
+        OperationDetailDocument, ReaderContractVersion, ReportRunId, ReportTriggerKey,
+        ResearchJobParams, SchemaContractVersion, TradePolicyCandidateId,
+    },
 };
 use quant_pivot_system_tests::postgres::setup_pg;
 use sea_orm::{
@@ -65,10 +68,14 @@ pub async fn typed_rejects_without_fallback() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection();
 
-    let valid = PortfolioRiskBudget::default();
+    let valid = PortfolioDecisionResult::ZeroCandidates {
+        rejected_tier_count: 0,
+        evidence_hash: ContentHash::parse(&format!("blake3:{}", "a".repeat(64)))
+            .expect("valid evidence hash"),
+    };
     let row = postgres_json(&valid, db).await;
     assert_eq!(
-        decode_json::<PortfolioRiskBudget>(&row).expect("valid decode"),
+        decode_json::<PortfolioDecisionResult>(&row).expect("valid decode"),
         valid
     );
 
@@ -76,13 +83,13 @@ pub async fn typed_rejects_without_fallback() {
     unknown_field["future_field"] = json!(true);
     let row = postgres_json(unknown_field, db).await;
     assert!(
-        decode_json::<PortfolioRiskBudget>(&row).is_err(),
+        decode_json::<PortfolioDecisionResult>(&row).is_err(),
         "project-owned documents must reject unknown fields returned by PostgreSQL"
     );
 
     let row = postgres_json(json!([]), db).await;
     assert!(
-        decode_json::<PortfolioRiskBudget>(&row).is_err(),
+        decode_json::<PortfolioDecisionResult>(&row).is_err(),
         "object documents must reject an array shape"
     );
 

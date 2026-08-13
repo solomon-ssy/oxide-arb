@@ -384,6 +384,15 @@ pub struct ModelRunId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SignalCandidateId(Uuid);
 
+impl SignalCandidateId {
+    /// Project a canonical candidate preimage into an idempotent row identity.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f211);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
 /// Frozen, point-in-time training dataset artifact identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrainingDatasetId(Uuid);
@@ -521,6 +530,15 @@ pub struct ModelComparisonReportId(Uuid);
 /// by Weather features. All kinds share one content-addressed ledger.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CalibrationArtifactId(Uuid);
+
+impl CalibrationArtifactId {
+    /// Deterministically project immutable calibration evidence into its id.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_ca11);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
 
 /// Shadow comparison record identifier (shadow vs active model run).
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -783,6 +801,13 @@ impl FeedbackDecisionArtifactId {
 }
 
 impl BacktestReportId {
+    /// Deterministic identity for one content-addressed replay input.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20d);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+
     /// Stable report identity for one model replay in a comparison artifact.
     #[must_use]
     pub fn from_feedback_comparison(
@@ -954,6 +979,67 @@ pub struct ReportDataQualitySnapshotId(Uuid);
 /// Portfolio plan identifier used by a recommendation report.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PortfolioPlanId(Uuid);
+
+impl PortfolioPlanId {
+    /// Derive a deterministic plan identity from the complete solve preimage.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x7904_f764_7c92_48b8_aa3f_7088_e12b_e221);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
+/// Promoted model that deterministically generates report-specific joint scenarios.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PortfolioScenarioModelArtifactId(Uuid);
+
+impl PortfolioScenarioModelArtifactId {
+    /// Derive the stable model-artifact identity from its canonical content hash.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x36d4_72a2_e62f_4c79_a6de_ee92_b5e1_a4b8);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
+/// Report-specific concrete joint-scenario artifact consumed by the global solver.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PortfolioScenarioArtifactId(Uuid);
+
+impl PortfolioScenarioArtifactId {
+    /// Derive the stable report-artifact identity from its canonical content hash.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0xa7f0_d272_6dfc_4210_a232_e574_36ae_c82f);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
+/// One represented Route's durable diagnostics and lineage within a report run.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReportRouteRunId(Uuid);
+
+impl ReportRouteRunId {
+    /// Derive a deterministic Route-run identity from its immutable lineage preimage.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x96f1_e46a_ad0a_4d11_bcb9_ad5a_d243_c3fe);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
+/// One venue-executable discrete sizing tier offered to the global MILP.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EconomicTierId(Uuid);
+
+impl EconomicTierId {
+    /// Derive the stable tier identity from its complete immutable economics preimage.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x25c9_2a6f_a424_4e18_a1b3_2247_8068_77f4);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
 
 /// Immutable `TopN` recommendation report identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]

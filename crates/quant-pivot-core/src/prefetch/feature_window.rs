@@ -15,7 +15,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    clickhouse::BookMicrostructureRow,
+    clickhouse::{BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS, BookMicrostructureRow},
     domain::data_plane::{
         CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation, TradeTapePrint,
         WeatherForecastPoint, WeatherObservationFact,
@@ -78,10 +78,13 @@ impl FeatureWindowProvider {
         let mut grouped: HashMap<TokenId, Vec<MicrostructureBucket>> = HashMap::new();
         for row in rows {
             let bucket = decode_bucket(&row)?;
-            if bucket.bucket_time < from || bucket.bucket_time > cutoff {
+            let bucket_end_ms = row
+                .bucket_time
+                .saturating_add(BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS);
+            if bucket.bucket_time < from || bucket_end_ms > cutoff.timestamp_millis() {
                 return Err(ResearchError::PitResolution {
                     detail: format!(
-                        "microstructure row for token {} at {} is outside [{from}, {cutoff}]",
+                        "microstructure row for token {} at {} is not a closed one-second bucket inside [{from}, {cutoff})",
                         row.token_id, bucket.bucket_time
                     ),
                 }

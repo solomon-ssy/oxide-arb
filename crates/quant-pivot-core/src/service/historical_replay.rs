@@ -22,7 +22,10 @@ use quant_pivot_models::{
         quant::{DataQualityStatus, OutcomeSide},
     },
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
-    types::{MarketId, OutcomeTokenBinding, Price, TokenId, Usd},
+    types::{
+        MarketId, OutcomeTokenBinding, Price, TokenId, TradeTapeSourceEvidence, Usd,
+        stable_name::FeatureName,
+    },
 };
 use quant_pivot_research::{
     domain::{DomainFactWindows, build_domain_slice_inputs},
@@ -37,9 +40,23 @@ use quant_pivot_research::{
     selection::SelectedMarket,
 };
 
-use crate::prefetch::historical_window::{
-    Prefetched, ReplaySample, feature_window, replay_boundary, selected_market, trade_tape_window,
+use crate::{
+    ingest::trade_tape_health::runtime_market_tape_available,
+    prefetch::historical_window::{
+        Prefetched, ReplaySample, feature_window, replay_boundary, selected_market,
+        trade_tape_window,
+    },
 };
+
+/// Provenance used to decide whether PIT trade-tape facts were complete enough
+/// to consume for one replay.
+#[derive(Clone, Copy)]
+pub enum ReplayTradeTapeSource<'a> {
+    /// A sealed historical source slice owns fact completeness.
+    Materialized { available_by: DateTime<Utc> },
+    /// Runtime parity recomputes availability from serving's raw source state.
+    FrozenRuntime(&'a HashMap<MarketId, TradeTapeSourceEvidence>),
+}
 
 /// Frozen feature/factor/data-quality config governing a replay.
 #[derive(Clone)]
@@ -52,6 +69,11 @@ pub struct ReplayConfig {
     pub domain: DomainConfig,
     /// Data-quality gates applied during feature build.
     pub data_quality: DataQualityConfig,
+    /// Governed single-recommendation exposure cap used by online serving to
+    /// normalize decision-capture liquidity. Replay must use the same frozen
+    /// denominator; catalog liquidity is an observed market attribute, not a
+    /// transform parameter.
+    pub liquidity_cap_usd: Usd,
     /// Factor-native bias calibration. Classical feature-only replay carries
     /// `None` and never resolves or consumes this dependency.
     pub bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
@@ -63,16 +85,18 @@ pub struct CrossSectionRequest<'a> {
     pub pit: &'a dyn PointInTimeSnapshotSource,
     /// Prefetched facts backing the trailing feature windows.
     pub prefetched: &'a Prefetched,
+    /// Explicit trade-tape source provenance; never inferred from row presence.
+    pub trade_tape_source: ReplayTradeTapeSource<'a>,
     /// Frozen decision time for the replayed cross-section.
     pub decision_at: DateTime<Utc>,
     /// `(market, token)` samples in this decision-time group.
     pub group: &'a [ReplaySample],
+    /// Exact frozen model-input contract used by online feature materialization.
+    pub required_features: &'a [FeatureName],
     /// Exact `ResearchProfile` category. `None` is the explicit pooled plane.
     pub category_scope: Option<MarketCategory>,
     /// Source visibility delay applied to features.
     pub knowledge_lag: Duration,
-    /// Maximum trailing feature lookback.
-    pub lookback: Duration,
 }
 
 /// One PIT-resolved cross-section: aligned feature vectors, selection snapshots,
@@ -173,8 +197,7 @@ pub async fn materialize_cross_section(
         outcome_bindings,
         windows,
         trade_windows,
-        liquidity_caps,
-    } = resolve_replay_inputs(config, request, &boundary).await?;
+    } = resolve_replay_inputs(builder, config, request, &boundary).await?;
     if selected.is_empty() {
         return Ok(None);
     }
@@ -209,30 +232,32 @@ pub async fn materialize_cross_section(
         .zip(windows.iter())
         .zip(trade_windows.iter())
         .zip(domain_inputs.iter())
-        .zip(liquidity_caps.iter())
-        .map(
-            |((((market, snapshot), trade_snapshot), domain), liquidity_cap)| {
-                let boundary = boundary.clone();
-                async move {
-                    builder
-                        .resolve_inputs(
-                            market,
-                            &boundary,
-                            request.pit,
-                            FeatureSourceWindows {
-                                microstructure: snapshot,
-                                trade_tape: trade_snapshot,
-                                domain: domain.as_ref(),
-                            },
-                            *liquidity_cap,
-                        )
-                        .await
-                }
-            },
-        );
+        .map(|(((market, snapshot), trade_snapshot), domain)| {
+            let boundary = boundary.clone();
+            async move {
+                builder
+                    .resolve_inputs(
+                        market,
+                        &boundary,
+                        request.pit,
+                        FeatureSourceWindows {
+                            microstructure: snapshot,
+                            trade_tape: trade_snapshot,
+                            domain: domain.as_ref(),
+                        },
+                        config.liquidity_cap_usd,
+                    )
+                    .await
+            }
+        });
     let bundles = try_join_all(resolve_futures).await?;
 
-    let vectors = builder.build_batch(&bundles, &[], &config.features, &config.data_quality)?;
+    let vectors = builder.build_batch(
+        &bundles,
+        request.required_features,
+        &config.features,
+        &config.data_quality,
+    )?;
 
     let partitioned = partition_feature_vectors(vectors, &bundles, &selected, &outcome_bindings)?;
     if partitioned.kept_vectors.is_empty() {
@@ -360,19 +385,24 @@ struct ReplayInputs {
     outcome_bindings: Vec<OutcomeTokenBinding>,
     windows: Vec<MarketWindowSnapshot>,
     trade_windows: Vec<TradeTapeWindowSnapshot>,
-    liquidity_caps: Vec<Usd>,
 }
 
 async fn resolve_replay_inputs(
+    builder: &ConfiguredFeatureBuilder,
     config: &ReplayConfig,
     request: &CrossSectionRequest<'_>,
     boundary: &DecisionBoundary,
 ) -> QuantResult<ReplayInputs> {
+    // `WindowSpec.lookback` owns the widest prefetch horizon across source
+    // families. Materialization must instead apply the exact per-source
+    // horizon used online; otherwise a long trade-tape window silently widens
+    // the microstructure window and creates training/serving skew.
+    let microstructure_lookback =
+        Duration::from_secs(config.features.max_microstructure_lookback_secs());
     let mut selected = Vec::with_capacity(request.group.len());
     let mut outcome_bindings = Vec::with_capacity(request.group.len());
     let mut windows = Vec::with_capacity(request.group.len());
     let mut trade_windows = Vec::with_capacity(request.group.len());
-    let mut liquidity_caps = Vec::with_capacity(request.group.len());
     for sample in request.group {
         let Some(snapshot) = request
             .pit
@@ -387,17 +417,6 @@ async fn resolve_replay_inputs(
         {
             continue;
         }
-        let liquidity_cap =
-            snapshot
-                .market
-                .liquidity_usd
-                .ok_or_else(|| ResearchError::PitResolution {
-                    detail: format!(
-                        "market {} has no catalog liquidity at decision {}",
-                        sample.market_id,
-                        boundary.decision_at()
-                    ),
-                })?;
         let feature_side = if sample.token_id == snapshot.market.token_yes {
             OutcomeSide::Yes
         } else if sample.token_id == snapshot.market.token_no {
@@ -429,30 +448,70 @@ async fn resolve_replay_inputs(
         windows.push(feature_window(
             sample.token_id.clone(),
             boundary,
-            request.lookback,
+            microstructure_lookback,
             request
                 .prefetched
                 .micro
                 .get(&sample.token_id)
                 .map_or(&[][..], Vec::as_slice),
         )?);
-        trade_windows.push(trade_tape_window(
-            sample.market_id.clone(),
-            boundary,
-            Duration::from_secs(config.features.structural.trade_tape_window_secs),
-            request
-                .prefetched
-                .trade_tape
-                .get(&sample.market_id)
-                .map_or(&[][..], Vec::as_slice),
-        )?);
-        liquidity_caps.push(liquidity_cap);
+        let (trade_tape_source, trade_tape_available) = replay_trade_tape_source(
+            builder.needs_trade_tape(),
+            &request.trade_tape_source,
+            &sample.market_id,
+            snapshot.market.neg_risk,
+        )?;
+        trade_windows.push(
+            trade_tape_window(
+                sample.market_id.clone(),
+                boundary,
+                Duration::from_secs(config.features.structural.trade_tape_window_secs),
+                request
+                    .prefetched
+                    .trade_tape
+                    .get(&sample.market_id)
+                    .map_or(&[][..], Vec::as_slice),
+            )?
+            .with_source_evidence(trade_tape_source, trade_tape_available),
+        );
     }
     Ok(ReplayInputs {
         selected,
         outcome_bindings,
         windows,
         trade_windows,
-        liquidity_caps,
     })
+}
+
+fn replay_trade_tape_source(
+    required: bool,
+    source: &ReplayTradeTapeSource<'_>,
+    market_id: &MarketId,
+    neg_risk: bool,
+) -> QuantResult<(TradeTapeSourceEvidence, bool)> {
+    if !required {
+        return Ok((TradeTapeSourceEvidence::not_required(), false));
+    }
+    match source {
+        ReplayTradeTapeSource::Materialized { available_by } => {
+            Ok((TradeTapeSourceEvidence::materialized(*available_by), true))
+        }
+        ReplayTradeTapeSource::FrozenRuntime(by_market) => {
+            let evidence = by_market.get(market_id).ok_or_else(|| {
+                ResearchError::Determinism {
+                    detail: format!(
+                        "runtime parity has no frozen trade-tape source evidence for market {market_id}"
+                    ),
+                }
+            })?;
+            let available = runtime_market_tape_available(evidence, neg_risk).map_err(|detail| {
+                ResearchError::Determinism {
+                    detail: format!(
+                        "runtime parity trade-tape evidence for market {market_id} is invalid: {detail}"
+                    ),
+                }
+            })?;
+            Ok((evidence.clone(), available))
+        }
+    }
 }

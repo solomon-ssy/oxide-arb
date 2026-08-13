@@ -48,10 +48,10 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
         DatasetCohortManifest, DatasetCoverage, DatasetFeatureStateCounts, DatasetManifest,
-        FeatureCellState, MarketId, ModelSpecId, Price, ResearchJobProgress,
+        FeatureCellState, MarketId, ModelSpecId, ModelTrainingTarget, Price, ResearchJobProgress,
         ResearchProfileArtifact, SchemaVersion, Shares, TokenId, TradePolicyArtifactId,
         TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
-        TrainingSampleSource, Usd, factor::FactorServingPlane,
+        TrainingSampleSource, Usd, factor::FactorServingPlane, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -77,11 +77,10 @@ use quant_pivot_research::{
         LabelBuildOutput, LabelName, Labeler, LiquidityExitLabeler, LotSamplePlan,
         LotTerminalSnapshot, LotTrainingContext, MaxAdverseExcursionLabeler,
         MaxFavorableExcursionLabeler, PlanMarket, ReturnToHorizonLabeler, SamplePlan,
-        TOKEN_PAYOUT_RATIO, TokenPayoutRatioLabeler, TrainingDatasetArtifact,
-        TrainingDatasetBuilder, TrainingDatasetPlanner, TrainingExample, TrainingLabel,
-        assert_no_future_leakage, count_samples, dataset_source_fingerprint,
-        label_names_for_sources, plan_lot_timeline_samples, plan_samples, probe_matrix_coverage,
-        remaining_shares_at,
+        TokenPayoutRatioLabeler, TrainingDatasetArtifact, TrainingDatasetBuilder,
+        TrainingDatasetPlanner, TrainingExample, TrainingLabel, assert_no_future_leakage,
+        count_samples, dataset_source_fingerprint, label_names_for_sources,
+        plan_lot_timeline_samples, plan_samples, probe_matrix_coverage, remaining_shares_at,
     },
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -102,7 +101,7 @@ use crate::{
         calibration_shared::assert_dataset_disjoint,
         historical_replay::{
             CrossSectionRequest, ReplayCaptureKey, ReplayConfig, ReplayCrossSection,
-            ReplayFactorMode, ReplayFactorOutput, materialize_cross_section,
+            ReplayFactorMode, ReplayFactorOutput, ReplayTradeTapeSource, materialize_cross_section,
         },
         pit_selection::OfflinePitSelector,
     },
@@ -502,6 +501,8 @@ pub struct TrainingDatasetBuildConfig {
     pub domain: DomainConfig,
     /// Data-quality gates applied during feature build.
     pub data_quality: DataQualityConfig,
+    /// Governed online-serving denominator for decision-capture liquidity.
+    pub liquidity_cap_usd: Usd,
     /// Offline training-dataset build parameters (from runtime `training` section).
     pub training: TrainingConfig,
     /// Selection config — the enabled-category selection gate is applied to the
@@ -534,6 +535,7 @@ pub struct TrainingDatasetService {
     factors: FactorsConfig,
     domain: DomainConfig,
     data_quality: DataQualityConfig,
+    liquidity_cap_usd: Usd,
     max_book_staleness: Duration,
     min_exit_depth_usd: Usd,
     /// Frozen selection policy (drives the offline point-in-time selection funnel).
@@ -688,12 +690,21 @@ impl TrainingDatasetService {
         let (
             model_spec_definition_hash,
             model_family,
+            training_target,
             trade_policy_artifact_id,
             trade_policy_hash,
             trade_policy,
         ) = self
             .resolve_trade_policy_binding(&request, &profile)
             .await?;
+        if training_target != ModelTrainingTarget::OutcomePayout {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "model-score feedback requires outcome_payout target; model spec declares {training_target:?}"
+                ),
+            }
+            .into());
+        }
         let expected_contract = self.factor_contract_for(
             model_family,
             request.feature_schema_version,
@@ -722,7 +733,7 @@ impl TrainingDatasetService {
             samples: Vec::new(),
             lot_samples: Vec::new(),
             exit_training_lots: Vec::new(),
-            label_names: vec![TOKEN_PAYOUT_RATIO],
+            label_names: vec![LabelName::new(training_target.label_name())],
             trade_policy_artifact_id,
             trade_policy_hash,
             trade_policy,
@@ -758,6 +769,7 @@ impl TrainingDatasetService {
         let (
             model_spec_definition_hash,
             model_family,
+            _training_target,
             trade_policy_artifact_id,
             trade_policy_hash,
             trade_policy,
@@ -895,6 +907,7 @@ impl TrainingDatasetService {
             factors: config.factors,
             domain: config.domain,
             data_quality: config.data_quality,
+            liquidity_cap_usd: config.liquidity_cap_usd,
             max_book_staleness,
             min_exit_depth_usd,
             enabled_categories: config
@@ -955,6 +968,7 @@ impl TrainingDatasetService {
     ) -> QuantResult<(
         ContentHash,
         ModelFamily,
+        ModelTrainingTarget,
         Option<TradePolicyArtifactId>,
         Option<ContentHash>,
         Option<TradePolicyArtifactPayload>,
@@ -991,13 +1005,27 @@ impl TrainingDatasetService {
             .into());
         }
         if request.purpose == DatasetPurpose::PolicyFit {
-            return Ok((spec.definition_hash, spec.model_family, None, None, None));
+            return Ok((
+                spec.definition_hash,
+                spec.model_family,
+                spec.training_contract.target,
+                None,
+                None,
+                None,
+            ));
         }
         spec.training_contract
-            .validate()
+            .validate_for(spec.model_family)
             .map_err(|detail| ResearchError::DatasetPlan { detail })?;
-        let Some(artifact_id) = spec.training_contract.trade_policy_artifact_id else {
-            return Ok((spec.definition_hash, spec.model_family, None, None, None));
+        let Some(artifact_id) = spec.training_contract.evaluation_trade_policy_artifact_id else {
+            return Ok((
+                spec.definition_hash,
+                spec.model_family,
+                spec.training_contract.target,
+                None,
+                None,
+                None,
+            ));
         };
         let artifact = self
             .trade_policy_repo
@@ -1056,6 +1084,7 @@ impl TrainingDatasetService {
         Ok((
             spec.definition_hash,
             spec.model_family,
+            spec.training_contract.target,
             Some(artifact.artifact_id),
             Some(artifact.content_hash),
             Some(artifact.payload_json),
@@ -1495,6 +1524,7 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
         let (
             model_spec_definition_hash,
             model_family,
+            _training_target,
             trade_policy_artifact_id,
             trade_policy_hash,
             trade_policy,
@@ -2104,6 +2134,7 @@ impl TrainingDatasetService {
             features: self.features.clone(),
             factors: self.factors.clone(),
             data_quality: self.data_quality.clone(),
+            liquidity_cap_usd: self.liquidity_cap_usd,
             domain: self.domain.clone(),
             selection: self.selection.clone(),
             model_requirements,
@@ -2143,6 +2174,7 @@ impl TrainingDatasetService {
             features: &self.features,
             factors: &self.factors,
             data_quality: &self.data_quality,
+            liquidity_cap_usd: self.liquidity_cap_usd,
             domain: &self.domain,
             selection: &self.selection,
             model_requirements,
@@ -2196,6 +2228,10 @@ impl TrainingDatasetService {
             .as_slice()
             .contains(&TrainingSampleSource::ExitDecision)
         {
+            let required_features = self
+                .resolve_model_requirements(&plan.request.model_spec_id)
+                .await?
+                .union_all();
             coverage.exit_decision_candidates = plan.lot_samples.len() as u64;
             coverage.planned_samples += plan.lot_samples.len() as u64;
             self.append_exit_decision_examples(
@@ -2205,6 +2241,7 @@ impl TrainingDatasetService {
                     prefetched,
                     clob_market_info,
                     context,
+                    required_features: &required_features,
                 },
                 &factor_engine,
                 &mut ExampleBuildSink {
@@ -2266,6 +2303,7 @@ impl TrainingDatasetService {
             factors: self.factors.clone(),
             domain: self.domain.clone(),
             data_quality: self.data_quality.clone(),
+            liquidity_cap_usd: self.liquidity_cap_usd,
             bias_table: if model_family.is_classical() {
                 None
             } else {
@@ -2298,9 +2336,11 @@ impl TrainingDatasetService {
                 replay_config: &replay_config,
                 pit: input.pit,
                 prefetched: input.prefetched,
+                trade_tape_available_by: input.plan.request.source_lineage.pit_cutoff,
                 as_of,
                 group: &group,
                 context: input.context,
+                required_features: input.required_features,
             })
             .await?
             else {
@@ -2641,14 +2681,15 @@ impl TrainingDatasetService {
         }
         model_spec
             .training_contract
-            .validate()
+            .validate_for(model_family)
             .map_err(|detail| ResearchError::DatasetBuild {
                 detail: format!(
                     "model spec {} has invalid training contract: {detail}",
                     model_spec.model_spec_id
                 ),
             })?;
-        let target_label = LabelName::new(model_spec.training_contract.target_label_name.clone());
+        let target_label =
+            LabelName::new(model_spec.training_contract.target.label_name().to_owned());
         let mut coverage = coverage;
         coverage.bias_table_hash = if model_family.is_classical() {
             None
@@ -2661,7 +2702,7 @@ impl TrainingDatasetService {
             builder.schema(),
             &model_spec.input_contract,
             &target_label,
-            model_spec.training_contract.target_label_horizon_secs,
+            model_spec.training_contract.target.label_horizon_secs(),
         )?);
         Ok(coverage)
     }
@@ -2906,6 +2947,7 @@ struct HistoricalSpineParams<'a> {
     features: &'a FeaturesConfig,
     factors: &'a FactorsConfig,
     data_quality: &'a DataQualityConfig,
+    liquidity_cap_usd: Usd,
     domain: &'a DomainConfig,
     selection: &'a SelectionConfig,
     /// Target `ModelSpec`'s resolved feature requirements.
@@ -2932,6 +2974,7 @@ struct HistoricalSpineInputs {
     features: FeaturesConfig,
     factors: FactorsConfig,
     data_quality: DataQualityConfig,
+    liquidity_cap_usd: Usd,
     domain: DomainConfig,
     selection: SelectionConfig,
     /// Target `ModelSpec`'s resolved feature requirements.
@@ -2967,6 +3010,7 @@ fn run_historical_spine_blocking(
             features: &inputs.features,
             factors: &inputs.factors,
             data_quality: &inputs.data_quality,
+            liquidity_cap_usd: inputs.liquidity_cap_usd,
             domain: &inputs.domain,
             selection: &inputs.selection,
             model_requirements: inputs.model_requirements,
@@ -3011,12 +3055,14 @@ async fn run_historical_spine(
         factors: params.factors.clone(),
         domain: params.domain.clone(),
         data_quality: params.data_quality.clone(),
+        liquidity_cap_usd: params.liquidity_cap_usd,
         bias_table: if params.model_family.is_classical() {
             None
         } else {
             params.bias_table.as_ref().map(Arc::clone)
         },
     };
+    let required_features = params.model_requirements.union_all();
     let pit_selector = OfflinePitSelector::new(
         params.selection,
         params.data_quality,
@@ -3068,11 +3114,14 @@ async fn run_historical_spine(
             &CrossSectionRequest {
                 pit: params.pit,
                 prefetched: params.prefetched,
+                trade_tape_source: ReplayTradeTapeSource::Materialized {
+                    available_by: params.request.source_lineage.pit_cutoff,
+                },
                 decision_at: as_of,
                 group: &replay_group,
+                required_features: &required_features,
                 category_scope: factor_engine.category_scope(),
                 knowledge_lag: params.context.knowledge_lag,
-                lookback: params.context.lookback,
             },
         )
         .await?
@@ -3415,6 +3464,7 @@ struct ExitDecisionAppendInput<'a> {
     prefetched: &'a Prefetched,
     clob_market_info: &'a [ClobMarketInfoVersion],
     context: &'a ReplayContext,
+    required_features: &'a [FeatureName],
 }
 
 struct LotCrossSectionMaterialize<'a> {
@@ -3424,9 +3474,11 @@ struct LotCrossSectionMaterialize<'a> {
     replay_config: &'a ReplayConfig,
     pit: &'a dyn PointInTimeSnapshotSource,
     prefetched: &'a Prefetched,
+    trade_tape_available_by: DateTime<Utc>,
     as_of: DateTime<Utc>,
     group: &'a [&'a LotSamplePlan],
     context: &'a ReplayContext,
+    required_features: &'a [FeatureName],
 }
 
 struct ExitDecisionSampleBuild<'a> {
@@ -3562,11 +3614,14 @@ async fn materialize_lot_cross_section(
         &CrossSectionRequest {
             pit: input.pit,
             prefetched: input.prefetched,
+            trade_tape_source: ReplayTradeTapeSource::Materialized {
+                available_by: input.trade_tape_available_by,
+            },
             decision_at: input.as_of,
             group: &replay_group,
+            required_features: input.required_features,
             category_scope: input.category_scope,
             knowledge_lag: input.context.knowledge_lag,
-            lookback: input.context.lookback,
         },
     )
     .await
