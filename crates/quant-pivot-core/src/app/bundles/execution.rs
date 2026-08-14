@@ -17,10 +17,11 @@ use crate::{
         AdmissionInputBuilder, AdmissionInputBuilderDeps, ClobOrderClient,
         ClobReconciliationReader, CompositeExitSignalEvaluator, CoreExecutionDispatcher,
         CoreExitDispatcher, DefaultAdmissionEngine, DispatchWake, EvidenceCollector,
-        ExecutionBreaker, ExecutionDispatcherDeps, ExitDispatcherDeps, ExitMonitorHealthHandle,
-        ExitMonitorService, ExitMonitorServiceDeps, ExitSignalEvaluator, IntentLifecyclePublisher,
-        OutcomeReconciliationService, OutcomeReconciliationServiceDeps, PolymarketOrderClient,
-        ReconciliationService, ReconciliationServiceDeps, VenueEvidenceCollector,
+        ExecutionBreaker, ExecutionDispatcherDeps, ExecutionOrderLifecyclePublisher,
+        ExitDispatcherDeps, ExitMonitorHealthHandle, ExitMonitorService, ExitMonitorServiceDeps,
+        ExitSignalEvaluator, IntentLifecyclePublisher, OutcomeReconciliationService,
+        OutcomeReconciliationServiceDeps, PolymarketOrderClient, ReconciliationService,
+        ReconciliationServiceDeps, SettlementLifecyclePublisher, VenueEvidenceCollector,
         VenueReconciliationReader,
         settlement_discovery::SettlementDiscoveryService,
         settlement_discovery_wake::SettlementDiscoveryWake,
@@ -143,6 +144,9 @@ impl ExecutionBundle {
 
         let breaker = build_execution_breaker(deps)?;
         let settlement = build_settlement_runtime(deps)?;
+        let order_lifecycle = Arc::new(ExecutionOrderLifecyclePublisher::new(
+            deps.intent_lifecycle.publisher(),
+        ));
 
         // Exit-monitor health seam: owned by the governance bundle so it
         // is shared with the mode preflight; published by the worker, read by
@@ -180,6 +184,7 @@ impl ExecutionBundle {
                 metrics: Arc::clone(&infra.metrics),
                 execution_events: Arc::clone(&infra.execution_event_writer),
                 intent_lifecycle: Arc::clone(&deps.intent_lifecycle),
+                order_lifecycle: Arc::clone(&order_lifecycle),
                 feature_parity_gate: Arc::new(RepositoryFeatureParityGate::new(Arc::clone(
                     &repos.feature_parity,
                 )
@@ -212,6 +217,7 @@ impl ExecutionBundle {
             capital_events: Arc::clone(&infra.capital_allocation_event_writer),
             position_events: Arc::clone(&infra.position_event_writer),
             intent_lifecycle: Arc::clone(&deps.intent_lifecycle),
+            order_lifecycle: Arc::clone(&order_lifecycle),
             events: deps.intent_lifecycle.publisher(),
         }));
 
@@ -228,6 +234,7 @@ impl ExecutionBundle {
             &submission,
             &order_client,
             &breaker,
+            &order_lifecycle,
             exit_monitor_health.clone(),
         );
         let outcome_reconciliation = build_outcome_reconciliation_service(deps)?;
@@ -268,6 +275,9 @@ struct SettlementRuntime {
 fn build_settlement_runtime(deps: &ExecutionBundleDeps<'_>) -> QuantResult<SettlementRuntime> {
     let repository =
         Arc::clone(&deps.infra.repos.settlement_redeem) as Arc<dyn SettlementRedeemRepository>;
+    let lifecycle = Arc::new(SettlementLifecyclePublisher::new(
+        deps.intent_lifecycle.publisher(),
+    ));
     let catalog = SettlementDeploymentCatalog::official_current()
         .map_err(|source| QuantError::config(source.to_string()))?;
     let chain_reader = AlloySettlementChainReader::connect(&deps.deploy.polymarket.onchain)?;
@@ -290,7 +300,10 @@ fn build_settlement_runtime(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Settl
         as Arc<dyn SettlementGovernanceRepository>;
     let adapter_reader = AlloySettlementAdapterReader::connect(&deps.deploy.polymarket.onchain)
         .map_err(|source| QuantError::config(source.to_string()))?;
-    let discovery = Arc::new(SettlementDiscoveryService::new(Arc::clone(&repository)));
+    let discovery = Arc::new(SettlementDiscoveryService::new(
+        Arc::clone(&repository),
+        Arc::clone(&lifecycle),
+    ));
     let preflight = Arc::new(SettlementPreflightService::new(
         SettlementPreflightServiceDeps {
             repository: Arc::clone(&repository),
@@ -301,6 +314,7 @@ fn build_settlement_runtime(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Settl
             credentials,
             config: deps.deploy.polymarket.settlement.clone(),
             worker_id: WorkerId::from_v7(),
+            lifecycle: Arc::clone(&lifecycle),
         },
     ));
     let service = Arc::new(SettlementService::new(SettlementServiceDeps {
@@ -312,6 +326,7 @@ fn build_settlement_runtime(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Settl
         config: deps.deploy.polymarket.settlement.clone(),
         worker_id: WorkerId::from_v7(),
         metrics: Arc::clone(&deps.infra.metrics),
+        lifecycle: Arc::clone(&lifecycle),
     }));
     let governed_actions = Arc::new(SettlementGovernedActionService::new(
         SettlementGovernedActionServiceDeps {
@@ -349,6 +364,7 @@ fn build_settlement_runtime(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Settl
             config: deps.deploy.polymarket.settlement.clone(),
             runtime_controls: deps.governance.runtime_controls.clone(),
             execution_account_id: deps.account.execution_account.execution_account_id,
+            lifecycle,
         },
     ));
     let recovery_admission = Arc::clone(&control) as Arc<dyn SettlementRecoveryAdmissionPort>;
@@ -465,6 +481,7 @@ fn build_exit_monitor(
     submission: &Arc<dyn ExecutionSubmissionRepository>,
     order_client: &Arc<dyn PolymarketOrderClient>,
     breaker: &Arc<ExecutionBreaker>,
+    order_lifecycle: &Arc<ExecutionOrderLifecyclePublisher>,
     health: ExitMonitorHealthHandle,
 ) -> Arc<ExitMonitorService> {
     let repos = &wiring.infra.repos;
@@ -527,6 +544,7 @@ fn build_exit_monitor(
         intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
         clob_market_info: Arc::clone(&repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
         book_store: Arc::clone(&wiring.data.book_store),
+        order_lifecycle: Arc::clone(order_lifecycle),
     }));
     Arc::new(ExitMonitorService::new(ExitMonitorServiceDeps {
         positions: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,

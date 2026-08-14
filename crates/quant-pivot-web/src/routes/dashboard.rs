@@ -36,7 +36,7 @@ use quant_pivot_models::{
             ExecutionOrderState, OrderIntentStatus, RecommendationReportStatus, ReportRunStatus,
         },
         rbac::{Operation, ResourceType},
-        runtime_activity::{RuntimeActivityDomain, RuntimeActivityStatus},
+        runtime_activity::RuntimeActivityDomain,
     },
 };
 use uuid::Uuid;
@@ -696,31 +696,21 @@ async fn load_runtime_activity(
         DashboardReasonCode::NoSamples,
         None,
         async {
-            let query = |status, limit| RuntimeActivityReadQuery {
+            let query = RuntimeActivityReadQuery {
                 visible_domains: visible_domains.clone(),
                 domain: None,
-                status,
+                status: None,
                 cursor: None,
-                limit,
+                limit: 8,
             };
-            let (recent, running, attention) = tokio::try_join!(
-                state.runtime_activities.page(query(None, 8)),
-                state
-                    .runtime_activities
-                    .page(query(Some(RuntimeActivityStatus::Running), 1)),
-                state
-                    .runtime_activities
-                    .page(query(Some(RuntimeActivityStatus::Attention), 1)),
-            )?;
+            let recent = state.runtime_activities.page(query).await?;
             Ok(Some((
                 recent
                     .items
                     .first()
                     .map_or(observed_at, |item| item.updated_at),
                 DashboardRuntimeActivityView {
-                    total: recent.summary.total,
-                    running: running.summary.total,
-                    attention: attention.summary.total,
+                    indicator: recent.indicator,
                     items: recent.items,
                 },
             )))

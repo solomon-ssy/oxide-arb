@@ -8,7 +8,7 @@
 
 use actix_web::{
     http::Method,
-    web::{Data, Query},
+    web::{Data, Path, Query},
 };
 use quant_pivot_models::{
     domain::{
@@ -17,6 +17,7 @@ use quant_pivot_models::{
         pagination::Paginated,
     },
     enums::rbac::{Operation, ResourceType},
+    types::OperationLogId,
 };
 
 use crate::{
@@ -29,12 +30,20 @@ use crate::{
 
 /// Operation-log read routes.
 pub(crate) fn route_specs() -> Vec<RouteSpec> {
-    vec![spec(
-        Method::GET,
-        "/operation-logs",
-        Rule::ResourceOp(ResourceType::OperationLog, Operation::Read),
-        list,
-    )]
+    vec![
+        spec(
+            Method::GET,
+            "/operation-logs",
+            Rule::ResourceOp(ResourceType::OperationLog, Operation::Read),
+            list,
+        ),
+        spec(
+            Method::GET,
+            "/operation-logs/{id}",
+            Rule::ResourceOp(ResourceType::OperationLog, Operation::Read),
+            get,
+        ),
+    ]
 }
 
 /// `GET /api/operation-logs` — paginated, filtered operation-log query
@@ -45,6 +54,19 @@ pub async fn list(
 ) -> Result<WebResponse<Paginated<OperationLogView>>, WebError> {
     let result = state.operation_logs.page(query.into_inner()).await?;
     Ok(WebResponse::ok(project_page(result)))
+}
+
+/// `GET /api/operation-logs/{id}` — one immutable redacted audit row.
+pub async fn get(
+    state: Data<AppState>,
+    id: Path<OperationLogId>,
+) -> Result<WebResponse<OperationLogView>, WebError> {
+    let info = state
+        .operation_logs
+        .find_by_id(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("operation log not found: {id}")))?;
+    Ok(WebResponse::ok(OperationLogView::from(info)))
 }
 
 /// Project a paginated [`OperationLogInfo`] page into its outbound view.

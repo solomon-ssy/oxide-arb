@@ -58,10 +58,13 @@ use quant_pivot_repository::traits::quant::{
 use tokio::sync::Mutex;
 
 use crate::{
-    execution::settlement_recovery_admission::{
-        SettlementRecoveryAdmission, SettlementRecoveryAdmissionBlockReason,
-        SettlementRecoveryAdmissionEvidence, SettlementRecoveryAdmissionPort,
-        SettlementRecoveryAdmissionRequest,
+    execution::{
+        SettlementLifecyclePublisher,
+        settlement_recovery_admission::{
+            SettlementRecoveryAdmission, SettlementRecoveryAdmissionBlockReason,
+            SettlementRecoveryAdmissionEvidence, SettlementRecoveryAdmissionPort,
+            SettlementRecoveryAdmissionRequest,
+        },
     },
     governance::RuntimeControlsHandle,
 };
@@ -87,6 +90,7 @@ pub struct CoreSettlementControlPort {
     runtime_controls: RuntimeControlsHandle,
     execution_account_id: ExecutionAccountId,
     readiness_cache: Mutex<Option<SettlementReadinessCacheEntry>>,
+    lifecycle: Arc<SettlementLifecyclePublisher>,
 }
 
 /// Complete dependency set for the settlement control plane.
@@ -100,6 +104,7 @@ pub struct CoreSettlementControlPortDeps {
     pub config: SettlementDeployConfig,
     pub runtime_controls: RuntimeControlsHandle,
     pub execution_account_id: ExecutionAccountId,
+    pub lifecycle: Arc<SettlementLifecyclePublisher>,
 }
 
 impl CoreSettlementControlPort {
@@ -116,6 +121,7 @@ impl CoreSettlementControlPort {
             runtime_controls: deps.runtime_controls,
             execution_account_id: deps.execution_account_id,
             readiness_cache: Mutex::new(None),
+            lifecycle: deps.lifecycle,
         }
     }
 
@@ -644,15 +650,17 @@ impl SettlementControlPort for CoreSettlementControlPort {
         actor: UserId,
         approved_at: DateTime<Utc>,
     ) -> QuantResult<SettlementRedeemInfo> {
-        self.repository
+        let committed = self
+            .repository
             .approve_authorization(ApproveSettlementAuthorization {
                 settlement_redeem_id,
                 digest,
                 actor,
                 approved_at,
             })
-            .await
-            .map_err(Into::into)
+            .await?;
+        self.lifecycle.committed(&committed);
+        Ok(committed)
     }
 
     async fn revoke_authorization(
@@ -662,15 +670,17 @@ impl SettlementControlPort for CoreSettlementControlPort {
         actor: UserId,
         revoked_at: DateTime<Utc>,
     ) -> QuantResult<SettlementRedeemInfo> {
-        self.repository
+        let committed = self
+            .repository
             .revoke_authorization(RevokeSettlementAuthorization {
                 settlement_redeem_id,
                 digest,
                 actor,
                 revoked_at,
             })
-            .await
-            .map_err(Into::into)
+            .await?;
+        self.lifecycle.committed(&committed);
+        Ok(committed)
     }
 
     async fn operator_approval_preflight(

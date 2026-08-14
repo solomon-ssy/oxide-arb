@@ -50,6 +50,7 @@ use crate::{
     execution::{
         admission::{AdmissionDecision, AdmissionInputBuilder, ExecutionAdmissionEngine},
         breaker::ExecutionBreaker,
+        execution_order_lifecycle::ExecutionOrderLifecyclePublisher,
         intent_lifecycle::IntentLifecyclePublisher,
         order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
     },
@@ -73,6 +74,8 @@ pub struct ExecutionDispatcherDeps {
     pub execution_events: Arc<ExecutionEventWriter>,
     /// Fans out `quant.intent` lifecycle events as the venue truth settles.
     pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
+    /// Fans out committed execution-order creation and venue-result transitions.
+    pub order_lifecycle: Arc<ExecutionOrderLifecyclePublisher>,
     /// Checked before claim, then captured as an exact clear generation and
     /// revalidated under the parity advisory lock inside the write-ahead
     /// transaction so a newly opened latch cannot race entry.
@@ -261,6 +264,7 @@ impl CoreExecutionDispatcher {
             Ok(order) => order,
             Err(error) => return Err(self.revert_and(intent_id, error.into()).await),
         };
+        self.deps.order_lifecycle.created(&execution_order, now);
         self.deps.metrics.inc_execution_order_submitted();
         self.deps.execution_events.write(project_execution_event(
             &execution_order,
@@ -300,6 +304,9 @@ impl CoreExecutionDispatcher {
             .submission
             .record_submission_result(&execution_order.execution_order_id, write)
             .await?;
+        self.deps
+            .order_lifecycle
+            .transition(&execution_order, &recorded, now);
         self.deps.execution_events.write(project_execution_event(
             &recorded,
             recommendation.recommendation_id,

@@ -58,6 +58,11 @@ impl CoreEvent {
                 None,
                 serde_json::to_value(payload).ok()?,
             ),
+            Self::ExecutionOrder(payload) => (
+                WsChannel::QuantExecutionOrder,
+                None,
+                serde_json::to_value(payload).ok()?,
+            ),
             Self::Condition(payload) => (
                 WsChannel::QuantCondition,
                 None,
@@ -95,19 +100,22 @@ mod tests {
             governance::SystemStatus,
             quant::RepresentedRouteSet,
             runtime::{
-                CoreEvent, MaterializationRunEvent, MaterializationRunKind,
-                MaterializationRunStatus, ReconciliationLifecycleEvent, ReportEventKind,
-                ReportLifecycleEvent, ReportRunLifecycleEvent, SettlementRedeemLifecycleEvent,
+                CoreEvent, ExecutionOrderEventKind, ExecutionOrderLifecycleEvent,
+                MaterializationRunEvent, MaterializationRunKind, MaterializationRunStatus,
+                ReconciliationLifecycleEvent, ReportEventKind, ReportLifecycleEvent,
+                ReportRunLifecycleEvent, SettlementRedeemLifecycleEvent,
             },
             ws::{SubscriptionKey, channel::WsChannel},
         },
         enums::{
-            execution::ReconciliationResult,
+            execution::{ExecutionOrderPhase, ReconciliationResult},
             quant::{
-                QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportRunStatus,
-                TrainingDatasetStatus,
+                ExecutionOrderState, QuantRuntimeMode, RecommendationReportStatus, ReportKind,
+                ReportRunStatus, TrainingDatasetStatus,
             },
-            settlement::SettlementCaseState,
+            settlement::{
+                SettlementAuthorizationState, SettlementCaseState, SettlementReadinessStatus,
+            },
             system::CapabilityReason,
         },
         runtime_config::BuyModelRoute,
@@ -268,11 +276,32 @@ mod tests {
     }
 
     #[test]
+    fn execution_order_global_channel() {
+        let event = CoreEvent::ExecutionOrder(ExecutionOrderLifecycleEvent {
+            event: ExecutionOrderEventKind::PartiallyFilled,
+            execution_order_id: "eo-1".to_owned(),
+            order_intent_id: "oi-1".to_owned(),
+            order_phase: ExecutionOrderPhase::Entry,
+            market_id: MarketId::new("0xabc"),
+            state: ExecutionOrderState::PartiallyFilled,
+            occurred_at: Utc::now(),
+        });
+        let (key, envelope) = event.event_envelope().expect("execution order maps");
+        assert_eq!(key, SubscriptionKey::global(WsChannel::QuantExecutionOrder));
+        assert_eq!(envelope.kind.as_str(), "quant.execution_order");
+        assert_eq!(envelope.data["event"], "partially_filled");
+        assert_eq!(envelope.data["execution_order_id"], "eo-1");
+    }
+
+    #[test]
     fn settlement_maps_global_channel() {
         let event = CoreEvent::Settlement(SettlementRedeemLifecycleEvent {
             settlement_redeem_id: "sr-1".to_owned(),
             market_id: MarketId::new("0xabc"),
             state: SettlementCaseState::Confirmed,
+            readiness_status: SettlementReadinessStatus::Ready,
+            authorization_state: SettlementAuthorizationState::Consumed,
+            occurred_at: Utc::now(),
         });
         let (key, envelope) = event.event_envelope().expect("settlement maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::QuantSettlement));

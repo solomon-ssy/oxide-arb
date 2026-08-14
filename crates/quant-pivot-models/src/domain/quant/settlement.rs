@@ -186,6 +186,13 @@ pub struct SettlementChainSubmissionInfo {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Atomic settlement-submission write result with the post-commit case view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettlementSubmissionOutcome {
+    pub redeem: SettlementRedeemInfo,
+    pub submission: SettlementChainSubmissionInfo,
+}
+
 info_from_model!(
     SettlementChainSubmissionInfo,
     quant_settlement_chain_submission::Model,

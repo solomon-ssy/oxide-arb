@@ -48,6 +48,7 @@ use crate::{
         admission::pit_fee_schedule,
         breaker::ExecutionBreaker,
         dispatcher::{gtd_expiration_at, submit_response_resolution},
+        execution_order_lifecycle::ExecutionOrderLifecyclePublisher,
         exit_monitor::ExitOrderSpec,
         order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
     },
@@ -80,6 +81,7 @@ pub struct ExitDispatcherDeps {
     pub intents: Arc<dyn OrderIntentRepository>,
     pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     pub book_store: Arc<BookStore>,
+    pub order_lifecycle: Arc<ExecutionOrderLifecyclePublisher>,
 }
 
 /// Submits exit (Sell) orders and settles their venue outcome atomically.
@@ -121,6 +123,9 @@ impl CoreExitDispatcher {
             .submission
             .create_exit_order(new_order, reason, pending_scale_out)
             .await?;
+        self.deps
+            .order_lifecycle
+            .created(&execution_order, Utc::now());
         let recommendation_id = intent.recommendation_id;
         self.deps.execution_events.write(project_execution_event(
             &execution_order,
@@ -173,6 +178,9 @@ impl CoreExitDispatcher {
             .submission
             .record_exit_result(&execution_order.execution_order_id, write)
             .await?;
+        self.deps
+            .order_lifecycle
+            .transition(&execution_order, &recorded, result.responded_at);
         self.deps.execution_events.write(project_execution_event(
             &recorded,
             recommendation_id,

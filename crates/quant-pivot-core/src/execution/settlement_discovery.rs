@@ -23,6 +23,8 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::quant::settlement_redeem::SettlementRedeemRepository;
 
+use crate::execution::SettlementLifecyclePublisher;
+
 /// Bounded durable-poll result used by worker metrics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SettlementDiscoverySummary {
@@ -36,12 +38,19 @@ pub struct SettlementDiscoverySummary {
 /// PostgreSQL-truth discovery. Venue events are only allowed to wake this poll.
 pub struct SettlementDiscoveryService {
     repository: Arc<dyn SettlementRedeemRepository>,
+    lifecycle: Arc<SettlementLifecyclePublisher>,
 }
 
 impl SettlementDiscoveryService {
     #[must_use]
-    pub fn new(repository: Arc<dyn SettlementRedeemRepository>) -> Self {
-        Self { repository }
+    pub fn new(
+        repository: Arc<dyn SettlementRedeemRepository>,
+        lifecycle: Arc<SettlementLifecyclePublisher>,
+    ) -> Self {
+        Self {
+            repository,
+            lifecycle,
+        }
     }
 
     /// Revalidate existing cases first, then create missing account-scoped cases.
@@ -83,13 +92,15 @@ impl SettlementDiscoveryService {
                 summary.unchanged += 1;
                 return Ok(());
             }
-            self.repository
+            let committed = self
+                .repository
                 .mark_inventory_absent(MarkSettlementInventoryAbsent {
                     settlement_redeem_id: redeem.settlement_redeem_id,
                     expected_inventory_digest: redeem.inventory_digest,
                     observed_at,
                 })
                 .await?;
+            self.lifecycle.committed(&committed);
             summary.marked_not_required += 1;
             return Ok(());
         };
@@ -112,7 +123,8 @@ impl SettlementDiscoveryService {
         let contributor_lots_digest = frozen.contributor_lots_digest;
         let effective_policy = frozen.effective_policy;
         let lots = frozen.into_rows(redeem.settlement_redeem_id);
-        self.repository
+        let committed = self
+            .repository
             .refresh_discovered_inventory(RefreshSettlementInventory {
                 settlement_redeem_id: redeem.settlement_redeem_id,
                 expected_inventory_digest: redeem.inventory_digest,
@@ -128,6 +140,7 @@ impl SettlementDiscoveryService {
                 observed_at,
             })
             .await?;
+        self.lifecycle.committed(&committed);
         summary.refreshed += 1;
         Ok(())
     }
@@ -196,7 +209,10 @@ impl SettlementDiscoveryService {
         let expected_digest = new_case.inventory_digest;
         let rows = frozen.into_rows(settlement_redeem_id);
         match self.repository.insert_discovered_case(new_case, rows).await {
-            Ok(_) => summary.discovered += 1,
+            Ok(committed) => {
+                self.lifecycle.committed(&committed);
+                summary.discovered += 1;
+            }
             Err(StorageError::Duplicate { .. }) => {
                 let concurrent = self
                     .repository

@@ -38,7 +38,10 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::quant::settlement_redeem::SettlementRedeemRepository;
 use rust_decimal::Decimal;
 
-use super::settlement_timing::{deadline, retry_deadline};
+use super::{
+    SettlementLifecyclePublisher,
+    settlement_timing::{deadline, retry_deadline},
+};
 
 /// Outcome-token / pUSD micro-unit scale used by inventory ↔ chain raw matching.
 const OUTCOME_TOKEN_SCALE: u64 = 1_000_000;
@@ -60,6 +63,7 @@ pub struct SettlementPreflightService {
     credentials: SettlementCredentialAvailability,
     config: SettlementDeployConfig,
     worker_id: WorkerId,
+    lifecycle: Arc<SettlementLifecyclePublisher>,
 }
 
 pub struct SettlementPreflightServiceDeps {
@@ -71,6 +75,7 @@ pub struct SettlementPreflightServiceDeps {
     pub credentials: SettlementCredentialAvailability,
     pub config: SettlementDeployConfig,
     pub worker_id: WorkerId,
+    pub lifecycle: Arc<SettlementLifecyclePublisher>,
 }
 
 impl SettlementPreflightService {
@@ -85,6 +90,7 @@ impl SettlementPreflightService {
             credentials: deps.credentials,
             config: deps.config,
             worker_id: deps.worker_id,
+            lifecycle: deps.lifecycle,
         }
     }
 
@@ -173,7 +179,8 @@ impl SettlementPreflightService {
             return Ok(SettlementPreflightOutcome::Blocked);
         }
         let expected_payout = expected_payout(&preflight)?;
-        self.repository
+        let committed = self
+            .repository
             .persist_preflight(PersistSettlementPreflight {
                 settlement_redeem_id: redeem.settlement_redeem_id,
                 owner: self.worker_id,
@@ -201,6 +208,7 @@ impl SettlementPreflightService {
                 observed_at,
             })
             .await?;
+        self.lifecycle.committed(&committed);
         Ok(SettlementPreflightOutcome::Ready)
     }
 
@@ -218,7 +226,8 @@ impl SettlementPreflightService {
             self.config.retry_max_secs,
             &redeem.settlement_redeem_id.to_string(),
         )?;
-        self.repository
+        let committed = self
+            .repository
             .persist_preflight(PersistSettlementPreflight {
                 settlement_redeem_id: redeem.settlement_redeem_id,
                 owner: self.worker_id,
@@ -242,6 +251,7 @@ impl SettlementPreflightService {
                 observed_at,
             })
             .await?;
+        self.lifecycle.committed(&committed);
         Ok(())
     }
 }

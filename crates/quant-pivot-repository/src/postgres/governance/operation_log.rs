@@ -12,6 +12,7 @@ use quant_pivot_models::{
         pagination::{PageWindow, Paginated},
     },
     entities::operation_log::{Column, Entity},
+    types::OperationLogId,
 };
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
@@ -92,6 +93,17 @@ impl OperationLogRepository for PgOperationLogRepository {
         insert_many_chunked::<Entity, NewOperationLog>(&txn, logs).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(())
+    }
+
+    async fn find_by_id(
+        &self,
+        id: &OperationLogId,
+    ) -> Result<Option<OperationLogInfo>, StorageError> {
+        Entity::find_by_id(*id)
+            .one(&self.db)
+            .await
+            .map(|row| row.map(Into::into))
+            .map_err(StorageError::from)
     }
 
     async fn page(

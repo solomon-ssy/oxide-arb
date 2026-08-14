@@ -102,9 +102,18 @@ pub struct RuntimeActivitySummaryView {
     pub by_domain: Vec<RuntimeActivityDomainCountView>,
 }
 
+/// Permission-visible activity counts independent of list filters and paging.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct RuntimeActivityIndicatorView {
+    pub total: u64,
+    pub running: u64,
+    pub attention: u64,
+}
+
 /// Keyset page returned by `GET /api/runtime/activities`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeActivityPageView {
+    pub indicator: RuntimeActivityIndicatorView,
     pub summary: RuntimeActivitySummaryView,
     pub items: Vec<RuntimeActivityView>,
     pub has_more: bool,

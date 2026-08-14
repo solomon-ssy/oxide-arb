@@ -12,6 +12,7 @@ use quant_pivot_api::settlement::confirmation::{
 };
 use quant_pivot_core::{
     execution::{
+        SettlementLifecyclePublisher,
         settlement_confirmation::{
             build_settlement_confirmation, settlement_reconciliation_command,
         },
@@ -51,6 +52,7 @@ use quant_pivot_models::{
             },
             settlement_inventory::NewSettlementInventoryLot,
         },
+        runtime::CoreEventPublisher,
     },
     entities::{
         market::Entity as MarketEntity,
@@ -97,6 +99,7 @@ use quant_pivot_models::{
         },
     },
 };
+
 use quant_pivot_repository::{
     postgres::{
         PgCapitalAllocationRepository, PgEventRepository, PgExecutionAccountRepository,
@@ -135,6 +138,11 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
     QueryFilter,
 };
+
+fn settlement_lifecycle() -> Arc<SettlementLifecyclePublisher> {
+    let (events, _receiver) = CoreEventPublisher::bounded(64);
+    Arc::new(SettlementLifecyclePublisher::new(events))
+}
 
 const MARKET_ID: &str = "settlement-persistence-market";
 const WINNING_TOKEN_RAW_BALANCE: &str = "40000000";
@@ -529,7 +537,8 @@ async fn prepare_discovery_scenario(db: &DatabaseConnection) -> PreparedDiscover
 
     let repository = Arc::new(PgSettlementRedeemRepository::new(db.clone()));
     let service = SettlementDiscoveryService::new(
-        Arc::clone(&repository) as Arc<dyn SettlementRedeemRepository>
+        Arc::clone(&repository) as Arc<dyn SettlementRedeemRepository>,
+        settlement_lifecycle(),
     );
     let first = service
         .run_once(observed_at + TimeDelta::seconds(1), 32)
@@ -591,6 +600,7 @@ async fn settlement_orchestration_scenario() {
         config: SettlementDeployConfig::default(),
         worker_id: service_worker,
         metrics: Arc::new(MetricsHub::new()),
+        lifecycle: settlement_lifecycle(),
     });
     let now = Utc::now();
 
@@ -1428,7 +1438,8 @@ async fn authorize_prepare_and_dispatch(
             persisted_at: now + TimeDelta::seconds(4),
         })
         .await
-        .expect("authorization consumption and envelope insert are atomic");
+        .expect("authorization consumption and envelope insert are atomic")
+        .submission;
     let consumed = repository
         .find_by_id(&redeem_id)
         .await
@@ -2053,8 +2064,10 @@ async fn seed_ready_automatic_case(
         .await
         .expect("persist automatic settlement resolution");
 
-    let discovery =
-        SettlementDiscoveryService::new(Arc::new(PgSettlementRedeemRepository::new(db.clone())));
+    let discovery = SettlementDiscoveryService::new(
+        Arc::new(PgSettlementRedeemRepository::new(db.clone())),
+        settlement_lifecycle(),
+    );
     let summary = discovery
         .run_once(resolved_at + TimeDelta::seconds(1), 32)
         .await

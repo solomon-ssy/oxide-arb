@@ -7,8 +7,9 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::api::{
-        RuntimeActivityDomainCountView, RuntimeActivityEntityView, RuntimeActivityPageView,
-        RuntimeActivityReadQuery, RuntimeActivitySummaryView, RuntimeActivityView,
+        RuntimeActivityDomainCountView, RuntimeActivityEntityView, RuntimeActivityIndicatorView,
+        RuntimeActivityPageView, RuntimeActivityReadQuery, RuntimeActivitySummaryView,
+        RuntimeActivityView,
     },
     enums::runtime_activity::{RuntimeActivityDomain, RuntimeActivityStatus},
 };
@@ -171,7 +172,7 @@ WITH activity AS (
         COALESCE(confirmed_at, failed_at),
         updated_at
     FROM quant_settlement_redeem
-), visible AS (
+), permitted AS (
     SELECT *
     FROM activity
     WHERE (($1::boolean AND domain = 'research')
@@ -179,7 +180,16 @@ WITH activity AS (
         OR ($3::boolean AND domain = 'execution')
         OR ($4::boolean AND domain = 'reconciliation')
         OR ($5::boolean AND domain = 'settlement'))
-      AND ($6::text IS NULL OR domain = $6)
+), indicator AS (
+    SELECT
+        COUNT(*)::bigint AS indicator_total,
+        COUNT(*) FILTER (WHERE status = 'running')::bigint AS indicator_running,
+        COUNT(*) FILTER (WHERE status = 'attention')::bigint AS indicator_attention
+    FROM permitted
+), visible AS (
+    SELECT *
+    FROM permitted
+    WHERE ($6::text IS NULL OR domain = $6)
       AND ($7::text IS NULL OR status = $7)
 ), counts AS (
     SELECT
@@ -199,6 +209,9 @@ WITH activity AS (
     LIMIT $11
 )
 SELECT
+    indicator.indicator_total,
+    indicator.indicator_running,
+    indicator.indicator_attention,
     counts.total_count,
     counts.research_count,
     counts.report_count,
@@ -219,13 +232,17 @@ SELECT
     items.started_at,
     items.finished_at,
     items.updated_at
-FROM counts
+FROM indicator
+CROSS JOIN counts
 LEFT JOIN items ON TRUE
 ORDER BY items.updated_at DESC NULLS LAST, items.domain DESC, items.activity_id DESC
 ";
 
 #[derive(Debug, FromQueryResult)]
 struct RuntimeActivityRow {
+    indicator_total: i64,
+    indicator_running: i64,
+    indicator_attention: i64,
     total_count: i64,
     research_count: i64,
     report_count: i64,
@@ -317,6 +334,11 @@ impl RuntimeActivityRepository for PgRuntimeActivityRepository {
                 by_domain.push(RuntimeActivityDomainCountView { domain, count });
             }
         }
+        let indicator = RuntimeActivityIndicatorView {
+            total: count(first.indicator_total)?,
+            running: count(first.indicator_running)?,
+            attention: count(first.indicator_attention)?,
+        };
         let summary = RuntimeActivitySummaryView {
             total: count(first.total_count)?,
             by_domain,
@@ -334,6 +356,7 @@ impl RuntimeActivityRepository for PgRuntimeActivityRepository {
             items.truncate(page_limit);
         }
         Ok(RuntimeActivityPageView {
+            indicator,
             summary,
             items,
             has_more,

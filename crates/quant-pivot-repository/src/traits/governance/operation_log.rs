@@ -1,10 +1,13 @@
 //! Append-only operation-log repository contract.
 
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::{
-    api::OperationLogQuery,
-    governance::{NewOperationLog, OperationLogInfo},
-    pagination::Paginated,
+use quant_pivot_models::{
+    domain::{
+        api::OperationLogQuery,
+        governance::{NewOperationLog, OperationLogInfo},
+        pagination::Paginated,
+    },
+    types::OperationLogId,
 };
 
 /// Persistence for the immutable operation-log activity trail.
@@ -18,6 +21,12 @@ pub trait OperationLogRepository: Send + Sync {
 
     /// Append many rows in one transaction — used by the async buffered writer.
     async fn append_batch(&self, logs: Vec<NewOperationLog>) -> Result<(), StorageError>;
+
+    /// Load one immutable row by its canonical identifier.
+    async fn find_by_id(
+        &self,
+        id: &OperationLogId,
+    ) -> Result<Option<OperationLogInfo>, StorageError>;
 
     /// Paginated, filtered query ordered by `occurred_at desc`.
     async fn page(

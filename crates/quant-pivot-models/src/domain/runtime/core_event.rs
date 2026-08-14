@@ -12,17 +12,22 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::{
         api::{MarketBookView, SystemStatusView},
-        quant::{OrderIntentInfo, RecommendationReportInfo, ReportRunInfo, RepresentedRouteSet},
+        quant::{
+            ExecutionOrderInfo, OrderIntentInfo, RecommendationReportInfo, ReportRunInfo,
+            RepresentedRouteSet, settlement::SettlementRedeemInfo,
+        },
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
-        execution::ReconciliationResult,
+        execution::{ExecutionOrderPhase, ReconciliationResult},
         quant::{
-            EmptyReportReason, EntryConditionState, OrderIntentStatus, QuantRuntimeMode,
-            RecommendationReportStatus, ReportKind, ReportRunStatus, ReportRunTerminalReason,
-            ResearchJobKind, ResearchJobStatus, TrainingDatasetStatus,
+            EmptyReportReason, EntryConditionState, ExecutionOrderState, OrderIntentStatus,
+            QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportRunStatus,
+            ReportRunTerminalReason, ResearchJobKind, ResearchJobStatus, TrainingDatasetStatus,
         },
-        settlement::SettlementCaseState,
+        settlement::{
+            SettlementAuthorizationState, SettlementCaseState, SettlementReadinessStatus,
+        },
     },
     types::{
         ConditionTruth, ContentHash, EntryConditionInstanceId, MarketId, RecommendationReportId,
@@ -550,6 +555,70 @@ pub struct ReconciliationLifecycleEvent {
     pub operator_resolved: bool,
 }
 
+/// Durable execution-order transition carried by [`ExecutionOrderLifecycleEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionOrderEventKind {
+    Created,
+    Planned,
+    Accepted,
+    Submitted,
+    PartiallyFilled,
+    Filled,
+    CancelRequested,
+    Cancelled,
+    Failed,
+    Ambiguous,
+}
+
+impl From<ExecutionOrderState> for ExecutionOrderEventKind {
+    fn from(state: ExecutionOrderState) -> Self {
+        match state {
+            ExecutionOrderState::Planned => Self::Planned,
+            ExecutionOrderState::Accepted => Self::Accepted,
+            ExecutionOrderState::Submitted => Self::Submitted,
+            ExecutionOrderState::PartiallyFilled => Self::PartiallyFilled,
+            ExecutionOrderState::Filled => Self::Filled,
+            ExecutionOrderState::CancelRequested => Self::CancelRequested,
+            ExecutionOrderState::Cancelled => Self::Cancelled,
+            ExecutionOrderState::Failed => Self::Failed,
+            ExecutionOrderState::Ambiguous => Self::Ambiguous,
+        }
+    }
+}
+
+/// Committed execution-order revision hint fanned out on `quant.execution_order`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionOrderLifecycleEvent {
+    pub event: ExecutionOrderEventKind,
+    pub execution_order_id: String,
+    pub order_intent_id: String,
+    pub order_phase: ExecutionOrderPhase,
+    pub market_id: MarketId,
+    pub state: ExecutionOrderState,
+    pub occurred_at: DateTime<Utc>,
+}
+
+impl ExecutionOrderLifecycleEvent {
+    /// Build a revision hint from the exact row returned by the committing repository call.
+    #[must_use]
+    pub fn committed(
+        order: &ExecutionOrderInfo,
+        event: ExecutionOrderEventKind,
+        occurred_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            event,
+            execution_order_id: order.execution_order_id.to_string(),
+            order_intent_id: order.order_intent_id.to_string(),
+            order_phase: order.order_phase,
+            market_id: order.market_id.clone(),
+            state: order.state,
+            occurred_at,
+        }
+    }
+}
+
 /// Settlement-redeem state transition fanned out on `quant.settlement`.
 ///
 /// A revision hint only: the settlement ledger re-fetches over REST on any bump.
@@ -558,6 +627,24 @@ pub struct SettlementRedeemLifecycleEvent {
     pub settlement_redeem_id: String,
     pub market_id: MarketId,
     pub state: SettlementCaseState,
+    pub readiness_status: SettlementReadinessStatus,
+    pub authorization_state: SettlementAuthorizationState,
+    pub occurred_at: DateTime<Utc>,
+}
+
+impl SettlementRedeemLifecycleEvent {
+    /// Build an event from the exact case row returned by the committing transaction.
+    #[must_use]
+    pub fn committed(redeem: &SettlementRedeemInfo) -> Self {
+        Self {
+            settlement_redeem_id: redeem.settlement_redeem_id.to_string(),
+            market_id: redeem.market_id.clone(),
+            state: redeem.state,
+            readiness_status: redeem.readiness_status,
+            authorization_state: redeem.authorization_state,
+            occurred_at: redeem.updated_at,
+        }
+    }
 }
 
 /// Condition-instance revision hint fanned out on `quant.condition`.
@@ -593,6 +680,7 @@ pub enum CoreEvent {
     Alert(SystemAlertEvent),
     MaterializationRun(MaterializationRunEvent),
     Reconciliation(ReconciliationLifecycleEvent),
+    ExecutionOrder(ExecutionOrderLifecycleEvent),
     Settlement(SettlementRedeemLifecycleEvent),
 }
 
@@ -611,6 +699,7 @@ impl CoreEvent {
             Self::Alert(_) => "system.alert",
             Self::MaterializationRun(_) => "materialization.run_update",
             Self::Reconciliation(_) => "quant.reconciliation",
+            Self::ExecutionOrder(_) => "quant.execution_order",
             Self::Settlement(_) => "quant.settlement",
         }
     }

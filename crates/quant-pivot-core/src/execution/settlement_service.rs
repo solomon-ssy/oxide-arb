@@ -48,6 +48,7 @@ use quant_pivot_repository::traits::{
 
 use crate::{
     execution::{
+        SettlementLifecyclePublisher,
         settlement_confirmation::build_settlement_confirmation,
         settlement_timing::{deadline, elapsed_ms_since, retry_deadline},
     },
@@ -192,6 +193,7 @@ pub struct SettlementServiceDeps {
     pub config: SettlementDeployConfig,
     pub worker_id: WorkerId,
     pub metrics: Arc<MetricsHub>,
+    pub lifecycle: Arc<SettlementLifecyclePublisher>,
 }
 
 /// Lease-based, restart-safe settlement orchestration service.
@@ -204,6 +206,7 @@ pub struct SettlementService {
     config: SettlementDeployConfig,
     worker_id: WorkerId,
     metrics: Arc<MetricsHub>,
+    lifecycle: Arc<SettlementLifecyclePublisher>,
 }
 
 impl SettlementService {
@@ -218,6 +221,7 @@ impl SettlementService {
             config: deps.config,
             worker_id: deps.worker_id,
             metrics: deps.metrics,
+            lifecycle: deps.lifecycle,
         }
     }
 
@@ -284,7 +288,8 @@ impl SettlementService {
         )?;
         let scope = authorization_scope(&claim.redeem, expires_at)?;
         let digest = scope.digest()?;
-        self.repository
+        let committed = self
+            .repository
             .stage_authorization(StageSettlementAuthorization {
                 settlement_redeem_id: claim.redeem.settlement_redeem_id,
                 owner: self.worker_id,
@@ -295,6 +300,7 @@ impl SettlementService {
                 staged_at: now,
             })
             .await?;
+        self.lifecycle.committed(&committed);
         self.release(&claim.redeem.settlement_redeem_id).await?;
         Ok(SettlementPassOutcome::AuthorizationPending {
             settlement_redeem_id: claim.redeem.settlement_redeem_id,
@@ -355,7 +361,7 @@ impl SettlementService {
         let expected_authorization_digest = (admitted.mode == QuantRuntimeMode::SemiAuto)
             .then_some(claim.redeem.authorization_digest)
             .flatten();
-        let durable = self
+        let persisted = self
             .repository
             .persist_prepared_submission(PersistPreparedSettlementSubmission {
                 owner: self.worker_id,
@@ -365,6 +371,8 @@ impl SettlementService {
                 persisted_at,
             })
             .await?;
+        self.lifecycle.committed(&persisted.redeem);
+        let durable = persisted.submission;
         let dispatching = self.begin_dispatch(&durable, persisted_at).await?;
         self.dispatch_durable(&claim.redeem, &dispatching).await
     }
@@ -579,7 +587,8 @@ impl SettlementService {
                     submission.relayer_transaction_id.clone().ok_or_else(|| {
                         invariant("AwaitingChainHash submission has no opaque relayer ID")
                     })?;
-                self.repository
+                let committed = self
+                    .repository
                     .record_relayer_chain_hash(RecordRelayerSettlementChainHash {
                         settlement_redeem_id: redeem.settlement_redeem_id,
                         settlement_chain_submission_id: submission.settlement_chain_submission_id,
@@ -589,6 +598,7 @@ impl SettlementService {
                         observed_at,
                     })
                     .await?;
+                self.lifecycle.committed(&committed.redeem);
                 self.defer(
                     &redeem.settlement_redeem_id,
                     Some(submission.settlement_chain_submission_id),
@@ -663,16 +673,19 @@ impl SettlementService {
                             .await;
                     }
                 };
-                if let Err(source) = self.repository.confirm(write).await {
-                    return self
-                        .schedule_retry(
-                            &redeem,
-                            Some(&submission),
-                            SettlementFailureCode::LedgerUnavailable,
-                            source.to_string(),
-                            observed_at,
-                        )
-                        .await;
+                match self.repository.confirm(write).await {
+                    Ok(committed) => self.lifecycle.committed(&committed),
+                    Err(source) => {
+                        return self
+                            .schedule_retry(
+                                &redeem,
+                                Some(&submission),
+                                SettlementFailureCode::LedgerUnavailable,
+                                source.to_string(),
+                                observed_at,
+                            )
+                            .await;
+                    }
                 }
                 Ok(SettlementPassOutcome::SettlementConfirmed {
                     settlement_chain_submission_id: submission.settlement_chain_submission_id,
@@ -703,7 +716,8 @@ impl SettlementService {
                 reason: "durable submission has no signed envelope hash".to_owned(),
             }
         })?;
-        self.repository
+        let committed = self
+            .repository
             .begin_dispatch(BeginSettlementDispatch {
                 settlement_redeem_id,
                 settlement_chain_submission_id: submission.settlement_chain_submission_id,
@@ -714,8 +728,9 @@ impl SettlementService {
                 expected_signed_envelope_hash: envelope_hash,
                 dispatching_at: now,
             })
-            .await
-            .map_err(Into::into)
+            .await?;
+        self.lifecycle.committed(&committed.redeem);
+        Ok(committed.submission)
     }
 
     async fn dispatch_durable(
@@ -756,7 +771,8 @@ impl SettlementService {
                     .await;
             }
             SettlementDispatchResult::EoaAccepted => {
-                self.repository
+                let committed = self
+                    .repository
                     .record_eoa_broadcast(RecordEoaSettlementBroadcast {
                         settlement_redeem_id,
                         settlement_chain_submission_id: submission.settlement_chain_submission_id,
@@ -765,12 +781,14 @@ impl SettlementService {
                         observed_at,
                     })
                     .await?;
+                self.lifecycle.committed(&committed.redeem);
                 SettlementPassOutcome::DispatchAccepted {
                     settlement_chain_submission_id: submission.settlement_chain_submission_id,
                 }
             }
             SettlementDispatchResult::RelayerAccepted(relayer_transaction_id) => {
-                self.repository
+                let committed = self
+                    .repository
                     .record_relayer_acceptance(RecordRelayerSettlementAcceptance {
                         settlement_redeem_id,
                         settlement_chain_submission_id: submission.settlement_chain_submission_id,
@@ -780,6 +798,7 @@ impl SettlementService {
                         observed_at,
                     })
                     .await?;
+                self.lifecycle.committed(&committed.redeem);
                 SettlementPassOutcome::DispatchAccepted {
                     settlement_chain_submission_id: submission.settlement_chain_submission_id,
                 }
@@ -871,7 +890,8 @@ impl SettlementService {
             self.config.retry_max_secs,
             &redeem.settlement_redeem_id.to_string(),
         )?;
-        self.repository
+        let committed = self
+            .repository
             .persist_preflight(PersistSettlementPreflight {
                 settlement_redeem_id: redeem.settlement_redeem_id,
                 owner: self.worker_id,
@@ -898,6 +918,7 @@ impl SettlementService {
                 observed_at,
             })
             .await?;
+        self.lifecycle.committed(&committed);
         Ok(SettlementPassOutcome::RetryScheduled {
             settlement_redeem_id: redeem.settlement_redeem_id,
             settlement_chain_submission_id: None,
@@ -923,7 +944,8 @@ impl SettlementService {
         )?;
         let settlement_chain_submission_id =
             submission.map(|value| value.settlement_chain_submission_id);
-        self.repository
+        let committed = self
+            .repository
             .schedule_retry(ScheduleSettlementRetry {
                 settlement_redeem_id: redeem.settlement_redeem_id,
                 settlement_chain_submission_id,
@@ -934,6 +956,7 @@ impl SettlementService {
                 observed_at,
             })
             .await?;
+        self.lifecycle.committed(&committed);
         Ok(SettlementPassOutcome::RetryScheduled {
             settlement_redeem_id: redeem.settlement_redeem_id,
             settlement_chain_submission_id,
@@ -950,7 +973,8 @@ impl SettlementService {
         detail: String,
         observed_at: DateTime<Utc>,
     ) -> QuantResult<SettlementPassOutcome> {
-        self.repository
+        let committed = self
+            .repository
             .require_reconciliation(RequireSettlementReconciliation {
                 settlement_redeem_id: redeem.settlement_redeem_id,
                 settlement_chain_submission_id: submission.settlement_chain_submission_id,
@@ -960,6 +984,7 @@ impl SettlementService {
                 observed_at,
             })
             .await?;
+        self.lifecycle.committed(&committed);
         self.metrics
             .record_settlement_reconciliation_required("redeem", failure_code.as_str());
         Ok(SettlementPassOutcome::ReconciliationRequired {
@@ -976,7 +1001,8 @@ impl SettlementService {
         seconds: u64,
     ) -> QuantResult<()> {
         let next_attempt_at = deadline(observed_at, seconds, "polymarket.settlement.next_work_at")?;
-        self.repository
+        let committed = self
+            .repository
             .schedule_work(ScheduleSettlementWork {
                 settlement_redeem_id: *redeem_id,
                 settlement_chain_submission_id: submission_id,
@@ -985,6 +1011,7 @@ impl SettlementService {
                 observed_at,
             })
             .await?;
+        self.lifecycle.committed(&committed);
         Ok(())
     }
 

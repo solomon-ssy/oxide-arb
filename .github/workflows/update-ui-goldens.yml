@@ -1,0 +1,60 @@
+name: update-ui-goldens
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit or branch to render
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  render-linux-goldens:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium
+        working-directory: ui
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Verify Docker runtime
+        run: docker info
+      - name: Render Linux visual baselines
+        working-directory: ui
+        env:
+          PLAYWRIGHT_PRODUCTION_FIXTURE: governed-feedback
+        run: >-
+          pnpm exec playwright test
+          --project=visual-desktop-dark
+          --project=visual-desktop-light
+          --project=visual-mobile-dark
+          --update-snapshots
+          --grep @visual
+      - name: Upload Linux golden artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-linux-goldens-${{ github.sha }}
+          path: ui/apps/web-antdv-next/tests/e2e/config-audit.spec.ts-snapshots/*-linux.png
+          if-no-files-found: error
+          retention-days: 14

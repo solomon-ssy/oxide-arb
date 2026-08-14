@@ -52,7 +52,10 @@ use quant_pivot_research::execution_semantics::{LiquidityRole, PitFeeSchedule};
 
 use super::{CollectedReconciliation, EvidenceCollector, VenuePresence};
 use crate::{
-    execution::{ExecutionBreaker, IntentLifecyclePublisher, PolymarketOrderClient},
+    execution::{
+        ExecutionBreaker, ExecutionOrderLifecyclePublisher, IntentLifecyclePublisher,
+        PolymarketOrderClient,
+    },
     observability::{
         capital_allocation_fact_writer::CapitalAllocationEventWriter,
         execution_fact_writer::ExecutionEventWriter,
@@ -112,6 +115,8 @@ pub struct ReconciliationServiceDeps {
     pub position_events: Arc<PositionEventWriter>,
     /// Fans out the settled `quant.intent` status after a reconciliation write.
     pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
+    /// Fans out the exact committed execution-order row after reconciliation.
+    pub order_lifecycle: Arc<ExecutionOrderLifecyclePublisher>,
     /// Fans out `quant.reconciliation` revision hints after a reconciliation write.
     pub events: CoreEventPublisher,
 }
@@ -329,12 +334,14 @@ impl ReconciliationService {
             now,
         )?;
         let exit_realized_pnl = write.exit.as_ref().map(|exit| exit.realized_pnl_usd);
-        self.deps
+        let recorded = self
+            .deps
             .submission
             .apply_reconciliation(&order.execution_order_id, write)
             .await?;
+        self.deps.order_lifecycle.transition(order, &recorded, now);
         self.mirror_ledger_events(
-            order,
+            &recorded,
             recommendation.recommendation_id,
             ChQuantLedgerEventKind::Reconciled,
             now,
@@ -416,6 +423,7 @@ impl ReconciliationService {
             .submission
             .apply_reconciliation(&order.execution_order_id, write)
             .await?;
+        self.deps.order_lifecycle.transition(&order, &recorded, now);
         self.mirror_ledger_events(
             &recorded,
             recommendation.recommendation_id,
@@ -541,13 +549,17 @@ impl ReconciliationService {
             resolved_by: None,
             resolved_at: None,
         };
-        self.deps
+        let recorded = self
+            .deps
             .submission
             .apply_reconciliation(&order.execution_order_id, write)
             .await?;
+        self.deps
+            .order_lifecycle
+            .transition(order, &recorded, Utc::now());
 
         self.mirror_ledger_events(
-            order,
+            &recorded,
             recommendation.recommendation_id,
             ChQuantLedgerEventKind::Unresolvable,
             Utc::now(),

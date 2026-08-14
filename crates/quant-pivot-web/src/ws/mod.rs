@@ -76,6 +76,7 @@ impl DeliveryClass {
             | WsChannel::QuantReport
             | WsChannel::QuantReportRun
             | WsChannel::QuantIntent
+            | WsChannel::QuantExecutionOrder
             | WsChannel::QuantCondition
             | WsChannel::MaterializationRunUpdate
             | WsChannel::ResearchFeedback

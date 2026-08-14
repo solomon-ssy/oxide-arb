@@ -157,8 +157,9 @@ pub use role::{
 };
 pub use runtime_activity::{
     RuntimeActivityActionView, RuntimeActivityCursor, RuntimeActivityDomainCountView,
-    RuntimeActivityEntityView, RuntimeActivityListQuery, RuntimeActivityPageView,
-    RuntimeActivityReadQuery, RuntimeActivitySummaryView, RuntimeActivityView,
+    RuntimeActivityEntityView, RuntimeActivityIndicatorView, RuntimeActivityListQuery,
+    RuntimeActivityPageView, RuntimeActivityReadQuery, RuntimeActivitySummaryView,
+    RuntimeActivityView,
 };
 pub use runtime_config::{
     ActivatePolicyDraftRequest, ApprovePolicyDraftRequest, ConfigActivityQuery, ConfigActivityView,

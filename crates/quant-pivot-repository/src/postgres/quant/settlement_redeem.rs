@@ -25,7 +25,7 @@ use quant_pivot_models::{
                 RecordRelayerSettlementChainHash, RequireSettlementReconciliation,
                 RevokeSettlementAuthorization, ScheduleSettlementRetry, ScheduleSettlementWork,
                 SettlementChainSubmissionInfo, SettlementRedeemInfo, SettlementRedeemLotInfo,
-                SettlementWorkClaim, StageSettlementAuthorization,
+                SettlementSubmissionOutcome, SettlementWorkClaim, StageSettlementAuthorization,
             },
             settlement_inventory::{
                 MarkSettlementInventoryAbsent, NewSettlementInventoryLot,
@@ -2254,7 +2254,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
     async fn persist_prepared_submission(
         &self,
         command: PersistPreparedSettlementSubmission,
-    ) -> Result<SettlementChainSubmissionInfo, StorageError> {
+    ) -> Result<SettlementSubmissionOutcome, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let redeem_id = command.submission.settlement_redeem_id.ok_or_else(|| {
             StorageError::invariant_violation(
@@ -2303,7 +2303,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             ActiveValue::Set(Some(command.submission.verified_block_number));
         active.verified_block_hash =
             ActiveValue::Set(Some(command.submission.verified_block_hash.clone()));
-        active.update(&txn).await.map_err(StorageError::from)?;
+        let case_model = active.update(&txn).await.map_err(StorageError::from)?;
         if command.expected_authorization_digest.is_some() {
             let authorization = authorization.ok_or_else(|| {
                 StorageError::state_conflict(
@@ -2332,14 +2332,18 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                 .await
                 .map_err(StorageError::from)?;
         }
+        let redeem = Self::assemble_one_redeem(&txn, case_model).await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(inserted.into())
+        Ok(SettlementSubmissionOutcome {
+            redeem,
+            submission: inserted.into(),
+        })
     }
 
     async fn begin_dispatch(
         &self,
         command: BeginSettlementDispatch,
-    ) -> Result<SettlementChainSubmissionInfo, StorageError> {
+    ) -> Result<SettlementSubmissionOutcome, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.dispatching_at)?;
@@ -2388,15 +2392,19 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         let mut case_active = model.into_active_model();
         case_active.state = ActiveValue::Set(SettlementCaseState::Submitted);
         case_active.submitted_at = ActiveValue::Set(Some(command.dispatching_at));
-        case_active.update(&txn).await.map_err(StorageError::from)?;
+        let case_model = case_active.update(&txn).await.map_err(StorageError::from)?;
+        let redeem = Self::assemble_one_redeem(&txn, case_model).await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(dispatching.into())
+        Ok(SettlementSubmissionOutcome {
+            redeem,
+            submission: dispatching.into(),
+        })
     }
 
     async fn record_eoa_broadcast(
         &self,
         command: RecordEoaSettlementBroadcast,
-    ) -> Result<SettlementChainSubmissionInfo, StorageError> {
+    ) -> Result<SettlementSubmissionOutcome, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.observed_at)?;
@@ -2421,14 +2429,18 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         active.state = ActiveValue::Set(SettlementSubmissionState::AwaitingFinality);
         active.chain_hash_observed_at = ActiveValue::Set(Some(command.observed_at));
         let awaiting = active.update(&txn).await.map_err(StorageError::from)?;
+        let redeem = Self::assemble_one_redeem(&txn, model).await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(awaiting.into())
+        Ok(SettlementSubmissionOutcome {
+            redeem,
+            submission: awaiting.into(),
+        })
     }
 
     async fn record_relayer_acceptance(
         &self,
         command: RecordRelayerSettlementAcceptance,
-    ) -> Result<SettlementChainSubmissionInfo, StorageError> {
+    ) -> Result<SettlementSubmissionOutcome, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.observed_at)?;
@@ -2453,14 +2465,18 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         active.state = ActiveValue::Set(SettlementSubmissionState::AwaitingChainHash);
         active.relayer_transaction_id = ActiveValue::Set(Some(command.relayer_transaction_id));
         let awaiting = active.update(&txn).await.map_err(StorageError::from)?;
+        let redeem = Self::assemble_one_redeem(&txn, model).await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(awaiting.into())
+        Ok(SettlementSubmissionOutcome {
+            redeem,
+            submission: awaiting.into(),
+        })
     }
 
     async fn record_relayer_chain_hash(
         &self,
         command: RecordRelayerSettlementChainHash,
-    ) -> Result<SettlementChainSubmissionInfo, StorageError> {
+    ) -> Result<SettlementSubmissionOutcome, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.observed_at)?;
@@ -2495,8 +2511,12 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         active.transaction_hash = ActiveValue::Set(Some(command.transaction_hash));
         active.chain_hash_observed_at = ActiveValue::Set(Some(command.observed_at));
         let awaiting = active.update(&txn).await.map_err(StorageError::from)?;
+        let redeem = Self::assemble_one_redeem(&txn, model).await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(awaiting.into())
+        Ok(SettlementSubmissionOutcome {
+            redeem,
+            submission: awaiting.into(),
+        })
     }
 
     async fn confirm(

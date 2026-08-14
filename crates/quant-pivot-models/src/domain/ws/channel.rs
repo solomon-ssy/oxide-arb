@@ -61,6 +61,8 @@ pub enum WsChannel {
     /// Order-intent lifecycle events (created / approved / rejected / cancelled
     /// / expired / invalidated), discriminated by the payload's `event` field.
     QuantIntent,
+    /// Durable execution-order lifecycle revision hints.
+    QuantExecutionOrder,
     /// Recommendation-owned entry-condition instance revision hints.
     QuantCondition,
     /// Materialization / replay run lifecycle update for dashboard clients.
@@ -78,7 +80,7 @@ pub enum WsChannel {
 
 impl WsChannel {
     /// Every channel, used by exhaustiveness tests and reverse lookup.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::SystemStatus,
         Self::SystemAlert,
         Self::MarketResolved,
@@ -87,6 +89,7 @@ impl WsChannel {
         Self::QuantReport,
         Self::QuantReportRun,
         Self::QuantIntent,
+        Self::QuantExecutionOrder,
         Self::QuantCondition,
         Self::MaterializationRunUpdate,
         Self::ResearchFeedback,
@@ -106,6 +109,7 @@ impl WsChannel {
             Self::QuantReport => "quant.report",
             Self::QuantReportRun => "quant.report_run",
             Self::QuantIntent => "quant.intent",
+            Self::QuantExecutionOrder => "quant.execution_order",
             Self::QuantCondition => "quant.condition",
             Self::MaterializationRunUpdate => "materialization.run_update",
             Self::ResearchFeedback => "research.feedback",
@@ -127,6 +131,7 @@ impl WsChannel {
                 ResourceType::QuantReport
             }
             Self::QuantIntent => ResourceType::OrderIntent,
+            Self::QuantExecutionOrder => ResourceType::ExecutionOrder,
             Self::MaterializationRunUpdate | Self::ResearchFeedback => {
                 ResourceType::Materialization
             }
@@ -253,6 +258,14 @@ mod tests {
     fn research_feedback_channel_contract() {
         let channel = WsChannel::from_str("research.feedback").expect("canonical feedback channel");
         assert_eq!(channel.resource(), ResourceType::Materialization);
+        assert_eq!(channel.scope(), ChannelScope::Global);
+    }
+
+    #[test]
+    fn execution_order_channel_contract() {
+        let channel = WsChannel::from_str("quant.execution_order")
+            .expect("canonical execution-order channel");
+        assert_eq!(channel.resource(), ResourceType::ExecutionOrder);
         assert_eq!(channel.scope(), ChannelScope::Global);
     }
 

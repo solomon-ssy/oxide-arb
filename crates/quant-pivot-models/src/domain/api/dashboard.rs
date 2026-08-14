@@ -9,7 +9,7 @@ use crate::{
     domain::{
         api::{
             DependencyCheck, EquitySnapshotView, LiveAccountView, QuantRecommendationView,
-            QuantReportView, RuntimeActivityView, SystemStatusView,
+            QuantReportView, RuntimeActivityIndicatorView, RuntimeActivityView, SystemStatusView,
         },
         data_plane::DataQualitySnapshot,
     },
@@ -134,9 +134,7 @@ pub struct DashboardSubsystemHealthView {
 /// Recent permission-visible durable work, independent of transport events.
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardRuntimeActivityView {
-    pub total: u64,
-    pub running: u64,
-    pub attention: u64,
+    pub indicator: RuntimeActivityIndicatorView,
     pub items: Vec<RuntimeActivityView>,
 }
 

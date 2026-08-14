@@ -9,6 +9,7 @@ pub mod dispatch_wake;
 pub mod dispatcher;
 pub mod entry_condition;
 pub mod entry_condition_worker;
+pub mod execution_order_lifecycle;
 pub mod exit_dispatcher;
 pub mod exit_monitor;
 pub mod exit_monitor_service;
@@ -24,6 +25,7 @@ pub mod settlement_discovery_wake;
 pub mod settlement_executor;
 pub mod settlement_external;
 pub mod settlement_governed_action_service;
+pub mod settlement_lifecycle;
 pub mod settlement_preflight;
 pub mod settlement_recovery_admission;
 pub mod settlement_service;
@@ -47,6 +49,7 @@ pub use entry_condition_worker::{
     EntryConditionInputProvider, EntryConditionWorker, LiveEntryConditionInputDeps,
     LiveEntryConditionInputProvider,
 };
+pub use execution_order_lifecycle::ExecutionOrderLifecyclePublisher;
 pub use exit_dispatcher::{CoreExitDispatcher, ExitDispatcherDeps, ExitSubmitRequest};
 pub use exit_monitor::{
     CompositeExitSignalEvaluator, ExitDecision, ExitMonitorHealth, ExitMonitorHealthHandle,
@@ -70,4 +73,5 @@ pub use reconciliation::{
     OperatorReconcileResolution, ReconcileFacts, ReconciliationDecision, ReconciliationService,
     ReconciliationServiceDeps, VenueEvidenceCollector, VenuePresence, VenueReconciliationReader,
 };
+pub use settlement_lifecycle::SettlementLifecyclePublisher;
 pub use trade_policy_guard::require_frozen_trade_policy;

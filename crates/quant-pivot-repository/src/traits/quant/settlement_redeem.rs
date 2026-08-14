@@ -12,8 +12,8 @@ use quant_pivot_models::{
                 RecordRelayerSettlementAcceptance, RecordRelayerSettlementChainHash,
                 RequireSettlementReconciliation, RevokeSettlementAuthorization,
                 ScheduleSettlementRetry, ScheduleSettlementWork, SettlementChainSubmissionInfo,
-                SettlementRedeemInfo, SettlementRedeemLotInfo, SettlementWorkClaim,
-                StageSettlementAuthorization,
+                SettlementRedeemInfo, SettlementRedeemLotInfo, SettlementSubmissionOutcome,
+                SettlementWorkClaim, StageSettlementAuthorization,
             },
             settlement_inventory::{
                 MarkSettlementInventoryAbsent, NewSettlementInventoryLot,
@@ -186,29 +186,29 @@ pub trait SettlementRedeemRepository: Send + Sync {
     async fn persist_prepared_submission(
         &self,
         command: PersistPreparedSettlementSubmission,
-    ) -> Result<SettlementChainSubmissionInfo, StorageError>;
+    ) -> Result<SettlementSubmissionOutcome, StorageError>;
 
     /// Compare-and-swap the exact durable target/digest/calldata/envelope into
     /// `Dispatching`; only after this succeeds may transport be invoked.
     async fn begin_dispatch(
         &self,
         command: BeginSettlementDispatch,
-    ) -> Result<SettlementChainSubmissionInfo, StorageError>;
+    ) -> Result<SettlementSubmissionOutcome, StorageError>;
 
     async fn record_eoa_broadcast(
         &self,
         command: RecordEoaSettlementBroadcast,
-    ) -> Result<SettlementChainSubmissionInfo, StorageError>;
+    ) -> Result<SettlementSubmissionOutcome, StorageError>;
 
     async fn record_relayer_acceptance(
         &self,
         command: RecordRelayerSettlementAcceptance,
-    ) -> Result<SettlementChainSubmissionInfo, StorageError>;
+    ) -> Result<SettlementSubmissionOutcome, StorageError>;
 
     async fn record_relayer_chain_hash(
         &self,
         command: RecordRelayerSettlementChainHash,
-    ) -> Result<SettlementChainSubmissionInfo, StorageError>;
+    ) -> Result<SettlementSubmissionOutcome, StorageError>;
 
     async fn confirm(
         &self,
