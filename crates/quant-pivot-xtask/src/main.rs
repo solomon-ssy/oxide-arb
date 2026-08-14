@@ -1,6 +1,7 @@
 mod account_read_smoke;
 mod architecture;
 mod config_contract;
+mod enum_catalog;
 mod function_design;
 mod performance;
 mod public_read_smoke;
@@ -143,6 +144,12 @@ enum Commands {
     #[command(name = "research-model-api-schema")]
     ResearchModelApiSchema {
         #[arg(long, default_value = "schema/api/research-model-v1.schema.json")]
+        output: PathBuf,
+    },
+    /// Generate the Rust enum catalog consumed by the SPA presentation layer.
+    #[command(name = "enum-catalog-schema")]
+    EnumCatalogSchema {
+        #[arg(long, default_value = "schema/api/enum-catalog-v1.schema.json")]
         output: PathBuf,
     },
     /// Plan, apply, or verify the exact preproduction clean-boot reset scope.
@@ -427,6 +434,7 @@ async fn run() -> Result<()> {
         }
         Commands::ConfigApiSchema { output } => write_config_api_schema(&output),
         Commands::ResearchModelApiSchema { output } => write_model_api_schema(&output),
+        Commands::EnumCatalogSchema { output } => enum_catalog::write_schema(&output),
         Commands::PreproductionReset { command } => (command).preproduction_reset().await,
     }
 }

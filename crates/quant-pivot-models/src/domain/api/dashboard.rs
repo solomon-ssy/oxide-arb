@@ -9,7 +9,7 @@ use crate::{
     domain::{
         api::{
             DependencyCheck, EquitySnapshotView, LiveAccountView, QuantRecommendationView,
-            QuantReportView, SystemStatusView,
+            QuantReportView, RuntimeActivityView, SystemStatusView,
         },
         data_plane::DataQualitySnapshot,
     },
@@ -131,6 +131,40 @@ pub struct DashboardSubsystemHealthView {
     pub checks: Vec<DependencyCheck>,
 }
 
+/// Recent permission-visible durable work, independent of transport events.
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardRuntimeActivityView {
+    pub total: u64,
+    pub running: u64,
+    pub attention: u64,
+    pub items: Vec<RuntimeActivityView>,
+}
+
+/// Report coordinator queue health for the selected dashboard window.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct DashboardReportRuntimeView {
+    pub queued: u64,
+    pub running: u64,
+    pub failed: u64,
+    pub abandoned: u64,
+}
+
+/// Execution-plane pressure requiring operator awareness.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct DashboardExecutionRuntimeView {
+    pub pending_intents: u64,
+    pub active_orders: u64,
+    pub ambiguous_orders: u64,
+    pub unresolved_reconciliations: u64,
+}
+
+/// Data-plane serving quality and its derived operational state.
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardDataPlaneView {
+    pub quality: DataQualitySnapshot,
+    pub degraded: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DashboardActionSeverity {
@@ -185,6 +219,10 @@ pub struct DashboardOverviewView {
     pub research_readiness: DashboardSection<DashboardResearchReadinessView>,
     pub subsystem_health: DashboardSection<DashboardSubsystemHealthView>,
     pub action_inbox: DashboardSection<Vec<DashboardActionItemView>>,
+    pub runtime_activity: DashboardSection<DashboardRuntimeActivityView>,
+    pub report_runtime: DashboardSection<DashboardReportRuntimeView>,
+    pub execution_runtime: DashboardSection<DashboardExecutionRuntimeView>,
+    pub data_plane: DashboardSection<DashboardDataPlaneView>,
 }
 
 #[cfg(test)]

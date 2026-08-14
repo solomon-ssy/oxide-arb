@@ -55,6 +55,7 @@ pub mod registry;
 pub mod research_jobs;
 pub mod research_models;
 pub mod roles;
+pub mod runtime_activities;
 pub mod runtime_config;
 pub mod settlement_redeems;
 pub mod structural_monitor;
@@ -91,6 +92,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(menus::route_specs());
     specs.extend(permissions::route_specs());
     specs.extend(runtime_config::route_specs());
+    specs.extend(runtime_activities::route_specs());
     specs.extend(operation_logs::route_specs());
     specs.extend(system::route_specs());
     specs.extend(markets::route_specs());

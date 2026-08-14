@@ -28,7 +28,7 @@ use quant_pivot_models::{
     },
     types::{
         ResearchJobId, ResearchProfileArtifact, ResearchProfileId, TradePolicyArtifactId,
-        TradePolicyCohort, TradePolicyEvidenceObjectKind, TradePolicyValidationRunId, UserId,
+        TradePolicyEvidenceObjectKind, TradePolicyValidationRunId, UserId,
     },
 };
 
@@ -91,12 +91,6 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/trade-policies/{id}",
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             get,
-        ),
-        spec(
-            Method::GET,
-            "/research/trade-policies/{id}/cohorts",
-            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
-            cohorts,
         ),
         spec(
             Method::GET,
@@ -253,18 +247,6 @@ pub async fn get(
         .await?
         .ok_or_else(|| WebError::NotFound(format!("trade policy not found: {id}")))?;
     Ok(WebResponse::ok(TradePolicyDetailView::from(info)))
-}
-
-pub async fn cohorts(
-    state: Data<AppState>,
-    id: Path<TradePolicyArtifactId>,
-) -> Result<WebResponse<Vec<TradePolicyCohort>>, WebError> {
-    let info = state
-        .trade_policies
-        .find(&id)
-        .await?
-        .ok_or_else(|| WebError::NotFound(format!("trade policy not found: {id}")))?;
-    Ok(WebResponse::ok(info.payload_json.cohorts))
 }
 
 pub async fn source_slice(

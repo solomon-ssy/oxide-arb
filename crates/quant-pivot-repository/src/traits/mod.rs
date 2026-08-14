@@ -44,11 +44,12 @@ pub use quant::{
     RecommendationRepository, RecommendationResolutionOutcomeRepository, ReconciliationRepository,
     ReportRunRepository, ResearchJobEnqueueOutcome, ResearchJobRepository, ResearchJobRetryOutcome,
     ResearchReadinessEvidenceRepository, ReservedCapitalRepository,
-    ResolutionObservationRepository, ServingEvidenceRepository, ShadowBindingCancelCommit,
-    ShadowBindingCancelOutcome, ShadowBindingCommit, ShadowBindingCommitOutcome,
-    ShadowBindingRejectCommit, ShadowBindingRejectOutcome, ShadowComparisonRepository,
-    ShadowComparisonWriteOutcome, ShadowLatencyObservation, SourceSliceRepository,
-    TradePolicyRepository, TradeTapeBlockCursorRepository, TrainingDatasetRepository,
+    ResolutionObservationRepository, RuntimeActivityRepository, ServingEvidenceRepository,
+    ShadowBindingCancelCommit, ShadowBindingCancelOutcome, ShadowBindingCommit,
+    ShadowBindingCommitOutcome, ShadowBindingRejectCommit, ShadowBindingRejectOutcome,
+    ShadowComparisonRepository, ShadowComparisonWriteOutcome, ShadowLatencyObservation,
+    SourceSliceRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
+    TrainingDatasetRepository,
 };
 pub use rbac::{
     MenuRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository, UserRepository,

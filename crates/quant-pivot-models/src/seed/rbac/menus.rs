@@ -1,4 +1,4 @@
-//! Seeds the full navigation menu tree (directories, pages, button permissions).
+//! Seeds the canonical five-domain workspace navigation and action permissions.
 
 use std::{future::Future, pin::Pin};
 
@@ -33,17 +33,16 @@ pub const MENUS_SEED: SeedSpec = SeedSpec {
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v1.runtime-controls",
+    checksum: "rbac.menus.bootstrap.v1.workspace-ia.i18n-actions",
     apply: load_boxed,
     hydrate: hydrate_boxed,
 };
 
-/// Stable namespace for deterministic menu UUIDs (v5 over node `name`).
+/// Stable namespace for deterministic menu UUIDs (v5 over the hierarchical name).
 const fn menu_namespace() -> Uuid {
     Uuid::from_u128(0x0000_0040_0080_0000_0000_0000_0000_0001)
 }
 
-/// Format a `resource:operation` permission code from typed values.
 fn perm(resource: ResourceType, operation: Operation) -> String {
     format!("{}:{}", resource.as_str(), operation.as_str())
 }
@@ -56,7 +55,7 @@ fn stable_menu_id(parent: Option<&MenuId>, name: &str) -> MenuId {
     MenuId::new(Uuid::new_v5(&menu_namespace(), identity.as_bytes()))
 }
 
-/// Minimal menu projection for role-menu assignment seeds.
+/// Minimal menu projection consumed by the derived role-menu seed.
 #[derive(Debug, Clone)]
 pub struct MenuGrantSpec {
     /// Stable menu id.
@@ -67,7 +66,6 @@ pub struct MenuGrantSpec {
     pub permission_code: Option<String>,
 }
 
-/// Accumulates menu rows while assigning stable monotonic sort keys per parent.
 struct MenuTree {
     models: Vec<ActiveModel>,
     grants: Vec<MenuGrantSpec>,
@@ -75,7 +73,6 @@ struct MenuTree {
     next_sort: i32,
 }
 
-/// Specification for one menu node, consumed by [`MenuTree::push`].
 struct NodeSpec<'a> {
     parent: Option<&'a MenuId>,
     kind: MenuKind,
@@ -86,12 +83,9 @@ struct NodeSpec<'a> {
     icon: Option<&'a str>,
     permission_code: Option<String>,
     affix_tab: bool,
-    /// Route the SPA can navigate to but never renders in the sidebar (detail
-    /// pages). `Button` nodes are always hidden regardless of this flag.
     hide_in_menu: bool,
 }
 
-/// Route page fields for [`MenuTree::page`].
 struct PageSpec<'a> {
     parent: &'a MenuId,
     name: &'a str,
@@ -100,6 +94,13 @@ struct PageSpec<'a> {
     component: &'a str,
     permission_code: Option<String>,
     icon: &'a str,
+}
+
+struct ActionSpec<'a> {
+    name: &'a str,
+    title: &'a str,
+    resource: ResourceType,
+    operation: Operation,
 }
 
 impl Default for NodeSpec<'_> {
@@ -123,11 +124,10 @@ impl MenuTree {
     fn bootstrap() -> Self {
         let mut tree = Self::new();
         tree.build_command_center();
-        tree.build_trading();
-        tree.build_execution();
-        tree.build_research();
-        tree.build_governance();
-        tree.build_audit();
+        tree.build_trading_signals();
+        tree.build_execution_capital();
+        tree.build_research_models();
+        tree.build_system_governance();
         tree
     }
 
@@ -182,22 +182,14 @@ impl MenuTree {
     }
 
     fn page(&mut self, spec: PageSpec<'_>) -> MenuId {
-        self.push_page(spec, false, false)
+        self.push_page(spec, false)
     }
 
-    fn page_affixed(&mut self, spec: PageSpec<'_>) -> MenuId {
-        self.push_page(spec, true, false)
+    fn affixed_page(&mut self, spec: PageSpec<'_>) -> MenuId {
+        self.push_page(spec, true)
     }
 
-    /// A navigable route that never appears in the sidebar (e.g. a detail page
-    /// reached from a table row). Parent it under a directory, not another
-    /// page, so it renders as a sibling route rather than nesting inside the
-    /// parent page's component.
-    fn page_hidden(&mut self, spec: PageSpec<'_>) -> MenuId {
-        self.push_page(spec, false, true)
-    }
-
-    fn push_page(&mut self, spec: PageSpec<'_>, affix_tab: bool, hide_in_menu: bool) -> MenuId {
+    fn push_page(&mut self, spec: PageSpec<'_>, affix_tab: bool) -> MenuId {
         self.push(NodeSpec {
             parent: Some(spec.parent),
             kind: MenuKind::Menu,
@@ -208,34 +200,31 @@ impl MenuTree {
             icon: Some(spec.icon),
             permission_code: spec.permission_code,
             affix_tab,
-            hide_in_menu,
+            hide_in_menu: false,
         })
     }
 
-    fn button(&mut self, parent: &MenuId, name: &str, title: &str, permission_code: String) {
-        self.push(NodeSpec {
-            parent: Some(parent),
-            kind: MenuKind::Button,
-            name,
-            title,
-            permission_code: Some(permission_code),
-            ..NodeSpec::default()
-        });
+    fn buttons(&mut self, parent: &MenuId, specs: &[ActionSpec<'_>]) {
+        for spec in specs {
+            self.push(NodeSpec {
+                parent: Some(parent),
+                kind: MenuKind::Button,
+                name: spec.name,
+                title: spec.title,
+                permission_code: Some(perm(spec.resource, spec.operation)),
+                ..NodeSpec::default()
+            });
+        }
     }
-}
 
-impl MenuTree {
-    /// Command center: the operator首屏 dashboard. System control button permissions
-    /// are canonical here (header state lights + dashboard quick actions); UI
-    /// visibility still comes from the role's global access-code set.
     fn build_command_center(&mut self) {
-        let command_center = self.dir(
+        let directory = self.dir(
             "command-center",
             "page.menu.group.commandCenter",
             "lucide:layout-dashboard",
         );
-        let dashboard = self.page_affixed(PageSpec {
-            parent: &command_center,
+        let dashboard = self.affixed_page(PageSpec {
+            parent: &directory,
             name: "dashboard",
             title: "page.menu.dashboard",
             path: "/dashboard",
@@ -243,620 +232,374 @@ impl MenuTree {
             permission_code: None,
             icon: "lucide:home",
         });
-        self.button(
+        self.buttons(
             &dashboard,
-            "system:switch_mode",
-            "Switch Runtime Mode",
-            perm(ResourceType::System, Operation::SwitchMode),
+            &[
+                ActionSpec {
+                    name: "system:switch_mode",
+                    title: "page.menu.action.switchRuntimeMode",
+                    resource: ResourceType::System,
+                    operation: Operation::SwitchMode,
+                },
+                ActionSpec {
+                    name: "system:halt",
+                    title: "page.menu.action.halt",
+                    resource: ResourceType::System,
+                    operation: Operation::Halt,
+                },
+                ActionSpec {
+                    name: "system:resume",
+                    title: "page.menu.action.resume",
+                    resource: ResourceType::System,
+                    operation: Operation::Resume,
+                },
+                ActionSpec {
+                    name: "system:emergency",
+                    title: "page.menu.action.emergencyHalt",
+                    resource: ResourceType::System,
+                    operation: Operation::Emergency,
+                },
+            ],
         );
-        self.button(
-            &dashboard,
-            "system:halt",
-            "Halt",
-            perm(ResourceType::System, Operation::Halt),
-        );
-        self.button(
-            &dashboard,
-            "system:resume",
-            "Resume",
-            perm(ResourceType::System, Operation::Resume),
-        );
-        self.button(
-            &dashboard,
-            "system:emergency",
-            "Emergency Halt",
-            perm(ResourceType::System, Operation::Emergency),
-        );
-    }
-}
-
-impl MenuTree {
-    /// Trading plane: market registry + the `RecommendationReport` primary artifact.
-    fn build_trading(&mut self) {
-        let trading = self.dir("trading", "page.menu.group.trading", "lucide:trending-up");
-        let markets = self.page(PageSpec {
-            parent: &trading,
-            name: "markets",
-            title: "page.menu.markets",
-            path: "/markets",
-            component: "markets/index",
-            permission_code: Some(perm(ResourceType::Market, Operation::Read)),
-            icon: "lucide:store",
-        });
-        self.button(
-            &markets,
-            "market:update",
-            "Subscribe / Block",
-            perm(ResourceType::Market, Operation::Update),
-        );
-        // Full-screen market detail (live book + microstructure charts), reached
-        // from a table row — navigable but hidden from the sidebar.
-        self.page_hidden(PageSpec {
-            parent: &trading,
-            name: "market-detail",
-            title: "page.menu.marketDetail",
-            path: "/markets/:id",
-            component: "markets/detail/index",
-            permission_code: Some(perm(ResourceType::Market, Operation::Read)),
-            icon: "lucide:line-chart",
-        });
-        let quant_reports = self.page(PageSpec {
-            parent: &trading,
-            name: "quant-reports",
-            title: "page.menu.quantReports",
-            path: "/quant/reports",
-            component: "quant/reports/index",
-            permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
-            icon: "lucide:bar-chart-3",
-        });
-        self.button(
-            &quant_reports,
-            "quant_report:enqueue",
-            "Run Ad-hoc Report",
-            perm(ResourceType::QuantReport, Operation::Enqueue),
-        );
-        self.button(
-            &quant_reports,
-            "quant_report:revoke",
-            "Revoke Report",
-            perm(ResourceType::QuantReport, Operation::Revoke),
-        );
-        // Full-screen report detail (overview + summary, ranked recommendations,
-        // structural diff), reached from the report list — navigable but hidden.
-        self.page_hidden(PageSpec {
-            parent: &trading,
-            name: "report-detail",
-            title: "page.menu.reportDetail",
-            path: "/quant/reports/:id",
-            component: "quant/reports/detail/index",
-            permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
-            icon: "lucide:file-text",
-        });
-        // Full-screen recommendation detail (score / plans / factors / evidence),
-        // deep-linkable and reached from a report's recommendations.
-        self.page_hidden(PageSpec {
-            parent: &trading,
-            name: "recommendation-detail",
-            title: "page.menu.recommendationDetail",
-            path: "/quant/recommendations/:id",
-            component: "quant/recommendations/detail",
-            permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
-            icon: "lucide:target",
-        });
-        // Structural Alpha dashboard: trade-tape participant
-        // concentration, source coverage, and neg-risk leg-sum drift.
         self.page(PageSpec {
-            parent: &trading,
-            name: "structural-monitor",
-            title: "page.menu.structuralMonitor",
-            path: "/quant/structural",
-            component: "quant/structural/index",
-            permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
-            icon: "lucide:git-compare-arrows",
+            parent: &directory,
+            name: "runtime-activity",
+            title: "page.menu.runtimeActivity",
+            path: "/runtime/activity",
+            component: "runtime/activity/index",
+            permission_code: Some(perm(ResourceType::System, Operation::Read)),
+            icon: "lucide:activity",
         });
     }
-}
 
-impl MenuTree {
-    /// Execution plane: intent审批台, CLOB submission ledger, system-lot positions,
-    /// reconciliation queue, settlement redeems, and the live venue account.
-    fn build_execution(&mut self) {
-        let execution = self.dir("execution", "page.menu.group.execution", "lucide:zap");
-        let intents = self.page(PageSpec {
-            parent: &execution,
-            name: "order-intents",
-            title: "page.menu.orderIntents",
-            path: "/quant/intents",
-            component: "quant/intents/index",
+    fn build_trading_signals(&mut self) {
+        let directory = self.dir(
+            "trading-signals",
+            "page.menu.group.tradingSignals",
+            "lucide:chart-no-axes-combined",
+        );
+        let intelligence = self.page(PageSpec {
+            parent: &directory,
+            name: "market-intelligence",
+            title: "page.menu.marketIntelligence",
+            path: "/trading/market-intelligence",
+            component: "trading/market-intelligence/index",
+            permission_code: Some(perm(ResourceType::Market, Operation::Read)),
+            icon: "lucide:radar",
+        });
+        self.buttons(
+            &intelligence,
+            &[ActionSpec {
+                name: "market:update",
+                title: "page.menu.action.updateMarket",
+                resource: ResourceType::Market,
+                operation: Operation::Update,
+            }],
+        );
+        let recommendations = self.page(PageSpec {
+            parent: &directory,
+            name: "recommendations",
+            title: "page.menu.recommendations",
+            path: "/trading/recommendations",
+            component: "trading/recommendations/index",
+            permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
+            icon: "lucide:scan-search",
+        });
+        self.buttons(
+            &recommendations,
+            &[
+                ActionSpec {
+                    name: "quant_report:enqueue",
+                    title: "page.menu.action.runReport",
+                    resource: ResourceType::QuantReport,
+                    operation: Operation::Enqueue,
+                },
+                ActionSpec {
+                    name: "quant_report:revoke",
+                    title: "page.menu.action.revokeReport",
+                    resource: ResourceType::QuantReport,
+                    operation: Operation::Revoke,
+                },
+            ],
+        );
+    }
+
+    fn build_execution_capital(&mut self) {
+        let directory = self.dir(
+            "execution-capital",
+            "page.menu.group.executionCapital",
+            "lucide:landmark",
+        );
+        let orders = self.page(PageSpec {
+            parent: &directory,
+            name: "execution-orders",
+            title: "page.menu.executionOrders",
+            path: "/execution/orders",
+            component: "execution/orders/index",
             permission_code: Some(perm(ResourceType::OrderIntent, Operation::Read)),
             icon: "lucide:list-checks",
         });
-        self.button(
-            &intents,
-            "order_intent:create",
-            "Create Intent",
-            perm(ResourceType::OrderIntent, Operation::Create),
-        );
-        self.button(
-            &intents,
-            "order_intent:approve",
-            "Approve Intent",
-            perm(ResourceType::OrderIntent, Operation::Approve),
-        );
-        self.button(
-            &intents,
-            "order_intent:reject",
-            "Reject Intent",
-            perm(ResourceType::OrderIntent, Operation::Reject),
-        );
-        self.button(
-            &intents,
-            "order_intent:cancel",
-            "Cancel Intent",
-            perm(ResourceType::OrderIntent, Operation::Cancel),
+        self.buttons(
+            &orders,
+            &[
+                ActionSpec {
+                    name: "order_intent:create",
+                    title: "page.menu.action.createIntent",
+                    resource: ResourceType::OrderIntent,
+                    operation: Operation::Create,
+                },
+                ActionSpec {
+                    name: "order_intent:approve",
+                    title: "page.menu.action.approveIntent",
+                    resource: ResourceType::OrderIntent,
+                    operation: Operation::Approve,
+                },
+                ActionSpec {
+                    name: "order_intent:reject",
+                    title: "page.menu.action.rejectIntent",
+                    resource: ResourceType::OrderIntent,
+                    operation: Operation::Reject,
+                },
+                ActionSpec {
+                    name: "order_intent:cancel",
+                    title: "page.menu.action.cancelIntent",
+                    resource: ResourceType::OrderIntent,
+                    operation: Operation::Cancel,
+                },
+            ],
         );
         self.page(PageSpec {
-            parent: &execution,
-            name: "execution-orders",
-            title: "page.menu.executionOrders",
-            path: "/quant/execution-orders",
-            component: "quant/execution-orders/index",
-            permission_code: Some(perm(ResourceType::ExecutionOrder, Operation::Read)),
-            icon: "lucide:receipt",
+            parent: &directory,
+            name: "execution-portfolio",
+            title: "page.menu.executionPortfolio",
+            path: "/execution/portfolio",
+            component: "execution/portfolio/index",
+            permission_code: Some(perm(ResourceType::AccountSnapshot, Operation::Read)),
+            icon: "lucide:wallet-cards",
         });
-        self.page(PageSpec {
-            parent: &execution,
-            name: "positions",
-            title: "page.menu.positions",
-            path: "/quant/positions",
-            component: "quant/positions/index",
-            permission_code: Some(perm(ResourceType::Position, Operation::Read)),
-            icon: "lucide:layers",
-        });
-        let reconciliations = self.page(PageSpec {
-            parent: &execution,
-            name: "reconciliations",
-            title: "page.menu.reconciliations",
-            path: "/quant/reconciliations",
-            component: "quant/reconciliations/index",
+        let post_trade = self.page(PageSpec {
+            parent: &directory,
+            name: "execution-post-trade",
+            title: "page.menu.executionPostTrade",
+            path: "/execution/post-trade",
+            component: "execution/post-trade/index",
             permission_code: Some(perm(ResourceType::Reconciliation, Operation::Read)),
             icon: "lucide:scale",
         });
-        self.button(
-            &reconciliations,
-            "reconciliation:resolve",
-            "Resolve",
-            perm(ResourceType::Reconciliation, Operation::Resolve),
+        self.buttons(
+            &post_trade,
+            &[
+                ActionSpec {
+                    name: "reconciliation:resolve",
+                    title: "page.menu.action.resolveReconciliation",
+                    resource: ResourceType::Reconciliation,
+                    operation: Operation::Resolve,
+                },
+                ActionSpec {
+                    name: "settlement_redeem:create",
+                    title: "page.menu.action.createSettlement",
+                    resource: ResourceType::SettlementRedeem,
+                    operation: Operation::Create,
+                },
+                ActionSpec {
+                    name: "settlement_redeem:approve",
+                    title: "page.menu.action.approveSettlement",
+                    resource: ResourceType::SettlementRedeem,
+                    operation: Operation::Approve,
+                },
+                ActionSpec {
+                    name: "settlement_redeem:revoke",
+                    title: "page.menu.action.revokeSettlement",
+                    resource: ResourceType::SettlementRedeem,
+                    operation: Operation::Revoke,
+                },
+            ],
         );
-        let settlement_redeems = self.page(PageSpec {
-            parent: &execution,
-            name: "settlement-redeems",
-            title: "page.menu.settlementRedeems",
-            path: "/quant/settlement-redeems",
-            component: "quant/settlement-redeems/index",
-            permission_code: Some(perm(ResourceType::SettlementRedeem, Operation::Read)),
-            icon: "lucide:banknote",
-        });
-        self.button(
-            &settlement_redeems,
-            "settlement_redeem:create",
-            "Create Settlement Action",
-            perm(ResourceType::SettlementRedeem, Operation::Create),
-        );
-        self.button(
-            &settlement_redeems,
-            "settlement_redeem:approve",
-            "Approve Settlement Batch",
-            perm(ResourceType::SettlementRedeem, Operation::Approve),
-        );
-        self.button(
-            &settlement_redeems,
-            "settlement_redeem:revoke",
-            "Revoke Settlement Action",
-            perm(ResourceType::SettlementRedeem, Operation::Revoke),
-        );
-        self.page(PageSpec {
-            parent: &execution,
-            name: "account",
-            title: "page.menu.account",
-            path: "/quant/account",
-            component: "quant/account/index",
-            permission_code: Some(perm(ResourceType::AccountSnapshot, Operation::Read)),
-            icon: "lucide:wallet",
-        });
-        // Full-screen intent detail (frozen entry / exit policy / risk envelope,
-        // approval + admission trace, linked execution orders), deep-linkable and
-        // reached from the approval console or a create-intent handoff.
-        self.page_hidden(PageSpec {
-            parent: &execution,
-            name: "order-intent-detail",
-            title: "page.menu.orderIntentDetail",
-            path: "/quant/intents/:id",
-            component: "quant/intents/detail/index",
-            permission_code: Some(perm(ResourceType::OrderIntent, Operation::Read)),
-            icon: "lucide:list-checks",
-        });
     }
-}
 
-/// Model-spec catalog — the offline research lifecycle root (spec → dataset → version).
-fn build_research_model_specs(t: &mut MenuTree, research: &MenuId) {
-    let model_specs = t.page(PageSpec {
-        parent: research,
-        name: "research-model-specs",
-        title: "page.menu.researchModelSpecs",
-        path: "/research/model-specs",
-        component: "research/model-specs/index",
-        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-        icon: "lucide:file-cog",
-    });
-    t.button(
-        &model_specs,
-        "materialization:create",
-        "Create Model Spec",
-        perm(ResourceType::Materialization, Operation::Create),
-    );
-}
-
-/// Governed trade-policy fitting and publication workbench.
-fn build_research_trade_policies(t: &mut MenuTree, research: &MenuId) {
-    let trade_policies = t.page(PageSpec {
-        parent: research,
-        name: "research-trade-policies",
-        title: "page.menu.researchTradePolicies",
-        path: "/research/trade-policies",
-        component: "research/trade-policies/index",
-        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-        icon: "lucide:route",
-    });
-    t.button(
-        &trade_policies,
-        "materialization:create",
-        "Fit / Validate Trade Policy",
-        perm(ResourceType::Materialization, Operation::Create),
-    );
-    t.button(
-        &trade_policies,
-        "publication:publish",
-        "Publish Trade Policy",
-        perm(ResourceType::Publication, Operation::Publish),
-    );
-    t.button(
-        &trade_policies,
-        "publication:retire",
-        "Retire Trade Policy",
-        perm(ResourceType::Publication, Operation::Retire),
-    );
-}
-
-impl MenuTree {
-    /// Research plane: real catalog pages backing the operator workbench —
-    /// training-dataset ledger, trained-model registry, backtest reports, and factor
-    /// governance. Each page pages a `GET /research/*` list endpoint;
-    /// governed mutations (plan/build/train/backtest/publish/rollback/retire) are
-    /// button permissions on the page they belong to. The pairwise comparison report
-    /// is a deep-linkable detail reached from a backtest (hidden from the sidebar).
-    fn build_research(&mut self) {
-        let research = self.dir(
-            "research",
-            "page.menu.group.research",
+    fn build_research_models(&mut self) {
+        let directory = self.dir(
+            "research-models",
+            "page.menu.group.researchModels",
             "lucide:flask-conical",
         );
-        build_research_model_specs(self, &research);
-        build_research_trade_policies(self, &research);
-        let datasets = self.page(PageSpec {
-            parent: &research,
-            name: "research-datasets",
-            title: "page.menu.researchDatasets",
-            path: "/research/datasets",
-            component: "research/datasets/index",
+        let lab = self.page(PageSpec {
+            parent: &directory,
+            name: "research-lab",
+            title: "page.menu.researchLab",
+            path: "/research/lab",
+            component: "research/lab/index",
             permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-            icon: "lucide:database",
+            icon: "lucide:workflow",
         });
-        self.button(
-            &datasets,
-            "materialization:create",
-            "Plan / Build Dataset",
-            perm(ResourceType::Materialization, Operation::Create),
+        self.buttons(
+            &lab,
+            &[
+                ActionSpec {
+                    name: "materialization:create",
+                    title: "page.menu.action.createResearchArtifact",
+                    resource: ResourceType::Materialization,
+                    operation: Operation::Create,
+                },
+                ActionSpec {
+                    name: "replay:create",
+                    title: "page.menu.action.runBacktest",
+                    resource: ResourceType::Replay,
+                    operation: Operation::Create,
+                },
+                ActionSpec {
+                    name: "publication:publish",
+                    title: "page.menu.action.publishModel",
+                    resource: ResourceType::Publication,
+                    operation: Operation::Publish,
+                },
+                ActionSpec {
+                    name: "publication:rollback",
+                    title: "page.menu.action.rollbackModel",
+                    resource: ResourceType::Publication,
+                    operation: Operation::Rollback,
+                },
+                ActionSpec {
+                    name: "publication:retire",
+                    title: "page.menu.action.retireModel",
+                    resource: ResourceType::Publication,
+                    operation: Operation::Retire,
+                },
+            ],
         );
-        let models = self.page(PageSpec {
-            parent: &research,
-            name: "research-models",
-            title: "page.menu.researchModels",
-            path: "/research/models",
-            component: "research/models/index",
+        let learning = self.page(PageSpec {
+            parent: &directory,
+            name: "research-learning-policy",
+            title: "page.menu.researchLearningPolicy",
+            path: "/research/learning-policy",
+            component: "research/learning-policy/index",
             permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-            icon: "lucide:brain-circuit",
+            icon: "lucide:route",
         });
-        self.button(
-            &models,
-            "replay:create",
-            "Run Backtest",
-            perm(ResourceType::Replay, Operation::Create),
+        self.buttons(
+            &learning,
+            &[
+                ActionSpec {
+                    name: "materialization:create",
+                    title: "page.menu.action.fitPolicy",
+                    resource: ResourceType::Materialization,
+                    operation: Operation::Create,
+                },
+                ActionSpec {
+                    name: "publication:publish",
+                    title: "page.menu.action.publishPolicy",
+                    resource: ResourceType::Publication,
+                    operation: Operation::Publish,
+                },
+                ActionSpec {
+                    name: "publication:authorize",
+                    title: "page.menu.action.authorizeCandidate",
+                    resource: ResourceType::Publication,
+                    operation: Operation::Authorize,
+                },
+                ActionSpec {
+                    name: "publication:activate",
+                    title: "page.menu.action.activateCandidate",
+                    resource: ResourceType::Publication,
+                    operation: Operation::Activate,
+                },
+                ActionSpec {
+                    name: "publication:reject",
+                    title: "page.menu.action.rejectCandidate",
+                    resource: ResourceType::Publication,
+                    operation: Operation::Reject,
+                },
+                ActionSpec {
+                    name: "publication:retire",
+                    title: "page.menu.action.retirePolicy",
+                    resource: ResourceType::Publication,
+                    operation: Operation::Retire,
+                },
+            ],
         );
-        self.button(
-            &models,
-            "publication:publish",
-            "Publish Model",
-            perm(ResourceType::Publication, Operation::Publish),
-        );
-        self.button(
-            &models,
-            "publication:rollback",
-            "Rollback Model",
-            perm(ResourceType::Publication, Operation::Rollback),
-        );
-        self.button(
-            &models,
-            "publication:retire",
-            "Retire Model",
-            perm(ResourceType::Publication, Operation::Retire),
-        );
-        self.page(PageSpec {
-            parent: &research,
-            name: "research-backtests",
-            title: "page.menu.researchBacktests",
-            path: "/research/backtests",
-            component: "research/backtests/index",
-            permission_code: Some(perm(ResourceType::Replay, Operation::Read)),
-            icon: "lucide:line-chart",
+        let reliability = self.page(PageSpec {
+            parent: &directory,
+            name: "research-data-reliability",
+            title: "page.menu.researchDataReliability",
+            path: "/research/data-reliability",
+            component: "research/data-reliability/index",
+            permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+            icon: "lucide:shield-check",
         });
-        build_research_jobs(self, &research);
-        build_research_feature_integrity(self, &research);
-        self.build_research_feedback(&research);
-        self.page(PageSpec {
-            parent: &research,
-            name: "research-factors",
-            title: "page.menu.researchFactors",
-            path: "/research/factors",
-            component: "research/factors/index",
-            permission_code: Some(perm(ResourceType::FactorDefinition, Operation::Read)),
-            icon: "lucide:sigma",
-        });
-        build_research_calibration_artifacts(self, &research);
-        build_research_domain_governance(self, &research);
-        // Pairwise comparison report — deep-linkable from a backtest, hidden from
-        // the sidebar (parented under the directory, not another page).
-        self.page_hidden(PageSpec {
-            parent: &research,
-            name: "research-comparison-detail",
-            title: "page.menu.researchComparisonDetail",
-            path: "/research/comparisons/:id",
-            component: "research/comparisons/detail",
-            permission_code: Some(perm(ResourceType::Replay, Operation::Read)),
-            icon: "lucide:git-compare",
-        });
+        self.buttons(
+            &reliability,
+            &[ActionSpec {
+                name: "materialization:create",
+                title: "page.menu.action.recoverReliability",
+                resource: ResourceType::Materialization,
+                operation: Operation::Create,
+            }],
+        );
     }
 
-    /// Feedback-cycle observability and governed retraining workbench.
-    fn build_research_feedback(&mut self, research: &MenuId) {
-        let feedback = self.page(PageSpec {
-            parent: research,
-            name: "research-feedback",
-            title: "page.menu.researchFeedback",
-            path: "/research/feedback",
-            component: "research/feedback/index",
-            permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-            icon: "lucide:refresh-cw",
-        });
-        self.button(
-            &feedback,
-            "publication:authorize",
-            "Authorize Candidate",
-            perm(ResourceType::Publication, Operation::Authorize),
-        );
-        self.button(
-            &feedback,
-            "publication:activate",
-            "Activate Candidate",
-            perm(ResourceType::Publication, Operation::Activate),
-        );
-        self.button(
-            &feedback,
-            "publication:reject",
-            "Reject Candidate",
-            perm(ResourceType::Publication, Operation::Reject),
-        );
-    }
-}
-
-/// Deterministic serving/replay diagnostics and governed parity recovery.
-fn build_research_feature_integrity(t: &mut MenuTree, research: &MenuId) {
-    let feature_integrity = t.page(PageSpec {
-        parent: research,
-        name: "research-feature-integrity",
-        title: "page.menu.researchFeatureIntegrity",
-        path: "/research/feature-integrity",
-        component: "research/feature-integrity/index",
-        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-        icon: "lucide:scan-search",
-    });
-    t.button(
-        &feature_integrity,
-        "feature_integrity:govern",
-        "Run Full Parity / Clear Latch",
-        perm(ResourceType::Materialization, Operation::Create),
-    );
-}
-
-/// Unified calibration-artifact catalog: content-addressed
-/// `market_price_bias` and `model_score` artifacts fit via governed research
-/// jobs; bias tables activate into runtime config, model calibrators bind to
-/// model versions.
-fn build_research_calibration_artifacts(t: &mut MenuTree, research: &MenuId) {
-    let calibration_artifacts = t.page(PageSpec {
-        parent: research,
-        name: "research-calibration-artifacts",
-        title: "page.menu.researchCalibrationArtifacts",
-        path: "/research/calibration-artifacts",
-        component: "research/calibration-artifacts/index",
-        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-        icon: "lucide:scale",
-    });
-    t.button(
-        &calibration_artifacts,
-        "materialization:create",
-        "Fit Calibration Artifact",
-        perm(ResourceType::Materialization, Operation::Create),
-    );
-}
-
-/// Market-linkage ledger + domain-source ingest health.
-fn build_research_domain_governance(t: &mut MenuTree, research: &MenuId) {
-    let linkages = t.page(PageSpec {
-        parent: research,
-        name: "research-market-linkages",
-        title: "page.menu.researchMarketLinkages",
-        path: "/research/market-linkages",
-        component: "research/market-linkages/index",
-        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-        icon: "lucide:link-2",
-    });
-    t.button(
-        &linkages,
-        "materialization:create",
-        "Resolve / Override Linkage",
-        perm(ResourceType::Materialization, Operation::Create),
-    );
-    t.page(PageSpec {
-        parent: research,
-        name: "research-domain-sources",
-        title: "page.menu.researchDomainSources",
-        path: "/research/domain-sources",
-        component: "research/domain-sources/index",
-        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-        icon: "lucide:activity",
-    });
-    t.page(PageSpec {
-        parent: research,
-        name: "research-basis-alerts",
-        title: "page.menu.researchBasisAlerts",
-        path: "/research/basis-alerts",
-        component: "research/basis-alerts/index",
-        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-        icon: "lucide:triangle-alert",
-    });
-}
-
-/// Task center: the durable async research-job engine (dataset build / model
-/// train / backtest) — live progress, cancel, retry, and crash-recovery status.
-fn build_research_jobs(t: &mut MenuTree, research: &MenuId) {
-    t.page(PageSpec {
-        parent: research,
-        name: "research-jobs",
-        title: "page.menu.researchJobs",
-        path: "/research/jobs",
-        component: "research/jobs/index",
-        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-        icon: "lucide:list-checks",
-    });
-}
-
-impl MenuTree {
-    /// Governance plane: independently revisioned policies and project lifecycle.
-    fn build_governance(&mut self) {
-        let governance = self.dir(
-            "governance",
-            "page.menu.group.governance",
+    fn build_system_governance(&mut self) {
+        let directory = self.dir(
+            "system-governance",
+            "page.menu.group.systemGovernance",
             "lucide:settings-2",
         );
         let config = self.page(PageSpec {
-            parent: &governance,
-            name: "config",
-            title: "page.menu.config",
+            parent: &directory,
+            name: "system-config",
+            title: "page.menu.systemConfig",
             path: "/system/config",
-            component: "config/index",
+            component: "system/config/index",
             permission_code: Some(perm(ResourceType::DecisionPolicySnapshot, Operation::Read)),
             icon: "lucide:sliders-horizontal",
         });
-        for (name, title, path, component, permission_code, icon) in [
-            (
-                "config-deployment",
-                "page.config.deployment.title",
-                "/system/config/deployment",
-                "config/deployment",
-                perm(ResourceType::DecisionPolicySnapshot, Operation::Read),
-                "lucide:server-cog",
-            ),
-            (
-                "config-activity",
-                "page.config.activity.title",
-                "/system/config/activity",
-                "config/activity",
-                perm(ResourceType::DecisionPolicySnapshot, Operation::Read),
-                "lucide:history",
-            ),
-            (
-                "config-resource",
-                "page.config.resource.title",
-                "/system/config/:resource",
-                "config/resource",
-                perm(ResourceType::DecisionPolicySnapshot, Operation::Read),
-                "lucide:sliders-horizontal",
-            ),
-        ] {
-            self.page_hidden(PageSpec {
-                parent: &governance,
-                name,
-                title,
-                path,
-                component,
-                permission_code: Some(permission_code),
-                icon,
-            });
-        }
-        self.button(
+        self.buttons(
             &config,
-            "config:create",
-            "Create Draft",
-            perm(ResourceType::DecisionPolicySnapshot, Operation::Create),
+            &[
+                ActionSpec {
+                    name: "config:create",
+                    title: "page.menu.action.createConfigDraft",
+                    resource: ResourceType::DecisionPolicySnapshot,
+                    operation: Operation::Create,
+                },
+                ActionSpec {
+                    name: "config:approve",
+                    title: "page.menu.action.approveConfigRevision",
+                    resource: ResourceType::DecisionPolicySnapshot,
+                    operation: Operation::Approve,
+                },
+                ActionSpec {
+                    name: "config:activate",
+                    title: "page.menu.action.activateConfigRevision",
+                    resource: ResourceType::DecisionPolicySnapshot,
+                    operation: Operation::Activate,
+                },
+                ActionSpec {
+                    name: "config:rollback",
+                    title: "page.menu.action.rollbackConfigRevision",
+                    resource: ResourceType::DecisionPolicySnapshot,
+                    operation: Operation::Rollback,
+                },
+            ],
         );
-        self.button(
-            &config,
-            "config:approve",
-            "Approve Revision",
-            perm(ResourceType::DecisionPolicySnapshot, Operation::Approve),
-        );
-        self.button(
-            &config,
-            "config:activate",
-            "Activate Revision",
-            perm(ResourceType::DecisionPolicySnapshot, Operation::Activate),
-        );
-        self.button(
-            &config,
-            "config:rollback",
-            "Rollback Revision",
-            perm(ResourceType::DecisionPolicySnapshot, Operation::Rollback),
-        );
-    }
-}
-
-impl MenuTree {
-    /// Audit trail: the operation log is the single generic audit entry point.
-    fn build_audit(&mut self) {
-        let audit = self.dir("audit-trail", "page.menu.group.audit", "lucide:file-search");
         self.page(PageSpec {
-            parent: &audit,
-            name: "operation-log",
-            title: "page.menu.operationLog",
-            path: "/operation-log",
-            component: "operation-log/index",
+            parent: &directory,
+            name: "system-audit",
+            title: "page.menu.systemAudit",
+            path: "/system/audit",
+            component: "system/audit/index",
             permission_code: Some(perm(ResourceType::OperationLog, Operation::Read)),
             icon: "lucide:scroll-text",
         });
     }
 }
 
-/// Insert the menu tree and publish all menu IDs to the context.
+/// Insert the fresh-boot menu tree and publish its grants during hydration.
 pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let tree = MenuTree::bootstrap();
-
     let rows_affected = Entity::insert_many(tree.models)
         .on_conflict(OnConflict::column(Column::Id).do_nothing().to_owned())
         .exec_without_returning(db)
         .await?;
-
     let _ = ctx;
     Ok(rows_affected)
 }
@@ -918,14 +661,14 @@ mod tests {
     use crate::enums::rbac::MenuKind;
 
     #[test]
-    fn menu_ids_stable_name() {
+    fn menu_ids_stable() {
         let first = stable_menu_id(None, "markets");
         let second = stable_menu_id(None, "markets");
         assert_eq!(first, second);
     }
 
     #[test]
-    fn name_different_parents_id() {
+    fn different_parents_differ() {
         let left = stable_menu_id(None, "left");
         let right = stable_menu_id(None, "right");
         assert_ne!(
@@ -935,161 +678,169 @@ mod tests {
     }
 
     #[test]
-    fn seed_tree_execution_buttons() {
+    fn visible_workspace_contract() {
         let tree = MenuTree::bootstrap();
-        let names: HashSet<_> = tree
+        let directories = tree
             .models
             .iter()
-            .map(|model| {
-                if let ActiveValue::Set(name) = &model.name {
-                    name.clone()
-                } else {
-                    String::new()
+            .filter(|model| matches!(&model.kind, ActiveValue::Set(MenuKind::Directory)))
+            .count();
+        let workspaces = tree
+            .models
+            .iter()
+            .filter_map(|model| {
+                if !matches!(&model.kind, ActiveValue::Set(MenuKind::Menu))
+                    || !matches!(&model.hide_in_menu, ActiveValue::Set(false))
+                {
+                    return None;
                 }
+                let ActiveValue::Set(name) = &model.name else {
+                    return None;
+                };
+                let ActiveValue::Set(Some(path)) = &model.path else {
+                    return None;
+                };
+                let ActiveValue::Set(Some(component)) = &model.component else {
+                    return None;
+                };
+                Some((name.clone(), path.clone(), component.clone()))
             })
-            .collect();
-        for expected in [
-            "order-intents",
-            "order-intent-detail",
-            "execution-orders",
-            "positions",
-            "reconciliations",
-            "settlement-redeems",
-            "account",
-            "research-model-specs",
-            "research-datasets",
-            "research-models",
-            "research-backtests",
-            "research-feedback",
-            "research-jobs",
-            "research-feature-integrity",
-            "feature_integrity:govern",
-            "research-factors",
-            "report-detail",
-            "recommendation-detail",
-            "quant_report:enqueue",
-            "system:switch_mode",
-            "system:halt",
-            "system:resume",
-            "system:emergency",
-            "settlement_redeem:create",
-            "settlement_redeem:approve",
-            "settlement_redeem:revoke",
-        ] {
-            assert!(names.contains(expected), "missing menu node `{expected}`");
+            .collect::<HashSet<_>>();
+        let expected = [
+            ("dashboard", "/dashboard", "dashboard/index"),
+            (
+                "runtime-activity",
+                "/runtime/activity",
+                "runtime/activity/index",
+            ),
+            (
+                "market-intelligence",
+                "/trading/market-intelligence",
+                "trading/market-intelligence/index",
+            ),
+            (
+                "recommendations",
+                "/trading/recommendations",
+                "trading/recommendations/index",
+            ),
+            (
+                "execution-orders",
+                "/execution/orders",
+                "execution/orders/index",
+            ),
+            (
+                "execution-portfolio",
+                "/execution/portfolio",
+                "execution/portfolio/index",
+            ),
+            (
+                "execution-post-trade",
+                "/execution/post-trade",
+                "execution/post-trade/index",
+            ),
+            ("research-lab", "/research/lab", "research/lab/index"),
+            (
+                "research-learning-policy",
+                "/research/learning-policy",
+                "research/learning-policy/index",
+            ),
+            (
+                "research-data-reliability",
+                "/research/data-reliability",
+                "research/data-reliability/index",
+            ),
+            ("system-config", "/system/config", "system/config/index"),
+            ("system-audit", "/system/audit", "system/audit/index"),
+        ]
+        .into_iter()
+        .map(|(name, path, component)| (name.to_owned(), path.to_owned(), component.to_owned()))
+        .collect::<HashSet<_>>();
+
+        assert_eq!(directories, 5);
+        assert_eq!(workspaces, expected);
+    }
+
+    #[test]
+    fn legacy_spa_paths_absent() {
+        let tree = MenuTree::bootstrap();
+        for model in &tree.models {
+            let ActiveValue::Set(Some(path)) = &model.path else {
+                continue;
+            };
+            assert!(!path.starts_with("/quant/"), "legacy path `{path}`");
+            assert_ne!(path, "/markets");
+            assert_ne!(path, "/operation-log");
+            assert!(!path.starts_with("/research/jobs"));
+            assert!(!path.starts_with("/research/models"));
+            assert!(!path.starts_with("/research/datasets"));
         }
     }
 
     #[test]
-    fn feature_integrity_uses_component() {
+    fn workspace_actions_complete() {
         let tree = MenuTree::bootstrap();
-        let page = tree
+        let permission_codes = tree
             .models
             .iter()
-            .find(|model| {
-                matches!(
-                    &model.name,
-                    sea_orm::ActiveValue::Set(name) if name == "research-feature-integrity"
-                )
+            .filter_map(|model| {
+                if !matches!(&model.kind, ActiveValue::Set(MenuKind::Button)) {
+                    return None;
+                }
+                match &model.permission_code {
+                    ActiveValue::Set(Some(code)) => Some(code.as_str()),
+                    _ => None,
+                }
             })
-            .expect("feature-integrity menu page");
-        assert_eq!(
-            page.permission_code,
-            sea_orm::ActiveValue::Set(Some("materialization:read".to_owned()))
-        );
-        assert_eq!(
-            page.path,
-            sea_orm::ActiveValue::Set(Some("/research/feature-integrity".to_owned()))
-        );
-        assert_eq!(
-            page.component,
-            sea_orm::ActiveValue::Set(Some("research/feature-integrity/index".to_owned()))
-        );
-        assert_eq!(page.hide_in_menu, sea_orm::ActiveValue::Set(false));
-
-        let action = tree
-            .models
-            .iter()
-            .find(|model| {
-                matches!(
-                    &model.name,
-                    sea_orm::ActiveValue::Set(name) if name == "feature_integrity:govern"
-                )
-            })
-            .expect("feature-integrity governed action");
-        assert_eq!(
-            action.parent_id,
-            sea_orm::ActiveValue::Set(Some(stable_menu_id(
-                Some(&stable_menu_id(None, "research")),
-                "research-feature-integrity",
-            )))
-        );
-        assert_eq!(
-            action.permission_code,
-            sea_orm::ActiveValue::Set(Some("materialization:create".to_owned()))
-        );
+            .collect::<HashSet<_>>();
+        for expected in [
+            "system:switch_mode",
+            "system:halt",
+            "system:resume",
+            "system:emergency",
+            "market:update",
+            "quant_report:enqueue",
+            "quant_report:revoke",
+            "order_intent:create",
+            "order_intent:approve",
+            "order_intent:reject",
+            "order_intent:cancel",
+            "reconciliation:resolve",
+            "settlement_redeem:create",
+            "settlement_redeem:approve",
+            "settlement_redeem:revoke",
+            "materialization:create",
+            "replay:create",
+            "publication:publish",
+            "publication:authorize",
+            "publication:activate",
+            "publication:reject",
+            "publication:rollback",
+            "publication:retire",
+            "config:create",
+            "config:approve",
+            "config:activate",
+            "config:rollback",
+        ] {
+            assert!(
+                permission_codes.contains(expected),
+                "missing workspace action `{expected}`"
+            );
+        }
     }
 
     #[test]
-    fn feedback_workbench_page() {
-        let tree = MenuTree::bootstrap();
-        let page = tree
-            .models
-            .iter()
-            .find(|model| {
-                matches!(
-                    &model.name,
-                    sea_orm::ActiveValue::Set(name) if name == "research-feedback"
-                )
-            })
-            .expect("feedback workbench menu page");
-        assert_eq!(
-            page.permission_code,
-            sea_orm::ActiveValue::Set(Some("materialization:read".to_owned()))
-        );
-        assert_eq!(
-            page.path,
-            sea_orm::ActiveValue::Set(Some("/research/feedback".to_owned()))
-        );
-        assert_eq!(
-            page.component,
-            sea_orm::ActiveValue::Set(Some("research/feedback/index".to_owned()))
-        );
-        assert_eq!(page.hide_in_menu, sea_orm::ActiveValue::Set(false));
-    }
-
-    #[test]
-    fn dashboard_overview_affixed_default() {
+    fn dashboard_affixed() {
         let tree = MenuTree::bootstrap();
         let dashboard = tree
             .models
             .iter()
-            .find(|model| {
-                matches!(&model.name, sea_orm::ActiveValue::Set(name) if name == "dashboard")
-            })
+            .find(|model| matches!(&model.name, ActiveValue::Set(name) if name == "dashboard"))
             .expect("dashboard menu node");
-        assert_eq!(dashboard.affix_tab, sea_orm::ActiveValue::Set(true),);
+        assert_eq!(dashboard.affix_tab, ActiveValue::Set(true));
     }
 
     #[test]
-    fn dashboard_command_center() {
-        let tree = MenuTree::bootstrap();
-        let command_center = stable_menu_id(None, "command-center");
-        let dashboard = tree
-            .models
-            .iter()
-            .find(|model| {
-                matches!(&model.name, sea_orm::ActiveValue::Set(name) if name == "dashboard")
-            })
-            .expect("dashboard menu node");
-        assert_eq!(
-            dashboard.parent_id,
-            sea_orm::ActiveValue::Set(Some(command_center))
-        );
-    }
-
-    #[test]
-    fn directory_menu_nodes_icons() {
+    fn menu_icons_valid() {
         let tree = MenuTree::bootstrap();
         for model in &tree.models {
             let kind = match &model.kind {

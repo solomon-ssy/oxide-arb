@@ -1,8 +1,7 @@
 //! Menu management endpoints (RBAC `Menu` resource).
 //!
-//! CRUD over the menu tree, plus the self-service `accessible` projection that
-//! returns only the menus the caller's **enabled** roles grant. Menus are not
-//! part of the Casbin policy, so none of these endpoints touch the enforcer.
+//! CRUD over the menu tree. The authenticated menu projection is returned by
+//! `GET /api/auth/me`; menus are not part of the Casbin policy.
 
 use actix_web::{
     http::Method,
@@ -24,13 +23,13 @@ use crate::{
     audit::OperationCtx,
     auth::casbin::Rule,
     error::WebError,
-    extractors::{AuthedActor, ValidatedJson},
+    extractors::ValidatedJson,
     response::WebResponse,
     routes::registry::{RouteSpec, spec},
     state::AppState,
 };
 
-/// Menu resource routes (the static `accessible` precedes the dynamic `{id}`).
+/// Menu resource routes.
 pub(crate) fn route_specs() -> Vec<RouteSpec> {
     vec![
         spec(
@@ -44,12 +43,6 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/menus",
             Rule::ResourceOp(ResourceType::Menu, Operation::Create),
             create,
-        ),
-        spec(
-            Method::GET,
-            "/menus/accessible",
-            Rule::AuthenticatedOnly,
-            accessible,
         ),
         spec(
             Method::PUT,
@@ -123,16 +116,4 @@ pub async fn delete(
     op_ctx.set_action(OperationCategory::Rbac, "menu.delete");
     op_ctx.set_resource(ResourceType::Menu, id.to_string());
     Ok(WebResponse::ok(()))
-}
-
-/// `GET /api/menus/accessible` — the menu tree the caller's enabled roles grant.
-pub async fn accessible(
-    state: Data<AppState>,
-    actor: AuthedActor,
-) -> Result<WebResponse<Vec<MenuTreeNode>>, WebError> {
-    let menus = state
-        .menus
-        .accessible_for_roles(&actor.roles.enabled_ids())
-        .await?;
-    Ok(WebResponse::ok(menus))
 }

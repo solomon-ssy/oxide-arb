@@ -45,8 +45,9 @@ pub use quant::{
     PgRecommendationRepository, PgRecommendationResolutionOutcomeRepository,
     PgReconciliationRepository, PgReportRunRepository, PgResearchJobRepository,
     PgResearchReadinessEvidenceRepository, PgReservedCapitalRepository,
-    PgResolutionObservationRepository, PgShadowComparisonRepository, PgSourceSliceRepository,
-    PgTradePolicyRepository, PgTradeTapeBlockCursorRepository, PgTrainingDatasetRepository,
+    PgResolutionObservationRepository, PgRuntimeActivityRepository, PgShadowComparisonRepository,
+    PgSourceSliceRepository, PgTradePolicyRepository, PgTradeTapeBlockCursorRepository,
+    PgTrainingDatasetRepository,
 };
 pub use rbac::{
     PgCasbinAdapter, PgMenuRepository, PgRoleMenuRepository, PgRolePermissionRepository,

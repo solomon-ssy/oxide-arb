@@ -416,6 +416,7 @@ pub mod model;
 pub mod operation_log;
 pub mod quant;
 pub mod rbac;
+pub mod runtime_activity;
 pub mod runtime_config;
 pub mod settlement;
 pub mod system;

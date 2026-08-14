@@ -1,18 +1,19 @@
 //! Coherent research lineage for the real-binary browser fixture.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Duration as StdDuration};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::app::ports::feedback_mutation::FeedbackCycleFreezePlan;
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
+        api::BuildTrainingDatasetRequest,
         data_plane::DecisionClock,
         ports::FeedbackDatasetBuildRequest,
         quant::{
             FeedbackCohortWindow, FeedbackCycleInfo, FeedbackCycleKey, FeedbackCycleKeyInput,
             FeedbackStageEventInput, ModelSpecInfo, ModelVersionInfo, NewBacktestReport,
-            NewFeedbackCycle, NewFeedbackStageEvent, NewModelRun,
+            NewFeedbackCycle, NewFeedbackStageEvent, NewModelRun, NewResearchJob,
         },
     },
     enums::{
@@ -20,7 +21,8 @@ use quant_pivot_models::{
         model::ModelFamily,
         quant::{
             DataQualityStatus, DatasetPurpose, FeedbackEvaluationMode, FeedbackStage,
-            FeedbackStageEventKind, FeedbackTriggerFamily, ModelRunKind, TrainingDatasetStatus,
+            FeedbackStageEventKind, FeedbackTriggerFamily, ModelRunKind, ResearchJobKind,
+            ResearchJobStatus, TrainingDatasetStatus,
         },
     },
     hashing::CanonicalDigest,
@@ -29,8 +31,9 @@ use quant_pivot_models::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, EventId, FeatureCell,
         FeatureStaleness, FeatureValue, FeedbackCycleId, MarketId, ModelRunId, ModelSpecId,
         ModelTrainingContract, ModelVersionId, PolicyBundleGeneration, Probability,
-        ResearchEvaluationTrack, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
-        TrainingSampleSource, TrainingSampleSources, Usd,
+        ResearchEvaluationTrack, ResearchJobId, ResearchJobParams, RoleCode, SchemaVersion,
+        TokenId, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, TrainingSampleSources,
+        Usd, WorkerId,
         backtest::{
             BacktestPortfolioFunnel, CategoryMetric, CategoryMetrics, ExpectedVsRealized,
             PnlCurvePoint, PnlSimulation,
@@ -42,13 +45,14 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgBacktestReportRepository, PgFeedbackCycleRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgTrainingDatasetRepository,
+        PgModelRunRepository, PgResearchJobRepository, PgTrainingDatasetRepository,
     },
     traits::{
         BacktestReportRepository, FeedbackCycleCasOutcome, FeedbackCycleGeneration,
         FeedbackCycleRepository, FeedbackCycleWriteOutcome, FeedbackStageWriteOutcome,
         FeedbackTriggerCommit, FeedbackTriggerWriteOutcome, ModelRegistryRepository,
-        ModelRunRepository, TrainingDatasetRepository,
+        ModelRunRepository, ResearchJobRepository, ResearchJobRetryOutcome,
+        TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -96,6 +100,7 @@ pub struct BrowserResearchFixture {
     pub backtest_report_id: BacktestReportId,
     pub feedback_cycle_id: FeedbackCycleId,
     pub governed_cancellation_cycle_id: Option<FeedbackCycleId>,
+    pub cancellable_research_job_id: ResearchJobId,
     pub model_version_id: ModelVersionId,
 }
 
@@ -112,6 +117,16 @@ struct FeedbackCycleSeed<'a> {
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
     observed_at: DateTime<Utc>,
+}
+
+struct FeedbackCycleSeedInput<'a> {
+    cancellation_evaluation: Option<&'a PersistedDataset>,
+    db: &'a DatabaseConnection,
+    evaluation: &'a PersistedDataset,
+    fixture: FeedbackCycleFixture,
+    model_version_id: ModelVersionId,
+    observed_at: DateTime<Utc>,
+    registry: &'a PgModelRegistryRepository,
 }
 
 struct PersistedFeedbackCycles {
@@ -615,32 +630,147 @@ async fn seed_research(
         now,
     )
     .await?;
-    let candidate = registry
-        .find_model_version(&model_version_id)
-        .await?
-        .ok_or_else(|| ResearchError::DatasetBuild {
-            detail: format!("browser candidate model {model_version_id} is missing"),
-        })?;
-    let feedback_cycles = FeedbackCycleSeed {
-        evaluation: &evaluation,
+    let feedback_cycles = FeedbackCycleSeed::persist_model(FeedbackCycleSeedInput {
         cancellation_evaluation: cancellation_evaluation.as_ref(),
-        model_family: candidate.model_family,
-        champion_model_version_id: candidate.model_version_id,
-        champion_serving_contract_hash: candidate.serving_contract_hash,
+        db,
+        evaluation: &evaluation,
+        fixture: feedback_cycle_fixture,
+        model_version_id,
         observed_at: now,
-    }
-    .persist(db, feedback_cycle_fixture)
+        registry: &registry,
+    })
+    .await?;
+    let cancellable_research_job_id = seed_cancellable_job(
+        db,
+        browser_model_spec_id,
+        infra.decision_policy_snapshot_id,
+        now,
+    )
     .await?;
     Ok(BrowserResearchFixture {
         evaluation_dataset_id: evaluation.id,
         backtest_report_id: report,
         feedback_cycle_id: feedback_cycles.historical_cycle_id,
         governed_cancellation_cycle_id: feedback_cycles.governed_cancellation_cycle_id,
+        cancellable_research_job_id,
         model_version_id,
     })
 }
 
-impl FeedbackCycleSeed<'_> {
+async fn seed_cancellable_job(
+    db: &DatabaseConnection,
+    model_spec_id: ModelSpecId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    observed_at: DateTime<Utc>,
+) -> QuantResult<ResearchJobId> {
+    let repository = PgResearchJobRepository::new(db.clone());
+    let job_id = ResearchJobId::from_v7();
+    repository
+        .enqueue(NewResearchJob {
+            job_id,
+            feedback_cycle_id: None,
+            feedback_stage: None,
+            kind: ResearchJobKind::DatasetBuild,
+            status: ResearchJobStatus::Queued,
+            model_spec_id: Some(model_spec_id),
+            decision_policy_snapshot_id: Some(decision_policy_snapshot_id),
+            params_json: ResearchJobParams::DatasetBuild(BuildTrainingDatasetRequest {
+                model_spec_id,
+                profile_ref: fixture_profile_ref(),
+                purpose: DatasetPurpose::Evaluation,
+                decision_policy_snapshot_id,
+                window_start: observed_at - Duration::hours(2),
+                window_end: observed_at - Duration::hours(1),
+                pit_cutoff: observed_at,
+                sample_interval_secs: 60,
+                horizons_secs: vec![3_600],
+                knowledge_lag_secs: KNOWLEDGE_LAG_SECS,
+                feature_schema_version: SchemaVersion::FIRST,
+                sample_sources: TrainingSampleSources::default(),
+                reason: "UI release-closure cancellable research fixture".to_owned(),
+                training_dataset_id: Some(TrainingDatasetId::from_v7()),
+            }),
+            requested_by: Some("ui-release-closure".to_owned()),
+            acting_role: RoleCode::new("admin"),
+            parent_job_id: None,
+            recovery_attempt: 0,
+            max_recovery_attempts: 3,
+        })
+        .await?;
+
+    let worker = WorkerId::from_v7();
+    let leased = repository
+        .lease_next(
+            &[ResearchJobKind::DatasetBuild],
+            &worker,
+            observed_at + Duration::minutes(5),
+        )
+        .await?
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: "cancellable research fixture could not acquire its lease".to_owned(),
+        })?;
+    if leased.job_id != job_id {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "cancellable research fixture leased {}, expected {job_id}",
+                leased.job_id
+            ),
+        }
+        .into());
+    }
+    let scheduled = repository
+        .retry_transient(
+            &job_id,
+            &worker,
+            "fixture-controlled retry window".to_owned(),
+            StdDuration::from_hours(24),
+        )
+        .await?;
+    match scheduled {
+        ResearchJobRetryOutcome::Scheduled(job) if job.job_id == job_id => Ok(job_id),
+        ResearchJobRetryOutcome::Scheduled(job) => Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "cancellable research fixture scheduled {}, expected {job_id}",
+                job.job_id
+            ),
+        }
+        .into()),
+        ResearchJobRetryOutcome::Exhausted(job) => Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "cancellable research fixture exhausted unexpectedly: {}",
+                job.job_id
+            ),
+        }
+        .into()),
+    }
+}
+
+impl<'a> FeedbackCycleSeed<'a> {
+    async fn persist_model(
+        input: FeedbackCycleSeedInput<'a>,
+    ) -> QuantResult<PersistedFeedbackCycles> {
+        let candidate = input
+            .registry
+            .find_model_version(&input.model_version_id)
+            .await?
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: format!(
+                    "browser candidate model {} is missing",
+                    input.model_version_id
+                ),
+            })?;
+        Self {
+            evaluation: input.evaluation,
+            cancellation_evaluation: input.cancellation_evaluation,
+            model_family: candidate.model_family,
+            champion_model_version_id: candidate.model_version_id,
+            champion_serving_contract_hash: candidate.serving_contract_hash,
+            observed_at: input.observed_at,
+        }
+        .persist(input.db, input.fixture)
+        .await
+    }
+
     fn seal_cycle(
         &self,
         feedback_policy_hash: ContentHash,

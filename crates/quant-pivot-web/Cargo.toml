@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64.workspace = true
 quant-pivot-allocator = { workspace = true }
 quant-pivot-error = { workspace = true, features = ["storage"] }
 quant-pivot-models = { workspace = true }

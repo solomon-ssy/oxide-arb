@@ -125,7 +125,6 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 |---|---|---|---|---|
 | 11.0 | Contract Freeze & Deletion Inventory | 语义精准地基 / 删除死语义 / build 硬化 | 12, 23 | [11.0](11.0-contract-freeze-and-deletion-inventory.md) |
 | 11.1 | Factor & Signal Redesign | 因子多样性 + 截面归一化 | 1, 2, 3 | [11.1](11.1-factor-and-signal-redesign.md) |
-| 11.2 | Polymarket Vertical Alpha (拆分索引) | — | 4 | [11.2](11.2-polymarket-vertical-alpha.md) |
 | 11.2.1 | Platform-Internal Structural Alpha | 结构因子族 + neg-risk 全腿 + favorite-longshot 偏差表(11.3 提前件) | 4(前半) | [11.2.1](11.2.1-platform-structural-alpha.md) |
 | 11.2.2 | Crypto External Vertical | 两层向量 + 分层 linkage + Binance 特征源 + category 路由 | 4(后半) | [11.2.2](11.2.2-crypto-external-vertical.md) |
 | 11.2.3 | Tier 2 LLM Linkage Fallback | 离线 LLM 结构化抽取 + grounding gate + review queue | — (extends 11.2.2) | [11.2.3](11.2.3-tier2-llm-linkage.md) |
@@ -139,7 +138,6 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility baseline + cash-budget + PIT fee + purged CPCV/uniqueness/DSR/PBO/ESS，交付至 ReportOnly shadow — **仓库契约已闭环：Weather/structural producers、56/21 CPCV、2× latency、Evidence v3、独立 Validate、分页 drilldown 与 fact outbox 已接通；物理迁移/真实数据验收与 24h shadow 待目标环境完成；真实 canary 已移交 11.11** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
 | 11.8 | Report Lifecycle, Durable Scheduling & Operator Workflow | **已完成（含 P0 收尾复核）**：CH decision-fact、delivery claim-loss 与 censor accounting 闭环；历史版本已被 boot 基线取代 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
 | 11.9 | Crypto / Weather Verticals, Attribution Feedback & Auto-Retraining | canonical truth、attempt/rollup、自动再训练、质量治理、三类 attribution、Weather 8-family、唯一 route authority 与 UI/ops — **Implementation Closure=BLOCKED；Business Loop Closure=BLOCKED；Operational Activation=BLOCKED** | 19, 20, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
-| 11.10 | Counterfactual Factor Attribution | **MERGED INTO 11.9**；仅保留合并说明，不是独立实施或依赖节点 | — | [11.10](11.10-counterfactual-factor-attribution.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
 
 ## 3. 依赖图
@@ -293,8 +291,8 @@ attribution)是历史设计文档。Phase 11 采取**破坏式接管**:
 - [11.9](11.9-attribution-feedback-and-auto-retraining.md) **取代** 06.5,并把 champion-challenger、
   drift-triggered retraining、factor governance gates、prediction explanation、policy
   counterfactual、outcome association 与 execution trajectory 一并纳入。
-- [11.10](11.10-counterfactual-factor-attribution.md) 标记 `MERGED INTO 11.9`；06.6 直接由 11.9
-  取代，不存在第二个 schema/artifact owner。
+- 原 11.10 已破坏式合并并删除；06.6 直接由 [11.9](11.9-attribution-feedback-and-auto-retraining.md)
+  取代，不存在第二个 schema/artifact owner 或兼容索引。
 - 06.5/06.6 文档只保留历史背景，不做 re-export、不保留旧 seam、realized-PnL factor
   attribution 或 dual-write；新命名以 11.9 为准。
 - 06.0/06.1(exit reinference / opportunistic sell)已落地,Phase 11 **不回推**,只在 11.7 复用其

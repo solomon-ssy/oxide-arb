@@ -29,6 +29,7 @@ mod reconciliation;
 mod research_job;
 mod research_model_contract;
 mod role;
+mod runtime_activity;
 mod runtime_config;
 pub mod settlement_redeem;
 mod structural_monitor;
@@ -153,6 +154,11 @@ pub use research_model_contract::ResearchModelApiContractSchema;
 pub use role::{
     AssignMenusRequest, AssignPermissionsRequest, ChangeRoleStatusRequest, CreateRoleRequest,
     UpdateRoleRequest,
+};
+pub use runtime_activity::{
+    RuntimeActivityActionView, RuntimeActivityCursor, RuntimeActivityDomainCountView,
+    RuntimeActivityEntityView, RuntimeActivityListQuery, RuntimeActivityPageView,
+    RuntimeActivityReadQuery, RuntimeActivitySummaryView, RuntimeActivityView,
 };
 pub use runtime_config::{
     ActivatePolicyDraftRequest, ApprovePolicyDraftRequest, ConfigActivityQuery, ConfigActivityView,

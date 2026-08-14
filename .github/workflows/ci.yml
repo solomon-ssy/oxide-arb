@@ -196,6 +196,9 @@ jobs:
       - name: Verify generated research-model API contracts
         working-directory: ui
         run: pnpm check:research-model-api
+      - name: Verify generated enum catalog
+        working-directory: ui
+        run: pnpm check:enum-catalog
       - name: Lint UI source and styles
         working-directory: ui
         run: pnpm lint
@@ -208,6 +211,9 @@ jobs:
       - name: Type-check all UI packages
         working-directory: ui
         run: pnpm check:type
+      - name: Type-check browser release contracts
+        working-directory: ui
+        run: pnpm check:e2e-types
       - name: Run deterministic UI unit and contract tests
         working-directory: ui
         run: pnpm test:unit
@@ -232,7 +238,7 @@ jobs:
   protected-e2e:
     name: protected-e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
         with:
@@ -261,19 +267,32 @@ jobs:
         working-directory: ui
         env:
           PLAYWRIGHT_EVIDENCE_RUN: run-1
+          PLAYWRIGHT_PRODUCTION_FIXTURE: governed-feedback
         run: |
           set -euo pipefail
           mkdir -p ../target/ci-evidence
-          pnpm exec playwright test --project=protected-chromium 2>&1 |
+          pnpm exec playwright test \
+            --project=functional-chromium \
+            --project=visual-desktop-dark \
+            --project=visual-desktop-light \
+            --project=visual-mobile-dark 2>&1 |
             tee ../target/ci-evidence/protected-e2e-run-1.log
       - name: Repeat browser E2E on a fresh production stack
         working-directory: ui
         env:
           PLAYWRIGHT_EVIDENCE_RUN: run-2
+          PLAYWRIGHT_PRODUCTION_FIXTURE: governed-feedback
         run: |
           set -euo pipefail
-          pnpm exec playwright test --project=protected-chromium 2>&1 |
+          pnpm exec playwright test \
+            --project=functional-chromium \
+            --project=visual-desktop-dark \
+            --project=visual-desktop-light \
+            --project=visual-mobile-dark 2>&1 |
             tee ../target/ci-evidence/protected-e2e-run-2.log
+      - name: Compare fresh-boot release manifests
+        working-directory: ui
+        run: node scripts/compare-ui-release-manifests.mjs run-1 run-2
       - name: Archive browser failure evidence (CI-009)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -282,7 +301,15 @@ jobs:
           path: |
             ui/playwright-report
             ui/test-results
+            ui/apps/web-antdv-next/test-results/ui-release-closure
             target/ci-evidence/protected-e2e-run-*.log
             target/production-stack/*/backend.log
           if-no-files-found: warn
           retention-days: 30
+      - name: Archive UI release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-release-closure-${{ github.sha }}
+          path: ui/apps/web-antdv-next/test-results/ui-release-closure
+          if-no-files-found: error
+          retention-days: 14

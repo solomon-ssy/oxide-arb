@@ -1,118 +1,70 @@
-# quant-pivot Frontend Refactor
+# quant-pivot Operator Console
 
-<!-- quant-pivot-deployment-contract:v1 -->
-> **Deployment contract**
-> - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
-> - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
-> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
-
-> 状态：当前实现架构与 Phase 10 出口索引；实时 gate 结果只记录在 closure Execution Ledger。
+> 状态：当前实现架构。范围为 `ui/apps/web-antdv-next`、前端共享包、后端动态菜单 seed 与对应 Web API。
 >
-> 范围：`ui/apps/web-antdv-next` 与前端共享类型包 `ui/packages/types`
->
-> 目标：把旧 Endgame admin 破坏式重构为 quant-pivot 操作台。主产物是 `RecommendationReport`，执行桥梁是 `OrderIntent`，运行模式只允许 `report_only`、`semi_auto`、`auto_execution`。
->
-> **可执行子phase实施契约（10.0–10.7）：** [`phase-10/README.md`](phase-10/README.md)
+> 部署契约：首次部署必须从空数据库 fresh boot。旧 URL、旧页面、旧菜单、旧 DTO 与旧截图不迁移、不兼容；禁止 redirect、alias、re-export、双写和旧命名转发。
 
-## 0. 兼容策略
+## 1. 产品定位
 
-零兼容。删除旧页面、旧 API、旧 store、旧 type、旧 WS case、旧权限码、旧 locale。禁止 re-export 兼容层，禁止旧命名别名，禁止 mock-only 生产页面。
+Operator Console 围绕 `RecommendationReport` 建立研究、决策、执行与治理闭环。默认
+`report_only` 仍读取真实 venue account 做 sizing；它不是 paper trading，也不是 dry-run。执行入口
+只能由 `OrderIntent` 进入，并由 runtime mode、approval、admission、kill-switch 与 settlement policy
+逐层 fail closed。
 
-## 1. 设计结论
+## 2. 信息架构
 
-本次前端不是在旧 Endgame 页面上"换文案"，而是重建业务面。保留 Vben/Antdv 后台基础设施和通用治理能力，删除旧套利业务模型。
+动态菜单只发布 5 个业务域、12 个页面：
 
-**必须保留：**
-
-- Vben `Page`、layout、后端动态菜单、权限码按钮控制。
-- `@vben/request` 接入层，以及已有 `Accept-Api-Version: v1` 请求头策略。
-- `useVbenVxeGrid`、Drawer 详情、Antdv 表单/弹窗/标签/描述列表等密集后台交互。
-- Pinia setup stores，但只保存跨页面、header、realtime、WS revision state；表格主数据由页面 query 拉取。
-- 统一 `governed-action-modal`，真实资金、运行模式、kill-switch、Config resource 激活/回滚等 mutation 必须治理化。
-- WebSocket 单例连接、断线重连、订阅恢复、toast/notification 分发。
-- RBAC、operation log、users/roles/menus 管理入口。
-
-**必须删除：**
-
-- 旧 Endgame 业务面：`opportunities`、`trades`、`risk`、`pnl`、旧 `analytics`、旧 `replay`、`blacklist`、`control-factors`、`publications`、旧 `audit`。
-- 旧运行模式：`DryRun`、`Paper`、`Live`、`ExecutionMode`。
-- 旧主路径权限码：`opportunity:*`、`trade:*`、`risk:*`、`pnl:*`、`blacklist:*`、旧 `analytics:*`、旧 `audit:*` 业务入口。
-- 旧 WS taxonomy：`opportunity.detected`、`trade.*`、`risk.*`、`pnl.update`、`control.published`。
-- 旧业务 barrel export 或 re-export shim。
-
-## 2. 架构约束
-
-前端路由由后端 menu seed 驱动。后端返回的 `component` 必须一一对应 `ui/apps/web-antdv-next/src/views/${component}.vue`，否则登录后动态路由无法落地。
-
-**菜单、权限码、组件路径必须在 10.0 锁死，在 10.2 同步后端 seed 与 locale。不能先做页面再反向猜菜单。**
-
-Pinia 仅承担状态协调职责；表格数据属于页面 query cache，不属于全局事实。
-
-Vue Router 动态路由必须在登录后菜单加载阶段完成，不能依赖页面 mounted 后补路由。
-
-## 3. 子phase索引
-
-| 子phase | 标题 | 文档 |
+| 域 | 页面 | Canonical path |
 |---|---|---|
-| 10.0 | Contract & Deletion Inventory | [`phase-10/10.0-contract-and-deletion-inventory.md`](phase-10/10.0-contract-and-deletion-inventory.md) |
-| 10.1 | Frontend Domain Foundation | [`phase-10/10.1-frontend-domain-foundation.md`](phase-10/10.1-frontend-domain-foundation.md) |
-| 10.2 | Navigation / Dashboard / Markets / Account | [`phase-10/10.2-navigation-dashboard-markets-account.md`](phase-10/10.2-navigation-dashboard-markets-account.md) |
-| 10.3 | Report Plane | [`phase-10/10.3-report-plane.md`](phase-10/10.3-report-plane.md) |
-| 10.4 | Execution Plane | [`phase-10/10.4-execution-plane.md`](phase-10/10.4-execution-plane.md) |
-| 10.5 | Research & Governance | [`phase-10/10.5-research-and-governance.md`](phase-10/10.5-research-and-governance.md) |
-| 10.6 | Hardening | [`phase-10/10.6-hardening.md`](phase-10/10.6-hardening.md) |
-| 10.7 | Config Console & Deploy Readiness | [`phase-10/10.7-deploy-config-and-preferences.md`](phase-10/10.7-deploy-config-and-preferences.md) |
+| Command | Dashboard | `/dashboard` |
+| Command | Activity Center | `/runtime/activity` |
+| Trading | Market Intelligence | `/trading/market-intelligence` |
+| Trading | Recommendations | `/trading/recommendations` |
+| Execution | Orders | `/execution/orders` |
+| Execution | Portfolio | `/execution/portfolio` |
+| Execution | Post-Trade | `/execution/post-trade` |
+| Research | Research Lab | `/research/lab` |
+| Research | Learning & Policy | `/research/learning-policy` |
+| Research | Data Reliability | `/research/data-reliability` |
+| System | Config | `/system/config` |
+| System | Audit | `/system/audit` |
 
-完整菜单树、API matrix、WS 契约、删除清单、API gap、各 phase 详细设计与推进计划见对应子文档。
+页面内功能由 `module` query 切换；对象详情统一由 `entity` + `id` 打开。任何旧 resource URL 都是
+404，不做跳转。后端 menu `component` 必须直接解析到对应 workspace 文件。
 
-## 4. 推荐实施顺序
+## 3. 交互与视觉系统
 
-```mermaid
-flowchart TD
-    F0["10.0 Contract & Deletion Inventory"]
-    F1["10.1 Domain Foundation"]
-    F2["10.2 Navigation / Dashboard / Markets / Account"]
-    F3["10.3 Report Plane"]
-    F4["10.4 Execution Plane"]
-    F5["10.5 Research & Governance"]
-    F7["10.7 Config Console & Deploy Readiness"]
-    F6["10.6 Hardening"]
+- dark-first token 体系统一 surface、border、status、chart、density、radius、layer 与 motion；明暗主题共享语义，不共享硬编码颜色。
+- Inter 与 JetBrains Mono 自托管；金额、价格、比例、hash 与 ID 使用等宽字体和 tabular numerals。
+- `EnumTag` 的展示表由 Rust enum schema 生成并穷尽覆盖。未知 wire 值必须 danger 显示、记录结构化 drift，并使契约测试失败。
+- 列表只负责定位；详情统一进入 Object Inspector。Research Lineage 与 Execution Flow Rail 使用同一 Inspector 结构。
+- Dashboard、Activity Center、Workspace 与 ECharts 暴露确定性的 readiness 状态，供视觉证据门禁消费。
+- motion 使用 token 化 duration/easing；`prefers-reduced-motion: reduce` 将动效收敛为单次 1ms，不靠截图验证动画。
 
-    F0 --> F1
-    F1 --> F2
-    F2 --> F3
-    F3 --> F4
-    F2 --> F5
-    F4 --> F6
-    F5 --> F7
-    F7 --> F6
-```
+## 4. 数据权威边界
 
-- **10.0** 设计冻结，不写业务代码。
-- **10.1** 编译基础层，切断旧 types/API/store/WS。
-- **10.2** operator 首屏 + markets + account。
-- **10.3** report 主产物 UI。
-- **10.4** 执行 ledger 全链路。
-- **10.5** 研究与治理（可与 10.3/10.4 并行）。
-- **10.7** 六类 Config resource、deployment readiness 与 lifecycle 页面。
-- **10.6** 作为最终出口执行 lint / unit / executable E2E / 删除证明。
+- REST/数据库快照是列表和详情的唯一权威事实；WebSocket 只发 revision/invalidation hint，随后重新读取 REST。
+- Pinia 只保存跨页连接状态、revision、短生命周期选择和 market book 热点缓存，不保存分页列表事实。
+- 所有 money/price/shares/bps wire value 在 TypeScript 中保持 decimal string。
+- mutation 必须经过统一 governed action，携带 reason、确认词、request id 与审计上下文；403/409/422 不得吞掉。
+- 运行模式、审批、执行、结算和策略激活均 fail closed。页面不得通过隐藏按钮替代服务端 AuthZ。
 
-## 5. 风险与控制
+## 5. 发布闭环
 
-| Risk | Impact | Control |
-|---|---|---|
-| 后端 menu seed 指向不存在 component | 登录后动态路由不可达 | 10.0 锁 path；10.2 seed verifier |
-| 旧 barrel export 残留 | 新页面误用旧 DTO | 10.1 删除；10.6 lint |
-| Research 缺 list endpoint | 前端造假 catalog | 10.0 gap register；10.5 ID-driven workbench |
-| WS 推送当表格事实源 | 状态不一致 | WS 只改 revision，表格 REST query |
-| `report_only` 误解为 dry-run | 凭证语义错误 | Dashboard/System 文案明确 |
-| Governed mutation 错误被吞 | fail-closed 不可见 | 409/403/422 detail 原样展示 |
+`pnpm test:e2e:ui-release-closure` 在两个全新 production-stack 环境中重复运行：
 
-## 6. 外部参考
+- 10 个真实后端、真实 PostgreSQL/Redis 的功能 spec；禁止 `page.route()` 伪造业务响应。
+- 50 张视觉证据：12 页桌面 dark/light、12 页移动 dark、14 个桌面 dark 关键态。
+- 每张图要求 `data-ui-ready=true`、HTTP drain、ECharts finished、无 skeleton/toast、字体就绪、Axe serious/critical 为 0、横向 overflow 为 0。
+- 像素阈值 `threshold=0.2`、`maxDiffPixelRatio=0.002`。
+- manifest 记录前后端 build id、seed/data revision、viewport、theme、locale、timezone、scenario 与截图 SHA-256；两次 fresh boot 的场景和数据 revision 必须一致。
 
-- [Vben Admin 权限](https://doc.vben.pro/guide/in-depth/access.html)
-- [Vben Admin 路由和菜单](https://doc.vben.pro/guide/essentials/route.html)
-- [Pinia setup stores](https://pinia.vuejs.org/core-concepts/)
-- [Vue Router dynamic routing](https://router.vuejs.org/guide/advanced/dynamic-routing.html)
+## 6. 当前实施索引
+
+- [Phase 10 当前实现索引](phase-10/README.md)
+- [契约与 clean-break inventory](phase-10/10.0-contract-and-deletion-inventory.md)
+- [导航、Dashboard 与 Market Intelligence](phase-10/10.2-navigation-dashboard-markets-account.md)
+- [RecommendationReport 平面](phase-10/10.3-report-plane.md)
+- [执行平面](phase-10/10.4-execution-plane.md)
+- [Research、Reliability 与 System](phase-10/10.5-research-and-governance.md)

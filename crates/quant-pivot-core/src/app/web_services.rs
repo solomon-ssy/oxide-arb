@@ -27,9 +27,9 @@ use quant_pivot_repository::{
         PromotionPermitRepository, RecommendationExecutionRollupRepository,
         RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
         ReportRunRepository, ResolutionObservationRepository, RoleMenuRepository,
-        RolePermissionRepository, RoleRepository, ServingEvidenceRepository, TradePolicyRepository,
-        TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
-        quant::settlement_redeem::SettlementRedeemRepository,
+        RolePermissionRepository, RoleRepository, RuntimeActivityRepository,
+        ServingEvidenceRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
+        UserRepository, UserRoleRepository, quant::settlement_redeem::SettlementRedeemRepository,
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -198,6 +198,8 @@ async fn build_app_state(
         perm_checker: auth.perm_checker,
         runtime_config: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
         operation_logs: Arc::clone(&repos.operation_log) as Arc<dyn OperationLogRepository>,
+        runtime_activities: Arc::clone(&repos.runtime_activity)
+            as Arc<dyn RuntimeActivityRepository>,
         operation_log,
         control: Arc::clone(&ctx.governance.runtime_control),
         capabilities: Arc::clone(&ctx.governance.capabilities),

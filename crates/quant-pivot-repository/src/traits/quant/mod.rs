@@ -49,6 +49,7 @@ mod research_job;
 mod research_readiness;
 mod reserved_capital;
 mod resolution_observation;
+mod runtime_activity;
 mod selection;
 pub mod settlement_governance;
 pub mod settlement_redeem;
@@ -131,6 +132,7 @@ pub use research_job::{
 pub use research_readiness::{ResearchReadinessEvidenceRepository, ShadowLatencyObservation};
 pub use reserved_capital::ReservedCapitalRepository;
 pub use resolution_observation::ResolutionObservationRepository;
+pub use runtime_activity::RuntimeActivityRepository;
 pub use selection::MarketSelectionRepository;
 pub use shadow_comparison::{ShadowComparisonRepository, ShadowComparisonWriteOutcome};
 pub use source_slice::SourceSliceRepository;

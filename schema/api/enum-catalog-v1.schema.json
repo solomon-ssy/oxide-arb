@@ -1,0 +1,4507 @@
+{
+  "schema_version": 1,
+  "source": "crates/quant-pivot-models/src/enums",
+  "enums": [
+    {
+      "name": "AccountSource",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Polymarket",
+          "wire_value": "polymarket"
+        },
+        {
+          "rust_variant": "HistoricalReplay",
+          "wire_value": "historical_replay"
+        }
+      ]
+    },
+    {
+      "name": "AdmissionCheckId",
+      "module": "execution",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "IntentState",
+          "wire_value": "intent_state"
+        },
+        {
+          "rust_variant": "RecommendationFreshness",
+          "wire_value": "recommendation_freshness"
+        },
+        {
+          "rust_variant": "ReportStatus",
+          "wire_value": "report_status"
+        },
+        {
+          "rust_variant": "RuntimeMode",
+          "wire_value": "runtime_mode"
+        },
+        {
+          "rust_variant": "SettlementRecovery",
+          "wire_value": "settlement_recovery"
+        },
+        {
+          "rust_variant": "ModelRouteBinding",
+          "wire_value": "model_route_binding"
+        },
+        {
+          "rust_variant": "DataQuality",
+          "wire_value": "data_quality"
+        },
+        {
+          "rust_variant": "BookFreshness",
+          "wire_value": "book_freshness"
+        },
+        {
+          "rust_variant": "VenueMetadata",
+          "wire_value": "venue_metadata"
+        },
+        {
+          "rust_variant": "EntryConditionPlan",
+          "wire_value": "entry_condition"
+        },
+        {
+          "rust_variant": "RiskEnvelopeHash",
+          "wire_value": "risk_envelope_hash"
+        },
+        {
+          "rust_variant": "CapitalBudget",
+          "wire_value": "capital_budget"
+        },
+        {
+          "rust_variant": "MaxOpenIntents",
+          "wire_value": "max_open_intents"
+        },
+        {
+          "rust_variant": "MaxReservedCapital",
+          "wire_value": "max_reserved_capital"
+        },
+        {
+          "rust_variant": "MarketExposure",
+          "wire_value": "market_exposure"
+        },
+        {
+          "rust_variant": "EventExposure",
+          "wire_value": "event_exposure"
+        },
+        {
+          "rust_variant": "CategoryExposure",
+          "wire_value": "category_exposure"
+        },
+        {
+          "rust_variant": "LiquidityDepth",
+          "wire_value": "liquidity_depth"
+        },
+        {
+          "rust_variant": "Slippage",
+          "wire_value": "slippage"
+        },
+        {
+          "rust_variant": "ManualBlock",
+          "wire_value": "manual_block"
+        },
+        {
+          "rust_variant": "KillSwitch",
+          "wire_value": "kill_switch"
+        },
+        {
+          "rust_variant": "VenueGuard",
+          "wire_value": "venue_guard"
+        },
+        {
+          "rust_variant": "CredentialReadiness",
+          "wire_value": "credential_readiness"
+        },
+        {
+          "rust_variant": "ExitMonitorReadiness",
+          "wire_value": "exit_monitor_readiness"
+        },
+        {
+          "rust_variant": "CalibratedReturnModel",
+          "wire_value": "calibrated_return_model"
+        }
+      ]
+    },
+    {
+      "name": "AdmissionOutcome",
+      "module": "execution",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "Allow",
+          "wire_value": "allow"
+        },
+        {
+          "rust_variant": "Deny",
+          "wire_value": "deny"
+        },
+        {
+          "rust_variant": "Defer",
+          "wire_value": "defer"
+        }
+      ]
+    },
+    {
+      "name": "ApprovalInvalidation",
+      "module": "execution",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "RecommendationExpired",
+          "wire_value": "recommendation_expired"
+        },
+        {
+          "rust_variant": "ReportSuperseded",
+          "wire_value": "report_superseded"
+        },
+        {
+          "rust_variant": "ReportRevoked",
+          "wire_value": "report_revoked"
+        },
+        {
+          "rust_variant": "ModelVersionRetired",
+          "wire_value": "model_version_retired"
+        },
+        {
+          "rust_variant": "RuntimeConfigChanged",
+          "wire_value": "runtime_config_changed"
+        },
+        {
+          "rust_variant": "RiskEnvelopeMismatch",
+          "wire_value": "risk_envelope_mismatch"
+        },
+        {
+          "rust_variant": "DataQualityDegraded",
+          "wire_value": "data_quality_degraded"
+        },
+        {
+          "rust_variant": "KillSwitchOpened",
+          "wire_value": "kill_switch_opened"
+        },
+        {
+          "rust_variant": "IntentExpired",
+          "wire_value": "intent_expired"
+        },
+        {
+          "rust_variant": "OperatorCancelled",
+          "wire_value": "operator_cancelled"
+        }
+      ]
+    },
+    {
+      "name": "ApprovalStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "NotRequired",
+          "wire_value": "not_required"
+        },
+        {
+          "rust_variant": "Pending",
+          "wire_value": "pending"
+        },
+        {
+          "rust_variant": "Approved",
+          "wire_value": "approved"
+        },
+        {
+          "rust_variant": "Rejected",
+          "wire_value": "rejected"
+        },
+        {
+          "rust_variant": "Expired",
+          "wire_value": "expired"
+        }
+      ]
+    },
+    {
+      "name": "AttributionArtifactKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "PredictionExplanation",
+          "wire_value": "prediction_explanation"
+        },
+        {
+          "rust_variant": "DecisionInterventionReplay",
+          "wire_value": "decision_intervention_replay"
+        },
+        {
+          "rust_variant": "ResolutionOutcomeAssociation",
+          "wire_value": "resolution_outcome_association"
+        },
+        {
+          "rust_variant": "ExecutionOutcomeAssociation",
+          "wire_value": "execution_outcome_association"
+        },
+        {
+          "rust_variant": "ExecutionTrajectory",
+          "wire_value": "execution_trajectory"
+        },
+        {
+          "rust_variant": "PolicyCounterfactualOutcome",
+          "wire_value": "policy_counterfactual_outcome"
+        }
+      ]
+    },
+    {
+      "name": "AttributionCohort",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Training",
+          "wire_value": "training"
+        },
+        {
+          "rust_variant": "Evaluation",
+          "wire_value": "evaluation"
+        },
+        {
+          "rust_variant": "Shadow",
+          "wire_value": "shadow"
+        }
+      ]
+    },
+    {
+      "name": "CalibrationKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "ModelScore",
+          "wire_value": "model_score"
+        },
+        {
+          "rust_variant": "MarketPriceBias",
+          "wire_value": "market_price_bias"
+        },
+        {
+          "rust_variant": "WeatherStationLeadBias",
+          "wire_value": "weather_station_lead_bias"
+        }
+      ]
+    },
+    {
+      "name": "CalibrationMethod",
+      "module": "quant",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "Isotonic",
+          "wire_value": "isotonic"
+        },
+        {
+          "rust_variant": "Platt",
+          "wire_value": "platt"
+        }
+      ]
+    },
+    {
+      "name": "CapabilityId",
+      "module": "system",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "ControlPlaneReady",
+          "wire_value": "control_plane_ready"
+        },
+        {
+          "rust_variant": "CatalogBaselineReady",
+          "wire_value": "catalog_baseline_ready"
+        },
+        {
+          "rust_variant": "ResearchCaptureEnabled",
+          "wire_value": "research_capture_enabled"
+        },
+        {
+          "rust_variant": "ReportGenerationEligible",
+          "wire_value": "report_generation_eligible"
+        },
+        {
+          "rust_variant": "EntryAdmissionEligible",
+          "wire_value": "entry_admission_eligible"
+        },
+        {
+          "rust_variant": "OrderSubmissionEligible",
+          "wire_value": "order_submission_eligible"
+        },
+        {
+          "rust_variant": "AutomaticParityEligible",
+          "wire_value": "automatic_parity_eligible"
+        }
+      ]
+    },
+    {
+      "name": "CapabilityReason",
+      "module": "system",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "ControlPlaneNotReady",
+          "wire_value": "control_plane_not_ready"
+        },
+        {
+          "rust_variant": "CatalogBaselineMissing",
+          "wire_value": "catalog_baseline_missing"
+        },
+        {
+          "rust_variant": "OperationalPhaseBlocksReports",
+          "wire_value": "operational_phase_blocks_reports"
+        },
+        {
+          "rust_variant": "RuntimeModeReportOnly",
+          "wire_value": "runtime_mode_report_only"
+        },
+        {
+          "rust_variant": "KillSwitchBlocksEntries",
+          "wire_value": "kill_switch_blocks_entries"
+        },
+        {
+          "rust_variant": "OperationalPhaseBlocksSubmission",
+          "wire_value": "operational_phase_blocks_submission"
+        },
+        {
+          "rust_variant": "NoServingEvidence",
+          "wire_value": "no_serving_evidence"
+        }
+      ]
+    },
+    {
+      "name": "CapitalAllocationState",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Allocated",
+          "wire_value": "allocated"
+        },
+        {
+          "rust_variant": "Locked",
+          "wire_value": "locked"
+        },
+        {
+          "rust_variant": "Spent",
+          "wire_value": "spent"
+        },
+        {
+          "rust_variant": "Released",
+          "wire_value": "released"
+        },
+        {
+          "rust_variant": "Impaired",
+          "wire_value": "impaired"
+        }
+      ]
+    },
+    {
+      "name": "CatalogChangeType",
+      "module": "catalog",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "GammaScanUpsert",
+          "wire_value": "gamma_scan_upsert"
+        },
+        {
+          "rust_variant": "GammaIdRecheckUpsert",
+          "wire_value": "gamma_id_recheck_upsert"
+        },
+        {
+          "rust_variant": "GammaConfirmedTombstone",
+          "wire_value": "gamma_confirmed_tombstone"
+        }
+      ]
+    },
+    {
+      "name": "CatalogEntityKind",
+      "module": "catalog",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Event",
+          "wire_value": "event"
+        },
+        {
+          "rust_variant": "Market",
+          "wire_value": "market"
+        },
+        {
+          "rust_variant": "Cursor",
+          "wire_value": "cursor"
+        }
+      ]
+    },
+    {
+      "name": "CatalogFilterReason",
+      "module": "catalog",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Inactive",
+          "wire_value": "inactive"
+        },
+        {
+          "rust_variant": "Closed",
+          "wire_value": "closed"
+        },
+        {
+          "rust_variant": "ClobDisabled",
+          "wire_value": "clob_disabled"
+        },
+        {
+          "rust_variant": "OrdersNotAccepted",
+          "wire_value": "orders_not_accepted"
+        }
+      ]
+    },
+    {
+      "name": "CatalogRejectionReason",
+      "module": "catalog",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "EmptyConditionId",
+          "wire_value": "empty_condition_id"
+        },
+        {
+          "rust_variant": "MissingClobTokenIds",
+          "wire_value": "missing_clob_token_ids"
+        },
+        {
+          "rust_variant": "NotBinary",
+          "wire_value": "not_binary"
+        },
+        {
+          "rust_variant": "InvalidTokenPair",
+          "wire_value": "invalid_token_pair"
+        },
+        {
+          "rust_variant": "UnsupportedTickSize",
+          "wire_value": "unsupported_tick_size"
+        },
+        {
+          "rust_variant": "DuplicateEntityId",
+          "wire_value": "duplicate_entity_id"
+        },
+        {
+          "rust_variant": "MalformedEntity",
+          "wire_value": "malformed_entity"
+        },
+        {
+          "rust_variant": "CursorProtocolViolation",
+          "wire_value": "cursor_protocol_violation"
+        }
+      ]
+    },
+    {
+      "name": "CatalogSyncFailureStage",
+      "module": "catalog",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Fetch",
+          "wire_value": "fetch"
+        },
+        {
+          "rust_variant": "Normalize",
+          "wire_value": "normalize"
+        },
+        {
+          "rust_variant": "Persist",
+          "wire_value": "persist"
+        },
+        {
+          "rust_variant": "Recovery",
+          "wire_value": "recovery"
+        }
+      ]
+    },
+    {
+      "name": "CatalogSyncKind",
+      "module": "catalog",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Baseline",
+          "wire_value": "baseline"
+        },
+        {
+          "rust_variant": "Reconcile",
+          "wire_value": "reconcile"
+        }
+      ]
+    },
+    {
+      "name": "CatalogSyncStatus",
+      "module": "catalog",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Committed",
+          "wire_value": "committed"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        }
+      ]
+    },
+    {
+      "name": "CatalogTimestampQuality",
+      "module": "catalog",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Source",
+          "wire_value": "source"
+        },
+        {
+          "rust_variant": "CommitTimeFallback",
+          "wire_value": "commit_time_fallback"
+        }
+      ]
+    },
+    {
+      "name": "CheckOutcome",
+      "module": "runtime_config",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "Passed",
+          "wire_value": "passed"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "NotApplicable",
+          "wire_value": "not_applicable"
+        }
+      ]
+    },
+    {
+      "name": "ClassicalKind",
+      "module": "model",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "GradientBoostedTrees",
+          "wire_value": "gradient_boosted_trees"
+        },
+        {
+          "rust_variant": "RandomForest",
+          "wire_value": "random_forest"
+        },
+        {
+          "rust_variant": "ExtraTrees",
+          "wire_value": "extra_trees"
+        },
+        {
+          "rust_variant": "LogisticRegression",
+          "wire_value": "logistic_regression"
+        },
+        {
+          "rust_variant": "Ridge",
+          "wire_value": "ridge"
+        },
+        {
+          "rust_variant": "Lasso",
+          "wire_value": "lasso"
+        },
+        {
+          "rust_variant": "ElasticNet",
+          "wire_value": "elastic_net"
+        }
+      ]
+    },
+    {
+      "name": "CohortCensorReason",
+      "module": "quant",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "ResolutionUnavailableAtCutoff",
+          "wire_value": "resolution_unavailable_at_cutoff"
+        },
+        {
+          "rust_variant": "ExecutionOutcomeUnavailableAtCutoff",
+          "wire_value": "execution_outcome_unavailable_at_cutoff"
+        }
+      ]
+    },
+    {
+      "name": "CohortExclusionReason",
+      "module": "quant",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "RecommendationNotPublished",
+          "wire_value": "recommendation_not_published"
+        },
+        {
+          "rust_variant": "NonPrimaryReport",
+          "wire_value": "non_primary_report"
+        },
+        {
+          "rust_variant": "OutsideFrozenWindow",
+          "wire_value": "outside_frozen_window"
+        },
+        {
+          "rust_variant": "ReportOnlyNoExecutionAuthority",
+          "wire_value": "report_only_no_execution_authority"
+        },
+        {
+          "rust_variant": "ExecutionNotAttempted",
+          "wire_value": "execution_not_attempted"
+        }
+      ]
+    },
+    {
+      "name": "ConfigAuditAction",
+      "module": "runtime_config",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "DraftCreated",
+          "wire_value": "config.draft_created"
+        },
+        {
+          "rust_variant": "DraftValidated",
+          "wire_value": "config.draft_validated"
+        },
+        {
+          "rust_variant": "ApprovalRecorded",
+          "wire_value": "config.approval_recorded"
+        },
+        {
+          "rust_variant": "RevisionActivated",
+          "wire_value": "config.revision_activated"
+        },
+        {
+          "rust_variant": "RevisionRolledBack",
+          "wire_value": "config.revision_rolled_back"
+        }
+      ]
+    },
+    {
+      "name": "ConfigResourceKind",
+      "module": "runtime_config",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "RecommendationPolicy",
+          "wire_value": "recommendation_policy"
+        },
+        {
+          "rust_variant": "ExecutionRiskPolicy",
+          "wire_value": "execution_risk_policy"
+        },
+        {
+          "rust_variant": "ModelRouting",
+          "wire_value": "model_routing"
+        },
+        {
+          "rust_variant": "ReportSchedule",
+          "wire_value": "report_schedule"
+        },
+        {
+          "rust_variant": "OperationsPolicy",
+          "wire_value": "operations_policy"
+        },
+        {
+          "rust_variant": "ExecutionAutomationPolicy",
+          "wire_value": "execution_automation_policy"
+        }
+      ]
+    },
+    {
+      "name": "DataQualityStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Fresh",
+          "wire_value": "fresh"
+        },
+        {
+          "rust_variant": "Acceptable",
+          "wire_value": "acceptable"
+        },
+        {
+          "rust_variant": "Degraded",
+          "wire_value": "degraded"
+        },
+        {
+          "rust_variant": "Stale",
+          "wire_value": "stale"
+        },
+        {
+          "rust_variant": "Insufficient",
+          "wire_value": "insufficient"
+        }
+      ]
+    },
+    {
+      "name": "DatasetPurpose",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Training",
+          "wire_value": "training"
+        },
+        {
+          "rust_variant": "Calibration",
+          "wire_value": "calibration"
+        },
+        {
+          "rust_variant": "Evaluation",
+          "wire_value": "evaluation"
+        },
+        {
+          "rust_variant": "PolicyFit",
+          "wire_value": "policy_fit"
+        }
+      ]
+    },
+    {
+      "name": "DecisionPolicySnapshotSource",
+      "module": "runtime_config",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Bootstrap",
+          "wire_value": "bootstrap"
+        },
+        {
+          "rust_variant": "Activation",
+          "wire_value": "activation"
+        },
+        {
+          "rust_variant": "Rollback",
+          "wire_value": "rollback"
+        }
+      ]
+    },
+    {
+      "name": "DomainFamily",
+      "module": "domain",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Crypto",
+          "wire_value": "crypto"
+        },
+        {
+          "rust_variant": "Weather",
+          "wire_value": "weather"
+        }
+      ]
+    },
+    {
+      "name": "DomainMetric",
+      "module": "domain",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "Close",
+          "wire_value": "close"
+        }
+      ]
+    },
+    {
+      "name": "DomainSourceExpectationStatus",
+      "module": "domain",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "NotStarted",
+          "wire_value": "not_started"
+        },
+        {
+          "rust_variant": "Live",
+          "wire_value": "live"
+        },
+        {
+          "rust_variant": "Stale",
+          "wire_value": "stale"
+        },
+        {
+          "rust_variant": "CredentialBlocked",
+          "wire_value": "credential_blocked"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "error"
+        },
+        {
+          "rust_variant": "Unsupported",
+          "wire_value": "unsupported"
+        }
+      ]
+    },
+    {
+      "name": "DownsideSource",
+      "module": "quant",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "MfeMae",
+          "wire_value": "mfe_mae"
+        }
+      ]
+    },
+    {
+      "name": "EmptyReportReason",
+      "module": "quant",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "EmptySelection",
+          "wire_value": "empty_selection"
+        },
+        {
+          "rust_variant": "InsufficientDataQuality",
+          "wire_value": "insufficient_data_quality"
+        },
+        {
+          "rust_variant": "PortfolioBudgetExhausted",
+          "wire_value": "portfolio_budget_exhausted"
+        },
+        {
+          "rust_variant": "AvailableCashExhausted",
+          "wire_value": "available_cash_exhausted"
+        },
+        {
+          "rust_variant": "NoPositiveSignal",
+          "wire_value": "no_positive_signal"
+        }
+      ]
+    },
+    {
+      "name": "EntryConditionAuditAction",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Created",
+          "wire_value": "created"
+        },
+        {
+          "rust_variant": "Evaluated",
+          "wire_value": "evaluated"
+        },
+        {
+          "rust_variant": "LeaseTakenOver",
+          "wire_value": "lease_taken_over"
+        },
+        {
+          "rust_variant": "Claimed",
+          "wire_value": "claimed"
+        },
+        {
+          "rust_variant": "Reverted",
+          "wire_value": "reverted"
+        },
+        {
+          "rust_variant": "Expired",
+          "wire_value": "expired"
+        },
+        {
+          "rust_variant": "Invalidated",
+          "wire_value": "invalidated"
+        }
+      ]
+    },
+    {
+      "name": "EntryConditionState",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "NotRequired",
+          "wire_value": "not_required"
+        },
+        {
+          "rust_variant": "Waiting",
+          "wire_value": "waiting"
+        },
+        {
+          "rust_variant": "Unavailable",
+          "wire_value": "unavailable"
+        },
+        {
+          "rust_variant": "Confirming",
+          "wire_value": "confirming"
+        },
+        {
+          "rust_variant": "Qualified",
+          "wire_value": "qualified"
+        },
+        {
+          "rust_variant": "Consumed",
+          "wire_value": "consumed"
+        },
+        {
+          "rust_variant": "Expired",
+          "wire_value": "expired"
+        },
+        {
+          "rust_variant": "Invalidated",
+          "wire_value": "invalidated"
+        }
+      ]
+    },
+    {
+      "name": "EventStatus",
+      "module": "market",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Active",
+          "wire_value": "active"
+        },
+        {
+          "rust_variant": "Closed",
+          "wire_value": "closed"
+        },
+        {
+          "rust_variant": "Archived",
+          "wire_value": "archived"
+        },
+        {
+          "rust_variant": "Unknown",
+          "wire_value": "unknown"
+        }
+      ]
+    },
+    {
+      "name": "ExecutionAttemptNoFillReason",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "VenueRejected",
+          "wire_value": "venue_rejected"
+        },
+        {
+          "rust_variant": "VenueCancelled",
+          "wire_value": "venue_cancelled"
+        },
+        {
+          "rust_variant": "VenueExpired",
+          "wire_value": "venue_expired"
+        },
+        {
+          "rust_variant": "ReconciledNotFilled",
+          "wire_value": "reconciled_not_filled"
+        }
+      ]
+    },
+    {
+      "name": "ExecutionAttemptTerminalState",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Unfilled",
+          "wire_value": "unfilled"
+        },
+        {
+          "rust_variant": "PartiallyFilled",
+          "wire_value": "partially_filled"
+        },
+        {
+          "rust_variant": "FullyFilled",
+          "wire_value": "fully_filled"
+        }
+      ]
+    },
+    {
+      "name": "ExecutionOrderPhase",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Entry",
+          "wire_value": "entry"
+        },
+        {
+          "rust_variant": "Exit",
+          "wire_value": "exit"
+        }
+      ]
+    },
+    {
+      "name": "ExecutionOrderState",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Planned",
+          "wire_value": "planned"
+        },
+        {
+          "rust_variant": "Accepted",
+          "wire_value": "accepted"
+        },
+        {
+          "rust_variant": "Submitted",
+          "wire_value": "submitted"
+        },
+        {
+          "rust_variant": "PartiallyFilled",
+          "wire_value": "partially_filled"
+        },
+        {
+          "rust_variant": "Filled",
+          "wire_value": "filled"
+        },
+        {
+          "rust_variant": "CancelRequested",
+          "wire_value": "cancel_requested"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "Ambiguous",
+          "wire_value": "ambiguous"
+        }
+      ]
+    },
+    {
+      "name": "ExecutionWalletKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Eoa",
+          "wire_value": "eoa"
+        },
+        {
+          "rust_variant": "Proxy",
+          "wire_value": "proxy"
+        },
+        {
+          "rust_variant": "GnosisSafe",
+          "wire_value": "gnosis_safe"
+        },
+        {
+          "rust_variant": "DepositWallet",
+          "wire_value": "deposit_wallet"
+        }
+      ]
+    },
+    {
+      "name": "ExitReason",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "TakeProfit",
+          "wire_value": "take_profit"
+        },
+        {
+          "rust_variant": "StopLoss",
+          "wire_value": "stop_loss"
+        },
+        {
+          "rust_variant": "TimeExit",
+          "wire_value": "time_exit"
+        },
+        {
+          "rust_variant": "PartialExit",
+          "wire_value": "partial_exit"
+        },
+        {
+          "rust_variant": "SignalInvalidated",
+          "wire_value": "signal_invalidated"
+        },
+        {
+          "rust_variant": "Opportunistic",
+          "wire_value": "opportunistic"
+        },
+        {
+          "rust_variant": "Manual",
+          "wire_value": "manual"
+        },
+        {
+          "rust_variant": "SettlementHold",
+          "wire_value": "settlement_hold"
+        },
+        {
+          "rust_variant": "ResolutionRedeem",
+          "wire_value": "resolution_redeem"
+        },
+        {
+          "rust_variant": "KillSwitchEmergency",
+          "wire_value": "kill_switch_emergency"
+        },
+        {
+          "rust_variant": "RiskEnvelopeBreached",
+          "wire_value": "risk_envelope_breached"
+        },
+        {
+          "rust_variant": "MarketAbnormal",
+          "wire_value": "market_abnormal"
+        },
+        {
+          "rust_variant": "DataStale",
+          "wire_value": "data_stale"
+        }
+      ]
+    },
+    {
+      "name": "ExitSettlementMode",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "HoldToResolution",
+          "wire_value": "hold_to_resolution"
+        },
+        {
+          "rust_variant": "ExitBeforeResolution",
+          "wire_value": "exit_before_resolution"
+        }
+      ]
+    },
+    {
+      "name": "ExitState",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "NotStarted",
+          "wire_value": "not_started"
+        },
+        {
+          "rust_variant": "Monitoring",
+          "wire_value": "monitoring"
+        },
+        {
+          "rust_variant": "Triggered",
+          "wire_value": "triggered"
+        },
+        {
+          "rust_variant": "OrderSubmitted",
+          "wire_value": "order_submitted"
+        },
+        {
+          "rust_variant": "PartiallyExited",
+          "wire_value": "partially_exited"
+        },
+        {
+          "rust_variant": "Exited",
+          "wire_value": "exited"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "ManualRequired",
+          "wire_value": "manual_required"
+        }
+      ]
+    },
+    {
+      "name": "FactorDefinitionScope",
+      "module": "factor",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Generic",
+          "wire_value": "generic"
+        },
+        {
+          "rust_variant": "Structural",
+          "wire_value": "structural"
+        },
+        {
+          "rust_variant": "DomainCrypto",
+          "wire_value": "domain_crypto"
+        },
+        {
+          "rust_variant": "DomainWeather",
+          "wire_value": "domain_weather"
+        }
+      ]
+    },
+    {
+      "name": "FactorDirection",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Positive",
+          "wire_value": "positive"
+        },
+        {
+          "rust_variant": "Negative",
+          "wire_value": "negative"
+        },
+        {
+          "rust_variant": "Neutral",
+          "wire_value": "neutral"
+        }
+      ]
+    },
+    {
+      "name": "FactorFamily",
+      "module": "factor",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Liquidity",
+          "wire_value": "liquidity"
+        },
+        {
+          "rust_variant": "Microstructure",
+          "wire_value": "microstructure"
+        },
+        {
+          "rust_variant": "Momentum",
+          "wire_value": "momentum"
+        },
+        {
+          "rust_variant": "MeanReversion",
+          "wire_value": "mean_reversion"
+        },
+        {
+          "rust_variant": "Volatility",
+          "wire_value": "volatility"
+        },
+        {
+          "rust_variant": "Activity",
+          "wire_value": "activity"
+        },
+        {
+          "rust_variant": "Resolution",
+          "wire_value": "resolution"
+        },
+        {
+          "rust_variant": "DataQuality",
+          "wire_value": "data_quality"
+        },
+        {
+          "rust_variant": "Structural",
+          "wire_value": "structural"
+        },
+        {
+          "rust_variant": "DomainCrypto",
+          "wire_value": "domain_crypto"
+        },
+        {
+          "rust_variant": "DomainWeather",
+          "wire_value": "domain_weather"
+        }
+      ]
+    },
+    {
+      "name": "FactorIndeterminateReason",
+      "module": "factor",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "CrossSectionTooSmall",
+          "wire_value": "cross_section_too_small"
+        },
+        {
+          "rust_variant": "ZeroVariance",
+          "wire_value": "zero_variance"
+        },
+        {
+          "rust_variant": "NoFrozenReference",
+          "wire_value": "no_frozen_reference"
+        },
+        {
+          "rust_variant": "LegBookMissing",
+          "wire_value": "leg_book_missing"
+        }
+      ]
+    },
+    {
+      "name": "FactorNormalization",
+      "module": "factor",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "WinsorizedZScore",
+          "wire_value": "winsorized_zscore"
+        },
+        {
+          "rust_variant": "Rank",
+          "wire_value": "rank"
+        },
+        {
+          "rust_variant": "MinMax",
+          "wire_value": "min_max"
+        }
+      ]
+    },
+    {
+      "name": "FactorValueState",
+      "module": "factor",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Scored",
+          "wire_value": "scored"
+        },
+        {
+          "rust_variant": "MissingInput",
+          "wire_value": "missing_input"
+        },
+        {
+          "rust_variant": "NotApplicable",
+          "wire_value": "not_applicable"
+        },
+        {
+          "rust_variant": "Indeterminate",
+          "wire_value": "indeterminate"
+        }
+      ]
+    },
+    {
+      "name": "FeatureCellState",
+      "module": "quant",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "Observed",
+          "wire_value": "observed"
+        },
+        {
+          "rust_variant": "Substituted",
+          "wire_value": "substituted"
+        },
+        {
+          "rust_variant": "Missing",
+          "wire_value": "missing"
+        },
+        {
+          "rust_variant": "NotApplicable",
+          "wire_value": "not_applicable"
+        }
+      ]
+    },
+    {
+      "name": "FeatureParityEventStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Matched",
+          "wire_value": "matched"
+        },
+        {
+          "rust_variant": "Mismatched",
+          "wire_value": "mismatched"
+        },
+        {
+          "rust_variant": "PendingMaterialization",
+          "wire_value": "pending_materialization"
+        }
+      ]
+    },
+    {
+      "name": "FeatureParityLatchState",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Open",
+          "wire_value": "open"
+        },
+        {
+          "rust_variant": "Clear",
+          "wire_value": "clear"
+        }
+      ]
+    },
+    {
+      "name": "FeatureParityRunKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Sampled",
+          "wire_value": "sampled"
+        },
+        {
+          "rust_variant": "Full",
+          "wire_value": "full"
+        }
+      ]
+    },
+    {
+      "name": "FeatureParityRunStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Queued",
+          "wire_value": "queued"
+        },
+        {
+          "rust_variant": "Running",
+          "wire_value": "running"
+        },
+        {
+          "rust_variant": "PendingMaterialization",
+          "wire_value": "pending_materialization"
+        },
+        {
+          "rust_variant": "Passed",
+          "wire_value": "passed"
+        },
+        {
+          "rust_variant": "Mismatched",
+          "wire_value": "mismatched"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        }
+      ]
+    },
+    {
+      "name": "FeatureParityStage",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Selection",
+          "wire_value": "selection"
+        },
+        {
+          "rust_variant": "Snapshot",
+          "wire_value": "snapshot"
+        },
+        {
+          "rust_variant": "Capture",
+          "wire_value": "capture"
+        },
+        {
+          "rust_variant": "FeatureCell",
+          "wire_value": "feature_cell"
+        },
+        {
+          "rust_variant": "DataQuality",
+          "wire_value": "data_quality"
+        },
+        {
+          "rust_variant": "Factor",
+          "wire_value": "factor"
+        },
+        {
+          "rust_variant": "ModelInput",
+          "wire_value": "model_input"
+        },
+        {
+          "rust_variant": "Prediction",
+          "wire_value": "prediction"
+        }
+      ]
+    },
+    {
+      "name": "FeatureParityStateTransition",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "BootstrapProof",
+          "wire_value": "bootstrap_proof"
+        },
+        {
+          "rust_variant": "DeterministicMismatch",
+          "wire_value": "deterministic_mismatch"
+        },
+        {
+          "rust_variant": "IntegrityFailure",
+          "wire_value": "integrity_failure"
+        },
+        {
+          "rust_variant": "GovernedAcknowledge",
+          "wire_value": "governed_acknowledge"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackCohort",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "ModelLearning",
+          "wire_value": "model_learning"
+        },
+        {
+          "rust_variant": "ModelScoreLearning",
+          "wire_value": "model_score_learning"
+        },
+        {
+          "rust_variant": "ExecutionLearning",
+          "wire_value": "execution_learning"
+        },
+        {
+          "rust_variant": "PolicyEvaluation",
+          "wire_value": "policy_evaluation"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackCycleStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Queued",
+          "wire_value": "queued"
+        },
+        {
+          "rust_variant": "Running",
+          "wire_value": "running"
+        },
+        {
+          "rust_variant": "Succeeded",
+          "wire_value": "succeeded"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        },
+        {
+          "rust_variant": "Quarantined",
+          "wire_value": "quarantined"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackDecision",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "NoAction",
+          "wire_value": "no_action"
+        },
+        {
+          "rust_variant": "ChallengerRejected",
+          "wire_value": "challenger_rejected"
+        },
+        {
+          "rust_variant": "CandidateReady",
+          "wire_value": "candidate_ready"
+        },
+        {
+          "rust_variant": "Promoted",
+          "wire_value": "promoted"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackDriftAssessment",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "WithinThreshold",
+          "wire_value": "within_threshold"
+        },
+        {
+          "rust_variant": "ThresholdExceeded",
+          "wire_value": "threshold_exceeded"
+        },
+        {
+          "rust_variant": "InsufficientEvidence",
+          "wire_value": "insufficient_evidence"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackDriftKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Data",
+          "wire_value": "data"
+        },
+        {
+          "rust_variant": "Concept",
+          "wire_value": "concept"
+        },
+        {
+          "rust_variant": "Label",
+          "wire_value": "label"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackDriftMetric",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "PopulationStabilityIndex",
+          "wire_value": "population_stability_index"
+        },
+        {
+          "rust_variant": "KolmogorovSmirnovPValue",
+          "wire_value": "kolmogorov_smirnov_p_value"
+        },
+        {
+          "rust_variant": "RankIcDrop",
+          "wire_value": "rank_ic_drop"
+        },
+        {
+          "rust_variant": "JensenShannonDivergence",
+          "wire_value": "jensen_shannon_divergence"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackEvaluationMode",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Conditional",
+          "wire_value": "conditional"
+        },
+        {
+          "rust_variant": "ForcedRetraining",
+          "wire_value": "forced_retraining"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackEvaluationPurpose",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "PromotionComparison",
+          "wire_value": "promotion_comparison"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackRecipeTemplateStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Draft",
+          "wire_value": "draft"
+        },
+        {
+          "rust_variant": "Approved",
+          "wire_value": "approved"
+        },
+        {
+          "rust_variant": "Retired",
+          "wire_value": "retired"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackSchedulerFailureKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Materialization",
+          "wire_value": "materialization"
+        },
+        {
+          "rust_variant": "Settlement",
+          "wire_value": "settlement"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackStage",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Trigger",
+          "wire_value": "trigger"
+        },
+        {
+          "rust_variant": "TruthFreeze",
+          "wire_value": "truth_freeze"
+        },
+        {
+          "rust_variant": "Coverage",
+          "wire_value": "coverage"
+        },
+        {
+          "rust_variant": "Attribution",
+          "wire_value": "attribution"
+        },
+        {
+          "rust_variant": "Drift",
+          "wire_value": "drift"
+        },
+        {
+          "rust_variant": "RecipePlan",
+          "wire_value": "recipe_plan"
+        },
+        {
+          "rust_variant": "DatasetSeal",
+          "wire_value": "dataset_seal"
+        },
+        {
+          "rust_variant": "Training",
+          "wire_value": "training"
+        },
+        {
+          "rust_variant": "Calibration",
+          "wire_value": "calibration"
+        },
+        {
+          "rust_variant": "Cpcv",
+          "wire_value": "cpcv"
+        },
+        {
+          "rust_variant": "Validation",
+          "wire_value": "validation"
+        },
+        {
+          "rust_variant": "Comparison",
+          "wire_value": "comparison"
+        },
+        {
+          "rust_variant": "ShadowBind",
+          "wire_value": "shadow_bind"
+        },
+        {
+          "rust_variant": "Shadow",
+          "wire_value": "shadow"
+        },
+        {
+          "rust_variant": "Decision",
+          "wire_value": "decision"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackStageEventKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Triggered",
+          "wire_value": "triggered"
+        },
+        {
+          "rust_variant": "JobLinked",
+          "wire_value": "job_linked"
+        },
+        {
+          "rust_variant": "Started",
+          "wire_value": "started"
+        },
+        {
+          "rust_variant": "Succeeded",
+          "wire_value": "succeeded"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "CancellationRequested",
+          "wire_value": "cancellation_requested"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        },
+        {
+          "rust_variant": "LeaseRecovered",
+          "wire_value": "lease_recovered"
+        }
+      ]
+    },
+    {
+      "name": "FeedbackTriggerFamily",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Scheduled",
+          "wire_value": "scheduled"
+        },
+        {
+          "rust_variant": "Manual",
+          "wire_value": "manual"
+        }
+      ]
+    },
+    {
+      "name": "FillRequirement",
+      "module": "quant",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "AllOrNothing",
+          "wire_value": "all_or_nothing"
+        },
+        {
+          "rust_variant": "AllowPartial",
+          "wire_value": "allow_partial"
+        }
+      ]
+    },
+    {
+      "name": "IneligibilityReason",
+      "module": "quant",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "ReportOnlyMode",
+          "wire_value": "report_only_mode"
+        },
+        {
+          "rust_variant": "AutomationCapExceeded",
+          "wire_value": "automation_cap_exceeded"
+        }
+      ]
+    },
+    {
+      "name": "KillSwitchState",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Closed",
+          "wire_value": "closed"
+        },
+        {
+          "rust_variant": "ExecutionHalted",
+          "wire_value": "execution_halted"
+        },
+        {
+          "rust_variant": "ExitOnly",
+          "wire_value": "exit_only"
+        },
+        {
+          "rust_variant": "EmergencyHalted",
+          "wire_value": "emergency_halted"
+        }
+      ]
+    },
+    {
+      "name": "KlineInterval",
+      "module": "domain",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "OneMinute",
+          "wire_value": "1m"
+        },
+        {
+          "rust_variant": "OneHour",
+          "wire_value": "1h"
+        }
+      ]
+    },
+    {
+      "name": "LinkageSourceRole",
+      "module": "domain",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Feature",
+          "wire_value": "feature"
+        },
+        {
+          "rust_variant": "LiveEvent",
+          "wire_value": "live_event"
+        },
+        {
+          "rust_variant": "Resolution",
+          "wire_value": "resolution"
+        },
+        {
+          "rust_variant": "HistoricalCalibration",
+          "wire_value": "historical_calibration"
+        },
+        {
+          "rust_variant": "Forecast",
+          "wire_value": "forecast"
+        }
+      ]
+    },
+    {
+      "name": "LinkageStatus",
+      "module": "domain",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Resolved",
+          "wire_value": "resolved"
+        },
+        {
+          "rust_variant": "Unresolved",
+          "wire_value": "unresolved"
+        },
+        {
+          "rust_variant": "Overridden",
+          "wire_value": "overridden"
+        }
+      ]
+    },
+    {
+      "name": "MarketCategory",
+      "module": "common",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Geopolitics",
+          "wire_value": "geopolitics"
+        },
+        {
+          "rust_variant": "Sports",
+          "wire_value": "sports"
+        },
+        {
+          "rust_variant": "Politics",
+          "wire_value": "politics"
+        },
+        {
+          "rust_variant": "Finance",
+          "wire_value": "finance"
+        },
+        {
+          "rust_variant": "Tech",
+          "wire_value": "tech"
+        },
+        {
+          "rust_variant": "Culture",
+          "wire_value": "culture"
+        },
+        {
+          "rust_variant": "Weather",
+          "wire_value": "weather"
+        },
+        {
+          "rust_variant": "Economics",
+          "wire_value": "economics"
+        },
+        {
+          "rust_variant": "Crypto",
+          "wire_value": "crypto"
+        },
+        {
+          "rust_variant": "Other",
+          "wire_value": "other"
+        }
+      ]
+    },
+    {
+      "name": "MarketStatus",
+      "module": "market",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Discovered",
+          "wire_value": "discovered"
+        },
+        {
+          "rust_variant": "Active",
+          "wire_value": "active"
+        },
+        {
+          "rust_variant": "Filtered",
+          "wire_value": "filtered"
+        },
+        {
+          "rust_variant": "Paused",
+          "wire_value": "paused"
+        },
+        {
+          "rust_variant": "ManuallyBlocked",
+          "wire_value": "manually_blocked"
+        },
+        {
+          "rust_variant": "Settled",
+          "wire_value": "settled"
+        },
+        {
+          "rust_variant": "Delisted",
+          "wire_value": "delisted"
+        }
+      ]
+    },
+    {
+      "name": "MenuKind",
+      "module": "rbac",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Directory",
+          "wire_value": "directory"
+        },
+        {
+          "rust_variant": "Menu",
+          "wire_value": "menu"
+        },
+        {
+          "rust_variant": "Button",
+          "wire_value": "button"
+        }
+      ]
+    },
+    {
+      "name": "ModeDenialReason",
+      "module": "execution",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "ReportOnly",
+          "wire_value": "report_only"
+        },
+        {
+          "rust_variant": "RecommendationIneligible",
+          "wire_value": "recommendation_ineligible"
+        },
+        {
+          "rust_variant": "RiskEnvelopeInvalid",
+          "wire_value": "risk_envelope_invalid"
+        },
+        {
+          "rust_variant": "KillSwitchBlocksEntry",
+          "wire_value": "kill_switch_blocks_entry"
+        },
+        {
+          "rust_variant": "AutoExecutionNotAllowed",
+          "wire_value": "auto_execution_not_allowed"
+        }
+      ]
+    },
+    {
+      "name": "ModelFamily",
+      "module": "model",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "WeightedFactor",
+          "wire_value": "weighted_factor"
+        },
+        {
+          "rust_variant": "ClassicalGradientBoostedTrees",
+          "wire_value": "classical_gradient_boosted_trees"
+        },
+        {
+          "rust_variant": "ClassicalRandomForest",
+          "wire_value": "classical_random_forest"
+        },
+        {
+          "rust_variant": "ClassicalExtraTrees",
+          "wire_value": "classical_extra_trees"
+        },
+        {
+          "rust_variant": "ClassicalLogisticRegression",
+          "wire_value": "classical_logistic_regression"
+        },
+        {
+          "rust_variant": "ClassicalRidge",
+          "wire_value": "classical_ridge"
+        },
+        {
+          "rust_variant": "ClassicalLasso",
+          "wire_value": "classical_lasso"
+        },
+        {
+          "rust_variant": "ClassicalElasticNet",
+          "wire_value": "classical_elastic_net"
+        },
+        {
+          "rust_variant": "HoldVsExitWeighted",
+          "wire_value": "hold_vs_exit_weighted"
+        }
+      ]
+    },
+    {
+      "name": "ModelGovernanceAction",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "BootstrapRoute",
+          "wire_value": "bootstrap_route"
+        },
+        {
+          "rust_variant": "PromoteRoute",
+          "wire_value": "promote_route"
+        },
+        {
+          "rust_variant": "SealCalibration",
+          "wire_value": "seal_calibration"
+        }
+      ]
+    },
+    {
+      "name": "ModelRunErrorCode",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "ActiveInferenceFailed",
+          "wire_value": "active_inference_failed"
+        },
+        {
+          "rust_variant": "ShadowInferenceFailed",
+          "wire_value": "shadow_inference_failed"
+        },
+        {
+          "rust_variant": "FeaturePlaneFailed",
+          "wire_value": "feature_plane_failed"
+        },
+        {
+          "rust_variant": "FactorPlaneFailed",
+          "wire_value": "factor_plane_failed"
+        },
+        {
+          "rust_variant": "SelectionFailed",
+          "wire_value": "selection_failed"
+        },
+        {
+          "rust_variant": "ArtifactLoadFailed",
+          "wire_value": "artifact_load_failed"
+        },
+        {
+          "rust_variant": "SchemaBindingFailed",
+          "wire_value": "schema_binding_failed"
+        },
+        {
+          "rust_variant": "TrainingFailed",
+          "wire_value": "training_failed"
+        },
+        {
+          "rust_variant": "CalibrationFailed",
+          "wire_value": "calibration_failed"
+        },
+        {
+          "rust_variant": "CancelledByOperator",
+          "wire_value": "cancelled_by_operator"
+        }
+      ]
+    },
+    {
+      "name": "ModelRunKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Training",
+          "wire_value": "training"
+        },
+        {
+          "rust_variant": "Backtest",
+          "wire_value": "backtest"
+        },
+        {
+          "rust_variant": "Calibration",
+          "wire_value": "calibration"
+        },
+        {
+          "rust_variant": "Cpcv",
+          "wire_value": "cpcv"
+        },
+        {
+          "rust_variant": "Shadow",
+          "wire_value": "shadow"
+        },
+        {
+          "rust_variant": "LiveInference",
+          "wire_value": "live_inference"
+        }
+      ]
+    },
+    {
+      "name": "ModelRunStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Running",
+          "wire_value": "running"
+        },
+        {
+          "rust_variant": "Succeeded",
+          "wire_value": "succeeded"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        }
+      ]
+    },
+    {
+      "name": "ModelSerializationFormat",
+      "module": "quant",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "Json",
+          "wire_value": "json"
+        },
+        {
+          "rust_variant": "Bincode",
+          "wire_value": "bincode"
+        }
+      ]
+    },
+    {
+      "name": "ModelVersionDerivationKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Training",
+          "wire_value": "training"
+        },
+        {
+          "rust_variant": "ReturnCalibration",
+          "wire_value": "return_calibration"
+        }
+      ]
+    },
+    {
+      "name": "ModelWeightSource",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Artifact",
+          "wire_value": "artifact"
+        }
+      ]
+    },
+    {
+      "name": "NormalizationSource",
+      "module": "factor",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "CrossSection",
+          "wire_value": "cross_section"
+        },
+        {
+          "rust_variant": "PerMarket",
+          "wire_value": "per_market"
+        },
+        {
+          "rust_variant": "FrozenReferenceQuantile",
+          "wire_value": "frozen_reference_quantile"
+        }
+      ]
+    },
+    {
+      "name": "OperationCategory",
+      "module": "operation_log",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Auth",
+          "wire_value": "auth"
+        },
+        {
+          "rust_variant": "Rbac",
+          "wire_value": "rbac"
+        },
+        {
+          "rust_variant": "Governance",
+          "wire_value": "governance"
+        },
+        {
+          "rust_variant": "DecisionPolicySnapshot",
+          "wire_value": "config"
+        },
+        {
+          "rust_variant": "System",
+          "wire_value": "system"
+        },
+        {
+          "rust_variant": "Risk",
+          "wire_value": "risk"
+        },
+        {
+          "rust_variant": "QuantReport",
+          "wire_value": "quant_report"
+        },
+        {
+          "rust_variant": "Market",
+          "wire_value": "market"
+        },
+        {
+          "rust_variant": "Replay",
+          "wire_value": "replay"
+        },
+        {
+          "rust_variant": "Other",
+          "wire_value": "other"
+        }
+      ]
+    },
+    {
+      "name": "OperationHttpMethod",
+      "module": "operation_log",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Get",
+          "wire_value": "GET"
+        },
+        {
+          "rust_variant": "Post",
+          "wire_value": "POST"
+        },
+        {
+          "rust_variant": "Put",
+          "wire_value": "PUT"
+        },
+        {
+          "rust_variant": "Patch",
+          "wire_value": "PATCH"
+        },
+        {
+          "rust_variant": "Delete",
+          "wire_value": "DELETE"
+        },
+        {
+          "rust_variant": "System",
+          "wire_value": "SYSTEM"
+        }
+      ]
+    },
+    {
+      "name": "OperationOutcome",
+      "module": "operation_log",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Success",
+          "wire_value": "success"
+        },
+        {
+          "rust_variant": "Failure",
+          "wire_value": "failure"
+        },
+        {
+          "rust_variant": "Denied",
+          "wire_value": "denied"
+        }
+      ]
+    },
+    {
+      "name": "OrderIntentKind",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Buy",
+          "wire_value": "buy"
+        }
+      ]
+    },
+    {
+      "name": "OrderIntentStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Draft",
+          "wire_value": "draft"
+        },
+        {
+          "rust_variant": "PendingApproval",
+          "wire_value": "pending_approval"
+        },
+        {
+          "rust_variant": "Approved",
+          "wire_value": "approved"
+        },
+        {
+          "rust_variant": "ApprovedByPolicy",
+          "wire_value": "approved_by_policy"
+        },
+        {
+          "rust_variant": "AdmissionPending",
+          "wire_value": "admission_pending"
+        },
+        {
+          "rust_variant": "AdmissionRejected",
+          "wire_value": "admission_rejected"
+        },
+        {
+          "rust_variant": "Submitted",
+          "wire_value": "submitted"
+        },
+        {
+          "rust_variant": "PartiallyFilled",
+          "wire_value": "partially_filled"
+        },
+        {
+          "rust_variant": "Filled",
+          "wire_value": "filled"
+        },
+        {
+          "rust_variant": "Rejected",
+          "wire_value": "rejected"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "Expired",
+          "wire_value": "expired"
+        },
+        {
+          "rust_variant": "Invalidated",
+          "wire_value": "invalidated"
+        }
+      ]
+    },
+    {
+      "name": "OrderTypeKind",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Fok",
+          "wire_value": "fok"
+        },
+        {
+          "rust_variant": "Fak",
+          "wire_value": "fak"
+        },
+        {
+          "rust_variant": "Gtc",
+          "wire_value": "gtc"
+        },
+        {
+          "rust_variant": "Gtd",
+          "wire_value": "gtd"
+        }
+      ]
+    },
+    {
+      "name": "OutcomeReconciliationTaskStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Pending",
+          "wire_value": "pending"
+        },
+        {
+          "rust_variant": "Delivering",
+          "wire_value": "delivering"
+        },
+        {
+          "rust_variant": "Retrying",
+          "wire_value": "retrying"
+        },
+        {
+          "rust_variant": "Completed",
+          "wire_value": "completed"
+        }
+      ]
+    },
+    {
+      "name": "OutcomeSide",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Yes",
+          "wire_value": "yes"
+        },
+        {
+          "rust_variant": "No",
+          "wire_value": "no"
+        }
+      ]
+    },
+    {
+      "name": "ParitySubjectKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "RecommendationReport",
+          "wire_value": "recommendation_report"
+        },
+        {
+          "rust_variant": "ModelRun",
+          "wire_value": "model_run"
+        },
+        {
+          "rust_variant": "ModelVersion",
+          "wire_value": "model_version"
+        }
+      ]
+    },
+    {
+      "name": "PolicyActivationKind",
+      "module": "runtime_config",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Initial",
+          "wire_value": "initial"
+        },
+        {
+          "rust_variant": "Promote",
+          "wire_value": "promote"
+        },
+        {
+          "rust_variant": "ModelBootstrap",
+          "wire_value": "model_bootstrap"
+        },
+        {
+          "rust_variant": "ModelShadowBinding",
+          "wire_value": "model_shadow_binding"
+        },
+        {
+          "rust_variant": "ModelShadowCancellation",
+          "wire_value": "model_shadow_cancellation"
+        },
+        {
+          "rust_variant": "ModelShadowRejection",
+          "wire_value": "model_shadow_rejection"
+        },
+        {
+          "rust_variant": "ModelPromotion",
+          "wire_value": "model_promotion"
+        },
+        {
+          "rust_variant": "Rollback",
+          "wire_value": "rollback"
+        }
+      ]
+    },
+    {
+      "name": "PolicyActorKind",
+      "module": "runtime_config",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Operator",
+          "wire_value": "operator"
+        },
+        {
+          "rust_variant": "System",
+          "wire_value": "system"
+        }
+      ]
+    },
+    {
+      "name": "PolicyApplyBoundary",
+      "module": "runtime_config",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "ReportRunClaim",
+          "wire_value": "report_run_claim"
+        },
+        {
+          "rust_variant": "OrderIntentCreation",
+          "wire_value": "order_intent_creation"
+        },
+        {
+          "rust_variant": "ModelEvaluationClaim",
+          "wire_value": "model_evaluation_claim"
+        },
+        {
+          "rust_variant": "FutureReportRunReconcile",
+          "wire_value": "future_report_run_reconcile"
+        },
+        {
+          "rust_variant": "OperationalAdmission",
+          "wire_value": "operational_admission"
+        },
+        {
+          "rust_variant": "ExecutionAutomationAdmission",
+          "wire_value": "execution_automation_policy_admission"
+        }
+      ]
+    },
+    {
+      "name": "PolicyApprovalDecision",
+      "module": "runtime_config",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Approved",
+          "wire_value": "approved"
+        },
+        {
+          "rust_variant": "Rejected",
+          "wire_value": "rejected"
+        }
+      ]
+    },
+    {
+      "name": "PolicyConsumer",
+      "module": "runtime_config",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "MarketSelection",
+          "wire_value": "market_selection"
+        },
+        {
+          "rust_variant": "ReportCoordinator",
+          "wire_value": "report_coordinator"
+        },
+        {
+          "rust_variant": "RecommendationComposer",
+          "wire_value": "recommendation_composer"
+        },
+        {
+          "rust_variant": "DataQualityGate",
+          "wire_value": "data_quality_gate"
+        },
+        {
+          "rust_variant": "PortfolioOptimizer",
+          "wire_value": "portfolio_optimizer"
+        },
+        {
+          "rust_variant": "OrderIntentService",
+          "wire_value": "order_intent_service"
+        },
+        {
+          "rust_variant": "ExecutionAdmission",
+          "wire_value": "execution_admission"
+        },
+        {
+          "rust_variant": "ExitMonitor",
+          "wire_value": "exit_monitor"
+        },
+        {
+          "rust_variant": "ModelRunner",
+          "wire_value": "model_runner"
+        },
+        {
+          "rust_variant": "ReportScheduler",
+          "wire_value": "report_scheduler"
+        },
+        {
+          "rust_variant": "WorkerAdmission",
+          "wire_value": "worker_admission"
+        },
+        {
+          "rust_variant": "AlertDispatcher",
+          "wire_value": "alert_dispatcher"
+        },
+        {
+          "rust_variant": "RuntimeModeGate",
+          "wire_value": "runtime_mode_gate"
+        }
+      ]
+    },
+    {
+      "name": "PolicyPreflightCheckKind",
+      "module": "runtime_config",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "TypedSchema",
+          "wire_value": "typed_schema"
+        },
+        {
+          "rust_variant": "SemanticValidation",
+          "wire_value": "semantic_validation"
+        },
+        {
+          "rust_variant": "ConsumerPreparation",
+          "wire_value": "consumer_preparation"
+        },
+        {
+          "rust_variant": "ArtifactCompatibility",
+          "wire_value": "artifact_compatibility"
+        },
+        {
+          "rust_variant": "CredentialAvailability",
+          "wire_value": "credential_availability"
+        },
+        {
+          "rust_variant": "SchedulePreview",
+          "wire_value": "schedule_preview"
+        },
+        {
+          "rust_variant": "ExecutionCapability",
+          "wire_value": "execution_capability"
+        }
+      ]
+    },
+    {
+      "name": "PolicyPreflightDetailCode",
+      "module": "runtime_config",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "TypedDocumentDecoded",
+          "wire_value": "typed_document_decoded"
+        },
+        {
+          "rust_variant": "SemanticValidationPassed",
+          "wire_value": "semantic_validation_passed"
+        },
+        {
+          "rust_variant": "SemanticValidationFailed",
+          "wire_value": "semantic_validation_failed"
+        },
+        {
+          "rust_variant": "ConsumerPreparationPassed",
+          "wire_value": "consumer_preparation_passed"
+        },
+        {
+          "rust_variant": "ConsumerPreparationSkipped",
+          "wire_value": "consumer_preparation_skipped"
+        },
+        {
+          "rust_variant": "ConsumerPreparationFailed",
+          "wire_value": "consumer_preparation_failed"
+        }
+      ]
+    },
+    {
+      "name": "PolicyRevisionStatus",
+      "module": "runtime_config",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Draft",
+          "wire_value": "draft"
+        },
+        {
+          "rust_variant": "Validated",
+          "wire_value": "validated"
+        }
+      ]
+    },
+    {
+      "name": "PolicyValidationCode",
+      "module": "runtime_config",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "SchemaVersionMismatch",
+          "wire_value": "schema_version_mismatch"
+        },
+        {
+          "rust_variant": "ResourceKindMismatch",
+          "wire_value": "resource_kind_mismatch"
+        },
+        {
+          "rust_variant": "SemanticConstraint",
+          "wire_value": "semantic_constraint"
+        },
+        {
+          "rust_variant": "DependencyUnavailable",
+          "wire_value": "dependency_unavailable"
+        },
+        {
+          "rust_variant": "ArtifactIncompatible",
+          "wire_value": "artifact_incompatible"
+        },
+        {
+          "rust_variant": "CredentialUnavailable",
+          "wire_value": "credential_unavailable"
+        },
+        {
+          "rust_variant": "ScheduleInvalid",
+          "wire_value": "schedule_invalid"
+        },
+        {
+          "rust_variant": "AuthorizationDenied",
+          "wire_value": "authorization_denied"
+        }
+      ]
+    },
+    {
+      "name": "PolicyValidationSeverity",
+      "module": "runtime_config",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "Error",
+          "wire_value": "error"
+        },
+        {
+          "rust_variant": "Warning",
+          "wire_value": "warning"
+        }
+      ]
+    },
+    {
+      "name": "PositionLedgerState",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Open",
+          "wire_value": "open"
+        },
+        {
+          "rust_variant": "Closing",
+          "wire_value": "closing"
+        },
+        {
+          "rust_variant": "Closed",
+          "wire_value": "closed"
+        },
+        {
+          "rust_variant": "Settled",
+          "wire_value": "settled"
+        }
+      ]
+    },
+    {
+      "name": "PriceComparison",
+      "module": "quant",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "AtOrAbove",
+          "wire_value": "at_or_above"
+        },
+        {
+          "rust_variant": "AtOrBelow",
+          "wire_value": "at_or_below"
+        }
+      ]
+    },
+    {
+      "name": "ProfileArtifactKind",
+      "module": "runtime_config",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Feature",
+          "wire_value": "feature"
+        },
+        {
+          "rust_variant": "Scoring",
+          "wire_value": "scoring"
+        },
+        {
+          "rust_variant": "Domain",
+          "wire_value": "domain"
+        },
+        {
+          "rust_variant": "ResearchMethod",
+          "wire_value": "research_method"
+        }
+      ]
+    },
+    {
+      "name": "QuantRuntimeMode",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "ReportOnly",
+          "wire_value": "report_only"
+        },
+        {
+          "rust_variant": "SemiAuto",
+          "wire_value": "semi_auto"
+        },
+        {
+          "rust_variant": "AutoExecution",
+          "wire_value": "auto_execution"
+        }
+      ]
+    },
+    {
+      "name": "RecommendationReportStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Prepared",
+          "wire_value": "prepared"
+        },
+        {
+          "rust_variant": "Published",
+          "wire_value": "published"
+        },
+        {
+          "rust_variant": "Superseded",
+          "wire_value": "superseded"
+        },
+        {
+          "rust_variant": "Obsolete",
+          "wire_value": "obsolete"
+        },
+        {
+          "rust_variant": "Revoked",
+          "wire_value": "revoked"
+        },
+        {
+          "rust_variant": "Expired",
+          "wire_value": "expired"
+        }
+      ]
+    },
+    {
+      "name": "RecommendationResolutionKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "WinnerTakeAll",
+          "wire_value": "winner_take_all"
+        },
+        {
+          "rust_variant": "SplitPayout",
+          "wire_value": "split_payout"
+        }
+      ]
+    },
+    {
+      "name": "RecommendationStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Prepared",
+          "wire_value": "prepared"
+        },
+        {
+          "rust_variant": "Published",
+          "wire_value": "published"
+        },
+        {
+          "rust_variant": "Superseded",
+          "wire_value": "superseded"
+        },
+        {
+          "rust_variant": "Obsolete",
+          "wire_value": "obsolete"
+        },
+        {
+          "rust_variant": "Revoked",
+          "wire_value": "revoked"
+        },
+        {
+          "rust_variant": "Expired",
+          "wire_value": "expired"
+        },
+        {
+          "rust_variant": "IntentCreated",
+          "wire_value": "intent_created"
+        },
+        {
+          "rust_variant": "Executed",
+          "wire_value": "executed"
+        }
+      ]
+    },
+    {
+      "name": "ReconciliationEvidenceKind",
+      "module": "execution",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "ClobOrderStatus",
+          "wire_value": "clob_order_status"
+        },
+        {
+          "rust_variant": "ClobTrades",
+          "wire_value": "clob_trades"
+        },
+        {
+          "rust_variant": "TokenBalanceDelta",
+          "wire_value": "token_balance_delta"
+        },
+        {
+          "rust_variant": "AccountBalanceDelta",
+          "wire_value": "account_balance_delta"
+        },
+        {
+          "rust_variant": "BookContext",
+          "wire_value": "book_context"
+        },
+        {
+          "rust_variant": "OperatorNote",
+          "wire_value": "operator_note"
+        }
+      ]
+    },
+    {
+      "name": "ReconciliationResult",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Pending",
+          "wire_value": "pending"
+        },
+        {
+          "rust_variant": "Filled",
+          "wire_value": "filled"
+        },
+        {
+          "rust_variant": "NotFilled",
+          "wire_value": "not_filled"
+        },
+        {
+          "rust_variant": "PartiallyFilled",
+          "wire_value": "partially_filled"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        },
+        {
+          "rust_variant": "Unresolvable",
+          "wire_value": "unresolvable"
+        }
+      ]
+    },
+    {
+      "name": "RedeemPolicy",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Manual",
+          "wire_value": "manual"
+        },
+        {
+          "rust_variant": "Auto",
+          "wire_value": "auto"
+        }
+      ]
+    },
+    {
+      "name": "ReportFactDeliveryStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Pending",
+          "wire_value": "pending"
+        },
+        {
+          "rust_variant": "Delivering",
+          "wire_value": "delivering"
+        },
+        {
+          "rust_variant": "Retrying",
+          "wire_value": "retrying"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "Verified",
+          "wire_value": "verified"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        }
+      ]
+    },
+    {
+      "name": "ReportKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "TopN",
+          "wire_value": "top_n"
+        },
+        {
+          "rust_variant": "ShadowTopN",
+          "wire_value": "shadow_top_n"
+        },
+        {
+          "rust_variant": "PostRunAudit",
+          "wire_value": "post_run_audit"
+        }
+      ]
+    },
+    {
+      "name": "ReportRunStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Queued",
+          "wire_value": "queued"
+        },
+        {
+          "rust_variant": "Running",
+          "wire_value": "running"
+        },
+        {
+          "rust_variant": "Succeeded",
+          "wire_value": "succeeded"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "Skipped",
+          "wire_value": "skipped"
+        },
+        {
+          "rust_variant": "Abandoned",
+          "wire_value": "abandoned"
+        }
+      ]
+    },
+    {
+      "name": "ReportRunTerminalReason",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "CoalescedByNewerOccurrence",
+          "wire_value": "coalesced_by_newer_occurrence"
+        },
+        {
+          "rust_variant": "ScheduleReconfigured",
+          "wire_value": "schedule_reconfigured"
+        },
+        {
+          "rust_variant": "QueueExpired",
+          "wire_value": "queue_expired"
+        },
+        {
+          "rust_variant": "BuildFailed",
+          "wire_value": "build_failed"
+        },
+        {
+          "rust_variant": "LeaseExpired",
+          "wire_value": "lease_expired"
+        }
+      ]
+    },
+    {
+      "name": "ReportScheduleGapReason",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "CoordinatorLag",
+          "wire_value": "coordinator_lag"
+        },
+        {
+          "rust_variant": "CoalescedByNewerOccurrence",
+          "wire_value": "coalesced_by_newer_occurrence"
+        },
+        {
+          "rust_variant": "ScheduleReconfigured",
+          "wire_value": "schedule_reconfigured"
+        }
+      ]
+    },
+    {
+      "name": "ReportTriggerKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Scheduled",
+          "wire_value": "scheduled"
+        },
+        {
+          "rust_variant": "AdHoc",
+          "wire_value": "ad_hoc"
+        }
+      ]
+    },
+    {
+      "name": "ResearchJobErrorCode",
+      "module": "quant",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "ExecutionFailed",
+          "wire_value": "execution_failed"
+        },
+        {
+          "rust_variant": "ExecutionRetryScheduled",
+          "wire_value": "execution_retry_scheduled"
+        },
+        {
+          "rust_variant": "ExecutionRetryExhausted",
+          "wire_value": "execution_retry_exhausted"
+        },
+        {
+          "rust_variant": "InterruptedByRestart",
+          "wire_value": "interrupted_by_restart"
+        },
+        {
+          "rust_variant": "InterruptedExceededAttempts",
+          "wire_value": "interrupted_exceeded_attempts"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        }
+      ]
+    },
+    {
+      "name": "ResearchJobKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "DatasetBuild",
+          "wire_value": "dataset_build"
+        },
+        {
+          "rust_variant": "ModelTrain",
+          "wire_value": "model_train"
+        },
+        {
+          "rust_variant": "Backtest",
+          "wire_value": "backtest"
+        },
+        {
+          "rust_variant": "BiasTableFit",
+          "wire_value": "bias_table_fit"
+        },
+        {
+          "rust_variant": "ModelCalibrationFit",
+          "wire_value": "model_calibration_fit"
+        },
+        {
+          "rust_variant": "CpcvBacktest",
+          "wire_value": "cpcv_backtest"
+        },
+        {
+          "rust_variant": "FeatureParity",
+          "wire_value": "feature_parity"
+        },
+        {
+          "rust_variant": "FeedbackTruthFreeze",
+          "wire_value": "feedback_truth_freeze"
+        },
+        {
+          "rust_variant": "FeedbackCoverage",
+          "wire_value": "feedback_coverage"
+        },
+        {
+          "rust_variant": "FeedbackAttribution",
+          "wire_value": "feedback_attribution"
+        },
+        {
+          "rust_variant": "FeedbackDrift",
+          "wire_value": "feedback_drift"
+        },
+        {
+          "rust_variant": "FeedbackRecipePlan",
+          "wire_value": "feedback_recipe_plan"
+        },
+        {
+          "rust_variant": "FeedbackDatasetSeal",
+          "wire_value": "feedback_dataset_seal"
+        },
+        {
+          "rust_variant": "FeedbackTraining",
+          "wire_value": "feedback_training"
+        },
+        {
+          "rust_variant": "FeedbackCalibration",
+          "wire_value": "feedback_calibration"
+        },
+        {
+          "rust_variant": "FeedbackCpcv",
+          "wire_value": "feedback_cpcv"
+        },
+        {
+          "rust_variant": "FeedbackValidation",
+          "wire_value": "feedback_validation"
+        },
+        {
+          "rust_variant": "FeedbackComparison",
+          "wire_value": "feedback_comparison"
+        },
+        {
+          "rust_variant": "FeedbackShadowBind",
+          "wire_value": "feedback_shadow_bind"
+        },
+        {
+          "rust_variant": "FeedbackShadow",
+          "wire_value": "feedback_shadow"
+        },
+        {
+          "rust_variant": "FeedbackDecision",
+          "wire_value": "feedback_decision"
+        },
+        {
+          "rust_variant": "TradePolicyFit",
+          "wire_value": "trade_policy_fit"
+        },
+        {
+          "rust_variant": "TradePolicyValidation",
+          "wire_value": "trade_policy_validation"
+        }
+      ]
+    },
+    {
+      "name": "ResearchJobResultKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "TrainingDataset",
+          "wire_value": "training_dataset"
+        },
+        {
+          "rust_variant": "ModelVersion",
+          "wire_value": "model_version"
+        },
+        {
+          "rust_variant": "BacktestReport",
+          "wire_value": "backtest_report"
+        },
+        {
+          "rust_variant": "BacktestPathSet",
+          "wire_value": "backtest_path_set"
+        },
+        {
+          "rust_variant": "CalibrationArtifact",
+          "wire_value": "calibration_artifact"
+        },
+        {
+          "rust_variant": "FeatureParityRun",
+          "wire_value": "feature_parity_run"
+        },
+        {
+          "rust_variant": "FeedbackTruthFreezeArtifact",
+          "wire_value": "feedback_truth_freeze_artifact"
+        },
+        {
+          "rust_variant": "FeedbackCoverageArtifact",
+          "wire_value": "feedback_coverage_artifact"
+        },
+        {
+          "rust_variant": "FeedbackAttributionManifest",
+          "wire_value": "feedback_attribution_manifest"
+        },
+        {
+          "rust_variant": "FeedbackDriftArtifact",
+          "wire_value": "feedback_drift_artifact"
+        },
+        {
+          "rust_variant": "CandidateRecipePlanArtifact",
+          "wire_value": "candidate_recipe_plan_artifact"
+        },
+        {
+          "rust_variant": "FeedbackLearningStageArtifact",
+          "wire_value": "feedback_learning_stage_artifact"
+        },
+        {
+          "rust_variant": "FeedbackValidationArtifact",
+          "wire_value": "feedback_validation_artifact"
+        },
+        {
+          "rust_variant": "FeedbackComparisonArtifact",
+          "wire_value": "feedback_comparison_artifact"
+        },
+        {
+          "rust_variant": "ShadowBindingArtifact",
+          "wire_value": "shadow_binding_artifact"
+        },
+        {
+          "rust_variant": "FeedbackShadowArtifact",
+          "wire_value": "feedback_shadow_artifact"
+        },
+        {
+          "rust_variant": "FeedbackDecisionArtifact",
+          "wire_value": "feedback_decision_artifact"
+        },
+        {
+          "rust_variant": "TradePolicyArtifact",
+          "wire_value": "trade_policy_artifact"
+        },
+        {
+          "rust_variant": "TradePolicyValidationRun",
+          "wire_value": "trade_policy_validation_run"
+        }
+      ]
+    },
+    {
+      "name": "ResearchJobStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Queued",
+          "wire_value": "queued"
+        },
+        {
+          "rust_variant": "AwaitingEvidence",
+          "wire_value": "awaiting_evidence"
+        },
+        {
+          "rust_variant": "RetryScheduled",
+          "wire_value": "retry_scheduled"
+        },
+        {
+          "rust_variant": "Running",
+          "wire_value": "running"
+        },
+        {
+          "rust_variant": "Succeeded",
+          "wire_value": "succeeded"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        }
+      ]
+    },
+    {
+      "name": "ResearchReadinessEvidenceKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "RetentionRunway",
+          "wire_value": "retention_runway"
+        },
+        {
+          "rust_variant": "ShadowLatencyProfile",
+          "wire_value": "shadow_latency_profile"
+        }
+      ]
+    },
+    {
+      "name": "ResolutionProjectionErrorCode",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "CatalogMappingUnavailable",
+          "wire_value": "catalog_mapping_unavailable"
+        },
+        {
+          "rust_variant": "InvalidObservation",
+          "wire_value": "invalid_observation"
+        },
+        {
+          "rust_variant": "PersistenceUnavailable",
+          "wire_value": "persistence_unavailable"
+        },
+        {
+          "rust_variant": "ExternalDependencyUnavailable",
+          "wire_value": "external_dependency_unavailable"
+        },
+        {
+          "rust_variant": "UnexpectedTransient",
+          "wire_value": "unexpected_transient"
+        }
+      ]
+    },
+    {
+      "name": "ResolutionProjectionStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Pending",
+          "wire_value": "pending"
+        },
+        {
+          "rust_variant": "Delivering",
+          "wire_value": "delivering"
+        },
+        {
+          "rust_variant": "RetryScheduled",
+          "wire_value": "retry_scheduled"
+        },
+        {
+          "rust_variant": "MappingBlocked",
+          "wire_value": "mapping_blocked"
+        },
+        {
+          "rust_variant": "Quarantined",
+          "wire_value": "quarantined"
+        },
+        {
+          "rust_variant": "Excluded",
+          "wire_value": "excluded"
+        },
+        {
+          "rust_variant": "Verified",
+          "wire_value": "verified"
+        }
+      ]
+    },
+    {
+      "name": "ResolutionRemediationAction",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Requeue",
+          "wire_value": "requeue"
+        },
+        {
+          "rust_variant": "Exclude",
+          "wire_value": "exclude"
+        }
+      ]
+    },
+    {
+      "name": "ResolverTier",
+      "module": "domain",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Tier0Slug",
+          "wire_value": "tier0_slug"
+        },
+        {
+          "rust_variant": "Tier1Template",
+          "wire_value": "tier1_template"
+        },
+        {
+          "rust_variant": "Override",
+          "wire_value": "override"
+        }
+      ]
+    },
+    {
+      "name": "ResourceType",
+      "module": "rbac",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "System",
+          "wire_value": "system"
+        },
+        {
+          "rust_variant": "Market",
+          "wire_value": "market"
+        },
+        {
+          "rust_variant": "DecisionPolicySnapshot",
+          "wire_value": "config"
+        },
+        {
+          "rust_variant": "Publication",
+          "wire_value": "publication"
+        },
+        {
+          "rust_variant": "Materialization",
+          "wire_value": "materialization"
+        },
+        {
+          "rust_variant": "Replay",
+          "wire_value": "replay"
+        },
+        {
+          "rust_variant": "QuantReport",
+          "wire_value": "quant_report"
+        },
+        {
+          "rust_variant": "AccountSnapshot",
+          "wire_value": "account_snapshot"
+        },
+        {
+          "rust_variant": "EquitySnapshot",
+          "wire_value": "equity_snapshot"
+        },
+        {
+          "rust_variant": "OrderIntent",
+          "wire_value": "order_intent"
+        },
+        {
+          "rust_variant": "ExecutionOrder",
+          "wire_value": "execution_order"
+        },
+        {
+          "rust_variant": "Position",
+          "wire_value": "position"
+        },
+        {
+          "rust_variant": "Reconciliation",
+          "wire_value": "reconciliation"
+        },
+        {
+          "rust_variant": "SettlementRedeem",
+          "wire_value": "settlement_redeem"
+        },
+        {
+          "rust_variant": "FactorDefinition",
+          "wire_value": "factor_definition"
+        },
+        {
+          "rust_variant": "OperationLog",
+          "wire_value": "operation_log"
+        },
+        {
+          "rust_variant": "User",
+          "wire_value": "user"
+        },
+        {
+          "rust_variant": "Role",
+          "wire_value": "role"
+        },
+        {
+          "rust_variant": "Menu",
+          "wire_value": "menu"
+        },
+        {
+          "rust_variant": "Permission",
+          "wire_value": "permission"
+        }
+      ]
+    },
+    {
+      "name": "RoleKind",
+      "module": "rbac",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Builtin",
+          "wire_value": "builtin"
+        },
+        {
+          "rust_variant": "Custom",
+          "wire_value": "custom"
+        }
+      ]
+    },
+    {
+      "name": "RoleStatus",
+      "module": "rbac",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Enabled",
+          "wire_value": "enabled"
+        },
+        {
+          "rust_variant": "Disabled",
+          "wire_value": "disabled"
+        }
+      ]
+    },
+    {
+      "name": "RuntimeActivityActionKind",
+      "module": "runtime_activity",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "CancelResearchJob",
+          "wire_value": "cancel_research_job"
+        },
+        {
+          "rust_variant": "RetryResearchJob",
+          "wire_value": "retry_research_job"
+        },
+        {
+          "rust_variant": "RetryReportRun",
+          "wire_value": "retry_report_run"
+        },
+        {
+          "rust_variant": "ResolveReconciliation",
+          "wire_value": "resolve_reconciliation"
+        }
+      ]
+    },
+    {
+      "name": "RuntimeActivityDomain",
+      "module": "runtime_activity",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "Research",
+          "wire_value": "research"
+        },
+        {
+          "rust_variant": "Report",
+          "wire_value": "report"
+        },
+        {
+          "rust_variant": "Execution",
+          "wire_value": "execution"
+        },
+        {
+          "rust_variant": "Reconciliation",
+          "wire_value": "reconciliation"
+        },
+        {
+          "rust_variant": "Settlement",
+          "wire_value": "settlement"
+        }
+      ]
+    },
+    {
+      "name": "RuntimeActivityStatus",
+      "module": "runtime_activity",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "Pending",
+          "wire_value": "pending"
+        },
+        {
+          "rust_variant": "Running",
+          "wire_value": "running"
+        },
+        {
+          "rust_variant": "Succeeded",
+          "wire_value": "succeeded"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        },
+        {
+          "rust_variant": "Attention",
+          "wire_value": "attention"
+        },
+        {
+          "rust_variant": "Skipped",
+          "wire_value": "skipped"
+        }
+      ]
+    },
+    {
+      "name": "SettlementAuthorizationState",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "NotRequired",
+          "wire_value": "not_required"
+        },
+        {
+          "rust_variant": "Pending",
+          "wire_value": "pending"
+        },
+        {
+          "rust_variant": "Approved",
+          "wire_value": "approved"
+        },
+        {
+          "rust_variant": "Revoked",
+          "wire_value": "revoked"
+        },
+        {
+          "rust_variant": "Consumed",
+          "wire_value": "consumed"
+        },
+        {
+          "rust_variant": "Expired",
+          "wire_value": "expired"
+        }
+      ]
+    },
+    {
+      "name": "SettlementCaseState",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Discovered",
+          "wire_value": "discovered"
+        },
+        {
+          "rust_variant": "Prepared",
+          "wire_value": "prepared"
+        },
+        {
+          "rust_variant": "Submitted",
+          "wire_value": "submitted"
+        },
+        {
+          "rust_variant": "Confirmed",
+          "wire_value": "confirmed"
+        },
+        {
+          "rust_variant": "RetryScheduled",
+          "wire_value": "retry_scheduled"
+        },
+        {
+          "rust_variant": "ReconciliationRequired",
+          "wire_value": "reconciliation_required"
+        },
+        {
+          "rust_variant": "ManualRequired",
+          "wire_value": "manual_required"
+        },
+        {
+          "rust_variant": "NotRequired",
+          "wire_value": "not_required"
+        }
+      ]
+    },
+    {
+      "name": "SettlementEffectivePolicy",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "AutomaticEligible",
+          "wire_value": "automatic_eligible"
+        },
+        {
+          "rust_variant": "ManualOnly",
+          "wire_value": "manual_only"
+        }
+      ]
+    },
+    {
+      "name": "SettlementFailureCode",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "RouteNotReady",
+          "wire_value": "route_not_ready"
+        },
+        {
+          "rust_variant": "BalanceMismatch",
+          "wire_value": "balance_mismatch"
+        },
+        {
+          "rust_variant": "SimulationReverted",
+          "wire_value": "simulation_reverted"
+        },
+        {
+          "rust_variant": "TransportUncertain",
+          "wire_value": "transport_uncertain"
+        },
+        {
+          "rust_variant": "SubmissionRejected",
+          "wire_value": "submission_rejected"
+        },
+        {
+          "rust_variant": "RelayerTerminalFailure",
+          "wire_value": "relayer_terminal_failure"
+        },
+        {
+          "rust_variant": "OnChainReverted",
+          "wire_value": "on_chain_reverted"
+        },
+        {
+          "rust_variant": "ReceiptEvidenceMismatch",
+          "wire_value": "receipt_evidence_mismatch"
+        },
+        {
+          "rust_variant": "PayoutMismatch",
+          "wire_value": "payout_mismatch"
+        },
+        {
+          "rust_variant": "DeploymentChanged",
+          "wire_value": "deployment_changed"
+        },
+        {
+          "rust_variant": "AuthorizationInvalid",
+          "wire_value": "authorization_invalid"
+        },
+        {
+          "rust_variant": "ExecutionNotQuiescent",
+          "wire_value": "execution_not_quiescent"
+        },
+        {
+          "rust_variant": "LeaseLost",
+          "wire_value": "lease_lost"
+        },
+        {
+          "rust_variant": "LedgerUnavailable",
+          "wire_value": "ledger_unavailable"
+        },
+        {
+          "rust_variant": "LocalInvariant",
+          "wire_value": "local_invariant"
+        },
+        {
+          "rust_variant": "ExternalEvidenceIncomplete",
+          "wire_value": "external_evidence_incomplete"
+        }
+      ]
+    },
+    {
+      "name": "SettlementGovernedActionKind",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "OutcomeTokenApproval",
+          "wire_value": "outcome_token_approval"
+        },
+        {
+          "rust_variant": "OutcomeTokenRevocation",
+          "wire_value": "outcome_token_revocation"
+        },
+        {
+          "rust_variant": "CanaryGrant",
+          "wire_value": "canary_grant"
+        }
+      ]
+    },
+    {
+      "name": "SettlementGovernedActionState",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Authorized",
+          "wire_value": "authorized"
+        },
+        {
+          "rust_variant": "RetryScheduled",
+          "wire_value": "retry_scheduled"
+        },
+        {
+          "rust_variant": "Consumed",
+          "wire_value": "consumed"
+        },
+        {
+          "rust_variant": "Revoked",
+          "wire_value": "revoked"
+        },
+        {
+          "rust_variant": "Expired",
+          "wire_value": "expired"
+        },
+        {
+          "rust_variant": "ReconciliationRequired",
+          "wire_value": "reconciliation_required"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        }
+      ]
+    },
+    {
+      "name": "SettlementReadinessStatus",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Unchecked",
+          "wire_value": "unchecked"
+        },
+        {
+          "rust_variant": "Ready",
+          "wire_value": "ready"
+        },
+        {
+          "rust_variant": "Blocked",
+          "wire_value": "blocked"
+        }
+      ]
+    },
+    {
+      "name": "SettlementReconciliationState",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "NotRequired",
+          "wire_value": "not_required"
+        },
+        {
+          "rust_variant": "AwaitingRelayerHash",
+          "wire_value": "awaiting_relayer_hash"
+        },
+        {
+          "rust_variant": "AwaitingReceipt",
+          "wire_value": "awaiting_receipt"
+        },
+        {
+          "rust_variant": "EvidenceMismatch",
+          "wire_value": "evidence_mismatch"
+        },
+        {
+          "rust_variant": "OperatorReviewRequired",
+          "wire_value": "operator_review_required"
+        },
+        {
+          "rust_variant": "Reconciled",
+          "wire_value": "reconciled"
+        }
+      ]
+    },
+    {
+      "name": "SettlementRoute",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "StandardV2",
+          "wire_value": "standard_v2"
+        },
+        {
+          "rust_variant": "NegRiskV2",
+          "wire_value": "neg_risk_v2"
+        }
+      ]
+    },
+    {
+      "name": "SettlementSubmissionKind",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "DirectEoa",
+          "wire_value": "direct_eoa"
+        },
+        {
+          "rust_variant": "Relayer",
+          "wire_value": "relayer"
+        },
+        {
+          "rust_variant": "ExternallyObserved",
+          "wire_value": "externally_observed"
+        }
+      ]
+    },
+    {
+      "name": "SettlementSubmissionPurpose",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "OutcomeTokenApproval",
+          "wire_value": "outcome_token_approval"
+        },
+        {
+          "rust_variant": "OutcomeTokenRevocation",
+          "wire_value": "outcome_token_revocation"
+        },
+        {
+          "rust_variant": "Redeem",
+          "wire_value": "redeem"
+        }
+      ]
+    },
+    {
+      "name": "SettlementSubmissionState",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Prepared",
+          "wire_value": "prepared"
+        },
+        {
+          "rust_variant": "Dispatching",
+          "wire_value": "dispatching"
+        },
+        {
+          "rust_variant": "AwaitingChainHash",
+          "wire_value": "awaiting_chain_hash"
+        },
+        {
+          "rust_variant": "AwaitingFinality",
+          "wire_value": "awaiting_finality"
+        },
+        {
+          "rust_variant": "Confirmed",
+          "wire_value": "confirmed"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        }
+      ]
+    },
+    {
+      "name": "SettlementWritePolicy",
+      "module": "settlement",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Disabled",
+          "wire_value": "disabled"
+        },
+        {
+          "rust_variant": "GovernedCanary",
+          "wire_value": "governed_canary"
+        },
+        {
+          "rust_variant": "SemiAuto",
+          "wire_value": "semi_auto"
+        },
+        {
+          "rust_variant": "Auto",
+          "wire_value": "auto"
+        }
+      ]
+    },
+    {
+      "name": "ShadowBindingStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Active",
+          "wire_value": "active"
+        },
+        {
+          "rust_variant": "Rejected",
+          "wire_value": "rejected"
+        },
+        {
+          "rust_variant": "Promoted",
+          "wire_value": "promoted"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        }
+      ]
+    },
+    {
+      "name": "Side",
+      "module": "common",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Buy",
+          "wire_value": "BUY"
+        },
+        {
+          "rust_variant": "Sell",
+          "wire_value": "SELL"
+        }
+      ]
+    },
+    {
+      "name": "SourceSliceStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Materializing",
+          "wire_value": "materializing"
+        },
+        {
+          "rust_variant": "Ready",
+          "wire_value": "ready"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        }
+      ]
+    },
+    {
+      "name": "StalenessLevel",
+      "module": "common",
+      "kind": "wire",
+      "members": [
+        {
+          "rust_variant": "Fresh",
+          "wire_value": "fresh"
+        },
+        {
+          "rust_variant": "Acceptable",
+          "wire_value": "acceptable"
+        },
+        {
+          "rust_variant": "Stale",
+          "wire_value": "stale"
+        },
+        {
+          "rust_variant": "Expired",
+          "wire_value": "expired"
+        }
+      ]
+    },
+    {
+      "name": "TickSize",
+      "module": "common",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Tenth",
+          "wire_value": "0.1"
+        },
+        {
+          "rust_variant": "Hundredth",
+          "wire_value": "0.01"
+        },
+        {
+          "rust_variant": "HalfCent",
+          "wire_value": "0.005"
+        },
+        {
+          "rust_variant": "QuarterCent",
+          "wire_value": "0.0025"
+        },
+        {
+          "rust_variant": "Thousandth",
+          "wire_value": "0.001"
+        },
+        {
+          "rust_variant": "TenThousandth",
+          "wire_value": "0.0001"
+        }
+      ]
+    },
+    {
+      "name": "TradePolicyGovernanceAction",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Validate",
+          "wire_value": "validate"
+        },
+        {
+          "rust_variant": "Publish",
+          "wire_value": "publish"
+        },
+        {
+          "rust_variant": "Retire",
+          "wire_value": "retire"
+        }
+      ]
+    },
+    {
+      "name": "TradePolicyStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Draft",
+          "wire_value": "draft"
+        },
+        {
+          "rust_variant": "Validated",
+          "wire_value": "validated"
+        },
+        {
+          "rust_variant": "Published",
+          "wire_value": "published"
+        },
+        {
+          "rust_variant": "Retired",
+          "wire_value": "retired"
+        }
+      ]
+    },
+    {
+      "name": "TradePolicyTrialScope",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Candidate",
+          "wire_value": "candidate"
+        },
+        {
+          "rust_variant": "Fold",
+          "wire_value": "fold"
+        },
+        {
+          "rust_variant": "Path",
+          "wire_value": "path"
+        },
+        {
+          "rust_variant": "LatencyStress",
+          "wire_value": "latency_stress"
+        }
+      ]
+    },
+    {
+      "name": "TradePolicyTrialStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Succeeded",
+          "wire_value": "succeeded"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        }
+      ]
+    },
+    {
+      "name": "TradePolicyValidationStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Running",
+          "wire_value": "running"
+        },
+        {
+          "rust_variant": "Succeeded",
+          "wire_value": "succeeded"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        }
+      ]
+    },
+    {
+      "name": "TrainingDatasetStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Planned",
+          "wire_value": "planned"
+        },
+        {
+          "rust_variant": "Building",
+          "wire_value": "building"
+        },
+        {
+          "rust_variant": "InsufficientLabels",
+          "wire_value": "insufficient_labels"
+        },
+        {
+          "rust_variant": "Ready",
+          "wire_value": "ready"
+        },
+        {
+          "rust_variant": "Expired",
+          "wire_value": "expired"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        }
+      ]
+    },
+    {
+      "name": "UserStatus",
+      "module": "rbac",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Active",
+          "wire_value": "active"
+        },
+        {
+          "rust_variant": "Disabled",
+          "wire_value": "disabled"
+        }
+      ]
+    },
+    {
+      "name": "VenueOrderStatus",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Filled",
+          "wire_value": "filled"
+        },
+        {
+          "rust_variant": "PartiallyFilled",
+          "wire_value": "partially_filled"
+        },
+        {
+          "rust_variant": "Rejected",
+          "wire_value": "rejected"
+        },
+        {
+          "rust_variant": "Cancelled",
+          "wire_value": "cancelled"
+        },
+        {
+          "rust_variant": "Open",
+          "wire_value": "open"
+        },
+        {
+          "rust_variant": "Expired",
+          "wire_value": "expired"
+        }
+      ]
+    },
+    {
+      "name": "VenueTradeStatus",
+      "module": "execution",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Matched",
+          "wire_value": "matched"
+        },
+        {
+          "rust_variant": "Mined",
+          "wire_value": "mined"
+        },
+        {
+          "rust_variant": "Confirmed",
+          "wire_value": "confirmed"
+        },
+        {
+          "rust_variant": "Retrying",
+          "wire_value": "retrying"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        }
+      ]
+    }
+  ]
+}

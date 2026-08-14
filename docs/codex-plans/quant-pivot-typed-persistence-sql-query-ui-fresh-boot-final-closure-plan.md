@@ -2,10 +2,8 @@
 
 ## 1. 文档定位与执行授权
 
-本文档是以下两份计划在 2026-07-20 补审后的最终整改与验收计划：
-
-- `quant-pivot-boot-config-governance-ui-ux-refactor-plan.md`；
-- `quant-pivot-boot-config-governance-seaorm-typed-closure-remediation-plan.md`。
+本文档是 boot config governance 与强类型持久化整改在 2026-07-20 补审后的最终验收计划；
+历史 UI/UX 计划已经由当前 Phase 10 Operator Console 架构取代并删除。
 
 原计划中的业务目标继续有效；与本文冲突的完成状态、技术基线和验收结论以本文为准。特别是，原整改计划中将全仓强类型、raw SQL、查询预算、Config UI 状态矩阵和文档规则标为 `Verified` 的结论过于乐观，必须回退为 `Partial`，重新以机器证据验收。
 

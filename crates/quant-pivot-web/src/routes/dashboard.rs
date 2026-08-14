@@ -15,16 +15,18 @@ use quant_pivot_models::{
             BasisAlertListQuery, EquitySnapshotView, ExecutionOrderListQuery,
             FactorDefinitionListQuery, LiveAccountView, ModelVersionListQuery,
             OrderIntentListQuery, QuantReportListQuery, QuantReportView, ReconciliationListQuery,
-            ReportRunListQuery, SystemStatusView,
+            ReportRunListQuery, RuntimeActivityReadQuery, SystemStatusView,
             dashboard::{
                 DashboardAccountView, DashboardActionItemView, DashboardActionOwner,
                 DashboardActionReasonCode, DashboardActionSeverity, DashboardAuthorityView,
-                DashboardExposureView, DashboardLifecycleView, DashboardOverviewQuery,
-                DashboardOverviewView, DashboardPrimaryAction, DashboardReasonCode,
-                DashboardReportView, DashboardResearchReadinessView, DashboardSection,
-                DashboardSubsystemHealthView,
+                DashboardDataPlaneView, DashboardExecutionRuntimeView, DashboardExposureView,
+                DashboardLifecycleView, DashboardOverviewQuery, DashboardOverviewView,
+                DashboardPrimaryAction, DashboardReasonCode, DashboardReportRuntimeView,
+                DashboardReportView, DashboardResearchReadinessView, DashboardRuntimeActivityView,
+                DashboardSection, DashboardSubsystemHealthView, DashboardWindow,
             },
         },
+        data_plane::DataQualitySnapshot,
         pagination::PageRequest,
         quant::EquitySnapshotQuery,
     },
@@ -34,6 +36,7 @@ use quant_pivot_models::{
             ExecutionOrderState, OrderIntentStatus, RecommendationReportStatus, ReportRunStatus,
         },
         rbac::{Operation, ResourceType},
+        runtime_activity::{RuntimeActivityDomain, RuntimeActivityStatus},
     },
 };
 use uuid::Uuid;
@@ -67,9 +70,94 @@ enum DashboardPermission {
     ReadReconciliation = 1 << 7,
     EnqueueReport = 1 << 8,
     ReadConfig = 1 << 9,
+    ReadSettlement = 1 << 10,
 }
 
 impl DashboardPermissions {
+    async fn load(state: &AppState, subject: &str) -> Result<Self, WebError> {
+        let (
+            read_system,
+            read_account,
+            read_equity,
+            read_reports,
+            read_intents,
+            read_execution_orders,
+            read_research,
+            read_reconciliation,
+            enqueue_report,
+            read_config,
+            read_settlement,
+        ) = tokio::try_join!(
+            permission(state, subject, ResourceType::System, Operation::Read),
+            permission(
+                state,
+                subject,
+                ResourceType::AccountSnapshot,
+                Operation::Read
+            ),
+            permission(
+                state,
+                subject,
+                ResourceType::EquitySnapshot,
+                Operation::Read
+            ),
+            permission(state, subject, ResourceType::QuantReport, Operation::Read),
+            permission(state, subject, ResourceType::OrderIntent, Operation::Read),
+            permission(
+                state,
+                subject,
+                ResourceType::ExecutionOrder,
+                Operation::Read
+            ),
+            permission(
+                state,
+                subject,
+                ResourceType::Materialization,
+                Operation::Read
+            ),
+            permission(
+                state,
+                subject,
+                ResourceType::Reconciliation,
+                Operation::Read
+            ),
+            permission(
+                state,
+                subject,
+                ResourceType::QuantReport,
+                Operation::Enqueue
+            ),
+            permission(
+                state,
+                subject,
+                ResourceType::DecisionPolicySnapshot,
+                Operation::Read
+            ),
+            permission(
+                state,
+                subject,
+                ResourceType::SettlementRedeem,
+                Operation::Read
+            ),
+        )?;
+        Ok(Self::from_decisions([
+            (DashboardPermission::ReadSystem, read_system),
+            (DashboardPermission::ReadAccount, read_account),
+            (DashboardPermission::ReadEquity, read_equity),
+            (DashboardPermission::ReadReports, read_reports),
+            (DashboardPermission::ReadIntents, read_intents),
+            (
+                DashboardPermission::ReadExecutionOrders,
+                read_execution_orders,
+            ),
+            (DashboardPermission::ReadResearch, read_research),
+            (DashboardPermission::ReadReconciliation, read_reconciliation),
+            (DashboardPermission::EnqueueReport, enqueue_report),
+            (DashboardPermission::ReadConfig, read_config),
+            (DashboardPermission::ReadSettlement, read_settlement),
+        ]))
+    }
+
     fn from_decisions<const N: usize>(decisions: [(DashboardPermission, bool); N]) -> Self {
         Self(
             decisions
@@ -96,6 +184,120 @@ struct PrimaryActionContext {
     permissions: DashboardPermissions,
 }
 
+struct DashboardRequest {
+    generated_at: DateTime<Utc>,
+    permissions: DashboardPermissions,
+    window: DashboardWindow,
+}
+
+impl DashboardRequest {
+    async fn load(
+        state: &AppState,
+        subject: &str,
+        query: DashboardOverviewQuery,
+    ) -> Result<Self, WebError> {
+        Ok(Self {
+            generated_at: Utc::now(),
+            permissions: DashboardPermissions::load(state, subject).await?,
+            window: query.window,
+        })
+    }
+
+    async fn snapshot(self, state: &AppState) -> DashboardOverviewView {
+        let window_start = self.generated_at - ChronoDuration::seconds(self.window.seconds());
+        let (
+            authority,
+            account,
+            equity_curve,
+            latest_report,
+            report_lifecycle,
+            research_readiness,
+            subsystem_health,
+            runtime_activity,
+            report_runtime,
+            execution_runtime,
+        ) = tokio::join!(
+            load_authority(state, self.permissions),
+            load_account(
+                state,
+                self.permissions.allows(DashboardPermission::ReadAccount)
+            ),
+            load_equity(
+                state,
+                self.permissions.allows(DashboardPermission::ReadEquity),
+                window_start,
+                self.generated_at
+            ),
+            load_latest_report(
+                state,
+                self.permissions.allows(DashboardPermission::ReadReports)
+            ),
+            load_report_lifecycle(state, self.permissions, window_start, self.generated_at),
+            load_research_readiness(
+                state,
+                self.permissions.allows(DashboardPermission::ReadResearch)
+            ),
+            load_subsystem_health(
+                state,
+                self.permissions.allows(DashboardPermission::ReadSystem)
+            ),
+            load_runtime_activity(state, self.permissions, self.generated_at),
+            load_report_runtime(state, self.permissions, window_start, self.generated_at),
+            load_execution_runtime(state, self.permissions, window_start, self.generated_at),
+        );
+        let exposures = exposure_section(&account);
+        let (data_quality, data_plane) = self.data_sections(state);
+        let action_inbox = load_action_inbox(state, self.permissions, self.generated_at).await;
+
+        DashboardOverviewView {
+            revision: Uuid::now_v7().to_string(),
+            generated_at: self.generated_at,
+            window: self.window,
+            authority,
+            account,
+            equity_curve,
+            latest_report,
+            report_lifecycle,
+            exposures,
+            data_quality,
+            research_readiness,
+            subsystem_health,
+            action_inbox,
+            runtime_activity,
+            report_runtime,
+            execution_runtime,
+            data_plane,
+        }
+    }
+
+    fn data_sections(
+        &self,
+        state: &AppState,
+    ) -> (
+        DashboardSection<DataQualitySnapshot>,
+        DashboardSection<DashboardDataPlaneView>,
+    ) {
+        if !self.permissions.allows(DashboardPermission::ReadSystem) {
+            return (DashboardSection::Forbidden, DashboardSection::Forbidden);
+        }
+        let snapshot = state.data_quality.snapshot();
+        let degraded = snapshot.stale > 0 || snapshot.ingest_lag_exceeded;
+        (
+            DashboardSection::Ready {
+                observed_at: snapshot.as_of,
+                value: snapshot.clone(),
+            },
+            DashboardSection::Ready {
+                observed_at: snapshot.as_of,
+                value: DashboardDataPlaneView {
+                    quality: snapshot,
+                    degraded,
+                },
+            },
+        )
+    }
+}
+
 pub(crate) fn route_specs() -> Vec<RouteSpec> {
     vec![spec(
         Method::GET,
@@ -110,139 +312,8 @@ async fn overview(
     actor: AuthedActor,
     query: Query<DashboardOverviewQuery>,
 ) -> Result<HttpResponse, WebError> {
-    let generated_at = Utc::now();
-    let query = query.into_inner();
-    let subject = actor.claims.sub.as_str();
-    let (
-        can_read_system,
-        can_read_account,
-        can_read_equity,
-        can_read_reports,
-        can_read_intents,
-        can_read_execution_orders,
-        can_read_research,
-        can_read_reconciliation,
-        can_enqueue_report,
-        can_read_config,
-    ) = tokio::try_join!(
-        permission(&state, subject, ResourceType::System, Operation::Read),
-        permission(
-            &state,
-            subject,
-            ResourceType::AccountSnapshot,
-            Operation::Read
-        ),
-        permission(
-            &state,
-            subject,
-            ResourceType::EquitySnapshot,
-            Operation::Read
-        ),
-        permission(&state, subject, ResourceType::QuantReport, Operation::Read),
-        permission(&state, subject, ResourceType::OrderIntent, Operation::Read),
-        permission(
-            &state,
-            subject,
-            ResourceType::ExecutionOrder,
-            Operation::Read
-        ),
-        permission(
-            &state,
-            subject,
-            ResourceType::Materialization,
-            Operation::Read
-        ),
-        permission(
-            &state,
-            subject,
-            ResourceType::Reconciliation,
-            Operation::Read
-        ),
-        permission(
-            &state,
-            subject,
-            ResourceType::QuantReport,
-            Operation::Enqueue
-        ),
-        permission(
-            &state,
-            subject,
-            ResourceType::DecisionPolicySnapshot,
-            Operation::Read
-        ),
-    )?;
-    let permissions = DashboardPermissions::from_decisions([
-        (DashboardPermission::ReadSystem, can_read_system),
-        (DashboardPermission::ReadAccount, can_read_account),
-        (DashboardPermission::ReadEquity, can_read_equity),
-        (DashboardPermission::ReadReports, can_read_reports),
-        (DashboardPermission::ReadIntents, can_read_intents),
-        (
-            DashboardPermission::ReadExecutionOrders,
-            can_read_execution_orders,
-        ),
-        (DashboardPermission::ReadResearch, can_read_research),
-        (
-            DashboardPermission::ReadReconciliation,
-            can_read_reconciliation,
-        ),
-        (DashboardPermission::EnqueueReport, can_enqueue_report),
-        (DashboardPermission::ReadConfig, can_read_config),
-    ]);
-
-    let window_start = generated_at - ChronoDuration::seconds(query.window.seconds());
-    let (
-        authority,
-        account,
-        equity_curve,
-        latest_report,
-        report_lifecycle,
-        research_readiness,
-        subsystem_health,
-    ) = tokio::join!(
-        load_authority(&state, permissions),
-        load_account(&state, permissions.allows(DashboardPermission::ReadAccount)),
-        load_equity(
-            &state,
-            permissions.allows(DashboardPermission::ReadEquity),
-            window_start,
-            generated_at
-        ),
-        load_latest_report(&state, permissions.allows(DashboardPermission::ReadReports)),
-        load_report_lifecycle(&state, permissions, window_start, generated_at),
-        load_research_readiness(
-            &state,
-            permissions.allows(DashboardPermission::ReadResearch)
-        ),
-        load_subsystem_health(&state, permissions.allows(DashboardPermission::ReadSystem)),
-    );
-    let exposures = exposure_section(&account);
-    let data_quality = if permissions.allows(DashboardPermission::ReadSystem) {
-        let snapshot = state.data_quality.snapshot();
-        DashboardSection::Ready {
-            observed_at: snapshot.as_of,
-            value: snapshot,
-        }
-    } else {
-        DashboardSection::Forbidden
-    };
-    let action_inbox = load_action_inbox(&state, permissions, generated_at).await;
-
-    let response = DashboardOverviewView {
-        revision: Uuid::now_v7().to_string(),
-        generated_at,
-        window: query.window,
-        authority,
-        account,
-        equity_curve,
-        latest_report,
-        report_lifecycle,
-        exposures,
-        data_quality,
-        research_readiness,
-        subsystem_health,
-        action_inbox,
-    };
+    let request = DashboardRequest::load(&state, &actor.claims.sub, query.into_inner()).await?;
+    let response = request.snapshot(&state).await;
     Ok(HttpResponse::Ok()
         .insert_header((CACHE_CONTROL, "private, no-store"))
         .json(WebResponse::ok(response)))
@@ -590,6 +661,201 @@ async fn load_report_lifecycle(
     .await
 }
 
+async fn load_runtime_activity(
+    state: &AppState,
+    permissions: DashboardPermissions,
+    observed_at: DateTime<Utc>,
+) -> DashboardSection<DashboardRuntimeActivityView> {
+    let visible_domains = [
+        (
+            RuntimeActivityDomain::Research,
+            permissions.allows(DashboardPermission::ReadResearch),
+        ),
+        (
+            RuntimeActivityDomain::Report,
+            permissions.allows(DashboardPermission::ReadReports),
+        ),
+        (
+            RuntimeActivityDomain::Execution,
+            permissions.allows(DashboardPermission::ReadExecutionOrders),
+        ),
+        (
+            RuntimeActivityDomain::Reconciliation,
+            permissions.allows(DashboardPermission::ReadReconciliation),
+        ),
+        (
+            RuntimeActivityDomain::Settlement,
+            permissions.allows(DashboardPermission::ReadSettlement),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(domain, allowed)| allowed.then_some(domain))
+    .collect::<Vec<_>>();
+    guarded(
+        !visible_domains.is_empty(),
+        DashboardReasonCode::NoSamples,
+        None,
+        async {
+            let query = |status, limit| RuntimeActivityReadQuery {
+                visible_domains: visible_domains.clone(),
+                domain: None,
+                status,
+                cursor: None,
+                limit,
+            };
+            let (recent, running, attention) = tokio::try_join!(
+                state.runtime_activities.page(query(None, 8)),
+                state
+                    .runtime_activities
+                    .page(query(Some(RuntimeActivityStatus::Running), 1)),
+                state
+                    .runtime_activities
+                    .page(query(Some(RuntimeActivityStatus::Attention), 1)),
+            )?;
+            Ok(Some((
+                recent
+                    .items
+                    .first()
+                    .map_or(observed_at, |item| item.updated_at),
+                DashboardRuntimeActivityView {
+                    total: recent.summary.total,
+                    running: running.summary.total,
+                    attention: attention.summary.total,
+                    items: recent.items,
+                },
+            )))
+        },
+    )
+    .await
+}
+
+async fn load_report_runtime(
+    state: &AppState,
+    permissions: DashboardPermissions,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> DashboardSection<DashboardReportRuntimeView> {
+    guarded(
+        permissions.allows(DashboardPermission::ReadReports),
+        DashboardReasonCode::NoSamples,
+        None,
+        async {
+            let query = |status| ReportRunListQuery {
+                status: Some(status),
+                from: Some(from),
+                to: Some(to),
+                page: PageRequest::new(1, 1),
+                ..ReportRunListQuery::default()
+            };
+            let (queued, running, failed, abandoned) = tokio::try_join!(
+                state
+                    .quant_reports
+                    .list_report_runs(query(ReportRunStatus::Queued)),
+                state
+                    .quant_reports
+                    .list_report_runs(query(ReportRunStatus::Running)),
+                state
+                    .quant_reports
+                    .list_report_runs(query(ReportRunStatus::Failed)),
+                state
+                    .quant_reports
+                    .list_report_runs(query(ReportRunStatus::Abandoned)),
+            )?;
+            Ok(Some((
+                to,
+                DashboardReportRuntimeView {
+                    queued: queued.total,
+                    running: running.total,
+                    failed: failed.total,
+                    abandoned: abandoned.total,
+                },
+            )))
+        },
+    )
+    .await
+}
+
+async fn load_execution_runtime(
+    state: &AppState,
+    permissions: DashboardPermissions,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> DashboardSection<DashboardExecutionRuntimeView> {
+    let allowed = permissions.allows(DashboardPermission::ReadIntents)
+        || permissions.allows(DashboardPermission::ReadExecutionOrders)
+        || permissions.allows(DashboardPermission::ReadReconciliation);
+    guarded(allowed, DashboardReasonCode::NoSamples, None, async {
+        let pending_intents = if permissions.allows(DashboardPermission::ReadIntents) {
+            state
+                .order_intents
+                .list(OrderIntentListQuery {
+                    status: Some(OrderIntentStatus::PendingApproval),
+                    from: Some(from),
+                    to: Some(to),
+                    page: PageRequest::new(1, 1),
+                    ..OrderIntentListQuery::default()
+                })
+                .await?
+                .total
+        } else {
+            0
+        };
+        let (active_orders, ambiguous_orders) =
+            if permissions.allows(DashboardPermission::ReadExecutionOrders) {
+                let query = |state_filter| ExecutionOrderListQuery {
+                    state: Some(state_filter),
+                    from: Some(from),
+                    to: Some(to),
+                    page: PageRequest::new(1, 1),
+                    ..ExecutionOrderListQuery::default()
+                };
+                let (submitted, partially_filled, ambiguous) = tokio::try_join!(
+                    state
+                        .execution_read
+                        .list_execution_orders(query(ExecutionOrderState::Submitted)),
+                    state
+                        .execution_read
+                        .list_execution_orders(query(ExecutionOrderState::PartiallyFilled)),
+                    state
+                        .execution_read
+                        .list_execution_orders(query(ExecutionOrderState::Ambiguous)),
+                )?;
+                (
+                    submitted.total.saturating_add(partially_filled.total),
+                    ambiguous.total,
+                )
+            } else {
+                (0, 0)
+            };
+        let unresolved_reconciliations =
+            if permissions.allows(DashboardPermission::ReadReconciliation) {
+                state
+                    .execution_read
+                    .list_reconciliations(ReconciliationListQuery {
+                        resolved: Some(false),
+                        from: Some(from),
+                        to: Some(to),
+                        page: PageRequest::new(1, 1),
+                        ..ReconciliationListQuery::default()
+                    })
+                    .await?
+                    .total
+            } else {
+                0
+            };
+        Ok(Some((
+            to,
+            DashboardExecutionRuntimeView {
+                pending_intents,
+                active_orders,
+                ambiguous_orders,
+                unresolved_reconciliations,
+            },
+        )))
+    })
+    .await
+}
+
 async fn load_subsystem_health(
     state: &AppState,
     allowed: bool,
@@ -677,7 +943,7 @@ async fn load_action_inbox(
                         reason_code: DashboardActionReasonCode::MarketDataDegraded,
                         owner: DashboardActionOwner::Data,
                         observed_at: quality.as_of,
-                        target_route: "/markets".to_owned(),
+                        target_route: "/research/data-reliability?module=sources".to_owned(),
                     });
                 }
             }
@@ -700,7 +966,10 @@ async fn load_action_inbox(
                         reason_code: DashboardActionReasonCode::UnresolvedReconciliation,
                         owner: DashboardActionOwner::Operations,
                         observed_at: reconciliation.created_at,
-                        target_route: "/quant/reconciliations".to_owned(),
+                        target_route: format!(
+                            "/execution/post-trade?module=reconciliation&entity=reconciliation&id={}",
+                            reconciliation.reconciliation_id
+                        ),
                     });
                 }
             }
@@ -720,7 +989,10 @@ async fn load_action_inbox(
                         reason_code: DashboardActionReasonCode::BasisAlertUnacknowledged,
                         owner: DashboardActionOwner::Research,
                         observed_at: alert.as_of,
-                        target_route: "/research/basis-alerts".to_owned(),
+                        target_route: format!(
+                            "/research/data-reliability?module=basis-alerts&market_id={}",
+                            alert.market_id
+                        ),
                     });
                 }
             }
@@ -740,7 +1012,10 @@ async fn load_action_inbox(
                         reason_code: DashboardActionReasonCode::ReportRunFailed,
                         owner: DashboardActionOwner::Research,
                         observed_at: run.finished_at.unwrap_or(run.requested_at),
-                        target_route: "/quant/reports".to_owned(),
+                        target_route: format!(
+                            "/trading/recommendations?module=reports&entity=report-run&id={}",
+                            run.report_run_id
+                        ),
                     });
                 }
             }

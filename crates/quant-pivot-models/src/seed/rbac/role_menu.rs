@@ -40,7 +40,7 @@ pub const ROLE_MENU_SEED: SeedSpec = SeedSpec {
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.role_menu.bootstrap.v1.boot-config-control-plane",
+    checksum: "rbac.role_menu.bootstrap.v1.workspace-ia",
     apply: load_boxed,
     hydrate: hydrate_boxed,
 };
@@ -180,11 +180,13 @@ mod tests {
     }
 
     #[test]
-    fn feature_integrity_menu_policy() {
+    fn workspace_menu_action_policy() {
         let sets = policy_sets();
         let viewer = sets.get("viewer").expect("viewer policies");
         let risk_owner = sets.get("risk_owner").expect("risk-owner policies");
 
+        // The consolidated research workspace remains visible to read-only
+        // roles, while governed controls stay absent from their action set.
         assert!(menu_granted(
             MenuKind::Menu,
             Some("materialization:read"),
@@ -204,6 +206,16 @@ mod tests {
             MenuKind::Button,
             Some("materialization:create"),
             risk_owner,
+        ));
+        assert!(menu_granted(
+            MenuKind::Button,
+            Some("publication:publish"),
+            risk_owner,
+        ));
+        assert!(!menu_granted(
+            MenuKind::Button,
+            Some("publication:publish"),
+            viewer,
         ));
     }
 }

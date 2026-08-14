@@ -1131,6 +1131,38 @@ impl ProductionStackFixture {
             Self::Empty => bail!("empty production fixture cannot seed browser evidence"),
         }
     }
+
+    async fn claim_cancellation_cycle(
+        self,
+        db: &DatabaseConnection,
+        cycle_id: Option<FeedbackCycleId>,
+    ) -> Result<Option<FeedbackCycleId>> {
+        let Some(cycle_id) = cycle_id else {
+            ensure!(
+                self != Self::GovernedFeedback,
+                "governed feedback fixture is missing its queued cancellation cycle"
+            );
+            return Ok(None);
+        };
+        ensure!(
+            self == Self::GovernedFeedback,
+            "only a governed feedback fixture may seed a cancellation cycle"
+        );
+        // Model a cycle already owned by another healthy worker. Its live lease
+        // makes API cancellation deterministic without weakening the terminal
+        // state machine or depending on a request-vs-worker race.
+        let claim = PgFeedbackCycleRepository::new(db.clone())
+            .claim_cycle(WorkerId::from_v7(), GOVERNED_CANCELLATION_LEASE_SECS)
+            .await?
+            .context("claim governed cancellation fixture cycle")?;
+        ensure!(
+            claim.cycle.feedback_cycle_id == cycle_id,
+            "governed cancellation fixture claimed {}, expected {}",
+            claim.cycle.feedback_cycle_id,
+            cycle_id,
+        );
+        Ok(Some(cycle_id))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3114,12 +3146,13 @@ async fn seed_browser_fixture(
         .await?;
     }
     println!(
-        "browser research fixture: model_version_id={} evaluation_dataset_id={} backtest_report_id={} feedback_cycle_id={} governed_cancellation_cycle_id={:?}",
+        "browser research fixture: model_version_id={} evaluation_dataset_id={} backtest_report_id={} feedback_cycle_id={} governed_cancellation_cycle_id={:?} cancellable_research_job_id={}",
         research.model_version_id,
         research.evaluation_dataset_id,
         research.backtest_report_id,
         research.feedback_cycle_id,
         research.governed_cancellation_cycle_id,
+        research.cancellable_research_job_id,
     );
     ensure!(
         !FIXTURE_TRADE_TAPE_ON_CHAIN_ENABLED,
@@ -3143,33 +3176,9 @@ async fn seed_browser_fixture(
     if closure.is_some() {
         pause_feedback_schedulers(db).await?;
     }
-    let governed_cancellation_cycle_id =
-        if let Some(cycle_id) = research.governed_cancellation_cycle_id {
-            ensure!(
-                fixture == ProductionStackFixture::GovernedFeedback,
-                "only a governed feedback fixture may seed a cancellation cycle"
-            );
-            // Model a cycle already owned by another healthy worker. Its live lease
-            // makes API cancellation deterministic without weakening the terminal
-            // state machine or depending on a request-vs-worker race.
-            let claim = PgFeedbackCycleRepository::new(db.clone())
-                .claim_cycle(WorkerId::from_v7(), GOVERNED_CANCELLATION_LEASE_SECS)
-                .await?
-                .context("claim governed cancellation fixture cycle")?;
-            ensure!(
-                claim.cycle.feedback_cycle_id == cycle_id,
-                "governed cancellation fixture claimed {}, expected {}",
-                claim.cycle.feedback_cycle_id,
-                cycle_id,
-            );
-            Some(cycle_id)
-        } else {
-            ensure!(
-                fixture != ProductionStackFixture::GovernedFeedback,
-                "governed feedback fixture is missing its queued cancellation cycle"
-            );
-            None
-        };
+    let governed_cancellation_cycle_id = fixture
+        .claim_cancellation_cycle(db, research.governed_cancellation_cycle_id)
+        .await?;
     if matches!(
         fixture,
         ProductionStackFixture::FeedbackClosure | ProductionStackFixture::FeedbackClosureRecovery

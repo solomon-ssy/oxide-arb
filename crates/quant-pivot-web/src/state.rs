@@ -32,8 +32,8 @@ use quant_pivot_repository::traits::{
     BasisAlertRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
     EntryConditionRepository, FeedbackOutboxRepository, MarketLinkageRepository, MarketRepository,
     MenuRepository, OperationLogRepository, PolicyRepository, QuantFactReadRepository,
-    RoleMenuRepository, RolePermissionRepository, RoleRepository, UserRepository,
-    UserRoleRepository,
+    RoleMenuRepository, RolePermissionRepository, RoleRepository, RuntimeActivityRepository,
+    UserRepository, UserRoleRepository,
 };
 
 /// Dependency bundle shared by all handlers and middleware.
@@ -55,6 +55,8 @@ pub struct AppState {
     pub perm_checker: Arc<PermChecker>,
     pub runtime_config: Arc<dyn PolicyRepository>,
     pub operation_logs: Arc<dyn OperationLogRepository>,
+    /// Permission-scoped keyset feed over durable runtime fact ledgers.
+    pub runtime_activities: Arc<dyn RuntimeActivityRepository>,
     pub operation_log: OperationLogBuffer,
     pub control: Arc<dyn RuntimeControlPort>,
     pub capabilities: Arc<dyn SystemCapabilityPort>,

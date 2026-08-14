@@ -507,7 +507,10 @@ impl ReportPublisher {
 
 /// Relative path to a report's detail view, embedded in operator notifications.
 fn report_path(report: &RecommendationReportInfo) -> String {
-    format!("/quant/reports/{}", report.recommendation_report_id)
+    format!(
+        "/trading/recommendations?module=queue&entity=report&id={}",
+        report.recommendation_report_id
+    )
 }
 
 fn notification_body(report: &RecommendationReportInfo, n: &ReportNotificationPayload) -> String {
@@ -599,7 +602,7 @@ mod tests {
         assert!(body.contains("warning: thin book"), "{body}");
         assert!(
             body.contains(&format!(
-                "/quant/reports/{}",
+                "/trading/recommendations?module=queue&entity=report&id={}",
                 report.recommendation_report_id
             )),
             "report link present: {body}"
