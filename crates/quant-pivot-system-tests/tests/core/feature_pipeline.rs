@@ -22,10 +22,10 @@ use quant_pivot_core::{
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
-        MidPriceBucketRow, QuantFeatureEventRow, TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, ExecutionParticipantFactRow,
+        ExecutionParticipantRow, MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow,
+        QuantFeatureEventRow,
     },
-    config::TradeTapeOnChainConfig,
     domain::{
         api::CalibrationArtifactListQuery,
         data_plane::DecisionClock,
@@ -48,7 +48,7 @@ use quant_pivot_models::{
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
     types::{
         CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId,
-        FeatureVectorId, MarketId, Price, Shares, TokenId, Usd,
+        FeatureVectorId, MarketId, Price, ResearchFeatureContract, Shares, TokenId, Usd,
         calibration::PublishedWeatherStationLeadBias,
     },
 };
@@ -74,11 +74,14 @@ use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
         catalog_fixtures::{make_event, make_market},
+        execution_history_fixtures::{
+            ConfigurableFactRead, live_history_config, live_history_repo,
+            whale_concentration_by_market,
+        },
         fact_sink::RecordingFactWriter,
         pit::InMemoryDecisionSnapshotSource,
         publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
-        trade_tape_fixtures::live_tape_cursor_repo,
     },
 };
 use rust_decimal::Decimal;
@@ -284,23 +287,43 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn market_tape_window(
+    async fn market_execution_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<ExecutionParticipantFactRow>, StorageError> {
         Ok(Vec::new())
     }
 
-    async fn last_trades(
+    async fn last_executions(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _limit: u64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn market_executions_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn execution_participants_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<ExecutionParticipantRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -518,17 +541,25 @@ pub async fn insufficient_vectors_audited_input() {
     let event_writer = Arc::new(FeatureEventWriter::new(Arc::new(RecordingFactWriter::new(
         Arc::clone(&rejected_events),
     ))));
-    let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
+    let execution_history = whale_concentration_by_market(
+        &MarketId::new(CATALOG.market_id),
+        &TokenId::new(CATALOG.yes_token),
+        (as_of - ChronoDuration::minutes(1)).timestamp_millis(),
+    );
+    let window_provider = FeatureWindowProvider::new(Arc::new(ConfigurableFactRead::new(
+        Arc::new(EmptyFactRead),
+        execution_history,
+    )));
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
         compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
         window_provider,
         feature_repo: Arc::clone(&repo) as Arc<dyn FeatureRepository>,
         event_writer,
-        block_cursor_repo: live_tape_cursor_repo(),
+        exchange_history_repo: live_history_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
         calibration_repo: Arc::new(EmptyCalibrationArtifactRepo),
-        trade_tape_on_chain: TradeTapeOnChainConfig::default(),
+        finalized_exchange_history: live_history_config(),
     });
 
     let domain = DomainConfig::default();
@@ -536,6 +567,7 @@ pub async fn insufficient_vectors_audited_input() {
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
+            feature_contract: ResearchFeatureContract::FullL2,
             boundary: DecisionClock::new(0)
                 .boundary(as_of)
                 .expect("decision boundary"),
@@ -638,22 +670,31 @@ pub async fn create_feature_vector_find() {
         Arc::clone(&flushed_events),
     ))));
 
-    let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
+    let execution_history = whale_concentration_by_market(
+        &MarketId::new(CATALOG.market_id),
+        &TokenId::new(CATALOG.yes_token),
+        (as_of - ChronoDuration::minutes(1)).timestamp_millis(),
+    );
+    let window_provider = FeatureWindowProvider::new(Arc::new(ConfigurableFactRead::new(
+        Arc::new(EmptyFactRead),
+        execution_history,
+    )));
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
         compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
         window_provider,
         feature_repo: Arc::clone(&feature_repo),
         event_writer: Arc::clone(&event_writer),
-        block_cursor_repo: live_tape_cursor_repo(),
+        exchange_history_repo: live_history_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
         calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
-        trade_tape_on_chain: TradeTapeOnChainConfig::default(),
+        finalized_exchange_history: live_history_config(),
     });
 
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &snapshot.included,
+            feature_contract: ResearchFeatureContract::FullL2,
             boundary,
             features: &features,
             domain: &domain,

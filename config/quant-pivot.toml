@@ -337,7 +337,7 @@ base_url = "https://gamma-api.polymarket.com"
 # Purpose: Interval between complete keyset reconciliations. Default: `300` seconds.
 # Requirement: Required; recommended value: 300.
 # Type/unit/range: Integer; seconds; minimum=0.
-# Validation/cross-field contract: [deploy.gamma.pagination] When Always: All four values must be greater than zero; page_size must be no greater than the Gamma /events/keyset limit of 500; max_keyset_requests must be no less than max_keyset_pages.
+# Validation/cross-field contract: [deploy.gamma.pagination] When Always: All values must be greater than zero; page_size must be no greater than the Gamma /events/keyset limit of 500; max_keyset_requests must be no less than max_keyset_pages; historical identity must cover the exchange-history retention frontier.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -348,7 +348,7 @@ reconcile_interval_secs = 300
 # Purpose: Page size for catalog pagination. Default: `100`.
 # Requirement: Required; recommended value: 100.
 # Type/unit/range: Integer; count; minimum=0.
-# Validation/cross-field contract: [deploy.gamma.pagination] When Always: All four values must be greater than zero; page_size must be no greater than the Gamma /events/keyset limit of 500; max_keyset_requests must be no less than max_keyset_pages.
+# Validation/cross-field contract: [deploy.gamma.pagination] When Always: All values must be greater than zero; page_size must be no greater than the Gamma /events/keyset limit of 500; max_keyset_requests must be no less than max_keyset_pages; historical identity must cover the exchange-history retention frontier.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -359,7 +359,7 @@ page_size = 100
 # Purpose: Maximum successful keyset pages in one scan. Default: `10_000`.
 # Requirement: Required; recommended value: 10000.
 # Type/unit/range: Integer; count; minimum=0.
-# Validation/cross-field contract: [deploy.gamma.pagination] When Always: All four values must be greater than zero; page_size must be no greater than the Gamma /events/keyset limit of 500; max_keyset_requests must be no less than max_keyset_pages.
+# Validation/cross-field contract: [deploy.gamma.pagination] When Always: All values must be greater than zero; page_size must be no greater than the Gamma /events/keyset limit of 500; max_keyset_requests must be no less than max_keyset_pages; historical identity must cover the exchange-history retention frontier.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
@@ -370,13 +370,24 @@ max_keyset_pages = 10000
 # Purpose: Maximum HTTP attempts, including retries, in one scan. Default: `50_000`.
 # Requirement: Required; recommended value: 50000.
 # Type/unit/range: Integer; count; minimum=0.
-# Validation/cross-field contract: [deploy.gamma.pagination] When Always: All four values must be greater than zero; page_size must be no greater than the Gamma /events/keyset limit of 500; max_keyset_requests must be no less than max_keyset_pages.
+# Validation/cross-field contract: [deploy.gamma.pagination] When Always: All values must be greater than zero; page_size must be no greater than the Gamma /events/keyset limit of 500; max_keyset_requests must be no less than max_keyset_pages; historical identity must cover the exchange-history retention frontier.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
 max_keyset_requests = 50000
+# Field: market_data.gamma.historical_identity_days
+# Purpose: Closed-event identity horizon required by fresh-boot history projection. Default: `200` days.
+# Requirement: Required; recommended value: 200.
+# Type/unit/range: Integer; days; minimum=0.
+# Validation/cross-field contract: [deploy.gamma.pagination] When Always: All values must be greater than zero; page_size must be no greater than the Gamma /events/keyset limit of 500; max_keyset_requests must be no less than max_keyset_pages; historical identity must cover the exchange-history retention frontier.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+historical_identity_days = 200
 
 [market_data.data_api]
 # Field: market_data.data_api.base_url
@@ -413,20 +424,20 @@ page_size = 500
 # Variants: not applicable.
 size_threshold = 1
 
-[market_data.trade_tape_on_chain]
-# Field: market_data.trade_tape_on_chain.enabled
-# Purpose: Enable periodic on-chain `OrderFilled` ingestion. Default: true.
-# Requirement: Required; recommended value: true.
+[market_data.finalized_exchange_history]
+# Field: market_data.finalized_exchange_history.enabled
+# Purpose: Enable finalized history extraction and projection.
+# Requirement: Required; recommended value: false.
 # Type/unit/range: Boolean; unitless; no additional scalar restriction beyond the serialized Rust type.
-# Validation/cross-field contract: No additional semantic or cross-field rule beyond the scalar and type contract.
+# Validation/cross-field contract: [deploy.exchange-history.authority] When Always: Enabled history requires authenticated HyperSync extraction, an independent non-Envio archive RPC witness, and the fixed fresh-boot PIT/frontier policy.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
-enabled = true
-# Field: market_data.trade_tape_on_chain.poll_secs
-# Purpose: Poll interval in seconds. Default: 30.
+enabled = false
+# Field: market_data.finalized_exchange_history.poll_secs
+# Purpose: Poll interval after the activation frontier reaches the finalized head.
 # Requirement: Required; recommended value: 30.
 # Type/unit/range: Integer; seconds; minimum=0.
 # Validation/cross-field contract: No additional semantic or cross-field rule beyond the scalar and type contract.
@@ -436,94 +447,233 @@ enabled = true
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
 poll_secs = 30
-# Field: market_data.trade_tape_on_chain.confirmations
-# Purpose: Block confirmations before a chunk is considered finalized. Default: 12.
+# Field: market_data.finalized_exchange_history.connect_timeout_ms
+# Purpose: HTTP connect timeout in milliseconds.
+# Requirement: Required; recommended value: 10000.
+# Type/unit/range: Integer; milliseconds; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+connect_timeout_ms = 10000
+# Field: market_data.finalized_exchange_history.request_timeout_ms
+# Purpose: Per-request timeout in milliseconds.
+# Requirement: Required; recommended value: 60000.
+# Type/unit/range: Integer; milliseconds; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+request_timeout_ms = 60000
+# Field: market_data.finalized_exchange_history.max_response_bytes
+# Purpose: Maximum decoded response body accepted from either provider.
+# Requirement: Required; recommended value: 67108864.
+# Type/unit/range: Integer; bytes; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+max_response_bytes = 67108864
+# Field: market_data.finalized_exchange_history.min_blocks_per_chunk
+# Purpose: Minimum inclusive chunk span after adaptive contraction.
+# Requirement: Required; recommended value: 100.
+# Type/unit/range: Integer; blocks; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+min_blocks_per_chunk = 100
+# Field: market_data.finalized_exchange_history.max_blocks_per_chunk
+# Purpose: Maximum inclusive chunk span after adaptive expansion.
+# Requirement: Required; recommended value: 2000.
+# Type/unit/range: Integer; blocks; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+max_blocks_per_chunk = 2000
+# Field: market_data.finalized_exchange_history.retry_initial_ms
+# Purpose: First retry delay in milliseconds.
+# Requirement: Required; recommended value: 500.
+# Type/unit/range: Integer; milliseconds; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+retry_initial_ms = 500
+# Field: market_data.finalized_exchange_history.retry_max_ms
+# Purpose: Maximum retry delay in milliseconds.
+# Requirement: Required; recommended value: 30000.
+# Type/unit/range: Integer; milliseconds; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+retry_max_ms = 30000
+# Field: market_data.finalized_exchange_history.retry_max_attempts
+# Purpose: Maximum attempts per provider pair before the frontier fails closed.
+# Requirement: Required; recommended value: 8.
+# Type/unit/range: Integer; count; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+retry_max_attempts = 8
+# Field: market_data.finalized_exchange_history.model_confirmation_blocks
+# Purpose: Confirmation delay used to reconstruct `model_available_at`.
 # Requirement: Required; recommended value: 12.
 # Type/unit/range: Integer; blocks; minimum=0.
-# Validation/cross-field contract: No additional semantic or cross-field rule beyond the scalar and type contract.
+# Validation/cross-field contract: [deploy.exchange-history.authority] When Always: Enabled history requires authenticated HyperSync extraction, an independent non-Envio archive RPC witness, and the fixed fresh-boot PIT/frontier policy.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
-confirmations = 12
-# Field: market_data.trade_tape_on_chain.max_blocks_per_tick
-# Purpose: Maximum blocks scanned per contract per tick. Default: 2000.
-# Requirement: Required; recommended value: 2000.
+model_confirmation_blocks = 12
+# Field: market_data.finalized_exchange_history.rollback_buffer_blocks
+# Purpose: Reconciliation buffer behind the accepted frontier.
+# Requirement: Required; recommended value: 200.
 # Type/unit/range: Integer; blocks; minimum=0.
-# Validation/cross-field contract: [deploy.trade-tape.work-budget] When Always: Block, batch, matching-window, terminal-age, and reconciliation-row budgets must each be greater than zero; reconciliation_max_rows must be no greater than the native SQL result budget of 1000000 rows.
+# Validation/cross-field contract: [deploy.exchange-history.authority] When Always: Enabled history requires authenticated HyperSync extraction, an independent non-Envio archive RPC witness, and the fixed fresh-boot PIT/frontier policy.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
-max_blocks_per_tick = 2000
-# Field: market_data.trade_tape_on_chain.max_blocks_per_request
-# Purpose: Maximum inclusive block range sent in one `eth_getLogs` request. Default: 2000.
-# Requirement: Required; recommended value: 2000.
+rollback_buffer_blocks = 200
+# Field: market_data.finalized_exchange_history.activation_frontier_days
+# Purpose: Recent history window prioritized for the first pooled activation.
+# Requirement: Required; recommended value: 33.
+# Type/unit/range: Integer; days; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.authority] When Always: Enabled history requires authenticated HyperSync extraction, an independent non-Envio archive RPC witness, and the fixed fresh-boot PIT/frontier policy.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+activation_frontier_days = 33
+# Field: market_data.finalized_exchange_history.retention_frontier_days
+# Purpose: Long-term raw history target filled after activation.
+# Requirement: Required; recommended value: 200.
+# Type/unit/range: Integer; days; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.authority] When Always: Enabled history requires authenticated HyperSync extraction, an independent non-Envio archive RPC witness, and the fixed fresh-boot PIT/frontier policy.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+retention_frontier_days = 200
+# Field: market_data.finalized_exchange_history.hot_window_blocks_per_tick
+# Purpose: Maximum blocks assigned to the activation frontier per scheduling turn.
+# Requirement: Required; recommended value: 50000.
 # Type/unit/range: Integer; blocks; minimum=0.
-# Validation/cross-field contract: [deploy.trade-tape.work-budget] When Always: Block, batch, matching-window, terminal-age, and reconciliation-row budgets must each be greater than zero; reconciliation_max_rows must be no greater than the native SQL result budget of 1000000 rows.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
-max_blocks_per_request = 2000
-# Field: market_data.trade_tape_on_chain.batch_size
-# Purpose: Maximum rows written per `ClickHouse` batch. Default: 1000.
+hot_window_blocks_per_tick = 50000
+# Field: market_data.finalized_exchange_history.full_history_blocks_per_tick
+# Purpose: Maximum blocks assigned to the retention frontier per scheduling turn.
+# Requirement: Required; recommended value: 5000.
+# Type/unit/range: Integer; blocks; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+full_history_blocks_per_tick = 5000
+# Field: market_data.finalized_exchange_history.batch_size
+# Purpose: Maximum rows written in one fact batch.
 # Requirement: Required; recommended value: 1000.
 # Type/unit/range: Integer; count; minimum=0.
-# Validation/cross-field contract: [deploy.trade-tape.work-budget] When Always: Block, batch, matching-window, terminal-age, and reconciliation-row budgets must each be greater than zero; reconciliation_max_rows must be no greater than the native SQL result budget of 1000000 rows.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
 batch_size = 1000
-# Field: market_data.trade_tape_on_chain.reconciliation_lookback_secs
-# Purpose: Re-read horizon for WS/on-chain reconciliation. Default: 3600 seconds.
-# Requirement: Required; recommended value: 3600.
-# Type/unit/range: Integer; seconds; minimum=0.
-# Validation/cross-field contract: [deploy.trade-tape.lookback] When Always: reconciliation_lookback_secs must be greater than reconciliation_terminal_age_secs.
+
+[market_data.finalized_exchange_history.hypersync]
+# Field: market_data.finalized_exchange_history.hypersync.endpoint
+# Purpose: Primary finalized Polygon exchange-history extraction endpoint.
+# Requirement: Required; recommended value: "https://polygon.hypersync.xyz".
+# Type/unit/range: String; unitless; no additional scalar restriction beyond the serialized Rust type.
+# Validation/cross-field contract: [deploy.exchange-history.authority] When Always: Enabled history requires authenticated HyperSync extraction, an independent non-Envio archive RPC witness, and the fixed fresh-boot PIT/frontier policy.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: sensitive_endpoint; deployment projection never exposes protected literals.
+# Variants: not applicable.
+endpoint = "https://polygon.hypersync.xyz"
+# Field: market_data.finalized_exchange_history.hypersync.api_token
+# Purpose: Bearer credential used only by the primary historical extraction adapter.
+# Requirement: Required; recommended value: "".
+# Type/unit/range: String; unitless; write_only.
+# Validation/cross-field contract: [deploy.exchange-history.authority] When Always: Enabled history requires authenticated HyperSync extraction, an independent non-Envio archive RPC witness, and the fixed fresh-boot PIT/frontier policy.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: secret; deployment projection never exposes protected literals.
+# Variants: not applicable.
+api_token = ""
+
+[market_data.finalized_exchange_history.attestor]
+# Field: market_data.finalized_exchange_history.attestor.max_blocks_per_log_request
+# Purpose: Maximum inclusive block span in one `eth_getLogs` request.
+# Requirement: Required; recommended value: 10.
+# Type/unit/range: Integer; blocks; minimum=0.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
-reconciliation_lookback_secs = 3600
-# Field: market_data.trade_tape_on_chain.reconciliation_match_window_ms
-# Purpose: Maximum absolute event-time distance for an exact match. Default: 2000 ms.
-# Requirement: Required; recommended value: 2000.
-# Type/unit/range: Integer; milliseconds; minimum=0.
-# Validation/cross-field contract: [deploy.trade-tape.work-budget] When Always: Block, batch, matching-window, terminal-age, and reconciliation-row budgets must each be greater than zero; reconciliation_max_rows must be no greater than the native SQL result budget of 1000000 rows.
-# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
-# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
-# Apply: process restart required; startup validation is fail-closed.
-# Sensitivity/redaction: public; deployment projection never exposes protected literals.
-# Variants: not applicable.
-reconciliation_match_window_ms = 2000
-# Field: market_data.trade_tape_on_chain.reconciliation_terminal_age_secs
-# Purpose: Age after which a still-unmatched WS print becomes unavailable. Default: 600 seconds.
-# Requirement: Required; recommended value: 600.
-# Type/unit/range: Integer; seconds; minimum=0.
-# Validation/cross-field contract: [deploy.trade-tape.work-budget] When Always: Block, batch, matching-window, terminal-age, and reconciliation-row budgets must each be greater than zero; reconciliation_max_rows must be no greater than the native SQL result budget of 1000000 rows. [deploy.trade-tape.lookback] When Always: reconciliation_lookback_secs must be greater than reconciliation_terminal_age_secs.
-# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
-# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
-# Apply: process restart required; startup validation is fail-closed.
-# Sensitivity/redaction: public; deployment projection never exposes protected literals.
-# Variants: not applicable.
-reconciliation_terminal_age_secs = 600
-# Field: market_data.trade_tape_on_chain.reconciliation_max_rows
-# Purpose: Hard row cap per reconciliation cycle; overflow fails without truncation.
-# Requirement: Required; recommended value: 100000.
+max_blocks_per_log_request = 10
+# Field: market_data.finalized_exchange_history.attestor.max_concurrent_log_requests
+# Purpose: Maximum concurrent `eth_getLogs` subrequests within one logical chunk.
+# Requirement: Required; recommended value: 2.
 # Type/unit/range: Integer; count; minimum=0.
-# Validation/cross-field contract: [deploy.trade-tape.work-budget] When Always: Block, batch, matching-window, terminal-age, and reconciliation-row budgets must each be greater than zero; reconciliation_max_rows must be no greater than the native SQL result budget of 1000000 rows.
+# Validation/cross-field contract: [deploy.exchange-history.work-budget] When Always: Timeout, attestor request span/concurrency, response-byte, adaptive logical-chunk, retry, worker, and batch budgets must form valid bounded ranges.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
-reconciliation_max_rows = 100000
+max_concurrent_log_requests = 2
+
+# Field: market_data.finalized_exchange_history.attestor.rpc_endpoint
+# Purpose: JSON-RPC endpoint in a trust and failure domain independent of Envio.
+# Requirement: Required; recommended value: {"source":"public","url":"https://polygon-rpc.com"}.
+# Type/unit/range: Variant; unitless; no additional scalar restriction beyond the serialized Rust type.
+# Validation/cross-field contract: [deploy.exchange-history.authority] When Always: Enabled history requires authenticated HyperSync extraction, an independent non-Envio archive RPC witness, and the fixed fresh-boot PIT/frontier policy.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: sensitive_endpoint; deployment projection never exposes protected literals.
+# Variants: protected, public.
+[market_data.finalized_exchange_history.attestor.rpc_endpoint]
+source = "public"
+url = "https://polygon-rpc.com"
 
 [domain_sources.binance]
 # Field: domain_sources.binance.enabled

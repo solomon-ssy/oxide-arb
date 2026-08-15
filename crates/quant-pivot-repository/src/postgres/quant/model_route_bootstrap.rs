@@ -14,7 +14,8 @@ use quant_pivot_models::{
         },
         quant::{
             BacktestPathSetInfo, BacktestReportInfo, CommitModelRouteBootstrap,
-            ModelBootstrapPolicyProjection, ModelGovernanceAuditDetail, ModelRouteBootstrapPolicy,
+            ModelBootstrapPolicyProjection, ModelBootstrapValidationEvidence,
+            ModelGovernanceAuditDetail, ModelRouteBootstrapActor, ModelRouteBootstrapPolicy,
             ModelRouteBootstrapPreflight, ModelRouteBootstrapRecord,
             ModelRouteBootstrapRecordInput, ModelRouteBootstrapRoute, ModelVersionInfo,
             NewModelGovernanceAudit,
@@ -58,7 +59,8 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
-        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId,
+        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId, RoleCode, UserId,
+        backtest::CpcvFoldValidationRegime,
     },
 };
 use sea_orm::{
@@ -68,7 +70,7 @@ use sea_orm::{
 
 use crate::{
     postgres::{
-        authorization::{self, AuthorizedGovernedActor},
+        authorization,
         governance::PgPolicyRepository,
         primitives,
         quant::{
@@ -80,6 +82,13 @@ use crate::{
         ModelRouteBootstrapCommit, ModelRouteBootstrapOutcome, ModelRouteBootstrapRepository,
     },
 };
+
+struct AuthorizedBootstrapActor {
+    kind: PolicyActorKind,
+    user_id: Option<UserId>,
+    username: String,
+    role: Option<RoleCode>,
+}
 
 struct BootstrapRows {
     snapshot: NewDecisionPolicySnapshot,
@@ -111,6 +120,36 @@ impl PgModelRouteBootstrapRepository {
             detail: detail.into(),
         }
         .into()
+    }
+
+    async fn authorize_bootstrap_actor(
+        transaction: &DatabaseTransaction,
+        actor: &ModelRouteBootstrapActor,
+    ) -> Result<AuthorizedBootstrapActor, RouteBootstrapCommitError> {
+        match actor {
+            ModelRouteBootstrapActor::Operator(actor) => {
+                let authorized = authorization::authorize_actor::<RouteBootstrapCommitError>(
+                    transaction,
+                    actor.user_id,
+                    &actor.acting_role,
+                    ResourceType::Publication,
+                    Operation::Publish,
+                )
+                .await?;
+                Ok(AuthorizedBootstrapActor {
+                    kind: PolicyActorKind::Operator,
+                    user_id: Some(authorized.user_id),
+                    username: authorized.username,
+                    role: Some(authorized.role),
+                })
+            }
+            ModelRouteBootstrapActor::FreshBootOrchestrator => Ok(AuthorizedBootstrapActor {
+                kind: PolicyActorKind::System,
+                user_id: None,
+                username: "fresh_boot_orchestrator".to_owned(),
+                role: None,
+            }),
+        }
     }
 
     async fn lock_runtime(
@@ -167,6 +206,7 @@ impl PgModelRouteBootstrapRepository {
             &bundle,
             manifest.route(),
             manifest.model_version_id(),
+            manifest.scenario_model_binding().clone(),
             database_now,
         )?;
         if projection.non_route_policy_hash() != preflight.non_route_policy_hash() {
@@ -276,24 +316,47 @@ impl PgModelRouteBootstrapRepository {
                 "CPCV path set differs from the bootstrap manifest",
             ));
         }
-        let backtest: BacktestReportInfo =
-            BacktestEntity::find_by_id(manifest.backtest_report_id())
-                .lock_shared()
-                .one(transaction)
-                .await
-                .map_err(StorageError::from)?
-                .ok_or_else(|| {
-                    StorageError::not_found("quant_backtest_report", manifest.backtest_report_id())
-                })?
-                .into();
-        backtest.verify_hash().map_err(Self::conflict)?;
-        if backtest.model_version_id != model.model_version_id
-            || backtest.decision_policy_snapshot_id != preflight.expected_snapshot_id()
-            || backtest.report_hash != manifest.backtest_report_hash()
-        {
-            return Err(Self::conflict(
-                "backtest report differs from the bootstrap manifest",
-            ));
+        let fold_regime = path_set
+            .fold_artifacts
+            .validation_regime()
+            .map_err(|error| Self::conflict(error.to_string()))?;
+        match manifest.validation_evidence() {
+            ModelBootstrapValidationEvidence::PredictiveCpcv { .. } => {
+                if fold_regime != CpcvFoldValidationRegime::PredictiveUtility {
+                    return Err(Self::conflict(
+                        "predictive bootstrap manifest is bound to portfolio-economic CPCV",
+                    ));
+                }
+            }
+            ModelBootstrapValidationEvidence::PortfolioEconomics {
+                backtest_report_id,
+                backtest_report_hash,
+                ..
+            } => {
+                if fold_regime != CpcvFoldValidationRegime::PortfolioEconomics {
+                    return Err(Self::conflict(
+                        "portfolio bootstrap manifest is bound to predictive CPCV",
+                    ));
+                }
+                let backtest: BacktestReportInfo = BacktestEntity::find_by_id(backtest_report_id)
+                    .lock_shared()
+                    .one(transaction)
+                    .await
+                    .map_err(StorageError::from)?
+                    .ok_or_else(|| {
+                        StorageError::not_found("quant_backtest_report", backtest_report_id)
+                    })?
+                    .into();
+                backtest.verify_hash().map_err(Self::conflict)?;
+                if backtest.model_version_id != model.model_version_id
+                    || backtest.decision_policy_snapshot_id != preflight.expected_snapshot_id()
+                    || backtest.report_hash != backtest_report_hash
+                {
+                    return Err(Self::conflict(
+                        "backtest report differs from the bootstrap manifest",
+                    ));
+                }
+            }
         }
         let report = manifest.quality_gate_report();
         report
@@ -430,8 +493,8 @@ impl PgModelRouteBootstrapRepository {
             )?,
             snapshot: document,
             source: DecisionPolicySnapshotSource::Activation,
-            created_by_kind: PolicyActorKind::Operator,
-            created_by_user_id: Some(record.actor_user_id()),
+            created_by_kind: record.actor_kind(),
+            created_by_user_id: record.actor_user_id(),
             created_by_label: record.actor_username().to_owned(),
             reason: record.audit_reason(),
         })
@@ -439,7 +502,7 @@ impl PgModelRouteBootstrapRepository {
 
     fn build_rows(
         command: &CommitModelRouteBootstrap,
-        authorized: &AuthorizedGovernedActor,
+        authorized: &AuthorizedBootstrapActor,
         current: &ActivePolicyBundle,
         projection: &ModelBootstrapPolicyProjection,
         model: &ModelVersionInfo,
@@ -482,6 +545,7 @@ impl PgModelRouteBootstrapRepository {
         };
         let record = ModelRouteBootstrapRecord::try_seal(ModelRouteBootstrapRecordInput {
             preflight: command.preflight().clone(),
+            actor_kind: authorized.kind,
             actor_user_id: authorized.user_id,
             actor_username: authorized.username.clone(),
             actor_role: authorized.role.clone(),
@@ -541,8 +605,8 @@ impl PgModelRouteBootstrapRepository {
             validated_at: Some(database_now),
             preflight_token_hash: Some(record.preflight().preflight_hash()),
             preflight_expires_at: None,
-            created_by_kind: PolicyActorKind::Operator,
-            created_by_user_id: Some(record.actor_user_id()),
+            created_by_kind: record.actor_kind(),
+            created_by_user_id: record.actor_user_id(),
             created_by_label: record.actor_username().to_owned(),
             reason: audit_reason.clone(),
         };
@@ -553,8 +617,8 @@ impl PgModelRouteBootstrapRepository {
             revision_hash,
             validation_subject: Some(subject),
             decision: PolicyApprovalDecision::Approved,
-            decided_by_kind: PolicyActorKind::Operator,
-            decided_by_user_id: Some(record.actor_user_id()),
+            decided_by_kind: record.actor_kind(),
+            decided_by_user_id: record.actor_user_id(),
             decided_by_label: record.actor_username().to_owned(),
             reason: audit_reason.clone(),
             decided_at: database_now,
@@ -565,9 +629,9 @@ impl PgModelRouteBootstrapRepository {
             model_version_id: Some(model.model_version_id),
             training_dataset_id: model.training_dataset_id,
             action: ModelGovernanceAction::BootstrapRoute,
-            actor_user_id: Some(record.actor_user_id()),
+            actor_user_id: record.actor_user_id(),
             actor_username: record.actor_username().to_owned(),
-            actor_role: Some(record.actor_role().clone()),
+            actor_role: record.actor_role().cloned(),
             reason: audit_reason.clone(),
             detail: ModelGovernanceAuditDetail::BootstrapRoute {
                 record: Box::new(record.clone()),
@@ -582,7 +646,7 @@ impl PgModelRouteBootstrapRepository {
             policy_revision_id: policy.committed_model_routing_revision_id,
             decision_policy_snapshot_id: policy.committed_snapshot_id,
             policy_approval_id: policy.policy_approval_id,
-            activated_by_kind: PolicyActorKind::Operator,
+            activated_by_kind: record.actor_kind(),
             activated_by_user_id: record.actor_user_id(),
             activated_by_label: record.actor_username().to_owned(),
             reason: audit_reason,
@@ -767,9 +831,9 @@ impl PgModelRouteBootstrapRepository {
             && audit.training_dataset_id
                 == Some(record.preflight().manifest().training_dataset_id())
             && audit.action == ModelGovernanceAction::BootstrapRoute
-            && audit.actor_user_id == Some(record.actor_user_id())
+            && audit.actor_user_id == record.actor_user_id()
             && audit.actor_username == record.actor_username()
-            && audit.actor_role.as_ref() == Some(record.actor_role())
+            && audit.actor_role.as_ref() == record.actor_role()
             && audit.reason == audit_reason
             && audit.audit_event_id == record.audit_event_id()
             && audit.promotion_permit_id.is_none()
@@ -782,8 +846,8 @@ impl PgModelRouteBootstrapRepository {
             && activation.policy_revision_id == policy.committed_model_routing_revision_id
             && activation.decision_policy_snapshot_id == policy.committed_snapshot_id
             && activation.policy_approval_id == policy.policy_approval_id
-            && activation.activated_by_kind == PolicyActorKind::Operator
-            && activation.activated_by_user_id == Some(record.actor_user_id())
+            && activation.activated_by_kind == record.actor_kind()
+            && activation.activated_by_user_id == record.actor_user_id()
             && activation.activated_by_label == record.actor_username()
             && activation.reason == audit_reason
             && activation.expected_active_revision_id
@@ -892,6 +956,11 @@ impl PgModelRouteBootstrapRepository {
             &previous,
             record.route().route,
             record.route().model_version_id,
+            record
+                .preflight()
+                .manifest()
+                .scenario_model_binding()
+                .clone(),
             activation.activated_at,
         )?;
         projection.validate_candidate(&committed.snapshot)?;
@@ -978,8 +1047,8 @@ impl PgModelRouteBootstrapRepository {
             && revision.validated_at.is_some()
             && revision.preflight_token_hash == Some(record.preflight().preflight_hash())
             && revision.preflight_expires_at.is_none()
-            && revision.created_by_kind == PolicyActorKind::Operator
-            && revision.created_by_user_id == Some(record.actor_user_id())
+            && revision.created_by_kind == record.actor_kind()
+            && revision.created_by_user_id == record.actor_user_id()
             && revision.created_by_label == record.actor_username()
             && revision.reason == audit_reason;
         let approval_exact = approval.policy_revision_id == revision.policy_revision_id
@@ -987,8 +1056,8 @@ impl PgModelRouteBootstrapRepository {
             && approval.revision_hash == revision_hash
             && approval.validation_subject == Some(subject)
             && approval.decision == PolicyApprovalDecision::Approved
-            && approval.decided_by_kind == PolicyActorKind::Operator
-            && approval.decided_by_user_id == Some(record.actor_user_id())
+            && approval.decided_by_kind == record.actor_kind()
+            && approval.decided_by_user_id == record.actor_user_id()
             && approval.decided_by_label == record.actor_username()
             && approval.reason == audit_reason
             && approval.expires_at.is_none();
@@ -1003,16 +1072,17 @@ impl PgModelRouteBootstrapRepository {
     fn command_matches(
         record: &ModelRouteBootstrapRecord,
         command: &CommitModelRouteBootstrap,
-        authorized: &AuthorizedGovernedActor,
+        authorized: &AuthorizedBootstrapActor,
     ) -> bool {
         let request = command.request();
         record.preflight().manifest().model_version_id() == request.model_version_id
             && record.preflight().expected_policy_generation() == request.expected_policy_generation
             && record.preflight().expected_runtime_revision()
                 == request.expected_runtime_control_revision
+            && record.actor_kind() == authorized.kind
             && record.actor_user_id() == authorized.user_id
             && record.actor_username() == authorized.username
-            && record.actor_role() == &authorized.role
+            && record.actor_role() == authorized.role.as_ref()
             && record.idempotency_key() == &request.idempotency_key
             && record.reason_code() == request.reason_code
             && record.note() == request.note
@@ -1036,14 +1106,8 @@ impl ModelRouteBootstrapRepository for PgModelRouteBootstrapRepository {
     ) -> Result<ModelRouteBootstrapCommit, RouteBootstrapCommitError> {
         command.preflight().validate()?;
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let authorized = authorization::authorize_actor::<RouteBootstrapCommitError>(
-            &transaction,
-            command.request().actor.user_id,
-            &command.request().actor.acting_role,
-            ResourceType::Publication,
-            Operation::Publish,
-        )
-        .await?;
+        let authorized =
+            Self::authorize_bootstrap_actor(&transaction, &command.request().actor).await?;
         let guard = PgPolicyRepository::acquire_activation_lock(&transaction).await?;
         if let Some(resolved) =
             Self::load_commit(&transaction, &command.request().idempotency_key).await?

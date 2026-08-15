@@ -1,13 +1,14 @@
 //! Authoritative active-event keyset scan orchestration with retry.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
     },
 };
 
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use futures_util::StreamExt;
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::{
@@ -29,6 +30,12 @@ use crate::infra::{
 const EVENTS_KEYSET_PATH: &str = "/events/keyset";
 const MAX_KEYSET_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_KEYSET_RESPONSE_BYTES_U64: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+enum GammaScanScope {
+    Active,
+    Historical { cutoff: DateTime<Utc> },
+}
 
 struct GammaResponseBody {
     bytes: Vec<u8>,
@@ -125,14 +132,27 @@ fn effective_keyset_page_size(page_size: u32) -> u32 {
 
 fn events_keyset_url(
     base_url: &str,
+    scope: GammaScanScope,
     page_size: u32,
     after_cursor: Option<&str>,
 ) -> Result<Url, ApiError> {
     let mut url = parse_events_keyset_base(base_url)?;
     {
         let mut pairs = url.query_pairs_mut();
-        pairs.append_pair("active", "true");
-        pairs.append_pair("closed", "false");
+        match scope {
+            GammaScanScope::Active => {
+                pairs.append_pair("active", "true");
+                pairs.append_pair("closed", "false");
+            }
+            GammaScanScope::Historical { cutoff } => {
+                pairs.append_pair("active", "false");
+                pairs.append_pair("closed", "true");
+                pairs.append_pair(
+                    "end_date_min",
+                    &cutoff.to_rfc3339_opts(SecondsFormat::Secs, true),
+                );
+            }
+        }
         pairs.append_pair("limit", &page_size.to_string());
         if let Some(cursor) = after_cursor {
             pairs.append_pair("after_cursor", cursor);
@@ -150,6 +170,7 @@ async fn fetch_events_keyset_page(
     config: &GammaConfig,
     retry_policy: &RetryPolicy,
     request_count: &Arc<AtomicU32>,
+    scope: GammaScanScope,
     page_size: u32,
     after_cursor: Option<&str>,
 ) -> Result<KeysetEventsPage, ApiError> {
@@ -174,7 +195,7 @@ async fn fetch_events_keyset_page(
                     ),
                 });
             }
-            let url = events_keyset_url(&base_url, page_size, after_cursor.as_deref())?;
+            let url = events_keyset_url(&base_url, scope, page_size, after_cursor.as_deref())?;
             let response = http.get(url).send().await.map_err(|e| ApiError::Gamma {
                 endpoint: EVENTS_KEYSET_PATH.into(),
                 status: e.status().map_or(0, |s| s.as_u16()),
@@ -218,13 +239,14 @@ async fn walk_keyset_pages<F>(
     http: &Client,
     config: &GammaConfig,
     retry_policy: &RetryPolicy,
+    request_count: &Arc<AtomicU32>,
+    scope: GammaScanScope,
     page_size: u32,
     mut visit: F,
 ) -> Result<(), ApiError>
 where
     F: FnMut(Vec<CatalogEvent>) -> bool,
 {
-    let request_count = Arc::new(AtomicU32::new(0));
     let mut pages = 0_u32;
     let mut after_cursor: Option<String> = None;
     let mut seen_cursors = BTreeSet::new();
@@ -243,7 +265,8 @@ where
             http,
             config,
             retry_policy,
-            &request_count,
+            request_count,
+            scope,
             page_size,
             after_cursor.as_deref(),
         )
@@ -287,14 +310,63 @@ pub async fn full_sync_raw(
     config: &GammaConfig,
     retry_policy: &RetryPolicy,
 ) -> Result<Vec<CatalogEvent>, ApiError> {
-    let mut catalog = Vec::new();
-    walk_keyset_pages(http, config, retry_policy, config.page_size, |events| {
-        catalog.extend(events);
-        true
-    })
+    let request_count = Arc::new(AtomicU32::new(0));
+    let mut catalog = BTreeMap::new();
+    let mut duplicate = None;
+    walk_keyset_pages(
+        http,
+        config,
+        retry_policy,
+        &request_count,
+        GammaScanScope::Active,
+        config.page_size,
+        |events| {
+            duplicate = append_catalog(&mut catalog, events);
+            duplicate.is_none()
+        },
+    )
     .await?;
+    reject_catalog_duplicate(duplicate)?;
+    let cutoff = Utc::now() - Duration::days(i64::from(config.historical_identity_days));
+    let mut duplicate = None;
+    walk_keyset_pages(
+        http,
+        config,
+        retry_policy,
+        &request_count,
+        GammaScanScope::Historical { cutoff },
+        config.page_size,
+        |events| {
+            duplicate = append_catalog(&mut catalog, events);
+            duplicate.is_none()
+        },
+    )
+    .await?;
+    reject_catalog_duplicate(duplicate)?;
 
-    Ok(catalog)
+    Ok(catalog.into_values().collect())
+}
+
+fn append_catalog(
+    catalog: &mut BTreeMap<String, CatalogEvent>,
+    events: Vec<CatalogEvent>,
+) -> Option<String> {
+    for event in events {
+        let event_id = event.id.clone();
+        if catalog.insert(event_id.clone(), event).is_some() {
+            return Some(event_id);
+        }
+    }
+    None
+}
+
+fn reject_catalog_duplicate(duplicate: Option<String>) -> Result<(), ApiError> {
+    duplicate.map_or(Ok(()), |event_id| {
+        Err(ApiError::Deserialize {
+            context: "gamma keyset identity".into(),
+            detail: format!("duplicate event `{event_id}` across canonical catalog scan"),
+        })
+    })
 }
 
 pub async fn full_sync(
@@ -338,10 +410,13 @@ pub async fn discover_active_tokens(
     }
 
     let mut tokens = Vec::with_capacity(limit);
+    let request_count = Arc::new(AtomicU32::new(0));
     walk_keyset_pages(
         http,
         config,
         retry_policy,
+        &request_count,
+        GammaScanScope::Active,
         config.page_size.min(50),
         |catalog| {
             for event in &catalog {
@@ -376,7 +451,9 @@ pub async fn discover_active_tokens(
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_keyset_page_size, events_keyset_url};
+    use chrono::{TimeZone, Utc};
+
+    use super::{GammaScanScope, effective_keyset_page_size, events_keyset_url};
     use crate::gamma::wire::GAMMA_EVENTS_KEYSET_MAX_PAGE_SIZE;
 
     #[test]
@@ -391,8 +468,13 @@ mod tests {
 
     #[test]
     fn keyset_url_encodes_cursor() {
-        let url = events_keyset_url("https://gamma-api.polymarket.com", 100, Some("cursor-1"))
-            .expect("url");
+        let url = events_keyset_url(
+            "https://gamma-api.polymarket.com",
+            GammaScanScope::Active,
+            100,
+            Some("cursor-1"),
+        )
+        .expect("url");
         let query = url.query().expect("query");
         assert!(query.contains("active=true"));
         assert!(query.contains("closed=false"));
@@ -402,8 +484,21 @@ mod tests {
 
     #[test]
     fn keyset_omits_after_cursor() {
-        let url = events_keyset_url("https://gamma-api.polymarket.com", 50, None).expect("url");
+        let cutoff = Utc
+            .with_ymd_and_hms(2026, 1, 2, 3, 4, 5)
+            .single()
+            .expect("cutoff");
+        let url = events_keyset_url(
+            "https://gamma-api.polymarket.com",
+            GammaScanScope::Historical { cutoff },
+            50,
+            None,
+        )
+        .expect("url");
         let query = url.query().expect("query");
         assert!(!query.contains("after_cursor"));
+        assert!(query.contains("active=false"));
+        assert!(query.contains("closed=true"));
+        assert!(query.contains("end_date_min=2026-01-02T03%3A04%3A05Z"));
     }
 }

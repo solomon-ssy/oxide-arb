@@ -22,7 +22,7 @@ use quant_pivot_models::{
         quant::{DataQualityStatus, FactorDirection},
     },
     runtime_config::FeaturesConfig,
-    types::{FactorDefinitionId, Probability},
+    types::{FactorDefinitionId, Probability, ResearchFeatureContract},
 };
 use rust_decimal::Decimal;
 
@@ -32,7 +32,9 @@ use crate::{
         names::{
             BOOK_IMBALANCE, DATA_QUALITY, LIQUIDITY_DEPTH, MARKET_ACTIVITY, MEAN_REVERSION,
             MOMENTUM_EMA_SLOPE, MOMENTUM_MACD, MOMENTUM_ROC, MOMENTUM_VOL_ADJUSTED,
-            SPREAD_EFFICIENCY, TIME_TO_RESOLUTION, VOLATILITY_REGIME,
+            SPREAD_EFFICIENCY, TIME_TO_RESOLUTION, TRADE_EXECUTION_ACTIVITY,
+            TRADE_EXECUTION_IMBALANCE, TRADE_MACD, TRADE_MOMENTUM, TRADE_PARTICIPANT_CONCENTRATION,
+            TRADE_VOLATILITY_REGIME, VOLATILITY_REGIME,
         },
         semantics::{
             DATA_QUALITY_SCORE, FEATURE_SCALAR_IDENTITY, PRIMARY_EMA_SLOPE, PRIMARY_REALIZED_VOL,
@@ -44,12 +46,17 @@ use crate::{
         },
     },
     features::{
-        self, FeatureCellState, FeatureName, FeatureSchema, FeatureStaleness, FeatureValue,
-        FeatureVector, NullPolicy, StalenessRule,
+        self, ExecutableFeatureSchema, FeatureCellState, FeatureName, FeatureStaleness,
+        FeatureValue, FeatureVector, NullPolicy, StalenessRule,
         names::{
             book,
             market::TIME_TO_RESOLUTION_SECS,
             micro::QUOTE_UPDATE_RATE,
+            trade::{
+                EXECUTION_INTENSITY, LAGGED_MOMENTUM, MACD_NORM as TRADE_MACD_NORM,
+                PARTICIPANT_HHI as TRADE_PARTICIPANT_HHI, REALIZED_VOLATILITY,
+                SIGNED_NOTIONAL_IMBALANCE,
+            },
             ts::{MACD_NORM, PRICE_REVERSAL},
         },
     },
@@ -177,9 +184,103 @@ pub fn generic_factors(
             semantic_key: FEATURE_SCALAR_IDENTITY,
         }
         .build(),
-        data_quality_factor(features),
+        data_quality_factor(features, ResearchFeatureContract::FullL2),
     ]);
     factors
+}
+
+/// Factor-native plane for an L2-free finalized-execution profile.
+///
+/// Every estimator consumes only `trade.*` cells. Domain factors are appended
+/// separately by [`crate::factors::FactorRegistry`] for the exact category.
+/// The finalized feature schema remains the sole missingness gate, so none of
+/// these factors invents a replacement for an unavailable execution window.
+#[must_use]
+pub fn bootstrap_trade_factors(
+    features: &FeaturesConfig,
+    feature_contract: ResearchFeatureContract,
+) -> Vec<(FactorDefinitionDocument, Arc<dyn FactorComputer>)> {
+    vec![
+        FeatureFactorInput {
+            name: TRADE_MOMENTUM,
+            family: FactorFamily::Momentum,
+            output: FactorOutputSemantics::OutcomeAlpha {
+                orientation: FactorAlphaOrientation::FeatureToken,
+            },
+            input: LAGGED_MOMENTUM,
+            normalization: FactorNormalization::WinsorizedZScore,
+            required: false,
+            headline_label: "finalized execution momentum",
+            semantic_key: FEATURE_SCALAR_IDENTITY,
+        }
+        .build(),
+        FeatureFactorInput {
+            name: TRADE_MACD,
+            family: FactorFamily::Momentum,
+            output: FactorOutputSemantics::OutcomeAlpha {
+                orientation: FactorAlphaOrientation::FeatureToken,
+            },
+            input: TRADE_MACD_NORM,
+            normalization: FactorNormalization::WinsorizedZScore,
+            required: false,
+            headline_label: "finalized execution MACD",
+            semantic_key: FEATURE_SCALAR_IDENTITY,
+        }
+        .build(),
+        FeatureFactorInput {
+            name: TRADE_EXECUTION_IMBALANCE,
+            family: FactorFamily::Microstructure,
+            output: FactorOutputSemantics::OutcomeAlpha {
+                orientation: FactorAlphaOrientation::FeatureToken,
+            },
+            input: SIGNED_NOTIONAL_IMBALANCE,
+            normalization: FactorNormalization::WinsorizedZScore,
+            required: false,
+            headline_label: "signed finalized execution imbalance",
+            semantic_key: FEATURE_SCALAR_IDENTITY,
+        }
+        .build(),
+        FeatureFactorInput {
+            name: TRADE_VOLATILITY_REGIME,
+            family: FactorFamily::Volatility,
+            output: FactorOutputSemantics::Context {
+                effect: FactorContextEffect::LowerIsSupportive,
+            },
+            input: REALIZED_VOLATILITY,
+            normalization: FactorNormalization::Rank,
+            required: false,
+            headline_label: "finalized execution volatility",
+            semantic_key: FEATURE_SCALAR_IDENTITY,
+        }
+        .build(),
+        FeatureFactorInput {
+            name: TRADE_EXECUTION_ACTIVITY,
+            family: FactorFamily::Activity,
+            output: FactorOutputSemantics::Context {
+                effect: FactorContextEffect::HigherIsSupportive,
+            },
+            input: EXECUTION_INTENSITY,
+            normalization: FactorNormalization::WinsorizedZScore,
+            required: false,
+            headline_label: "finalized execution intensity",
+            semantic_key: FEATURE_SCALAR_IDENTITY,
+        }
+        .build(),
+        FeatureFactorInput {
+            name: TRADE_PARTICIPANT_CONCENTRATION,
+            family: FactorFamily::Structural,
+            output: FactorOutputSemantics::Context {
+                effect: FactorContextEffect::LowerIsSupportive,
+            },
+            input: TRADE_PARTICIPANT_HHI,
+            normalization: FactorNormalization::WinsorizedZScore,
+            required: false,
+            headline_label: "finalized execution participant concentration",
+            semantic_key: FEATURE_SCALAR_IDENTITY,
+        }
+        .build(),
+        data_quality_factor(features, feature_contract),
+    ]
 }
 
 /// The independent momentum family: four distinct estimators (never a return
@@ -303,6 +404,7 @@ impl FeatureFactorInput {
 /// Build the data-quality `(spec, computer)` pair (`MinMax` bounds from config).
 fn data_quality_factor(
     features: &FeaturesConfig,
+    feature_contract: ResearchFeatureContract,
 ) -> (FactorDefinitionDocument, Arc<dyn FactorComputer>) {
     let spec = FactorDefinitionDocument {
         name: DATA_QUALITY,
@@ -320,7 +422,8 @@ fn data_quality_factor(
         required: false,
         computation: contract(DATA_QUALITY_SCORE),
     };
-    let schema = FeatureSchema::build(features).map_err(|error| error.to_string());
+    let schema = ExecutableFeatureSchema::build(features, feature_contract)
+        .map_err(|error| error.to_string());
     let computer = Arc::new(DataQualityFactor {
         spec: spec.clone(),
         schema,
@@ -428,7 +531,7 @@ impl FactorComputer for FeatureBackedFactor {
 /// quality minus missing-feature and staleness penalties).
 struct DataQualityFactor {
     spec: FactorDefinitionDocument,
-    schema: Result<FeatureSchema, String>,
+    schema: Result<ExecutableFeatureSchema, String>,
 }
 
 impl FactorComputer for DataQualityFactor {
@@ -511,7 +614,7 @@ struct QualitySummary {
 }
 
 impl QualitySummary {
-    fn from_vector(schema: &FeatureSchema, features: &FeatureVector) -> Self {
+    fn from_vector(schema: &ExecutableFeatureSchema, features: &FeatureVector) -> Self {
         let mut summary = Self::default();
         for spec in schema.specs().iter().filter(|spec| {
             matches!(
@@ -608,7 +711,7 @@ mod tests {
             quant::{DataQualityStatus, FactorDirection},
         },
         runtime_config::{FeatureFamily, FeaturesConfig},
-        types::{FactorDefinitionId, MarketId, SchemaVersion, TokenId},
+        types::{FactorDefinitionId, MarketId, ResearchFeatureContract, SchemaVersion, TokenId},
     };
     use rust_decimal_macros::dec;
 
@@ -671,7 +774,7 @@ mod tests {
     }
 
     fn score(config: &FeaturesConfig, features: &FeatureVector) -> RawFactor {
-        let (_, computer) = data_quality_factor(config);
+        let (_, computer) = data_quality_factor(config, ResearchFeatureContract::FullL2);
         computer
             .compute_raw(FactorDefinitionId::from_v7(), features)
             .expect("compute data quality")
@@ -814,7 +917,7 @@ mod tests {
     fn raw_lineage_is_declared() {
         let config = FeaturesConfig::default();
         let vector = market_vector(MarketCategory::Other);
-        let (definition, computer) = data_quality_factor(&config);
+        let (definition, computer) = data_quality_factor(&config, ResearchFeatureContract::FullL2);
         assert_eq!(
             definition.input_features,
             vec![QUALITY_STATUS, QUALITY_STALENESS, QUALITY_STATES]

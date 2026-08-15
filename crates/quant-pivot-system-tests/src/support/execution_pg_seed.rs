@@ -26,11 +26,11 @@ use quant_pivot_models::{
             NewPortfolioPlan, NewRecommendation, NewRecommendationReport, NewReconciliation,
             NewReportDataQualitySnapshot, NewReportRouteRun, NewReportTransaction,
             PortfolioConstraintEvidence, PortfolioDecisionResult, PortfolioObjectiveEvidence,
-            PortfolioScenario, PortfolioScenarioArtifact, PortfolioScenarioKind,
-            PortfolioScenarioVisibility, PositionExit, PositionFill, RecommendationEconomics,
-            RepresentedRouteSet, RouteCandidateFunnel, RouteModelLineage, RouteRunOutcome,
-            ScenarioCashflow, ScenarioDistribution, ScenarioWeight, SolverEvidence,
-            SubmissionLedgerWrite, TrainingDatasetInfo,
+            PortfolioScenario, PortfolioScenarioArtifact, PortfolioScenarioEvidenceRegime,
+            PortfolioScenarioKind, PortfolioScenarioVisibility, PositionExit, PositionFill,
+            RecommendationEconomics, RepresentedRouteSet, RouteCandidateFunnel, RouteModelLineage,
+            RouteRunOutcome, ScenarioCashflow, ScenarioDistribution, ScenarioWeight,
+            SolverEvidence, SubmissionLedgerWrite, TrainingDatasetInfo,
         },
         query::TimeWindow,
     },
@@ -89,9 +89,9 @@ use quant_pivot_models::{
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
         ReportDataQualityTokens, ReportRouteRunId, ReportRunId, ReportSummary, ResearchProfileRef,
         ResearchProfileSpec, RiskEnvelope, RoleCode, SchemaVersion, SelectionExclusionSummary,
-        Shares, SignalCandidateId, SizingPlan, SourceSliceManifestRef, ThesisInvalidationPolicy,
-        TokenId, TradePolicyCohortProvenance, TrainingDatasetId, Usd, UsdHours, UserId,
-        VenueOrderAmount, builtin_research_profiles,
+        ServingAuthority, Shares, SignalCandidateId, SizingPlan, SourceSliceManifestRef,
+        ThesisInvalidationPolicy, TokenId, TradePolicyCohortProvenance, TrainingDatasetId, Usd,
+        UsdHours, UserId, VenueOrderAmount, builtin_research_profiles,
         calibration::{
             IsotonicKnot, MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
             ModelScoreCalibrationDatasetBinding, ModelScoreCalibrationFitContract,
@@ -128,7 +128,7 @@ use quant_pivot_repository::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     factors::{FactorEngine, FactorValue, NormalizedFactor},
-    features::FeatureSchema,
+    features::ExecutableFeatureSchema,
     hashing::ResearchHasher,
     model::{CalibratedReturnModel, ModelArtifact, ReturnModelSpec},
     portfolio::CapitalTimeBucketContract,
@@ -1855,7 +1855,10 @@ pub fn fixture_profile_ref() -> ResearchProfileRef {
     builtin_research_profiles()
         .expect("research profiles")
         .into_iter()
-        .find(|profile| profile.spec.category == Some(MarketCategory::Weather))
+        .find(|profile| {
+            profile.spec.category == Some(MarketCategory::Weather)
+                && profile.spec.feature_contract.requires_l2()
+        })
         .expect("Weather ResearchProfile")
         .profile_ref
 }
@@ -2092,13 +2095,10 @@ pub async fn seed_report_catalog(
     token_id: &str,
     no_token_id: &TokenId,
 ) {
+    let mut event = make_event(event_id, "Event", "event", MarketCategory::Weather);
+    event.catalog_market_ids = vec![MarketId::new(market_id)].into();
     PgEventRepository::new(db.clone())
-        .upsert(make_event(
-            event_id,
-            "Event",
-            "event",
-            MarketCategory::Weather,
-        ))
+        .upsert(event)
         .await
         .expect("seed event");
     let mut market = make_market(
@@ -2688,8 +2688,14 @@ pub(super) async fn seed_model_version_named(
     let features = &policy.snapshot.profile_artifacts.features.definition;
     let factors = &policy.snapshot.profile_artifacts.scoring.definition;
     let domain = &policy.snapshot.profile_artifacts.domain.definition;
-    let factor_engine =
-        FactorEngine::for_model_scope(factors, features, domain, profile.spec.category, None);
+    let factor_engine = FactorEngine::for_model_scope(
+        factors,
+        features,
+        domain,
+        profile.spec.feature_contract,
+        profile.spec.category,
+        None,
+    );
     let factor_plane = factor_engine.serving_plane().expect("demo factor plane");
     PgFactorRepository::new(db.clone())
         .register_definitions(
@@ -2702,9 +2708,11 @@ pub(super) async fn seed_model_version_named(
         )
         .await
         .expect("register execution model factor definitions");
-    let feature_schema_hash =
-        ResearchHasher::feature_schema(&FeatureSchema::build(features).expect("feature schema"))
-            .expect("feature schema hash");
+    let feature_schema_hash = ResearchHasher::feature_schema(
+        &ExecutableFeatureSchema::build(features, profile.spec.feature_contract)
+            .expect("feature schema"),
+    )
+    .expect("feature schema hash");
     let dataset = ModelDatasetLedgerFixture::persist(
         db,
         dataset_store,
@@ -3078,13 +3086,15 @@ fn fixture_route_runs(
         model_version_id: ids.model_version,
         model_run_id: Some(ids.model_run),
         calibration_artifact_id: ids.calibration_artifact,
-        trade_policy_artifact_id: ids.trade_policy.artifact_id,
+        trade_policy_artifact_id: Some(ids.trade_policy.artifact_id),
         research_profile_artifact_id: profile_ref.artifact_id(),
         research_profile_ref: profile_ref,
         prediction_horizon_secs: 86_400,
         feature_contract_digest: content_hash('h'),
         pit_lineage_digest: content_hash('i'),
         serving_contract_digest: content_hash('j'),
+        recommendation_contract_hash: ids.trade_policy.artifact_hash,
+        serving_authority: ServingAuthority::ExecutionEligible,
     };
     let selected_recommendations =
         u32::try_from(recommendations.len()).expect("fixture recommendation count fits u32");
@@ -3100,7 +3110,7 @@ fn fixture_route_runs(
         model_version_id: Some(lineage.model_version_id),
         model_run_id: lineage.model_run_id,
         calibration_artifact_id: Some(lineage.calibration_artifact_id),
-        trade_policy_artifact_id: Some(lineage.trade_policy_artifact_id),
+        trade_policy_artifact_id: lineage.trade_policy_artifact_id,
         research_profile_artifact_id: Some(lineage.research_profile_artifact_id.clone()),
         lineage_json: Some(lineage),
         funnel_json: RouteCandidateFunnel {
@@ -3171,7 +3181,8 @@ fn fixture_scenario_artifact(
         route_set_digest: represented_routes.digest,
         serving_contract_digest: content_hash('j'),
         calibration_contract_digest: content_hash('k'),
-        trade_policy_contract_digest: content_hash('m'),
+        recommendation_contract_digest: content_hash('m'),
+        evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
         capital_time_bucket_contract_digest,
         scenarios,
         distributions: vec![
@@ -3474,10 +3485,10 @@ fn trade_plan(
     economic_tier_id: EconomicTierId,
 ) -> RecommendationTradePlan {
     RecommendationTradePlan {
-        policy: Box::new(policy.clone()),
+        policy: Box::new(policy.clone().into()),
         entry: entry_plan(),
         sizing: Box::new(sizing_plan(economic_tier_id)),
-        exit: Box::new(exit_plan()),
+        exit: Box::new(exit_plan().into()),
         risk_envelope: Box::new(risk_envelope()),
     }
 }

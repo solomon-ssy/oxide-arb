@@ -1,5 +1,5 @@
 //! Governed feature schema: [`FeatureSpec`] and the versioned
-//! [`FeatureSchema`] registry built from runtime config.
+//! [`ExecutableFeatureSchema`] registry built from runtime config.
 //!
 //! The schema is the single declaration of every feature the plane can produce:
 //! its dimensional kind, unit, valid range, null policy, source requirement,
@@ -13,7 +13,7 @@ use std::{collections::HashMap, ops::RangeInclusive};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     runtime_config::{FeatureFamily, FeaturesConfig},
-    types::SchemaVersion,
+    types::{ResearchFeatureContract, SchemaVersion},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -39,10 +39,17 @@ use crate::features::{
             STALE_QUOTE_FREQUENCY, SUDDEN_LIQUIDITY_WITHDRAWAL,
         },
         structural::{
-            BOOK_CHURN_INTENSITY, MAKER_GINI, NEGRISK_CONVERT_EDGE, NEGRISK_LEG_ASK_SUM,
-            NEGRISK_LEG_BID_SUM, NEGRISK_LEG_COUNT, PARTICIPANT_COUNT, PARTICIPANT_COVERAGE_RATIO,
+            BOOK_CHURN_INTENSITY, EXECUTION_HISTORY_COUNT, EXECUTION_HISTORY_NOTIONAL_USD,
+            MAKER_GINI, NEGRISK_CONVERT_EDGE, NEGRISK_LEG_ASK_SUM, NEGRISK_LEG_BID_SUM,
+            NEGRISK_LEG_COUNT, PARTICIPANT_COUNT, PARTICIPANT_COVERAGE_RATIO,
             PARTICIPANT_CR1_SHARE, PARTICIPANT_GINI, PARTICIPANT_HHI, PRICE_EXTREMITY, SHOCK_RATIO,
-            SHORT_RETURN, TAKER_GINI, TRADE_TAPE_COUNT, TRADE_TAPE_NOTIONAL_USD,
+            SHORT_RETURN, TAKER_GINI,
+        },
+        trade::{
+            EMA_SLOPE, EXECUTION_COVERAGE_RATIO, EXECUTION_INTENSITY, EXECUTION_STALENESS_SECS,
+            LAGGED_MOMENTUM, LAST_FILL_RETURN, MACD_NORM as TRADE_MACD_NORM,
+            PARTICIPANT_GINI as TRADE_PARTICIPANT_GINI, PARTICIPANT_HHI as TRADE_PARTICIPANT_HHI,
+            REALIZED_VOLATILITY, SIGNED_NOTIONAL_IMBALANCE,
         },
         ts::{MACD_NORM, PRICE_REVERSAL},
     },
@@ -94,8 +101,8 @@ pub enum SourceRequirement {
     /// Same-`as_of` order books of the market's neg-risk sibling YES legs
     /// (structural full-leg aggregates). No external data source.
     NegRiskSiblingLegs,
-    /// A window of persisted full-market trade-tape participant facts.
-    TradeTapeWindow,
+    /// A window of persisted finalized execution-participant facts.
+    FinalizedExecutionWindow,
     /// One resolved revision from the append-only market-linkage ledger.
     ResolvedLinkage,
     /// A resolved crypto-market linkage plus a PIT window of crypto-domain
@@ -118,7 +125,7 @@ impl SourceRequirement {
             Self::PublishedL2Book | Self::NegRiskSiblingLegs => EvidenceSourceKind::Book,
             Self::GammaMetadata => EvidenceSourceKind::GammaMetadata,
             Self::MicrostructureWindow => EvidenceSourceKind::ClickHouseFact,
-            Self::TradeTapeWindow => EvidenceSourceKind::TradeTape,
+            Self::FinalizedExecutionWindow => EvidenceSourceKind::FinalizedExecution,
             Self::ResolvedLinkage => EvidenceSourceKind::Linkage,
             Self::DomainCryptoObservationWindow => EvidenceSourceKind::DomainCrypto,
             Self::DomainWeatherObservationWindow => EvidenceSourceKind::DomainWeather,
@@ -154,8 +161,8 @@ pub enum StalenessRule {
     MaxBookAge,
     /// Bounded by `data_quality.max_feature_bucket_age_secs`.
     MaxFeatureBucketAge,
-    /// Bounded by `data_quality.max_trade_tape_age_secs`.
-    MaxTradeTapeAge,
+    /// Bounded by `data_quality.max_execution_age_secs`.
+    MaxExecutionAge,
     /// Bounded by `data_quality.max_domain_observation_age_secs`.
     MaxDomainObservationAge,
 }
@@ -271,7 +278,9 @@ impl FeatureSpecBuilder {
 /// per-value hot paths (long-format projection, availability oracle). The index
 /// is derived from `specs` and never serialized.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FeatureSchema {
+pub struct ExecutableFeatureSchema {
+    /// Exact profile contract that authorized this executable projection.
+    contract: ResearchFeatureContract,
     /// Monotonic schema version (`>= 1`).
     version: SchemaVersion,
     /// Governed feature specs (registry; order-independent for hashing).
@@ -281,9 +290,13 @@ pub struct FeatureSchema {
     by_name: HashMap<FeatureName, usize>,
 }
 
-impl FeatureSchema {
-    /// Assemble a schema from a version and its specs, building the name index.
-    pub fn new(version: SchemaVersion, specs: Vec<FeatureSpec>) -> QuantResult<Self> {
+impl ExecutableFeatureSchema {
+    /// Assemble an explicitly contract-bound schema from governed specs.
+    pub fn new(
+        version: SchemaVersion,
+        contract: ResearchFeatureContract,
+        specs: Vec<FeatureSpec>,
+    ) -> QuantResult<Self> {
         let mut by_name = HashMap::with_capacity(specs.len());
         for (idx, spec) in specs.iter().enumerate() {
             if by_name.insert(spec.name.clone(), idx).is_some() {
@@ -294,30 +307,60 @@ impl FeatureSchema {
             }
         }
         Ok(Self {
+            contract,
             version,
             specs,
             by_name,
         })
     }
 
-    /// Build the active schema from frozen feature config.
-    ///
-    /// Enables only the configured families and expands windowed families using
-    /// the configured bar / momentum / volatility windows and depth levels. The
-    /// schema version is taken from `config.feature_schema_version`.
-    pub fn build(config: &FeaturesConfig) -> QuantResult<Self> {
+    /// Build the exact feature schema permitted by a research profile.
+    pub fn build(config: &FeaturesConfig, contract: ResearchFeatureContract) -> QuantResult<Self> {
         let mut specs = Vec::new();
+        if matches!(
+            contract,
+            ResearchFeatureContract::TradeBootstrap
+                | ResearchFeatureContract::TradeBootstrapCrypto
+                | ResearchFeatureContract::TradeBootstrapWeather
+        ) {
+            trade_specs(&mut specs);
+            match contract {
+                ResearchFeatureContract::TradeBootstrapCrypto => crypto_domain_specs(&mut specs),
+                ResearchFeatureContract::TradeBootstrapWeather => {
+                    weather_domain_specs(&mut specs);
+                }
+                ResearchFeatureContract::TradeBootstrap
+                | ResearchFeatureContract::FullL2
+                | ResearchFeatureContract::FullL2Crypto
+                | ResearchFeatureContract::FullL2Weather => {}
+            }
+            return Self::new(config.feature_schema_version, contract, specs);
+        }
         for family in &config.enabled_feature_families {
             match family {
                 FeatureFamily::MarketMetadata => market_metadata_specs(&mut specs),
                 FeatureFamily::PriceBook => price_book_specs(config, &mut specs),
                 FeatureFamily::TimeSeries => time_series_specs(config, &mut specs),
+                FeatureFamily::Trade => trade_specs(&mut specs),
                 FeatureFamily::Microstructure => microstructure_specs(&mut specs),
                 FeatureFamily::Structural => structural_specs(&mut specs),
-                FeatureFamily::Domain => domain_specs(&mut specs),
+                FeatureFamily::Domain => match contract {
+                    ResearchFeatureContract::FullL2 => domain_specs(&mut specs),
+                    ResearchFeatureContract::FullL2Crypto => crypto_domain_specs(&mut specs),
+                    ResearchFeatureContract::FullL2Weather => weather_domain_specs(&mut specs),
+                    ResearchFeatureContract::TradeBootstrap
+                    | ResearchFeatureContract::TradeBootstrapCrypto
+                    | ResearchFeatureContract::TradeBootstrapWeather => {}
+                },
             }
         }
-        Self::new(config.feature_schema_version, specs)
+        Self::new(config.feature_schema_version, contract, specs)
+    }
+
+    /// Exact contract that authorized this executable schema.
+    #[must_use]
+    pub const fn contract(&self) -> ResearchFeatureContract {
+        self.contract
     }
 
     /// The schema version.
@@ -402,12 +445,15 @@ impl FeatureSchema {
         })
     }
 
-    /// Whether any governed spec needs a pre-fetched trade-tape window.
+    /// Whether any governed spec needs a pre-fetched finalized-execution window.
     #[must_use]
-    pub fn needs_trade_tape(&self) -> bool {
-        self.specs
-            .iter()
-            .any(|spec| matches!(spec.source_requirement, SourceRequirement::TradeTapeWindow))
+    pub fn needs_execution_history(&self) -> bool {
+        self.specs.iter().any(|spec| {
+            matches!(
+                spec.source_requirement,
+                SourceRequirement::FinalizedExecutionWindow
+            )
+        })
     }
 
     /// Whether any governed spec needs a resolved linkage + domain window.
@@ -429,6 +475,49 @@ impl FeatureSchema {
     /// The governed specs of the domain family (the domain-slice schema).
     pub fn domain_specs(&self) -> impl Iterator<Item = &FeatureSpec> {
         self.by_family(FeatureFamily::Domain)
+    }
+}
+
+/// Authoring-only superset used for feature-name discovery, validation and UI
+/// documentation. It has no conversion into an executable schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuthoringFeatureCatalog {
+    version: SchemaVersion,
+    specs: Vec<FeatureSpec>,
+    #[serde(skip)]
+    by_name: HashMap<FeatureName, usize>,
+}
+
+impl AuthoringFeatureCatalog {
+    /// Build the configured authoring superset. This is deliberately distinct
+    /// from every route's executable contract.
+    pub fn build(config: &FeaturesConfig) -> QuantResult<Self> {
+        let schema = ExecutableFeatureSchema::build(config, ResearchFeatureContract::FullL2)?;
+        Ok(Self {
+            version: schema.version,
+            specs: schema.specs,
+            by_name: schema.by_name,
+        })
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> SchemaVersion {
+        self.version
+    }
+
+    #[must_use]
+    pub fn specs(&self) -> &[FeatureSpec] {
+        &self.specs
+    }
+
+    #[must_use]
+    pub fn by_name(&self, name: &FeatureName) -> Option<&FeatureSpec> {
+        self.by_name.get(name).map(|&idx| &self.specs[idx])
+    }
+
+    #[must_use]
+    pub fn contains(&self, name: &FeatureName) -> bool {
+        self.by_name.contains_key(name)
     }
 }
 
@@ -669,6 +758,61 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     );
 }
 
+fn trade_specs(out: &mut Vec<FeatureSpec>) {
+    let ratio_names = [
+        LAST_FILL_RETURN,
+        REALIZED_VOLATILITY,
+        LAGGED_MOMENTUM,
+        EMA_SLOPE,
+        TRADE_MACD_NORM,
+        SIGNED_NOTIONAL_IMBALANCE,
+        TRADE_PARTICIPANT_GINI,
+        TRADE_PARTICIPANT_HHI,
+        EXECUTION_COVERAGE_RATIO,
+    ];
+    for name in ratio_names {
+        out.push(
+            FeatureSpecBuilder::new(
+                name,
+                FeatureFamily::Trade,
+                FeatureValueKind::Decimal,
+                SourceRequirement::FinalizedExecutionWindow,
+                PitRule::FactAtOrBeforeSourceCutoff,
+                StalenessRule::MaxExecutionAge,
+            )
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::RejectMarket)
+            .build(),
+        );
+    }
+    out.push(
+        FeatureSpecBuilder::new(
+            EXECUTION_INTENSITY,
+            FeatureFamily::Trade,
+            FeatureValueKind::Decimal,
+            SourceRequirement::FinalizedExecutionWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxExecutionAge,
+        )
+        .unit(FeatureUnit::PerSecond)
+        .null_policy(NullPolicy::RejectMarket)
+        .build(),
+    );
+    out.push(
+        FeatureSpecBuilder::new(
+            EXECUTION_STALENESS_SECS,
+            FeatureFamily::Trade,
+            FeatureValueKind::Count,
+            SourceRequirement::FinalizedExecutionWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxExecutionAge,
+        )
+        .unit(FeatureUnit::Seconds)
+        .null_policy(NullPolicy::RejectMarket)
+        .build(),
+    );
+}
+
 /// Momentum-family time-series specs: lag-skipped ROC, EMA slope, and the
 /// vol-normalized MACD (distinct estimators, never a return clone).
 fn momentum_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
@@ -834,19 +978,19 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
         .null_policy(NullPolicy::Penalize)
         .build(),
     );
-    trade_tape_structural_specs(out);
+    execution_history_structural_specs(out);
     structural_neg_risk_specs(out);
 }
 
-fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
+fn execution_history_structural_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
         FeatureSpecBuilder::new(
-            TRADE_TAPE_COUNT,
+            EXECUTION_HISTORY_COUNT,
             FeatureFamily::Structural,
             FeatureValueKind::Count,
-            SourceRequirement::TradeTapeWindow,
+            SourceRequirement::FinalizedExecutionWindow,
             PitRule::FactAtOrBeforeSourceCutoff,
-            StalenessRule::MaxTradeTapeAge,
+            StalenessRule::MaxExecutionAge,
         )
         .unit(FeatureUnit::Count)
         .null_policy(NullPolicy::Penalize)
@@ -857,9 +1001,9 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
             PARTICIPANT_COUNT,
             FeatureFamily::Structural,
             FeatureValueKind::Count,
-            SourceRequirement::TradeTapeWindow,
+            SourceRequirement::FinalizedExecutionWindow,
             PitRule::FactAtOrBeforeSourceCutoff,
-            StalenessRule::MaxTradeTapeAge,
+            StalenessRule::MaxExecutionAge,
         )
         .unit(FeatureUnit::Count)
         .null_policy(NullPolicy::Penalize)
@@ -867,12 +1011,12 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         FeatureSpecBuilder::new(
-            TRADE_TAPE_NOTIONAL_USD,
+            EXECUTION_HISTORY_NOTIONAL_USD,
             FeatureFamily::Structural,
             FeatureValueKind::Usd,
-            SourceRequirement::TradeTapeWindow,
+            SourceRequirement::FinalizedExecutionWindow,
             PitRule::FactAtOrBeforeSourceCutoff,
-            StalenessRule::MaxTradeTapeAge,
+            StalenessRule::MaxExecutionAge,
         )
         .unit(FeatureUnit::Usd)
         .null_policy(NullPolicy::Penalize)
@@ -891,9 +1035,9 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
                 name,
                 FeatureFamily::Structural,
                 FeatureValueKind::Decimal,
-                SourceRequirement::TradeTapeWindow,
+                SourceRequirement::FinalizedExecutionWindow,
                 PitRule::FactAtOrBeforeSourceCutoff,
-                StalenessRule::MaxTradeTapeAge,
+                StalenessRule::MaxExecutionAge,
             )
             .unit(FeatureUnit::Ratio)
             .range(Decimal::ZERO, Decimal::ONE)
@@ -1114,12 +1258,12 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
 mod contract_tests {
     use quant_pivot_models::{
         runtime_config::{FeatureFamily, FeaturesConfig},
-        types::SchemaVersion,
+        types::{ResearchFeatureContract, SchemaVersion},
     };
 
     use super::{
-        FeatureSchema, FeatureSpecBuilder, FeatureUnit, NullPolicy, PitRule, SourceRequirement,
-        StalenessRule,
+        AuthoringFeatureCatalog, ExecutableFeatureSchema, FeatureSpecBuilder, FeatureUnit,
+        NullPolicy, PitRule, SourceRequirement, StalenessRule,
     };
     use crate::features::{
         FeatureName, FeatureSpec, FeatureValueKind, names::book::SECONDARY_BEST_ASK,
@@ -1141,8 +1285,9 @@ mod contract_tests {
 
     #[test]
     fn duplicate_features_fail_construction() {
-        let error = FeatureSchema::new(
+        let error = ExecutableFeatureSchema::new(
             SchemaVersion::new(6),
+            ResearchFeatureContract::TradeBootstrap,
             vec![FeatureSpec::test_fixture(), FeatureSpec::test_fixture()],
         )
         .expect_err("duplicate name must fail");
@@ -1159,7 +1304,7 @@ mod contract_tests {
 
     #[test]
     fn secondary_executable_non_substituting() {
-        let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
+        let schema = AuthoringFeatureCatalog::build(&FeaturesConfig::default()).expect("schema");
         let spec = schema
             .by_name(&SECONDARY_BEST_ASK)
             .expect("secondary ask feature");

@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::{ChDecimal64, ChPrice, ChProbability, QuantExitSignalEvaluationEventRow},
-    config::TradeTapeOnChainConfig,
+    config::FinalizedExchangeHistoryConfig,
     domain::quant::{OrderIntentInfo, PositionInfo},
     enums::{
         clickhouse::{ChExitSignalEvaluatorKind, ChExitSignalVerdict},
@@ -29,8 +29,7 @@ use quant_pivot_models::{
     types::{ModelVersionId, OutcomeTokenBinding, Price},
 };
 use quant_pivot_repository::traits::{
-    FactorRepository, ModelRegistryRepository, RecommendationRepository,
-    TradeTapeBlockCursorRepository,
+    ExchangeHistoryRepository, FactorRepository, ModelRegistryRepository, RecommendationRepository,
 };
 use quant_pivot_research::{
     model::{
@@ -88,8 +87,8 @@ pub struct ModelBackedOpportunisticSellScorerDeps {
     pub factors: Arc<dyn FactorRepository>,
     pub pit_source: Arc<dyn PointInTimeSnapshotSource>,
     pub window_provider: FeatureWindowProvider,
-    pub block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
-    pub trade_tape_on_chain: TradeTapeOnChainConfig,
+    pub exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
+    pub finalized_exchange_history: FinalizedExchangeHistoryConfig,
 }
 
 /// Production [`OpportunisticSellScorer`] backed by the active exit scorer.
@@ -188,12 +187,17 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
             market: &market,
             features: &config.profile_artifacts.features.definition,
             domain: &config.profile_artifacts.domain.definition,
+            feature_contract: version
+                .profile_ref
+                .resolve_builtin_research_profile()
+                .map_err(QuantError::config)?
+                .spec
+                .feature_contract,
             data_quality: &config.recommendation.data_quality,
             requirements: &requirements,
             boundary: &boundary,
-            neg_risk: snapshot.market.neg_risk,
-            block_cursor_repo: self.deps.block_cursor_repo.as_ref(),
-            trade_tape_on_chain: &self.deps.trade_tape_on_chain,
+            exchange_history_repo: self.deps.exchange_history_repo.as_ref(),
+            finalized_exchange_history: &self.deps.finalized_exchange_history,
             liquidity_cap_usd,
         };
         let Some(vector) = build_live_feature_vector(&request).await? else {

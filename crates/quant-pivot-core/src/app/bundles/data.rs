@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::InfraBundle;
 use crate::{
+    app::exchange_history_worker::ExchangeHistoryProgressHandle,
     execution::settlement_discovery_wake::SettlementDiscoveryWake,
     governance::{LinkageResolverDeps, LinkageResolverService},
     ingest::{
@@ -69,6 +70,8 @@ pub struct DataBundle {
     pub market_filter: Arc<MarketFilter>,
     pub data_pipeline: Arc<DataPipeline>,
     pub gamma_service: Arc<GammaService>,
+    /// Lock-free history-frontier progress owned by the reconstruction worker.
+    pub exchange_history_progress: ExchangeHistoryProgressHandle,
     /// Offline market-linkage resolver.
     pub linkage_resolver: Arc<LinkageResolverService>,
     pub ws_manager: Arc<ClobWsManager>,
@@ -161,6 +164,7 @@ impl DataBundle {
             &deps.deploy.domain_sources.weather_vertical_bindings,
         )?);
         let status_nudge = SystemStatusNudge::default();
+        let exchange_history_progress = ExchangeHistoryProgressHandle::fresh_boot();
         let (gamma_service, ws_subscription) = assemble_gamma_service(GammaServiceAssembly {
             deps,
             gamma_client: &gamma_client,
@@ -203,6 +207,7 @@ impl DataBundle {
             market_filter,
             data_pipeline,
             gamma_service,
+            exchange_history_progress,
             linkage_resolver,
             ws_manager,
             ws_subscription,

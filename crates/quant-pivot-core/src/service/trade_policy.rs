@@ -13,7 +13,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
-    clickhouse::TradeTapeRow,
+    clickhouse::ExecutionParticipantFactRow,
     config::WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
     domain::{
         api::{
@@ -264,7 +264,7 @@ struct WeatherReplayInputs {
     replayed_examples: Vec<WeatherExampleReplay>,
     gate_linkages: Vec<MarketLinkage>,
     gate_observations: Vec<WeatherObservationFact>,
-    structural_trade_tape: Vec<TradeTapeRow>,
+    structural_executions: Vec<ExecutionParticipantFactRow>,
 }
 
 struct FrozenFitPlan {
@@ -875,10 +875,10 @@ impl TradePolicyService {
             && !frozen.sessions.is_empty()
             && [
                 SourceSliceObjectKind::L2Ledger,
-                SourceSliceObjectKind::L2Ledger,
                 SourceSliceObjectKind::L2Session,
                 SourceSliceObjectKind::L2Gap,
-                SourceSliceObjectKind::TradeTape,
+                SourceSliceObjectKind::MarketExecution,
+                SourceSliceObjectKind::ExecutionParticipant,
             ]
             .into_iter()
             .all(|kind| kinds.contains(&kind));
@@ -1651,7 +1651,7 @@ impl TradePolicyService {
                 let (structural_volatility_oos, structural_volatility_folds) =
                     evaluate_structural_volatility_oos(
                         &replay.structural_examples,
-                        &replay.structural_trade_tape,
+                        &replay.structural_executions,
                     )?;
                 let evidence = evaluate_weather_policy_evidence(&WeatherEvidenceRequest {
                     profile: input.profile,
@@ -3173,7 +3173,7 @@ fn append_source_operations_blockers(
             blockers,
             dataset.full_l2_trajectory_present.is_pass(),
             TradePolicyPreflightBlockerDetail::FullL2TrajectoryMissing,
-            "Materialize continuous snapshot-rooted L2 sessions and reconciled trade tape.",
+            "Materialize continuous snapshot-rooted L2 sessions and finalized execution history.",
             blocker_dataset_link(context),
         );
         push_blocker(
@@ -3349,7 +3349,7 @@ fn append_preflight_diagnostics(
     contract.messages.append(&mut dataset.messages);
     if !dataset.full_l2_trajectory_present.is_pass() {
         contract.messages.push(
-            "source slice does not contain the complete L2/session/gap/trade-tape replay contract"
+            "source slice does not contain the complete L2/session/gap/finalized-execution replay contract"
                 .to_owned(),
         );
     }
@@ -4056,7 +4056,7 @@ fn collect_weather_replay_inputs(
     })?);
     let mut gate_linkages = BTreeMap::<ContentHash, MarketLinkage>::new();
     let mut gate_observations = BTreeMap::<ContentHash, WeatherObservationFact>::new();
-    let mut structural_trade_tape = BTreeMap::<ContentHash, TradeTapeRow>::new();
+    let mut structural_executions = BTreeMap::<ContentHash, ExecutionParticipantFactRow>::new();
     for market_chunk in market_ids.chunks(MAX_REPLAY_PAGE_MARKETS) {
         ensure_policy_replay_active(input.purpose, input.cancel, "during L2 replay")?;
         let page_examples = market_chunk
@@ -4090,10 +4090,10 @@ fn collect_weather_replay_inputs(
                 .entry(observation.report_hash)
                 .or_insert_with(|| observation.clone());
         }
-        for trade in &page.trade_tape {
-            structural_trade_tape
-                .entry(CanonicalDigest::content_hash_json(trade)?)
-                .or_insert_with(|| trade.clone());
+        for execution in &page.finalized_executions {
+            structural_executions
+                .entry(CanonicalDigest::content_hash_json(execution)?)
+                .or_insert_with(|| execution.clone());
         }
         replayed_examples.extend(replay_weather_page(&WeatherReplayRequest {
             page: &page,
@@ -4121,7 +4121,7 @@ fn collect_weather_replay_inputs(
         replayed_examples,
         gate_linkages: gate_linkages.into_values().collect(),
         gate_observations: gate_observations.into_values().collect(),
-        structural_trade_tape: structural_trade_tape.into_values().collect(),
+        structural_executions: structural_executions.into_values().collect(),
     })
 }
 

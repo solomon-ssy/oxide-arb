@@ -31,7 +31,7 @@ use quant_pivot_core::{
     service::{
         historical_replay::{
             CrossSectionRequest, ReplayCaptureKey, ReplayConfig, ReplayCrossSection,
-            ReplayFactorMode, ReplayFactorOutput, ReplayTradeTapeSource, materialize_cross_section,
+            ReplayExecutionSource, ReplayFactorMode, ReplayFactorOutput, materialize_cross_section,
         },
         market_selection::map_snapshot_to_model,
         model_runner::{ActiveModelRequirementsRequest, ModelRunRequest, ModelRunner},
@@ -40,25 +40,16 @@ use quant_pivot_core::{
 };
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChBps, ChDecimal64, ChDigest,
-        ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow, MarketResolutionFactInput,
-        MarketResolutionRow, QuantFeatureEventRow, QuantModelInputEventRow,
-        QuantReportRecommendationFactRow, QuantServingEvidenceCompletionRow, ReportMarketFunnelRow,
-        TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChAssetAmount, ChBps,
+        ChDecimal64, ChDigest, ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow,
+        ExchangeHistoryAcceptanceRow, ExecutionParticipantRow, MarketExecutionRow,
+        MarketResolutionFactInput, MarketResolutionRow, QuantFeatureEventRow,
+        QuantModelInputEventRow, QuantReportRecommendationFactRow,
+        QuantServingEvidenceCompletionRow, ReportMarketFunnelRow,
     },
     config::{ClickHouseConfig, WeatherVerticalBindingsConfig},
     domain::{
-        data_plane::{
-            DecisionBoundary, DecisionClock, DecisionSource, DomainObservation,
-            trade_tape_coverage::{
-                FEE_RATE as TRADE_COVERAGE_FEE_RATE, MARKET_ID as TRADE_COVERAGE_MARKET_ID,
-                PARTICIPANT_ADDRESS as TRADE_COVERAGE_PARTICIPANT_ADDRESS,
-                PARTICIPANT_ROLE as TRADE_COVERAGE_PARTICIPANT_ROLE, PRICE as TRADE_COVERAGE_PRICE,
-                SIDE as TRADE_COVERAGE_SIDE, SIZE as TRADE_COVERAGE_SIZE,
-                TOKEN_ID as TRADE_COVERAGE_TOKEN_ID, TRADE_ID as TRADE_COVERAGE_TRADE_ID,
-                TX_HASH as TRADE_COVERAGE_TX_HASH,
-            },
-        },
+        data_plane::{DecisionBoundary, DecisionClock, DecisionSource, DomainObservation},
         market::{
             BookLevel, CATALOG_OBJECT_SCHEMA_VERSION, EventRegistryInfo, EventTags,
             MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
@@ -138,8 +129,8 @@ use quant_pivot_models::{
             CatalogTimestampQuality,
         },
         clickhouse::{
-            ChCanonicalBookEventType, ChStreamSessionEndReason, ChStreamSessionState,
-            ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
+            ChAvailabilityBasis, ChCanonicalBookEventType, ChExchangeSide, ChExchangeVersion,
+            ChExecutionParticipantRole, ChStreamSessionEndReason, ChStreamSessionState,
         },
         common::{CategorySet, MarketCategory, TickSize},
         domain::{DomainFamily, DomainMetric, LinkageStatus, ResolverTier},
@@ -170,12 +161,12 @@ use quant_pivot_models::{
         ClobMarketInfoVersionId, ClobTokenDescriptor, ContentHash, DecisionCaptureEvidence,
         DecisionPolicySnapshotId, EligibilitySummary, EventId, EvmBlockHash, EvmTransactionHash,
         ExternalJsonDocument, FactorBreakdownEntry, FeatureVectorId, FeedbackCycleId,
-        FeedbackRecipeTemplateId, MarketId, MarketLinkageId, ModelCandidateManifestId,
-        ModelVersionId, OrderId, OrderIntentId, PayoutRatio, PositionId, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
-        ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage, ResearchJobId,
-        ResearchProfileArtifact, ResolverVersion, RoleCode, ScaleOutState, SchemaVersion,
-        ShadowComparisonId, Shares, TokenId, TradeTapeSourceEvidence, Usd, UsdHours,
+        FeedbackRecipeTemplateId, FinalizedExecutionEvidence, MarketId, MarketLinkageId,
+        ModelCandidateManifestId, ModelVersionId, OrderId, OrderIntentId, PayoutRatio, PositionId,
+        Price, Probability, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
+        ResearchJobId, ResearchProfileArtifact, ResolverVersion, RoleCode, ScaleOutState,
+        SchemaVersion, ShadowComparisonId, Shares, TokenId, Usd, UsdHours,
         stable_name::FeatureName,
     },
 };
@@ -207,7 +198,7 @@ use quant_pivot_research::{
         WeightedTerm,
     },
     factors::{FactorEligibility, FactorEngine, FactorValue, FactorValueInsertContext},
-    features::{ConfiguredFeatureBuilder, FeatureSchema, FeatureVector, feature_events},
+    features::{ConfiguredFeatureBuilder, ExecutableFeatureSchema, FeatureVector, feature_events},
     feedback_governance::FeedbackGovernanceCodec,
     hashing::ResearchHasher,
     linkage::{LayeredResolver, WeatherStationRegistry, rule_for_alias},
@@ -451,7 +442,7 @@ pub struct FeedbackClosureFixture {
     shadow_cohorts: Arc<[ShadowObservationCohort]>,
     fact_writers: Arc<ClosureFactWriters>,
     replay: Arc<ClosureReplayContext>,
-    runtime_trade_tape_source: TradeTapeSourceEvidence,
+    runtime_finalized_execution_evidence: FinalizedExecutionEvidence,
 }
 
 /// Terminal proof for one node in the closed 15-stage production DAG.
@@ -558,14 +549,14 @@ struct ShadowObservationRequest<'a> {
     db: &'a DatabaseConnection,
     runner: &'a ModelRunner,
     serving: &'a ModelServingRouteSnapshot,
-    schema: &'a FeatureSchema,
+    schema: &'a ExecutableFeatureSchema,
     facts: &'a ClosureFactWriters,
     replay: &'a ClosureReplayContext,
     catalog: &'a ClosureCatalogFacts,
     policy_snapshot_id: DecisionPolicySnapshotId,
     sources: &'a [ClosureMarketSource],
     required_features: &'a [FeatureName],
-    runtime_trade_tape_source: &'a TradeTapeSourceEvidence,
+    runtime_finalized_execution_evidence: &'a FinalizedExecutionEvidence,
     decision_at: DateTime<Utc>,
     book_price_shift: Decimal,
 }
@@ -1469,7 +1460,7 @@ impl FeedbackClosureFixture {
         shadow_cohorts: Arc<[ShadowObservationCohort]>,
         fact_writers: Arc<ClosureFactWriters>,
         replay: Arc<ClosureReplayContext>,
-        runtime_trade_tape_source: TradeTapeSourceEvidence,
+        runtime_finalized_execution_evidence: FinalizedExecutionEvidence,
     ) -> Self {
         let catalogs = cohorts
             .iter()
@@ -1492,7 +1483,7 @@ impl FeedbackClosureFixture {
             shadow_cohorts,
             fact_writers,
             replay,
-            runtime_trade_tape_source,
+            runtime_finalized_execution_evidence,
         }
     }
 
@@ -1673,8 +1664,16 @@ struct CohortSourceFacts {
     books: Vec<BookL2LedgerRow>,
     microstructure: Vec<BookMicrostructureRow>,
     sessions: Vec<BookStreamSessionRow>,
-    trade_tape: Vec<TradeTapeRow>,
+    executions: Vec<MarketExecutionRow>,
+    participants: Vec<ExecutionParticipantRow>,
+    acceptances: Vec<ExchangeHistoryAcceptanceRow>,
     domain_observations: Vec<DomainObservationRow>,
+}
+
+struct ClosureExecutionFacts {
+    executions: Vec<MarketExecutionRow>,
+    participants: Vec<ExecutionParticipantRow>,
+    acceptance: ExchangeHistoryAcceptanceRow,
 }
 
 struct CohortInferenceResult {
@@ -1692,7 +1691,7 @@ struct PersistedCohortPlane {
 struct CohortInferenceContext<'a> {
     db: &'a DatabaseConnection,
     champion: &'a ModelVersionInfo,
-    schema: &'a FeatureSchema,
+    schema: &'a ExecutableFeatureSchema,
     runtime: &'a WeightedFactorRuntime,
     boundary: &'a DecisionBoundary,
     event_time: i64,
@@ -1702,7 +1701,9 @@ struct ClosureFactWriters {
     books: Arc<dyn FactWriter<BookL2LedgerRow>>,
     microstructure: Arc<dyn FactWriter<BookMicrostructureRow>>,
     sessions: Arc<dyn FactWriter<BookStreamSessionRow>>,
-    trade_tape: Arc<dyn FactWriter<TradeTapeRow>>,
+    executions: Arc<dyn FactWriter<MarketExecutionRow>>,
+    participants: Arc<dyn FactWriter<ExecutionParticipantRow>>,
+    acceptances: Arc<dyn FactWriter<ExchangeHistoryAcceptanceRow>>,
     domain_observations: Arc<dyn FactWriter<DomainObservationRow>>,
     features: Arc<dyn FactWriter<QuantFeatureEventRow>>,
     inputs: Arc<dyn FactWriter<QuantModelInputEventRow>>,
@@ -1735,10 +1736,20 @@ impl ClosureFactWriters {
                 Arc::clone(&manager),
                 "quant_book_stream_session",
             )),
-            trade_tape: Arc::new(ChFactWriter::new(
+            executions: Arc::new(ChFactWriter::new(
                 Arc::clone(&pool),
                 Arc::clone(&manager),
-                "quant_trade_tape",
+                "quant_market_execution",
+            )),
+            participants: Arc::new(ChFactWriter::new(
+                Arc::clone(&pool),
+                Arc::clone(&manager),
+                "quant_execution_participant",
+            )),
+            acceptances: Arc::new(ChFactWriter::new(
+                Arc::clone(&pool),
+                Arc::clone(&manager),
+                "quant_exchange_history_acceptance",
             )),
             domain_observations: Arc::new(ChFactWriter::new(
                 Arc::clone(&pool),
@@ -1789,9 +1800,15 @@ impl ClosureFactWriters {
         Self::write_batches(self.sessions.as_ref(), facts.sessions)
             .await
             .context("write closure book session facts")?;
-        Self::write_batches(self.trade_tape.as_ref(), facts.trade_tape)
+        Self::write_batches(self.executions.as_ref(), facts.executions)
             .await
-            .context("write closure trade tape facts")?;
+            .context("write closure execution facts")?;
+        Self::write_batches(self.participants.as_ref(), facts.participants)
+            .await
+            .context("write closure execution participant facts")?;
+        Self::write_batches(self.acceptances.as_ref(), facts.acceptances)
+            .await
+            .context("write closure execution acceptance facts")?;
         Self::write_batches(self.domain_observations.as_ref(), facts.domain_observations)
             .await
             .context("write closure domain observation facts")?;
@@ -1866,9 +1883,23 @@ impl ClosureReplayContext {
         let features = &profile.features.definition;
         let factors = &profile.scoring.definition;
         let domain = &profile.domain.definition;
-        let builder = ConfiguredFeatureBuilder::new(features, domain)?;
-        let factor_engine =
-            FactorEngine::for_model_scope(factors, features, domain, champion.category_scope, None);
+        let research_profile = champion
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(AnyhowError::msg)?;
+        let builder = ConfiguredFeatureBuilder::new_for_contract(
+            features,
+            domain,
+            research_profile.spec.feature_contract,
+        )?;
+        let factor_engine = FactorEngine::for_model_scope(
+            factors,
+            features,
+            domain,
+            research_profile.spec.feature_contract,
+            champion.category_scope,
+            None,
+        );
         let bindings = champion.serving_contract.bindings();
         ensure!(
             bindings.factors.bias_table.is_none(),
@@ -1894,6 +1925,13 @@ impl ClosureReplayContext {
             .snapshot
             .pit_knowledge_lag_secs()
             .context("closure policy has no unique enabled report knowledge lag")?;
+        let feature_contract = bindings
+            .model
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(AnyhowError::msg)?
+            .spec
+            .feature_contract;
         Ok(Self {
             builder,
             factor_engine,
@@ -1902,6 +1940,7 @@ impl ClosureReplayContext {
                 factors: factors.clone(),
                 domain: domain.clone(),
                 data_quality: policy.snapshot.recommendation.data_quality.clone(),
+                feature_contract,
                 liquidity_cap_usd: Usd::new(
                     policy
                         .snapshot
@@ -2027,7 +2066,9 @@ async fn seed_cohort_sources(
     let mut book_rows = Vec::with_capacity(observation_count * 2);
     let mut microstructure_rows = Vec::with_capacity(observation_count * 65);
     let mut session_rows = Vec::with_capacity(observation_count * 2);
-    let mut trade_tape_rows = Vec::with_capacity(observation_count * 40);
+    let mut execution_rows = Vec::with_capacity(observation_count * 20);
+    let mut participant_rows = Vec::with_capacity(observation_count * 40);
+    let mut acceptance_rows = Vec::with_capacity(observation_count);
     let mut market_infos = Vec::with_capacity(observation_count);
     for source in sources {
         let (scope, market_ordinal) = closure_market_identity(&source.market_id)?;
@@ -2050,12 +2091,15 @@ async fn seed_cohort_sources(
             closure_yes_wins(scope, market_ordinal)?,
             book_price_shift,
         )?);
-        trade_tape_rows.extend(closure_trade_tape_rows(
+        let execution_facts = closure_execution_history_rows(
             source,
             decision_at,
             replay.knowledge_lag.as_secs(),
             book_price_shift,
-        )?);
+        )?;
+        execution_rows.extend(execution_facts.executions);
+        participant_rows.extend(execution_facts.participants);
+        acceptance_rows.push(execution_facts.acceptance);
         session_rows.extend(source_sessions);
         market_infos.push(market_info);
     }
@@ -2077,7 +2121,9 @@ async fn seed_cohort_sources(
             books: book_rows,
             microstructure: microstructure_rows,
             sessions: session_rows,
-            trade_tape: trade_tape_rows,
+            executions: execution_rows,
+            participants: participant_rows,
+            acceptances: acceptance_rows,
             domain_observations: Vec::new(),
         })
         .await
@@ -2158,13 +2204,13 @@ struct CohortSeedContext<'a> {
     artifacts: &'a Arc<dyn ArtifactStore>,
     infra: &'a SharedDemoInfra,
     champion: &'a ModelVersionInfo,
-    schema: &'a FeatureSchema,
+    schema: &'a ExecutableFeatureSchema,
     runtime: &'a WeightedFactorRuntime,
     facts: &'a ClosureFactWriters,
     replay: &'a ClosureReplayContext,
     capability_registry_hash: ContentHash,
     account_capital_usd: Usd,
-    runtime_trade_tape_source: &'a TradeTapeSourceEvidence,
+    runtime_finalized_execution_evidence: &'a FinalizedExecutionEvidence,
 }
 
 struct ClosureSeedInputs {
@@ -2546,14 +2592,16 @@ pub(crate) struct FeedbackClosureSeedRequest<'a> {
     pub(crate) champion_model_version_id: ModelVersionId,
     pub(crate) historical_feedback_cycle_id: FeedbackCycleId,
     pub(crate) report_resolves_at: DateTime<Utc>,
-    pub(crate) runtime_trade_tape_source: TradeTapeSourceEvidence,
+    pub(crate) runtime_finalized_execution_evidence: FinalizedExecutionEvidence,
 }
 
 impl FeedbackClosureSeedRequest<'_> {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.runtime_trade_tape_source.runtime_parts().is_some(),
-            "closure live-inference fixture requires frozen runtime trade-tape source evidence"
+            self.runtime_finalized_execution_evidence
+                .runtime_parts()
+                .is_some(),
+            "closure live-inference fixture requires frozen finalized-execution evidence"
         );
         Ok(())
     }
@@ -2565,7 +2613,6 @@ pub(crate) async fn seed_feedback_closure(
 ) -> Result<FeedbackClosureFixture> {
     request.validate()?;
     let db = request.db;
-    let artifact_store = request.artifact_store;
     let ClosureSeedInputs {
         champion,
         model_spec,
@@ -2589,14 +2636,20 @@ pub(crate) async fn seed_feedback_closure(
         "closure serving-evidence fixture requires exactly one capability-registry revision"
     );
     let capability_registry_hash = capability_registry_hashes[0];
-    let artifact = ModelArtifact::load_verified(artifact_store.as_ref(), &champion).await?;
+    let artifact = ModelArtifact::load_verified(request.artifact_store.as_ref(), &champion).await?;
     let calibration_loader = CoreCalibrationArtifactLoader::new(Arc::new(
         PgCalibrationArtifactRepository::new(db.clone()),
     )
         as Arc<dyn CalibrationArtifactRepository>);
     let calibration = resolve_return_model_calibration(&calibration_loader, &artifact).await?;
     let runtime = WeightedFactorRuntime::new(artifact, calibration)?;
-    let schema = FeatureSchema::build(&policy.snapshot.profile_artifacts.features.definition)?;
+    let profile = fixture_profile_ref()
+        .resolve_builtin_research_profile()
+        .map_err(AnyhowError::msg)?;
+    let schema = ExecutableFeatureSchema::build(
+        &policy.snapshot.profile_artifacts.features.definition,
+        profile.spec.feature_contract,
+    )?;
     let fact_writers = Arc::new(ClosureFactWriters::connect(request.clickhouse_config).await?);
     let replay = Arc::new(ClosureReplayContext::build(
         db,
@@ -2604,9 +2657,6 @@ pub(crate) async fn seed_feedback_closure(
         &policy,
         &champion,
     )?);
-    let profile = fixture_profile_ref()
-        .resolve_builtin_research_profile()
-        .map_err(AnyhowError::msg)?;
     let database_now = db.statement_time().await;
     let plan = FeedbackCycleFreezePlan::derive(
         &profile,
@@ -2617,7 +2667,7 @@ pub(crate) async fn seed_feedback_closure(
         database_now,
     )?;
     let scenario_training =
-        ScenarioTrainingPlan::load(artifact_store, &policy, &plan, database_now).await?;
+        ScenarioTrainingPlan::load(request.artifact_store, &policy, &plan, database_now).await?;
     let training_group_count = closure_training_groups(
         validation.cpcv.n_groups,
         validation.cpcv.nested_estimator_min_groups,
@@ -2643,7 +2693,7 @@ pub(crate) async fn seed_feedback_closure(
     };
     let seed_context = CohortSeedContext {
         db,
-        artifacts: artifact_store,
+        artifacts: request.artifact_store,
         infra: &closure_infra,
         champion: &champion,
         schema: &schema,
@@ -2652,7 +2702,7 @@ pub(crate) async fn seed_feedback_closure(
         replay: replay.as_ref(),
         capability_registry_hash,
         account_capital_usd,
-        runtime_trade_tape_source: &request.runtime_trade_tape_source,
+        runtime_finalized_execution_evidence: &request.runtime_finalized_execution_evidence,
     };
     let mut seeded = Box::pin(seed_training_cohorts(
         &seed_context,
@@ -2681,7 +2731,7 @@ pub(crate) async fn seed_feedback_closure(
     seal_execution_rollups(db, &seeded, execution_attempts).await?;
     seed_historical_diagnostic(
         db,
-        artifact_store,
+        request.artifact_store,
         request.historical_feedback_cycle_id,
         plan.label_cutoff(),
         &champion,
@@ -2712,7 +2762,7 @@ pub(crate) async fn seed_feedback_closure(
         shadow_cohorts,
         fact_writers,
         replay,
-        request.runtime_trade_tape_source,
+        request.runtime_finalized_execution_evidence,
     ))
 }
 
@@ -2965,7 +3015,7 @@ impl PreparedCohort {
                 schema,
                 runtime,
                 replay,
-                context.runtime_trade_tape_source,
+                context.runtime_finalized_execution_evidence,
             )
             .await
             .with_context(|| {
@@ -3390,10 +3440,10 @@ impl CohortSeed {
         &mut self,
         db: &DatabaseConnection,
         champion: &ModelVersionInfo,
-        schema: &FeatureSchema,
+        schema: &ExecutableFeatureSchema,
         runtime: &WeightedFactorRuntime,
         replay: &ClosureReplayContext,
-        runtime_trade_tape_source: &TradeTapeSourceEvidence,
+        runtime_finalized_execution_evidence: &FinalizedExecutionEvidence,
     ) -> Result<CohortInferenceResult> {
         let created_at = self.decision_at + Duration::seconds(2);
         let event_time = created_at.timestamp_millis();
@@ -3408,7 +3458,7 @@ impl CohortSeed {
                 replay,
                 &boundary,
                 &required_features,
-                runtime_trade_tape_source,
+                runtime_finalized_execution_evidence,
             )
             .await?;
         let plane = self
@@ -3433,7 +3483,7 @@ impl CohortSeed {
         replay: &ClosureReplayContext,
         boundary: &DecisionBoundary,
         required_features: &[FeatureName],
-        runtime_trade_tape_source: &TradeTapeSourceEvidence,
+        runtime_finalized_execution_evidence: &FinalizedExecutionEvidence,
     ) -> Result<ReplayCrossSection> {
         let observation_count = self.recommendations.len();
         let samples = self
@@ -3473,11 +3523,13 @@ impl CohortSeed {
                 samples: samples.clone(),
                 lookback: replay.lookback,
                 knowledge_lag: replay.knowledge_lag,
+                feature_contract: replay.config.feature_contract,
                 max_horizon_secs: 0,
                 domain: replay.config.domain.clone(),
             })
             .await?;
-        let trade_tape_sources = frozen_trade_tape_sources(&samples, runtime_trade_tape_source)?;
+        let finalized_execution_evidences =
+            frozen_finalized_execution_evidences(&samples, runtime_finalized_execution_evidence)?;
         let cross = materialize_cross_section(
             &replay.builder,
             ReplayFactorMode::FactorNative {
@@ -3491,7 +3543,9 @@ impl CohortSeed {
                 // slice was prepared before the binary starts.
                 pit: &window.pit,
                 prefetched: &window.prefetched,
-                trade_tape_source: ReplayTradeTapeSource::FrozenRuntime(&trade_tape_sources),
+                finalized_execution_evidence: ReplayExecutionSource::FrozenRuntime(
+                    &finalized_execution_evidences,
+                ),
                 decision_at: self.decision_at,
                 group: &samples,
                 required_features,
@@ -4207,24 +4261,13 @@ fn closure_bucket_at(cutoff: DateTime<Utc>, minutes_ago: i64) -> DateTime<Utc> {
     }
 }
 
-fn closure_trade_tape_rows(
+fn closure_execution_history_rows(
     source: &ClosureMarketSource,
     decision_at: DateTime<Utc>,
     knowledge_lag_secs: u64,
     price_shift: Decimal,
-) -> Result<Vec<TradeTapeRow>> {
+) -> Result<ClosureExecutionFacts> {
     const PARTICIPANTS_PER_ROLE: usize = 20;
-    const OBSERVED_FLAGS: u16 = TRADE_COVERAGE_TRADE_ID
-        | TRADE_COVERAGE_MARKET_ID
-        | TRADE_COVERAGE_TOKEN_ID
-        | TRADE_COVERAGE_PARTICIPANT_ADDRESS
-        | TRADE_COVERAGE_PARTICIPANT_ROLE
-        | TRADE_COVERAGE_SIDE
-        | TRADE_COVERAGE_TX_HASH
-        | TRADE_COVERAGE_PRICE
-        | TRADE_COVERAGE_SIZE
-        | TRADE_COVERAGE_FEE_RATE;
-
     let (scope, ordinal) = closure_market_identity(&source.market_id)?;
     let token_id = TokenId::new(closure_token(scope, ordinal));
     let (bids, asks) = closure_levels(scope, true, price_shift, ordinal)?;
@@ -4233,68 +4276,118 @@ fn closure_trade_tape_rows(
     );
     let cutoff = DecisionClock::new(knowledge_lag_secs)
         .boundary(decision_at)?
-        .cutoff_for(DecisionSource::TradeTape);
-    let participant_count = PARTICIPANTS_PER_ROLE * 2;
-    (0..participant_count)
-        .map(|index| {
-            let offset_secs = i64::try_from(participant_count - index)?;
-            let event_at = cutoff - Duration::seconds(offset_secs);
-            let ingestion_at = event_at + Duration::seconds(1);
-            let role = if index < PARTICIPANTS_PER_ROLE {
-                ChTradeParticipantRole::Maker
-            } else {
-                ChTradeParticipantRole::Taker
-            };
-            let participant_seed = ordinal
-                .checked_mul(100)
-                .and_then(|value| value.checked_add(index))
-                .context("closure trade participant identity overflowed")?;
-            let shares = Shares::new(Decimal::from(24 + (index % 5)));
-            let notional = shares * price;
-            let source_event_id = format!(
-                "feedback-closure:{scope}:{ordinal}:{}:{index}:on-chain-fill",
-                decision_at.timestamp_millis()
-            );
-            let tx_seed = seeded_uuid(&source_event_id).as_u128();
-            Ok(TradeTapeRow {
+        .cutoff_for(DecisionSource::FinalizedExecution);
+    let chunk_id = seeded_uuid(&format!(
+        "feedback-closure:history:{}:{}",
+        source.market_id,
+        decision_at.timestamp_millis()
+    ));
+    let policy_hash = ResearchHasher::canonical(&(
+        "feedback-closure-availability-policy",
+        source.market_id.as_str(),
+        decision_at,
+    ))?;
+    let block_hash = format!("0x{}", policy_hash.hex());
+    let block_number = u64::try_from(decision_at.timestamp())?;
+    let mut executions = Vec::with_capacity(PARTICIPANTS_PER_ROLE);
+    let mut participants = Vec::with_capacity(PARTICIPANTS_PER_ROLE * 2);
+    for index in 0..PARTICIPANTS_PER_ROLE {
+        let offset_secs = i64::try_from(PARTICIPANTS_PER_ROLE - index)?;
+        let event_at = cutoff - Duration::seconds(offset_secs);
+        let observed_at = event_at + Duration::seconds(1);
+        let maker_seed = ordinal
+            .checked_mul(100)
+            .and_then(|value| value.checked_add(index))
+            .context("closure trade participant identity overflowed")?;
+        let taker_seed = maker_seed
+            .checked_add(PARTICIPANTS_PER_ROLE)
+            .context("closure taker identity overflowed")?;
+        let shares = Shares::new(Decimal::from(24 + (index % 5)));
+        let notional = shares * price;
+        let source_event_id = format!(
+            "feedback-closure:{scope}:{ordinal}:{}:{index}:on-chain-fill",
+            decision_at.timestamp_millis()
+        );
+        let tx_seed = seeded_uuid(&source_event_id).as_u128();
+        let execution_hash = ResearchHasher::canonical(&source_event_id)?;
+        let side = if index.is_multiple_of(2) {
+            ChExchangeSide::Buy
+        } else {
+            ChExchangeSide::Sell
+        };
+        executions.push(MarketExecutionRow {
+            execution_id: ChDigest::from(execution_hash),
+            match_id: None,
+            maker_order_filled_event_id: ChDigest::from(execution_hash),
+            market_id: source.market_id.clone(),
+            token_id: token_id.clone(),
+            contract_key: "ctf_exchange_v2".to_owned(),
+            exchange_version: ChExchangeVersion::V2,
+            transaction_hash: format!("0x{tx_seed:064x}"),
+            block_number,
+            transaction_index: 0,
+            log_index: u64::try_from(index)?,
+            maker_address: format!("0x{maker_seed:040x}"),
+            taker_address: format!("0x{taker_seed:040x}"),
+            side,
+            price: ChPrice::from(price),
+            size_shares: ChShares::from(shares),
+            notional_usd: ChUsd::from(notional),
+            fee_amount: ChAssetAmount::from(Decimal::ZERO),
+            fee_asset_id: "0".to_owned(),
+            effective_at: event_at.timestamp_millis(),
+            observed_at: observed_at.timestamp_millis(),
+            model_available_at: observed_at.timestamp_millis(),
+            availability_basis: ChAvailabilityBasis::BlockConfirmation,
+            availability_policy_hash: ChDigest::from(policy_hash),
+            chunk_id,
+            schema_version: MarketExecutionRow::SCHEMA_VERSION,
+        });
+        for (participant_role, participant_address) in [
+            (
+                ChExecutionParticipantRole::Maker,
+                format!("0x{maker_seed:040x}"),
+            ),
+            (
+                ChExecutionParticipantRole::Taker,
+                format!("0x{taker_seed:040x}"),
+            ),
+        ] {
+            participants.push(ExecutionParticipantRow {
+                execution_id: ChDigest::from(execution_hash),
                 market_id: source.market_id.clone(),
                 token_id: token_id.clone(),
-                event_time: event_at.timestamp_millis(),
-                ingestion_time: ingestion_at.timestamp_millis(),
-                stream_session_id: None,
-                token_sequence: None,
-                participant_address: format!("0x{participant_seed:040x}"),
-                participant_role: role,
-                side: if index.is_multiple_of(2) {
-                    ChTradeSide::Buy
-                } else {
-                    ChTradeSide::Sell
-                },
-                price: ChPrice::from(price),
-                size_shares: ChShares::from(shares),
-                notional_usd: ChUsd::from(notional),
-                tx_hash: Some(format!("0x{tx_seed:064x}")),
-                source_event_id: source_event_id.clone(),
-                source: ChTradeTapeSource::OnChainOrderFilled,
-                observed_field_flags: OBSERVED_FLAGS,
-                fee_rate_bps: Some(ChBps::from(Bps::ZERO)),
-                reconciliation_status: ChTradeReconciliationStatus::Matched,
-                matched_source_event_id: Some(format!("market-ws:{source_event_id}")),
-                revision: 1,
-                reconciled_at: Some(ingestion_at.timestamp_millis()),
-                raw_payload_json: Some(
-                    serde_json::json!({
-                        "market_id": source.market_id,
-                        "token_id": token_id,
-                        "participant": participant_seed,
-                        "role": if role == ChTradeParticipantRole::Maker { "maker" } else { "taker" },
-                    })
-                    .to_string(),
-                ),
-                schema_version: TradeTapeRow::SCHEMA_VERSION,
-            })
-        })
-        .collect()
+                participant_address,
+                participant_role,
+                participant_notional: ChUsd::from(notional),
+                effective_at: event_at.timestamp_millis(),
+                model_available_at: observed_at.timestamp_millis(),
+                availability_policy_hash: ChDigest::from(policy_hash),
+                chunk_id,
+                schema_version: ExecutionParticipantRow::SCHEMA_VERSION,
+            });
+        }
+    }
+    let acceptance = ExchangeHistoryAcceptanceRow {
+        chunk_id,
+        frontier: "activation".to_owned(),
+        from_block: 1,
+        to_block: block_number,
+        log_count: u64::try_from(executions.len())?,
+        provider_digest: ChDigest::from(policy_hash),
+        first_block_hash: block_hash.clone(),
+        last_block_hash: block_hash,
+        effective_through_at: cutoff.timestamp_millis(),
+        accepted_at: decision_at.timestamp_millis(),
+        active: 1,
+        state_revision: u64::try_from(decision_at.timestamp_micros())?,
+        schema_version: ExchangeHistoryAcceptanceRow::SCHEMA_VERSION,
+    };
+    Ok(ClosureExecutionFacts {
+        executions,
+        participants,
+        acceptance,
+    })
 }
 
 fn closure_book_row(
@@ -5074,8 +5167,12 @@ pub async fn complete_feedback_closure(
         .await?
         .context("closure shadow binding has no current policy snapshot")?;
     let runner = build_model_runner(db, artifact_store).await;
-    let schema = Arc::new(FeatureSchema::build(
+    let research_profile = fixture_profile_ref()
+        .resolve_builtin_research_profile()
+        .map_err(AnyhowError::msg)?;
+    let schema = Arc::new(ExecutableFeatureSchema::build(
         &policy.snapshot.profile_artifacts.features.definition,
+        research_profile.spec.feature_contract,
     )?);
     let first_decision_at = binding.bound_at + Duration::milliseconds(1);
     ensure!(
@@ -5129,7 +5226,7 @@ pub async fn complete_feedback_closure(
     };
     let fact_writers = Arc::clone(&fixture.fact_writers);
     let replay = Arc::clone(&fixture.replay);
-    let runtime_trade_tape_source = fixture.runtime_trade_tape_source.clone();
+    let runtime_finalized_execution_evidence = fixture.runtime_finalized_execution_evidence.clone();
     let required_features: Arc<[FeatureName]> = requirements.model_requirements.union_all().into();
     let results = stream::iter(0..SHADOW_OBSERVATION_COUNT)
         .map(|ordinal| {
@@ -5141,7 +5238,7 @@ pub async fn complete_feedback_closure(
             let fact_writers = Arc::clone(&fact_writers);
             let replay = Arc::clone(&replay);
             let required_features = Arc::clone(&required_features);
-            let runtime_trade_tape_source = runtime_trade_tape_source.clone();
+            let runtime_finalized_execution_evidence = runtime_finalized_execution_evidence.clone();
             async move {
                 let cohort_index = ordinal.div_euclid(2) % cohorts.len();
                 let cohort = cohorts[cohort_index].clone();
@@ -5161,7 +5258,7 @@ pub async fn complete_feedback_closure(
                     policy_snapshot_id: decision_policy_snapshot_id,
                     sources: cohort.markets.as_ref(),
                     required_features: required_features.as_ref(),
-                    runtime_trade_tape_source: &runtime_trade_tape_source,
+                    runtime_finalized_execution_evidence: &runtime_finalized_execution_evidence,
                     decision_at,
                     book_price_shift: cohort.book_price_shift,
                 })
@@ -5526,7 +5623,9 @@ async fn persist_serving_sources(
     let mut book_rows = Vec::with_capacity(sources.len() * 2);
     let mut microstructure_rows = Vec::with_capacity(sources.len() * 61);
     let mut session_rows = Vec::with_capacity(sources.len() * 2);
-    let mut trade_tape_rows = Vec::with_capacity(sources.len() * 40);
+    let mut execution_rows = Vec::with_capacity(sources.len() * 20);
+    let mut participant_rows = Vec::with_capacity(sources.len() * 40);
+    let mut acceptance_rows = Vec::with_capacity(sources.len());
     let mut market_infos = Vec::with_capacity(sources.len());
     for source in sources {
         let source_facts =
@@ -5540,12 +5639,15 @@ async fn persist_serving_sources(
             knowledge_lag_secs,
             book_price_shift,
         )?);
-        trade_tape_rows.extend(closure_trade_tape_rows(
+        let execution_facts = closure_execution_history_rows(
             source,
             decision_at,
             knowledge_lag_secs,
             book_price_shift,
-        )?);
+        )?;
+        execution_rows.extend(execution_facts.executions);
+        participant_rows.extend(execution_facts.participants);
+        acceptance_rows.push(execution_facts.acceptance);
     }
     let market_info_repository = PgClobMarketInfoRepository::new(db.clone());
     for market_info in market_infos {
@@ -5558,7 +5660,9 @@ async fn persist_serving_sources(
             books: book_rows,
             microstructure: microstructure_rows,
             sessions: session_rows,
-            trade_tape: trade_tape_rows,
+            executions: execution_rows,
+            participants: participant_rows,
+            acceptances: acceptance_rows,
             domain_observations,
         })
         .await?;
@@ -5859,13 +5963,13 @@ impl ShadowObservationRequest<'_> {
     }
 }
 
-fn frozen_trade_tape_sources(
+fn frozen_finalized_execution_evidences(
     samples: &[ReplaySample],
-    evidence: &TradeTapeSourceEvidence,
-) -> Result<HashMap<MarketId, TradeTapeSourceEvidence>> {
+    evidence: &FinalizedExecutionEvidence,
+) -> Result<HashMap<MarketId, FinalizedExecutionEvidence>> {
     ensure!(
         evidence.runtime_parts().is_some(),
-        "live serving evidence requires a frozen runtime trade-tape source"
+        "live serving evidence requires frozen finalized-execution history"
     );
     let sources = samples
         .iter()
@@ -5900,12 +6004,15 @@ async fn run_shadow_observation(
             samples: samples.clone(),
             lookback: replay.lookback,
             knowledge_lag: replay.knowledge_lag,
+            feature_contract: replay.config.feature_contract,
             max_horizon_secs: 0,
             domain: replay.config.domain.clone(),
         })
         .await?;
-    let trade_tape_sources =
-        frozen_trade_tape_sources(&samples, request.runtime_trade_tape_source)?;
+    let finalized_execution_evidences = frozen_finalized_execution_evidences(
+        &samples,
+        request.runtime_finalized_execution_evidence,
+    )?;
     let cross = materialize_cross_section(
         &replay.builder,
         ReplayFactorMode::FeatureOnly,
@@ -5913,7 +6020,9 @@ async fn run_shadow_observation(
         &CrossSectionRequest {
             pit: &window.pit,
             prefetched: &window.prefetched,
-            trade_tape_source: ReplayTradeTapeSource::FrozenRuntime(&trade_tape_sources),
+            finalized_execution_evidence: ReplayExecutionSource::FrozenRuntime(
+                &finalized_execution_evidences,
+            ),
             decision_at: request.decision_at,
             group: &samples,
             required_features: request.required_features,
@@ -6576,7 +6685,7 @@ mod tests {
         sync::Arc,
     };
 
-    use anyhow::{Error as AnyhowError, Result};
+    use anyhow::Result;
     use chrono::{DateTime, Duration, Utc};
     use quant_pivot_api::gamma::GammaClient;
     use quant_pivot_core::prefetch::historical_window::ReplaySample;
@@ -6592,8 +6701,8 @@ mod tests {
         },
         hashing::CanonicalDigest,
         types::{
-            ContentHash, DomainSourceId, MarketId, PayoutRatio, Probability, ShadowComparisonId,
-            TokenId, TradeTapeSourceEvidence,
+            ContentHash, DomainSourceId, FinalizedExecutionEvidence, MarketId, PayoutRatio,
+            Probability, ShadowComparisonId, TokenId,
         },
     };
     use rust_decimal::Decimal;
@@ -6615,7 +6724,7 @@ mod tests {
         closure_price_tier, closure_regime_sign, closure_resolution_fact,
         closure_reversion_strength, closure_spread_width, closure_training_groups,
         closure_yes_wins, evaluation_book_price_shift, evaluation_decision_points,
-        evaluation_market_range, feedback_resolution_times, frozen_trade_tape_sources,
+        evaluation_market_range, feedback_resolution_times, frozen_finalized_execution_evidences,
         recommendation_won, rule_for_alias, shadow_decision_at, shadow_market_range,
         shadow_price_shift, training_book_price_shift, training_market_range,
         validate_shadow_observations,
@@ -6633,21 +6742,23 @@ mod tests {
                 token_id: TokenId::new("runtime-token-b"),
             },
         ];
-        let evidence =
-            TradeTapeSourceEvidence::runtime(false, Vec::new()).map_err(AnyhowError::msg)?;
-        let sources = frozen_trade_tape_sources(&samples, &evidence)?;
+        let evidence = FinalizedExecutionEvidence::runtime(false, None, None);
+        let sources = frozen_finalized_execution_evidences(&samples, &evidence)?;
 
         assert_eq!(sources.len(), samples.len());
         assert!(sources.values().all(|source| source == &evidence));
         assert!(
-            frozen_trade_tape_sources(&samples, &TradeTapeSourceEvidence::materialized(Utc::now()))
-                .is_err()
+            frozen_finalized_execution_evidences(
+                &samples,
+                &FinalizedExecutionEvidence::materialized(Utc::now())
+            )
+            .is_err()
         );
         Ok(())
     }
 
     #[test]
-    fn runtime_sources_reject_duplicates() -> Result<()> {
+    fn runtime_sources_reject_duplicates() {
         let samples = [
             ReplaySample {
                 market_id: MarketId::new("runtime-source-duplicate"),
@@ -6658,11 +6769,9 @@ mod tests {
                 token_id: TokenId::new("runtime-token-b"),
             },
         ];
-        let evidence =
-            TradeTapeSourceEvidence::runtime(false, Vec::new()).map_err(AnyhowError::msg)?;
+        let evidence = FinalizedExecutionEvidence::runtime(false, None, None);
 
-        assert!(frozen_trade_tape_sources(&samples, &evidence).is_err());
-        Ok(())
+        assert!(frozen_finalized_execution_evidences(&samples, &evidence).is_err());
     }
 
     fn report_catalog(scope: &str, category: MarketCategory) -> Result<ClosureCatalogFacts> {

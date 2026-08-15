@@ -243,7 +243,8 @@ impl PortfolioScenarioGenerator {
             route_set_digest: represented_routes.digest,
             serving_contract_digest: model.serving_contract_digest,
             calibration_contract_digest: model.calibration_contract_digest,
-            trade_policy_contract_digest: model.trade_policy_contract_digest,
+            recommendation_contract_digest: model.recommendation_contract_digest,
+            evidence_regime: model.evidence_regime,
             capital_time_bucket_contract_digest: model.capital_time_bucket_contract_digest,
             scenarios,
             distributions: model.distributions.clone(),
@@ -285,7 +286,7 @@ fn validate_model_contract(
         || model.route_set_digest != represented_routes.digest
         || binding.serving_contract_digest != model.serving_contract_digest
         || binding.calibration_contract_digest != model.calibration_contract_digest
-        || binding.trade_policy_contract_digest != model.trade_policy_contract_digest
+        || binding.recommendation_contract_digest != model.recommendation_contract_digest
         || binding.capital_time_bucket_contract_digest != model.capital_time_bucket_contract_digest
         || model.capital_time_bucket_contract_digest != capital_bucket_digest
         || model.scenario_random_stream_hash == ContentHash::from_bytes([0_u8; 32])
@@ -1167,8 +1168,8 @@ mod tests {
     use quant_pivot_error::{QuantError, QuantResult};
     use quant_pivot_models::{
         domain::quant::{
-            DiscountCurvePoint, PortfolioScenarioFitEvidence, PortfolioScenarioKind,
-            PortfolioScenarioModelArtifact, PortfolioScenarioModelState,
+            DiscountCurvePoint, PortfolioScenarioEvidenceRegime, PortfolioScenarioFitEvidence,
+            PortfolioScenarioKind, PortfolioScenarioModelArtifact, PortfolioScenarioModelState,
             PortfolioScenarioResamplingMethod, PortfolioScenarioRouteFactor,
             PortfolioScenarioRouteFitLineage, PortfolioScenarioRouteModelLineage,
             PortfolioScenarioVisibility, RepresentedRouteSet, ScenarioDistribution,
@@ -1261,7 +1262,8 @@ mod tests {
                 route_set_digest: routes.digest,
                 serving_contract_digest: serving,
                 calibration_contract_digest: calibration,
-                trade_policy_contract_digest: trade_policy,
+                recommendation_contract_digest: trade_policy,
+                evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
                 capital_time_bucket_contract_digest: time_buckets,
                 scenario_random_stream_hash: hash("scenario-random-stream")?,
                 pit_residual_panel_hash: hash("pit-panel")?,
@@ -1303,7 +1305,7 @@ mod tests {
                         calibration_artifact_id: CalibrationArtifactId::from_v7(),
                         calibration_artifact_hash: hash(&format!("calibration-{route:?}"))
                             .expect("calibration hash"),
-                        trade_policy_contract_hash: trade_policy,
+                        recommendation_contract_hash: trade_policy,
                         fit_window_start: at - Duration::days(30),
                         fit_window_end: at,
                     })
@@ -1322,7 +1324,7 @@ mod tests {
                 route_set_digest: routes.digest,
                 serving_contract_digest: serving,
                 calibration_contract_digest: calibration,
-                trade_policy_contract_digest: trade_policy,
+                recommendation_contract_digest: trade_policy,
                 scenario_model_schema_version: SchemaVersion::FIRST,
                 capital_time_bucket_contract_digest: time_buckets,
                 model_content_hash: model.content_hash,

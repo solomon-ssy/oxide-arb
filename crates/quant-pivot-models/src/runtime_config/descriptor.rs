@@ -562,7 +562,7 @@ impl DescriptorCollector {
                 RecommendationPolicy,
                 "/data_quality/max_domain_observation_age_secs"
                 | "/data_quality/max_feature_bucket_age_secs"
-                | "/data_quality/max_trade_tape_age_secs"
+                | "/data_quality/max_execution_age_secs"
                 | "/reports/ad_hoc_default_knowledge_lag_secs"
                 | "/selection/max_time_to_resolution_secs"
                 | "/selection/min_time_to_resolution_secs",

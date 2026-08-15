@@ -17,8 +17,9 @@ use quant_pivot_models::{
     },
     types::{
         CalibrationArtifactId, ContentHash, ModelVersionId, PortfolioScenarioModelArtifactId,
-        ReportRouteRunId, ResearchProfileArtifactId, ResearchProfileRef, TradePolicyArtifactId,
-        model_lineage::ModelVersionDerivation,
+        ReportRouteRunId, ResearchFeatureContract, ResearchProfileArtifact,
+        ResearchProfileArtifactId, ResearchProfileRef, ServingAuthority, TradePolicyArtifactId,
+        model_lineage::ModelVersionDerivation, model_serving::ModelServingTradePolicyBinding,
     },
 };
 use quant_pivot_research::{
@@ -29,6 +30,13 @@ use quant_pivot_research::{
 
 use super::model_serving_preimage::VerifiedModelServingPreimage;
 
+#[derive(serde::Serialize)]
+struct BootstrapRecommendationContract<'a> {
+    profile_ref: &'a ResearchProfileRef,
+    feature_contract: ResearchFeatureContract,
+    serving_authority: ServingAuthority,
+}
+
 /// Route-owned immutable lineage required by a promoted joint-scenario binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotedRouteContract {
@@ -38,8 +46,11 @@ pub struct PromotedRouteContract {
     pub calibration_source_model_version_id: ModelVersionId,
     pub calibration_artifact_id: CalibrationArtifactId,
     pub calibration_contract_hash: ContentHash,
-    pub trade_policy_artifact_id: TradePolicyArtifactId,
-    pub trade_policy_contract_hash: ContentHash,
+    pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
+    pub recommendation_contract_hash: ContentHash,
+    pub serving_authority: ServingAuthority,
+    pub feature_contract: ResearchFeatureContract,
+    pub profile: ResearchProfileArtifact,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub research_profile_ref: ResearchProfileRef,
     pub prediction_horizon_secs: i64,
@@ -66,11 +77,13 @@ impl PromotedRouteContract {
                 "Route {route:?} serving contract has no probability calibration"
             ))
         })?;
-        let trade_policy = bindings.trade_policy.as_ref().ok_or_else(|| {
-            invalid(format!(
-                "Route {route:?} serving contract has no Trade Policy"
-            ))
-        })?;
+        let profile = bindings
+            .model
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(|error| invalid(format!("resolve Route {route:?} profile: {error}")))?;
+        let trade_policy = bindings.trade_policy.as_ref();
+        let recommendation_contract_hash = recommendation_contract_hash(&profile, trade_policy)?;
         let calibration_source_model_version_id = match version
             .verified_derivation()
             .map_err(|error| invalid(format!("verify Route {route:?} derivation: {error}")))?
@@ -99,14 +112,48 @@ impl PromotedRouteContract {
             calibration_source_model_version_id,
             calibration_artifact_id: calibration.artifact_id,
             calibration_contract_hash: calibration.content_hash,
-            trade_policy_artifact_id: trade_policy.artifact_id,
-            trade_policy_contract_hash: trade_policy.content_hash,
+            trade_policy_artifact_id: trade_policy.map(|binding| binding.artifact_id),
+            recommendation_contract_hash,
+            serving_authority: profile.spec.serving_authority,
+            feature_contract: profile.spec.feature_contract,
+            profile,
             research_profile_artifact_id: bindings.model.profile_ref.artifact_id(),
             research_profile_ref: bindings.model.profile_ref.clone(),
             prediction_horizon_secs: version.model_spec_prediction_horizon_secs,
             feature_contract_digest: bindings.transform.input_contract_hash,
             pit_lineage_digest: bindings.dataset.manifest.source_fingerprint,
         })
+    }
+}
+
+fn recommendation_contract_hash(
+    profile: &ResearchProfileArtifact,
+    trade_policy: Option<&ModelServingTradePolicyBinding>,
+) -> QuantResult<ContentHash> {
+    match profile.spec.serving_authority {
+        ServingAuthority::ExecutionEligible => trade_policy
+            .map(|binding| binding.content_hash)
+            .ok_or_else(|| {
+                invalid("execution-eligible Route serving contract has no Trade Policy".to_owned())
+                    .into()
+            }),
+        ServingAuthority::ReportOnlyWithLiveL2 => {
+            if trade_policy.is_some() {
+                return Err(invalid(
+                    "bootstrap Route must not bind an executable Trade Policy".to_owned(),
+                )
+                .into());
+            }
+            Ok(CanonicalDigest::content_hash_typed(
+                "quant-pivot/bootstrap-recommendation-contract",
+                1,
+                &BootstrapRecommendationContract {
+                    profile_ref: &profile.profile_ref,
+                    feature_contract: profile.spec.feature_contract,
+                    serving_authority: profile.spec.serving_authority,
+                },
+            )?)
+        }
     }
 }
 
@@ -379,7 +426,7 @@ impl PromotedPortfolioContextLoader {
                 .iter()
                 .map(|contract| RouteContractHash {
                     route: contract.route,
-                    content_hash: contract.trade_policy_contract_hash,
+                    content_hash: contract.recommendation_contract_hash,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -393,8 +440,8 @@ impl PromotedPortfolioContextLoader {
         if scenario_model_binding.serving_contract_digest != compatibility.serving_contract_digest
             || scenario_model_binding.calibration_contract_digest
                 != compatibility.calibration_contract_digest
-            || scenario_model_binding.trade_policy_contract_digest
-                != compatibility.trade_policy_contract_digest
+            || scenario_model_binding.recommendation_contract_digest
+                != compatibility.recommendation_contract_digest
         {
             return Err(invalid(
                 "scenario binding differs from the exact Route serving, calibration, or Trade Policy contracts"
@@ -532,10 +579,10 @@ impl PromotedPortfolioContextLoader {
             ))
             .into());
         }
-        if model.trade_policy_contract_digest != binding.trade_policy_contract_digest {
+        if model.recommendation_contract_digest != binding.recommendation_contract_digest {
             return Err(invalid(format!(
                 "scenario Trade-Policy digest {} differs from bound digest {}",
-                model.trade_policy_contract_digest, binding.trade_policy_contract_digest
+                model.recommendation_contract_digest, binding.recommendation_contract_digest
             ))
             .into());
         }

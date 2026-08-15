@@ -38,6 +38,7 @@ pub fn crypto_profile_ref() -> ResearchProfileRef {
         .find(|profile| {
             profile.spec.category == Some(MarketCategory::Crypto)
                 && profile.spec.target_horizon_secs == CRYPTO_PRICE_15M_HORIZON_SECS
+                && profile.spec.feature_contract.requires_l2()
         })
         .expect("Crypto ResearchProfile")
         .profile_ref
@@ -52,6 +53,7 @@ pub fn pooled_profile_ref() -> ResearchProfileRef {
         .find(|profile| {
             profile.spec.category.is_none()
                 && profile.spec.target_horizon_secs == POOLED_1H_HORIZON_SECS
+                && profile.spec.feature_contract.requires_l2()
         })
         .expect("pooled ResearchProfile")
         .profile_ref
@@ -66,6 +68,7 @@ pub fn weather_profile_ref() -> ResearchProfileRef {
         .find(|profile| {
             profile.spec.category == Some(MarketCategory::Weather)
                 && profile.spec.target_horizon_secs == WEATHER_FORECAST_24H_HORIZON_SECS
+                && profile.spec.feature_contract.requires_l2()
         })
         .expect("Weather ResearchProfile")
         .profile_ref

@@ -248,7 +248,7 @@ mod tests {
         types::{
             CalibrationArtifactId, ContentHash, ExecutionAccountId, ExecutionOrderId,
             OrderIntentId, PayoutRatio, RecommendationId, RecommendationReportId, ReconciliationId,
-            SchemaVersion, Shares, TradePolicyArtifactId, Usd,
+            SchemaVersion, ServingAuthority, Shares, TradePolicyArtifactId, Usd,
         },
     };
     use rust_decimal_macros::dec;
@@ -315,13 +315,15 @@ mod tests {
             model_version_id: recommendation.evidence_refs.model_version_id,
             model_run_id: Some(recommendation.evidence_refs.model_run_id),
             calibration_artifact_id,
-            trade_policy_artifact_id,
+            trade_policy_artifact_id: Some(trade_policy_artifact_id),
             research_profile_artifact_id: profile_ref.artifact_id(),
             research_profile_ref: profile_ref,
             prediction_horizon_secs: 86_400,
             feature_contract_digest: hash('f'),
             pit_lineage_digest: hash('8'),
             serving_contract_digest: hash('9'),
+            recommendation_contract_hash: hash('7'),
+            serving_authority: ServingAuthority::ExecutionEligible,
         };
         let route_run = ReportRouteRunInfo {
             report_route_run_id: recommendation.report_route_run_id,

@@ -13,9 +13,10 @@ use quant_pivot_models::{
     domain::{
         ports::{
             AccountReadPort, BacktestPort, CalibrationArtifactFitPort, CatalogStatusPort,
-            CommittedPolicyApplyPort, CpcvBacktestPort, DataQualityPort, ExecutionReadPort,
-            ExecutionRecoveryPort, FeatureIntegrityPort, FeedbackMutationPort, FeedbackReadPort,
-            KillSwitchPort, MarketDataPort, MarketLinkageGovernancePort, MetricsScrapePort,
+            CommittedPolicyApplyPort, CpcvBacktestPort, DataQualityPort,
+            ExchangeHistoryProgressPort, ExecutionReadPort, ExecutionRecoveryPort,
+            FeatureIntegrityPort, FeedbackMutationPort, FeedbackReadPort, KillSwitchPort,
+            MarketDataPort, MarketLinkageGovernancePort, MetricsScrapePort,
             ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort, ModelTrainingPort,
             OrderIntentPort, PasswordCryptoPort, PolicySnapshotPort, QuantReportPort,
             ReadinessPort, ReconciliationPort, ResearchCatalogPort, ResearchJobPort,
@@ -30,9 +31,10 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     BasisAlertRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
-    EntryConditionRepository, FeedbackOutboxRepository, MarketLinkageRepository, MarketRepository,
-    MenuRepository, OperationLogRepository, PolicyRepository, QuantFactReadRepository,
-    RoleMenuRepository, RolePermissionRepository, RoleRepository, RuntimeActivityRepository,
+    EntryConditionRepository, ExchangeHistoryRepository, FeedbackOutboxRepository,
+    FreshBootRepository, MarketLinkageRepository, MarketRepository, MenuRepository,
+    OperationLogRepository, PolicyRepository, QuantFactReadRepository, RoleMenuRepository,
+    RolePermissionRepository, RoleRepository, RuntimeActivityRepository, TrainingDatasetRepository,
     UserRepository, UserRoleRepository,
 };
 
@@ -60,6 +62,10 @@ pub struct AppState {
     pub operation_log: OperationLogBuffer,
     pub control: Arc<dyn RuntimeControlPort>,
     pub capabilities: Arc<dyn SystemCapabilityPort>,
+    pub exchange_history_progress: Arc<dyn ExchangeHistoryProgressPort>,
+    pub exchange_history: Arc<dyn ExchangeHistoryRepository>,
+    pub fresh_boot_runs: Arc<dyn FreshBootRepository>,
+    pub fresh_boot_datasets: Arc<dyn TrainingDatasetRepository>,
     /// Operational kill-switch governed read/write surface.
     pub kill_switch: Arc<dyn KillSwitchPort>,
     pub market_data: Arc<dyn MarketDataPort>,

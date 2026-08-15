@@ -1,4 +1,4 @@
-//! Side-effect-free first-champion route bootstrap preflight.
+//! First-champion route bootstrap scenario fit and preflight.
 
 use std::sync::Arc;
 
@@ -6,25 +6,42 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, feedback::FeedbackError};
 use quant_pivot_models::{
     domain::{
+        governance::RuntimeControlInfo,
         ports::{
             BootstrapQualityGateEvidence, BootstrapQualityGateInput, CandidateQualityGateEvidence,
             ModelGovernancePort,
         },
         quant::{
-            BacktestPathSetInfo, CandidateExplanationValidation, ModelBootstrapManifest,
-            ModelBootstrapManifestInput, ModelBootstrapPolicyProjection,
-            ModelRouteBootstrapPreflight, ModelRouteBootstrapPreflightInput, ModelVersionInfo,
+            BacktestPathSetInfo, CalibrationArtifactInfo, CandidateExplanationValidation,
+            ModelBootstrapManifest, ModelBootstrapManifestInput, ModelBootstrapPolicyProjection,
+            ModelBootstrapValidationEvidence, ModelRouteBootstrapPreflight,
+            ModelRouteBootstrapPreflightInput, ModelVersionInfo, PortfolioScenarioEvidenceRegime,
+            PortfolioScenarioRouteModelLineage, RepresentedRouteSet, RouteCompatibilityDigests,
+            RouteContractHash,
         },
     },
     enums::{model::ModelFamily, quant::QuantRuntimeMode, runtime_config::ConfigResourceKind},
-    runtime_config::BuyModelRoute,
-    types::{DecisionPolicySnapshotId, ModelVersionId, TrainingDatasetId},
+    runtime_config::{ActivePolicyBundle, BuyModelRoute, PortfolioScenarioModelArtifactBinding},
+    types::{
+        DecisionPolicySnapshotId, ModelVersionId, ServingAuthority, TrainingDatasetId,
+        backtest::CpcvFoldValidationRegime,
+    },
 };
 use quant_pivot_repository::traits::{
-    BacktestPathSetRepository, BacktestReportRepository, FeedbackCycleRepository,
+    BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
+    FeedbackCycleRepository, TrainingDatasetRepository,
+};
+use quant_pivot_research::{
+    artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
+    portfolio::{
+        PortfolioScenarioMethodology, PortfolioScenarioModelFitInput, PortfolioScenarioModelFitter,
+        PortfolioScenarioRouteFitInput,
+    },
 };
 
-use crate::service::model_route_evidence::ModelRouteEvidenceService;
+use crate::service::{
+    model_route_evidence::ModelRouteEvidenceService, portfolio_context::PromotedRouteContract,
+};
 
 /// Exact preflight and policy projection derived from current server truth.
 #[derive(Debug, Clone)]
@@ -52,6 +69,9 @@ pub struct ModelRouteBootstrapServiceDeps {
     pub backtests: Arc<dyn BacktestReportRepository>,
     pub cycles: Arc<dyn FeedbackCycleRepository>,
     pub model_governance: Arc<dyn ModelGovernancePort>,
+    pub calibrations: Arc<dyn CalibrationArtifactRepository>,
+    pub datasets: Arc<dyn TrainingDatasetRepository>,
+    pub artifacts: Arc<dyn ArtifactStore>,
 }
 
 /// Canonical owner of first-champion candidate evidence resolution.
@@ -62,6 +82,14 @@ pub struct ModelRouteBootstrapService {
 struct BootstrapQualityEvidence {
     path_set: BacktestPathSetInfo,
     quality: BootstrapQualityGateEvidence,
+}
+
+struct ScenarioRouteEvidence {
+    route: BuyModelRoute,
+    model: ModelVersionInfo,
+    contract: PromotedRouteContract,
+    path_set: BacktestPathSetInfo,
+    calibration: CalibrationArtifactInfo,
 }
 
 impl ModelRouteBootstrapService {
@@ -88,11 +116,7 @@ impl ModelRouteBootstrapService {
             .current_runtime()
             .await
             .map_err(Self::route_error)?;
-        if runtime.quant_runtime_mode != QuantRuntimeMode::ReportOnly {
-            return Err(Self::invalid(
-                "first-route bootstrap is allowed only in ReportOnly",
-            ));
-        }
+        Self::validate_report_controls(&bundle, &runtime)?;
         let model = self
             .deps
             .route_evidence
@@ -100,19 +124,7 @@ impl ModelRouteBootstrapService {
             .await?;
         let route = BuyModelRoute::try_from(model.category_scope)
             .map_err(|error| Self::invalid(error.to_string()))?;
-        if self.deps.route_evidence.current_route(route).is_some() {
-            return Err(Self::invalid(
-                "in-memory serving generation already contains the bootstrap target route",
-            ));
-        }
-        if !matches!(
-            model.model_family,
-            ModelFamily::WeightedFactor | ModelFamily::ClassicalGradientBoostedTrees
-        ) {
-            return Err(Self::invalid(
-                "bootstrap candidate family is not executable by the canonical runtime",
-            ));
-        }
+        self.validate_target(&model, route)?;
         self.deps
             .route_evidence
             .load_runtime(&model)
@@ -125,6 +137,26 @@ impl ModelRouteBootstrapService {
         let training_dataset_id = model.training_dataset_id.ok_or_else(|| {
             Self::invalid("bootstrap candidate has no immutable training dataset")
         })?;
+        let dataset = self
+            .deps
+            .datasets
+            .find_by_id(&training_dataset_id)
+            .await?
+            .ok_or_else(|| Self::invalid("bootstrap training dataset does not exist"))?;
+        if dataset
+            .sample_count
+            .and_then(|count| u64::try_from(count).ok())
+            .is_none()
+        {
+            return Err(Self::invalid(
+                "bootstrap training dataset has no valid sample count",
+            ));
+        }
+        if dataset.coverage.is_none() {
+            return Err(Self::invalid(
+                "bootstrap training dataset has no coverage ledger",
+            ));
+        }
         let BootstrapQualityEvidence { path_set, quality } = self
             .quality_evidence(
                 &model,
@@ -139,6 +171,9 @@ impl ModelRouteBootstrapService {
                 quality.quality_gate_report.hard_failures.len()
             )));
         }
+        let scenario_binding = self
+            .fit_reference_scenario(&bundle, &model, &path_set, evaluated_at)
+            .await?;
         let parity = self
             .deps
             .route_evidence
@@ -170,10 +205,8 @@ impl ModelRouteBootstrapService {
             calibration_artifact_hash: calibration.map(|(_, hash)| hash),
             profile_ref: model.profile_ref.clone(),
             route,
-            cpcv_path_set_id: path_set.path_set_id,
-            cpcv_path_set_hash: path_set.path_set_hash,
-            backtest_report_id: quality.backtest_report_id,
-            backtest_report_hash: quality.backtest_report_hash,
+            validation_evidence: quality.validation_evidence,
+            scenario_model_binding: scenario_binding.clone(),
             explanation_validation: explanation,
             quality_gate_report: quality.quality_gate_report,
             feature_parity_run_id: parity.run_id,
@@ -184,6 +217,7 @@ impl ModelRouteBootstrapService {
             &bundle,
             route,
             model.model_version_id,
+            scenario_binding,
             evaluated_at,
         )?;
         let expected_model_routing_revision_id = bundle
@@ -207,6 +241,51 @@ impl ModelRouteBootstrapService {
             preflight,
             projection,
         })
+    }
+
+    fn validate_report_controls(
+        bundle: &ActivePolicyBundle,
+        runtime: &RuntimeControlInfo,
+    ) -> QuantResult<()> {
+        if runtime.quant_runtime_mode != QuantRuntimeMode::ReportOnly {
+            return Err(Self::invalid(
+                "first-route bootstrap is allowed only in ReportOnly",
+            ));
+        }
+        if !bundle.snapshot.recommendation.reports.ad_hoc_report_enabled {
+            return Err(Self::invalid(
+                "first-route bootstrap requires governed ad-hoc reports to be enabled",
+            ));
+        }
+        if !bundle
+            .snapshot
+            .report_schedule
+            .schedules
+            .iter()
+            .any(|schedule| schedule.enabled)
+        {
+            return Err(Self::invalid(
+                "first-route bootstrap requires at least one enabled report schedule",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_target(&self, model: &ModelVersionInfo, route: BuyModelRoute) -> QuantResult<()> {
+        if self.deps.route_evidence.current_route(route).is_some() {
+            return Err(Self::invalid(
+                "in-memory serving generation already contains the bootstrap target route",
+            ));
+        }
+        if !matches!(
+            model.model_family,
+            ModelFamily::WeightedFactor | ModelFamily::ClassicalGradientBoostedTrees
+        ) {
+            return Err(Self::invalid(
+                "bootstrap candidate family is not executable by the canonical runtime",
+            ));
+        }
+        Ok(())
     }
 
     async fn quality_evidence(
@@ -235,17 +314,53 @@ impl ModelRouteBootstrapService {
                 "latest CPCV path set differs from the candidate or current policy snapshot",
             ));
         }
-        let backtest = self
-            .deps
-            .backtests
-            .list_by_model_version(&model.model_version_id)
-            .await?
-            .into_iter()
-            .find(|report| report.decision_policy_snapshot_id == policy_snapshot_id)
-            .ok_or_else(|| {
-                Self::invalid("bootstrap candidate has no backtest for the current policy snapshot")
-            })?;
-        backtest.verify_hash().map_err(Self::invalid)?;
+        let fold_regime = path_set
+            .fold_artifacts
+            .validation_regime()
+            .map_err(|error| Self::invalid(error.to_string()))?;
+        let profile = model
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(Self::invalid)?;
+        let validation_evidence = match profile.spec.serving_authority {
+            ServingAuthority::ReportOnlyWithLiveL2 => {
+                if fold_regime != CpcvFoldValidationRegime::PredictiveUtility {
+                    return Err(Self::invalid(
+                        "ReportOnlyWithLiveL2 bootstrap requires predictive CPCV evidence",
+                    ));
+                }
+                ModelBootstrapValidationEvidence::PredictiveCpcv {
+                    path_set_id: path_set.path_set_id,
+                    path_set_hash: path_set.path_set_hash,
+                }
+            }
+            ServingAuthority::ExecutionEligible => {
+                if fold_regime != CpcvFoldValidationRegime::PortfolioEconomics {
+                    return Err(Self::invalid(
+                        "ExecutionEligible bootstrap requires portfolio-economic CPCV evidence",
+                    ));
+                }
+                let backtest = self
+                    .deps
+                    .backtests
+                    .list_by_model_version(&model.model_version_id)
+                    .await?
+                    .into_iter()
+                    .find(|report| report.decision_policy_snapshot_id == policy_snapshot_id)
+                    .ok_or_else(|| {
+                        Self::invalid(
+                            "execution-eligible bootstrap has no portfolio backtest for the current policy snapshot",
+                        )
+                    })?;
+                backtest.verify_hash().map_err(Self::invalid)?;
+                ModelBootstrapValidationEvidence::PortfolioEconomics {
+                    path_set_id: path_set.path_set_id,
+                    path_set_hash: path_set.path_set_hash,
+                    backtest_report_id: backtest.backtest_report_id,
+                    backtest_report_hash: backtest.report_hash,
+                }
+            }
+        };
         let quality = self
             .deps
             .model_governance
@@ -256,13 +371,221 @@ impl ModelRouteBootstrapService {
                         path_set_id: path_set.path_set_id,
                         path_set_hash: path_set.path_set_hash,
                     },
-                    backtest_report_id: backtest.backtest_report_id,
-                    backtest_report_hash: backtest.report_hash,
+                    validation_evidence,
                 },
                 evaluated_at,
             )
             .await?;
         Ok(BootstrapQualityEvidence { path_set, quality })
+    }
+
+    async fn scenario_route_evidence(
+        &self,
+        bundle: &ActivePolicyBundle,
+        model: &ModelVersionInfo,
+        path_set: &BacktestPathSetInfo,
+    ) -> QuantResult<Vec<ScenarioRouteEvidence>> {
+        let target_route = BuyModelRoute::try_from(model.category_scope)
+            .map_err(|error| Self::invalid(error.to_string()))?;
+        let mut route_models = vec![(target_route, model.clone(), path_set.clone())];
+        for (route, binding) in &bundle.snapshot.model_routing.model.buy_routes {
+            if *route == target_route {
+                return Err(Self::invalid(
+                    "bootstrap target already has an active Route binding",
+                ));
+            }
+            let active_model = self
+                .deps
+                .route_evidence
+                .load_model(binding.champion.model_version_id)
+                .await?;
+            let active_path_set = self
+                .deps
+                .path_sets
+                .list_by_model_version(&active_model.model_version_id)
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    Self::invalid(format!(
+                        "active bootstrap Route {route:?} has no immutable CPCV path set"
+                    ))
+                })?;
+            route_models.push((*route, active_model, active_path_set));
+        }
+        route_models.sort_by_key(|(route, _, _)| *route);
+
+        let mut evidence = Vec::with_capacity(route_models.len());
+        for (route, route_model, route_path_set) in route_models {
+            route_path_set
+                .verify_hash()
+                .map_err(|error| Self::invalid(error.to_string()))?;
+            if route_path_set
+                .fold_artifacts
+                .validation_regime()
+                .map_err(|error| Self::invalid(error.to_string()))?
+                != CpcvFoldValidationRegime::PredictiveUtility
+            {
+                return Err(Self::invalid(format!(
+                    "bootstrap reference scenario Route {route:?} lacks predictive CPCV evidence"
+                )));
+            }
+            let contract = PromotedRouteContract::from_version(route, &route_model)?;
+            if contract.serving_authority != ServingAuthority::ReportOnlyWithLiveL2 {
+                return Err(Self::invalid(
+                    "bootstrap reference scenario cannot mix execution-eligible and L2-free Routes",
+                ));
+            }
+            let calibration = self
+                .deps
+                .calibrations
+                .find_by_id(&contract.calibration_artifact_id)
+                .await?
+                .ok_or_else(|| {
+                    Self::invalid(format!(
+                        "bootstrap calibration artifact {} does not exist",
+                        contract.calibration_artifact_id
+                    ))
+                })?;
+            calibration.verify_model_score().map_err(Self::invalid)?;
+            if calibration.content_hash != contract.calibration_contract_hash {
+                return Err(Self::invalid(
+                    "bootstrap calibration artifact differs from the serving contract",
+                ));
+            }
+            evidence.push(ScenarioRouteEvidence {
+                route,
+                model: route_model,
+                contract,
+                path_set: route_path_set,
+                calibration,
+            });
+        }
+        Ok(evidence)
+    }
+
+    async fn fit_reference_scenario(
+        &self,
+        bundle: &ActivePolicyBundle,
+        model: &ModelVersionInfo,
+        path_set: &BacktestPathSetInfo,
+        bound_at: DateTime<Utc>,
+    ) -> QuantResult<PortfolioScenarioModelArtifactBinding> {
+        let evidence = self
+            .scenario_route_evidence(bundle, model, path_set)
+            .await?;
+
+        let represented = RepresentedRouteSet::from_routes(
+            evidence.iter().map(|route_evidence| route_evidence.route),
+        )
+        .map_err(|error| Self::invalid(error.to_string()))?;
+        let compatibility = RouteCompatibilityDigests::try_new(
+            &represented,
+            &evidence
+                .iter()
+                .map(|route_evidence| RouteContractHash {
+                    route: route_evidence.route,
+                    content_hash: route_evidence.contract.serving_contract_hash,
+                })
+                .collect::<Vec<_>>(),
+            &evidence
+                .iter()
+                .map(|route_evidence| RouteContractHash {
+                    route: route_evidence.route,
+                    content_hash: route_evidence.contract.calibration_contract_hash,
+                })
+                .collect::<Vec<_>>(),
+            &evidence
+                .iter()
+                .map(|route_evidence| RouteContractHash {
+                    route: route_evidence.route,
+                    content_hash: route_evidence.contract.recommendation_contract_hash,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| Self::invalid(error.to_string()))?;
+        let horizon_secs = evidence
+            .iter()
+            .map(|route_evidence| {
+                u64::try_from(route_evidence.contract.prediction_horizon_secs).map_err(|error| {
+                    Self::invalid(format!(
+                        "bootstrap prediction horizon does not fit u64: {error}"
+                    ))
+                })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        let max_horizon_secs = horizon_secs.iter().copied().max().ok_or_else(|| {
+            Self::invalid("bootstrap scenario has no represented prediction horizon")
+        })?;
+        let methodology =
+            PortfolioScenarioMethodology::bootstrap_reference(&represented, max_horizon_secs)?;
+        let route_inputs = evidence
+            .iter()
+            .zip(horizon_secs)
+            .map(|(route_evidence, prediction_horizon_secs)| {
+                let calibration_source = &route_evidence
+                    .calibration
+                    .verify_model_score()
+                    .map_err(Self::invalid)?
+                    .fit_contract
+                    .model;
+                Ok(PortfolioScenarioRouteFitInput {
+                    route: route_evidence.route,
+                    model_lineage: PortfolioScenarioRouteModelLineage {
+                        evaluated_model_version_id: route_evidence.model.model_version_id,
+                        evaluated_model_artifact_hash: route_evidence.model.artifact_hash,
+                        evaluated_serving_contract_hash: route_evidence.model.serving_contract_hash,
+                        calibration_source_model_version_id: calibration_source.model_version_id,
+                        calibration_source_model_artifact_hash: calibration_source.artifact_hash,
+                        calibration_source_serving_contract_hash: calibration_source
+                            .serving_contract_hash,
+                    },
+                    calibration_artifact_id: route_evidence.calibration.artifact_id,
+                    calibration_artifact_hash: route_evidence.calibration.content_hash,
+                    recommendation_contract_hash: route_evidence
+                        .contract
+                        .recommendation_contract_hash,
+                    prediction_horizon_secs,
+                    path_set: &route_evidence.path_set,
+                    calibration: &route_evidence.calibration,
+                })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        let fitted = PortfolioScenarioModelFitter::fit(&PortfolioScenarioModelFitInput {
+            methodology: &methodology,
+            represented_routes: &represented,
+            compatibility,
+            evidence_regime: PortfolioScenarioEvidenceRegime::FinalizedReferenceReturns,
+            routes: route_inputs,
+            bound_at,
+        })?;
+        let key = ArtifactKey::new(
+            ArtifactNamespace::PortfolioScenarioModel,
+            fitted
+                .artifact
+                .portfolio_scenario_model_artifact_id
+                .to_string(),
+            "json",
+        )?;
+        let bytes = serde_json::to_vec(&fitted.artifact).map_err(|error| {
+            Self::invalid(format!("encode bootstrap reference scenario: {error}"))
+        })?;
+        if self.deps.artifacts.exists_by_key(&key).await? {
+            if self.deps.artifacts.get_by_key(&key).await? != bytes {
+                return Err(Self::invalid(
+                    "bootstrap scenario content-addressed key contains different bytes",
+                ));
+            }
+        } else {
+            self.deps.artifacts.put(key.clone(), &bytes).await?;
+        }
+        let stored = self.deps.artifacts.get_by_key(&key).await?;
+        if stored != bytes {
+            return Err(Self::invalid(
+                "bootstrap scenario failed exact artifact-store readback",
+            ));
+        }
+        Ok(fitted.binding)
     }
 
     fn invalid(detail: impl Into<String>) -> QuantError {

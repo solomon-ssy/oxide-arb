@@ -6,31 +6,35 @@
 /// migration instead of replaying historical ALTER/data-repair waves.
 pub(super) const BOOTSTRAP_SOURCES: &[&str] = &[include_str!("sql/bootstrap.sql")];
 
-pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 26] = [
+pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 30] = [
     "book_microstructure_1m",
     "book_microstructure_1m_mv",
     "book_microstructure_1s",
     "market_resolution_event",
     "quant_book_l2_ledger",
-    "quant_book_l2_trade_tape_mv",
     "quant_book_stream_session",
     "quant_capital_allocation_event",
     "quant_crypto_price_report",
     "quant_domain_event",
     "quant_domain_observation",
     "quant_entry_condition_evaluation_event",
+    "quant_exchange_event",
+    "quant_exchange_history_acceptance",
+    "quant_exchange_log_raw",
+    "quant_exchange_match",
     "quant_execution_event",
+    "quant_execution_participant",
     "quant_exit_signal_evaluation_event",
     "quant_factor_event",
     "quant_feature_event",
     "quant_feature_parity_event",
     "quant_model_input_event",
+    "quant_market_execution",
     "quant_position_event",
     "quant_report_recommendation_fact",
     "quant_report_market_funnel",
     "quant_serving_evidence_completion",
     "quant_signal_candidate_event",
-    "quant_trade_tape",
     "quant_weather_forecast_fact",
     "quant_weather_observation_fact",
 ];
@@ -193,18 +197,23 @@ mod tests {
     }
 
     #[test]
-    fn last_trade_projection_view() {
+    fn execution_facts_are_canonical() {
         let ddl = BOOTSTRAP_SOURCES
             .iter()
             .flat_map(|source| split_statements(source))
             .collect::<Vec<_>>()
             .join("\n");
         let normalized_ddl = ddl.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(ddl.contains("quant_book_l2_trade_tape_mv"));
+        assert!(normalized_ddl.contains("CREATE TABLE IF NOT EXISTS quant_market_execution"));
+        assert!(normalized_ddl.contains("`model_available_at` DateTime64(3, 'UTC')"));
+        assert!(normalized_ddl.contains("`availability_basis` Enum8('BlockConfirmation' = 1)"));
+        assert!(normalized_ddl.contains(
+            "ORDER BY (market_id, token_id, effective_at, block_number, transaction_index, log_index)"
+        ));
+        assert!(normalized_ddl.contains("`participant_role` Enum8('Maker' = 1, 'Taker' = 2)"));
         assert!(
-            normalized_ddl.contains("FROM quant_book_l2_ledger WHERE event_type = 'LastTrade'")
+            !normalized_ddl.contains("FROM quant_book_l2_ledger WHERE event_type = 'LastTrade'")
         );
-        assert!(ddl.contains("concat('blake3:', lower(hex(event_hash)))"));
         assert!(ddl.contains("non_replicated_deduplication_window = 10000"));
     }
 

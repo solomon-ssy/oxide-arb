@@ -3590,8 +3590,84 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_trade_tape_block_cursor_status_lag",
-        table: "quant_trade_tape_block_cursor",
+        name: "idx_quant_exchange_history_chunk_range",
+        table: "quant_exchange_history_chunk",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "frontier",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "from_block",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "to_block",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_exchange_history_chunk_frontier",
+        table: "quant_exchange_history_chunk",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "frontier",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "status",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "to_block",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_exchange_history_quarantine_chunk",
+        table: "quant_exchange_history_quarantine",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "chunk_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "quarantined_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_exchange_history_quarantine_resolution_chunk",
+        table: "quant_exchange_history_quarantine_resolution",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "replacement_chunk_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "resolved_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_fresh_boot_run_due",
+        table: "quant_fresh_boot_run",
         method: IndexMethod::BTree,
         unique: false,
         columns: &[
@@ -3600,8 +3676,50 @@ const INDEXES: &[IndexSpec] = &[
                 direction: IndexDirection::Asc,
             },
             IndexColumnSpec {
-                name: "head_lag_blocks",
+                name: "next_attempt_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "lease_expires_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_fresh_boot_run_profile_created",
+        table: "quant_fresh_boot_run",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "research_profile_artifact_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
                 direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_fresh_boot_run_event_timeline",
+        table: "quant_fresh_boot_run_event",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "run_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "event_sequence",
+                direction: IndexDirection::Asc,
             },
         ],
         predicate: None,

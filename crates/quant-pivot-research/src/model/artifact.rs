@@ -406,10 +406,10 @@ pub struct SubstitutionConfidenceRules {
     pub not_applicable: Decimal,
     /// Penalty multiplier for [`NullReason::LegBookMissing`].
     pub leg_book_missing: Decimal,
-    /// Penalty multiplier for [`NullReason::TradeTapeUnavailable`].
-    pub trade_tape_unavailable: Decimal,
-    /// Penalty multiplier for [`NullReason::InsufficientTradeTape`].
-    pub insufficient_trade_tape: Decimal,
+    /// Penalty multiplier for [`NullReason::FinalizedExecutionUnavailable`].
+    pub execution_history_unavailable: Decimal,
+    /// Penalty multiplier for [`NullReason::InsufficientExecutionHistory`].
+    pub insufficient_execution_history: Decimal,
     /// Penalty multiplier for [`NullReason::InsufficientRoleCoverage`].
     pub insufficient_role_coverage: Decimal,
     /// Penalty multiplier for [`NullReason::DomainSourceUnavailable`].
@@ -429,8 +429,8 @@ impl SubstitutionConfidenceRules {
             NullReason::InsufficientHistory => self.insufficient_history,
             NullReason::NotApplicable => self.not_applicable,
             NullReason::LegBookMissing => self.leg_book_missing,
-            NullReason::TradeTapeUnavailable => self.trade_tape_unavailable,
-            NullReason::InsufficientTradeTape => self.insufficient_trade_tape,
+            NullReason::FinalizedExecutionUnavailable => self.execution_history_unavailable,
+            NullReason::InsufficientExecutionHistory => self.insufficient_execution_history,
             NullReason::InsufficientRoleCoverage => self.insufficient_role_coverage,
             NullReason::DomainSourceUnavailable => self.domain_source_unavailable,
             NullReason::LinkageUnresolved => self.linkage_unresolved,
@@ -447,8 +447,8 @@ impl SubstitutionConfidenceRules {
             insufficient_history: Decimal::new(85, 2),
             not_applicable: Decimal::ONE,
             leg_book_missing: Decimal::new(90, 2),
-            trade_tape_unavailable: Decimal::new(80, 2),
-            insufficient_trade_tape: Decimal::new(85, 2),
+            execution_history_unavailable: Decimal::new(80, 2),
+            insufficient_execution_history: Decimal::new(85, 2),
             insufficient_role_coverage: Decimal::new(90, 2),
             domain_source_unavailable: Decimal::new(80, 2),
             linkage_unresolved: Decimal::new(80, 2),
@@ -1206,8 +1206,14 @@ impl SubstitutionConfidenceRules {
             ("insufficient_history", self.insufficient_history),
             ("not_applicable", self.not_applicable),
             ("leg_book_missing", self.leg_book_missing),
-            ("trade_tape_unavailable", self.trade_tape_unavailable),
-            ("insufficient_trade_tape", self.insufficient_trade_tape),
+            (
+                "execution_history_unavailable",
+                self.execution_history_unavailable,
+            ),
+            (
+                "insufficient_execution_history",
+                self.insufficient_execution_history,
+            ),
             (
                 "insufficient_role_coverage",
                 self.insufficient_role_coverage,

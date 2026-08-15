@@ -101,8 +101,8 @@ pub use feature::{
     CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, DomainFeatureSlice,
     EvidenceSourceRef, FeatureCell, FeatureCellState, FeatureParityDetail,
     FeatureParityDetailSource, FeatureSourceRefs, FeatureStaleness, FeatureValue,
-    FeatureVectorPayload, NullReason, SelectionMemberEvidence, SelectorParityEvidence,
-    TradeTapeCursorEvidence, TradeTapeSourceEvidence,
+    FeatureVectorPayload, FinalizedExecutionEvidence, NullReason, SelectionMemberEvidence,
+    SelectorParityEvidence,
 };
 pub use ids::{
     AccountSnapshotId, AttributionArtifactId, AuditEventId, BacktestPathSetId, BacktestReportId,
@@ -120,11 +120,12 @@ pub use ids::{
     FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackDecisionArtifactId,
     FeedbackDriftArtifactId, FeedbackEvaluationUseId, FeedbackLearningStageArtifactId,
     FeedbackRecipeTemplateId, FeedbackShadowArtifactId, FeedbackStageEventId,
-    FeedbackTriggerEventId, FeedbackTruthFreezeArtifactId, FeedbackValidationArtifactId, MarketId,
-    MarketLinkageId, MarketSelectionId, MenuId, ModelCandidateManifestId, ModelComparisonReportId,
-    ModelGovernanceAuditId, ModelRunId, ModelSpecId, ModelVersionId, OperationAction,
-    OperationLogId, OrderId, OrderIntentId, PolicyActivationId, PolicyApprovalId, PolicyRevisionId,
-    PortfolioPlanId, PortfolioScenarioArtifactId, PortfolioScenarioModelArtifactId, PositionId,
+    FeedbackTriggerEventId, FeedbackTruthFreezeArtifactId, FeedbackValidationArtifactId,
+    FreshBootRunEventId, FreshBootRunId, MarketId, MarketLinkageId, MarketSelectionId, MenuId,
+    ModelCandidateManifestId, ModelComparisonReportId, ModelGovernanceAuditId, ModelRunId,
+    ModelSpecId, ModelVersionId, OperationAction, OperationLogId, OrderId, OrderIntentId,
+    PolicyActivationId, PolicyApprovalId, PolicyRevisionId, PortfolioPlanId,
+    PortfolioScenarioArtifactId, PortfolioScenarioModelArtifactId, PositionId,
     PreproductionResetNonce, ProfileArtifactId, PromotionPermitId, RecommendationId,
     RecommendationReportId, ReconciliationId, ReportDataQualitySnapshotId, ReportRouteRunId,
     ReportRunId, ReportScheduleGapId, ReportScheduleId, ResearchJobId, ResearchProfileId,
@@ -161,24 +162,27 @@ pub use report_funnel::{
     MissingFeatureDiagnostic, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
 };
 pub use report_payload::{
-    ConfidenceSummary, DataQualitySummary, EligibilitySummary, EntryOrderPolicy, EntryPlan,
-    EvidenceRefs, EvidenceRefsInput, ExecutionEligibility, ExitPlan, FactorBreakdownEntry,
-    OpportunisticExitPolicy, PortfolioRejectionReason, RecommendationFactorBreakdown,
+    BootstrapExitGuidance, ConfidenceSummary, DataQualitySummary, EligibilitySummary,
+    EntryOrderPolicy, EntryPlan, EvidenceRefs, EvidenceRefsInput, ExecutionEligibility, ExitPlan,
+    FactorBreakdownEntry, OpportunisticExitPolicy, PortfolioRejectionReason,
+    RecommendationExitPlan, RecommendationFactorBreakdown, RecommendationPolicyProvenance,
     RecommendationTradePlan, RejectionReasonCount, ReportSummary, RiskEnvelope,
     RiskEnvelopeHashInput, ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy,
     TradePolicyCohortProvenance, TrailingStopPolicy,
 };
 pub use research_job_payload::{ResearchJobError, ResearchJobParams, ResearchJobProgress};
 pub use research_profile::{
-    CRYPTO_PRICE_15M_HORIZON_SECS, CRYPTO_PRICE_15M_PROFILE_ID, POOLED_1H_CONTROL_PROFILE_ID,
-    POOLED_1H_HORIZON_SECS, ResearchDecisionTrigger, ResearchEvaluationTrack,
-    ResearchEvaluationTrackEnum, ResearchEvaluationTrackIter, ResearchEvaluationTrackParseError,
-    ResearchEvaluationTrackVariant, ResearchEvaluationTrackVariantIter, ResearchFeedbackPolicy,
-    ResearchInformationRegime, ResearchMarketSelector, ResearchPolicyFitter,
+    CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID, CRYPTO_PRICE_15M_HORIZON_SECS,
+    CRYPTO_PRICE_15M_PROFILE_ID, POOLED_1H_CONTROL_PROFILE_ID, POOLED_1H_HORIZON_SECS,
+    POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID, ResearchAvailabilityPolicy, ResearchCohortContract,
+    ResearchDecisionTrigger, ResearchEvaluationTrack, ResearchEvaluationTrackEnum,
+    ResearchEvaluationTrackIter, ResearchEvaluationTrackParseError, ResearchEvaluationTrackVariant,
+    ResearchEvaluationTrackVariantIter, ResearchFeatureContract, ResearchFeedbackPolicy,
+    ResearchInformationRegime, ResearchLabelContract, ResearchMarketSelector, ResearchPolicyFitter,
     ResearchProfileArtifact, ResearchProfileArtifactId, ResearchProfileArtifactIdParseError,
-    ResearchProfileDataSource, ResearchProfileRef, ResearchProfileSpec,
-    WEATHER_FORECAST_24H_HORIZON_SECS, WEATHER_FORECAST_24H_PROFILE_ID, builtin_research_profiles,
-    minimum_raw_retention_days,
+    ResearchProfileDataSource, ResearchProfileRef, ResearchProfileSpec, ServingAuthority,
+    WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID, WEATHER_FORECAST_24H_HORIZON_SECS,
+    WEATHER_FORECAST_24H_PROFILE_ID, builtin_research_profiles, minimum_raw_retention_days,
 };
 pub use research_readiness::{
     HistoryCoverage, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION, ResearchReadinessEvidencePayload,
@@ -198,7 +202,7 @@ pub use semantic::{
 pub use source_slice::{
     SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SourceSliceCatalogProof, SourceSliceInvalidSession,
     SourceSliceManifest, SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef,
-    SourceSlicePitCutoffs, SourceSliceSessionInvalidationReason,
+    SourceSlicePitCutoff, SourceSliceSessionInvalidationReason,
 };
 pub use trade_policy::{
     EntryConditionTemplate, EntryConditionTemplateV1, EntryOrderTemplate, ExecutablePriceBasis,

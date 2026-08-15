@@ -77,7 +77,7 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
     backtest::PortfolioReturnObservation,
     factors::FactorEngine,
-    features::FeatureSchema,
+    features::ExecutableFeatureSchema,
     feedback_comparison::{
         FeedbackComparisonArtifact, FeedbackComparisonArtifactInput, FeedbackComparisonCodec,
         FeedbackComparisonReplayRef, RomanoWolfCandidateInput, RomanoWolfOutcome,
@@ -320,11 +320,15 @@ async fn build_scoped_models(
         .await
         .expect("load F10 policy")
         .expect("F10 policy exists");
+    let research_profile = profile_ref
+        .resolve_builtin_research_profile()
+        .expect("resolve F10 ResearchProfile");
     let profiles = &policy.snapshot.profile_artifacts;
     let factor_plane = FactorEngine::for_model_scope(
         &profiles.scoring.definition,
         &profiles.features.definition,
         &profiles.domain.definition,
+        research_profile.spec.feature_contract,
         category_scope,
         None,
     )
@@ -332,7 +336,11 @@ async fn build_scoped_models(
     .expect("build F10 factor plane")
     .clone();
     let feature_schema_hash = ResearchHasher::feature_schema(
-        &FeatureSchema::build(&profiles.features.definition).expect("build F10 feature schema"),
+        &ExecutableFeatureSchema::build(
+            &profiles.features.definition,
+            research_profile.spec.feature_contract,
+        )
+        .expect("build F10 feature schema"),
     )
     .expect("F10 feature-schema hash");
     let model_spec_id = ModelSpecId::from_v7();

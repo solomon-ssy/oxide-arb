@@ -46,6 +46,9 @@ pub struct ChUsd(i128);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChShares(i128);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChAssetAmount(i128);
+
 /// `Decimal(20, 18)` boundary value for a resolved token payout ratio.
 ///
 /// Construction and deserialization preserve the domain `0..=1` invariant;
@@ -242,6 +245,18 @@ impl From<ChUsd> for Usd {
     }
 }
 
+impl From<Decimal> for ChAssetAmount {
+    fn from(value: Decimal) -> Self {
+        Self(decimal_to_i128(value, MONEY_SCALE))
+    }
+}
+
+impl From<ChAssetAmount> for Decimal {
+    fn from(value: ChAssetAmount) -> Self {
+        decimal_from_i128(value.0, MONEY_SCALE)
+    }
+}
+
 impl ChShares {
     #[must_use]
     pub const fn scaled_i128(self) -> i128 {
@@ -358,6 +373,18 @@ impl Serialize for ChShares {
 }
 
 impl<'de> Deserialize<'de> for ChShares {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_scaled_i128(deserializer).map(Self)
+    }
+}
+
+impl Serialize for ChAssetAmount {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_scaled_i128(self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChAssetAmount {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserialize_scaled_i128(deserializer).map(Self)
     }

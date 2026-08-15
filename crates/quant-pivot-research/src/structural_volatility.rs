@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    clickhouse::TradeTapeRow,
-    enums::clickhouse::{ChTradeReconciliationStatus, ChTradeTapeSource},
+    clickhouse::ExecutionParticipantFactRow,
+    enums::clickhouse::ChExecutionParticipantRole,
     hashing::CanonicalDigest,
     types::{
         MarketId, StructuralVolatilityOosEvidence, StructuralVolatilityOosFoldRow, TokenId, Usd,
@@ -44,15 +44,15 @@ struct IntervalMetrics {
 }
 
 /// Compute expanding-calendar-month OOS benchmark evidence from the exact
-/// Dataset rows and reconciled Source-Slice trade tape used by policy replay.
+/// Dataset rows and accepted Source-Slice executions used by policy replay.
 pub fn evaluate_structural_volatility_oos(
     examples: &[TrainingExample],
-    trade_tape: &[TradeTapeRow],
+    executions: &[ExecutionParticipantFactRow],
 ) -> QuantResult<(
     StructuralVolatilityOosEvidence,
     Vec<StructuralVolatilityOosFoldRow>,
 )> {
-    let points = forecast_points(examples, trade_tape)?;
+    let points = forecast_points(examples, executions)?;
     let mut by_month = BTreeMap::<(i32, u32), Vec<&ForecastPoint>>::new();
     for point in &points {
         by_month
@@ -188,7 +188,7 @@ pub fn evaluate_structural_volatility_oos(
 
 fn forecast_points(
     examples: &[TrainingExample],
-    trade_tape: &[TradeTapeRow],
+    executions: &[ExecutionParticipantFactRow],
 ) -> QuantResult<Vec<ForecastPoint>> {
     let mut decisions = BTreeMap::<TokenId, BTreeSet<DateTime<Utc>>>::new();
     for example in examples {
@@ -198,27 +198,27 @@ fn forecast_points(
             .insert(example.decision_at());
     }
     let mut hourly_volume = BTreeMap::<(TokenId, DateTime<Utc>), Decimal>::new();
-    for trade in trade_tape
+    for execution in executions
         .iter()
-        .filter(|trade| canonical_activity_trade(trade))
+        .filter(|execution| execution.participant_role == ChExecutionParticipantRole::Maker)
     {
-        let Some(event_at) = DateTime::from_timestamp_millis(trade.event_time) else {
+        let Some(event_at) = DateTime::from_timestamp_millis(execution.effective_at) else {
             continue;
         };
-        let Some(token_decisions) = decisions.get(&trade.token_id) else {
+        let Some(token_decisions) = decisions.get(&execution.token_id) else {
             continue;
         };
         let Some(decision_at) = token_decisions.range(event_at..).next().copied() else {
             continue;
         };
         if event_at <= decision_at - Duration::hours(1)
-            || trade.ingestion_time > decision_at.timestamp_millis()
+            || execution.model_available_at > decision_at.timestamp_millis()
         {
             continue;
         }
         *hourly_volume
-            .entry((trade.token_id.clone(), decision_at))
-            .or_default() += Usd::from(trade.notional_usd).inner();
+            .entry((execution.token_id.clone(), decision_at))
+            .or_default() += Usd::from(execution.notional_usd).inner();
     }
     let mut timelines = BTreeMap::<(MarketId, TokenId), Vec<&TrainingExample>>::new();
     for example in examples {
@@ -301,19 +301,6 @@ fn forecast_points(
         );
     }
     Ok(qualified)
-}
-
-const fn canonical_activity_trade(trade: &TradeTapeRow) -> bool {
-    matches!(
-        (trade.source, trade.reconciliation_status),
-        (
-            ChTradeTapeSource::MarketWs,
-            ChTradeReconciliationStatus::Matched
-        ) | (
-            ChTradeTapeSource::OnChainOrderFilled,
-            ChTradeReconciliationStatus::OnChainOnly
-        )
-    )
 }
 
 fn fit_nonnegative_k(points: &[&ForecastPoint]) -> QuantResult<Decimal> {

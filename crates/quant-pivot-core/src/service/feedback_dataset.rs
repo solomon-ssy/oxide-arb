@@ -274,9 +274,12 @@ impl FeedbackDatasetService {
             }
             .into());
         }
-        self.dataset_service
-            .build_feedback(plan, materialized.examples, materialized.coverage)
-            .await
+        Box::pin(self.dataset_service.build_feedback(
+            plan,
+            materialized.examples,
+            materialized.coverage,
+        ))
+        .await
     }
 }
 

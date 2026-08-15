@@ -27,8 +27,9 @@ use quant_pivot_models::{
         },
         quant::{
             BacktestPathSetInfo, BacktestReportInfo, CandidateExplanationValidation,
-            ModelCandidateManifestError, ModelGovernanceAuditDetail, ModelVersionInfo,
-            NewModelGovernanceAudit, NewModelVersion, ShadowStabilitySummary, TrainingDatasetInfo,
+            ModelBootstrapValidationEvidence, ModelCandidateManifestError,
+            ModelGovernanceAuditDetail, ModelVersionInfo, NewModelGovernanceAudit, NewModelVersion,
+            ShadowStabilitySummary, TrainingDatasetInfo,
         },
     },
     enums::{
@@ -147,6 +148,12 @@ struct GovernanceAuditIdentity<'a> {
 ///
 struct GateEvaluation {
     report: QualityGateReport,
+}
+
+enum GateBacktestEvidence<'a> {
+    Latest,
+    Exact(&'a BacktestReportId),
+    NotApplicable,
 }
 
 impl ModelGovernanceService {
@@ -448,10 +455,12 @@ impl ModelGovernancePort for ModelGovernanceService {
             GatePreviewIntent::RouteActivation => GateIntent::RouteActivation,
             GatePreviewIntent::AutoExecution => GateIntent::AutoExecution,
         };
+        let backtest_evidence =
+            backtest_report_id.map_or(GateBacktestEvidence::Latest, GateBacktestEvidence::Exact);
         let evaluation = Box::pin(self.evaluate_gate(
             &version,
             gate_intent,
-            backtest_report_id,
+            backtest_evidence,
             None,
             Utc::now(),
         ))
@@ -469,7 +478,7 @@ impl ModelGovernancePort for ModelGovernanceService {
         Box::pin(self.evaluate_gate(
             &version,
             GateIntent::Candidate,
-            None,
+            GateBacktestEvidence::Latest,
             Some(evidence),
             evaluated_at,
         ))
@@ -484,41 +493,74 @@ impl ModelGovernancePort for ModelGovernanceService {
         evaluated_at: DateTime<Utc>,
     ) -> QuantResult<BootstrapQualityGateEvidence> {
         let version = self.find_version(model_version_id).await?;
-        let backtest = self
-            .deps
-            .backtest_report_repo
-            .find_by_id(&input.backtest_report_id)
-            .await?
-            .ok_or_else(|| GovernanceError::NotFound {
-                entity: "backtest_report",
-                id: input.backtest_report_id.to_string(),
-            })?;
-        backtest
-            .verify_hash()
-            .map_err(|detail| GovernanceError::IllegalTransition { detail })?;
-        if backtest.model_version_id != *model_version_id
-            || backtest.report_hash != input.backtest_report_hash
+        let (candidate_path_set_id, candidate_path_set_hash) = match input.candidate {
+            CandidateQualityGateEvidence::Cpcv {
+                path_set_id,
+                path_set_hash,
+            } => (path_set_id, path_set_hash),
+            CandidateQualityGateEvidence::CalibrationInsufficient => {
+                return Err(GovernanceError::IllegalTransition {
+                    detail: "bootstrap requires complete CPCV evidence".to_owned(),
+                }
+                .into());
+            }
+        };
+        if input.validation_evidence.path_set_id() != candidate_path_set_id
+            || input.validation_evidence.path_set_hash() != candidate_path_set_hash
         {
             return Err(GovernanceError::IllegalTransition {
-                detail: format!(
-                    "bootstrap backtest {} differs from model {} or frozen hash {}",
-                    backtest.backtest_report_id, model_version_id, input.backtest_report_hash
-                ),
+                detail: "bootstrap quality input binds two different CPCV path sets".to_owned(),
             }
             .into());
         }
+        let backtest = match input.validation_evidence {
+            ModelBootstrapValidationEvidence::PredictiveCpcv { .. } => None,
+            ModelBootstrapValidationEvidence::PortfolioEconomics {
+                backtest_report_id,
+                backtest_report_hash,
+                ..
+            } => {
+                let report = self
+                    .deps
+                    .backtest_report_repo
+                    .find_by_id(&backtest_report_id)
+                    .await?
+                    .ok_or_else(|| GovernanceError::NotFound {
+                        entity: "backtest_report",
+                        id: backtest_report_id.to_string(),
+                    })?;
+                report
+                    .verify_hash()
+                    .map_err(|detail| GovernanceError::IllegalTransition { detail })?;
+                if report.model_version_id != *model_version_id
+                    || report.report_hash != backtest_report_hash
+                {
+                    return Err(GovernanceError::IllegalTransition {
+                        detail: format!(
+                            "bootstrap portfolio backtest {backtest_report_id} differs from model {model_version_id} or frozen hash {backtest_report_hash}"
+                        ),
+                    }
+                    .into());
+                }
+                Some(report)
+            }
+        };
+        let backtest_evidence = backtest
+            .as_ref()
+            .map_or(GateBacktestEvidence::NotApplicable, |report| {
+                GateBacktestEvidence::Exact(&report.backtest_report_id)
+            });
         let evaluation = Box::pin(self.evaluate_gate(
             &version,
             GateIntent::Candidate,
-            Some(&backtest.backtest_report_id),
+            backtest_evidence,
             Some(input.candidate),
             evaluated_at,
         ))
         .await?;
         Ok(BootstrapQualityGateEvidence {
             quality_gate_report: evaluation.report,
-            backtest_report_id: backtest.backtest_report_id,
-            backtest_report_hash: backtest.report_hash,
+            validation_evidence: input.validation_evidence,
         })
     }
 
@@ -744,7 +786,7 @@ impl ModelGovernanceService {
         &self,
         version: &ModelVersionInfo,
         intent: GateIntent,
-        backtest_report_id: Option<&BacktestReportId>,
+        backtest_evidence: GateBacktestEvidence<'_>,
         candidate_evidence: Option<CandidateQualityGateEvidence>,
         evaluated_at: DateTime<Utc>,
     ) -> QuantResult<GateEvaluation> {
@@ -805,9 +847,10 @@ impl ModelGovernanceService {
                 .await?
                 .is_some();
 
-        let backtest = match backtest_report_id {
-            Some(id) => self.backtest_by_id(id).await?,
-            None => self.latest_backtest(&version.model_version_id).await?,
+        let backtest = match backtest_evidence {
+            GateBacktestEvidence::Exact(id) => self.backtest_by_id(id).await?,
+            GateBacktestEvidence::Latest => self.latest_backtest(&version.model_version_id).await?,
+            GateBacktestEvidence::NotApplicable => None,
         };
         let dataset = self.dataset_coverage(version).await?;
         // Route activation must rescan real Parquet provenance (#9). A version
@@ -1084,6 +1127,14 @@ fn path_set_gate_input(info: &BacktestPathSetInfo) -> QuantResult<CpcvPathSetGat
         }
     })?;
     Ok(CpcvPathSetGateInput {
+        validation_regime: info.fold_artifacts.validation_regime().map_err(|error| {
+            GovernanceError::IllegalTransition {
+                detail: format!(
+                    "CPCV path set {} has invalid validation regime: {error}",
+                    info.path_set_id
+                ),
+            }
+        })?,
         path_count,
         combination_count,
         median_rank_ic: info.median_rank_ic,
@@ -1170,9 +1221,9 @@ mod path_set_gate_input_tests {
             TrainingDatasetId,
             backtest::{
                 BacktestPaths, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
-                CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
-                CpcvTrialPathBinding, CscvSelectionEvidence, CscvTrialDescriptor,
-                CscvTrialGridBinding, SharpeDistribution,
+                CpcvFoldCalibrationPolicy, CpcvFoldValidationRegime, CpcvMethodologyBinding,
+                CpcvPathSetSubject, CpcvTrialPathBinding, CscvSelectionEvidence,
+                CscvTrialDescriptor, CscvTrialGridBinding, SharpeDistribution,
             },
         },
     };
@@ -1240,6 +1291,7 @@ mod path_set_gate_input_tests {
             ),
             fold_artifacts: CpcvFoldArtifacts::try_new(vec![
                 CpcvFoldArtifact {
+                    validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                     identity: CpcvEstimatorIdentity::Validation {
                         combination_index: 0,
                         test_partitions_hash: hash(),
@@ -1262,6 +1314,7 @@ mod path_set_gate_input_tests {
                     scenario_model_hash: hash(),
                 },
                 CpcvFoldArtifact {
+                    validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                     identity: CpcvEstimatorIdentity::TrialPathValidation {
                         trial_id: 0,
                         path_index: 0,
@@ -1287,6 +1340,7 @@ mod path_set_gate_input_tests {
                     scenario_model_hash: hash(),
                 },
                 CpcvFoldArtifact {
+                    validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                     identity: CpcvEstimatorIdentity::TrialPathValidation {
                         trial_id: 1,
                         path_index: 0,

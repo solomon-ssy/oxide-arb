@@ -191,7 +191,7 @@ impl PermitContext {
             route_set_digest: represented_routes.digest,
             serving_contract_digest: content_hash('e'),
             calibration_contract_digest: content_hash('f'),
-            trade_policy_contract_digest: content_hash('6'),
+            recommendation_contract_digest: content_hash('6'),
             scenario_model_schema_version: SchemaVersion::FIRST,
             capital_time_bucket_contract_digest: content_hash('7'),
             model_content_hash: scenario_model_content_hash,

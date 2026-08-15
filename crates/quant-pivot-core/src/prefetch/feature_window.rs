@@ -17,14 +17,14 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS, BookMicrostructureRow},
     domain::data_plane::{
-        CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation, TradeTapePrint,
-        WeatherForecastPoint, WeatherObservationFact,
+        CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation,
+        ExecutionParticipantPrint, WeatherForecastPoint, WeatherObservationFact,
     },
     types::{Bps, DomainInstrumentKey, MarketId, Price, TokenId, Usd},
 };
 use quant_pivot_repository::traits::QuantFactReadRepository;
 use quant_pivot_research::{
-    features::{MarketWindowSnapshot, MicrostructureBucket, TradeTapeWindowSnapshot},
+    features::{FinalizedExecutionWindowSnapshot, MarketWindowSnapshot, MicrostructureBucket},
     selection::SelectedMarket,
 };
 use rust_decimal::Decimal;
@@ -381,17 +381,17 @@ impl FeatureWindowProvider {
         Ok(grouped)
     }
 
-    /// Load a per-market trade-tape window for every selected market.
+    /// Load a finalized-execution window for every selected market.
     ///
     /// Empty snapshots are marked source-available because the `ClickHouse` read
     /// completed; a disabled/unavailable source is represented by callers using
-    /// [`TradeTapeWindowSnapshot::empty`].
-    pub async fn load_trade_tape_windows(
+    /// [`FinalizedExecutionWindowSnapshot::empty`].
+    pub async fn load_execution_windows(
         &self,
         markets: &[SelectedMarket],
         boundary: &DecisionBoundary,
         lookback: Duration,
-    ) -> QuantResult<HashMap<MarketId, TradeTapeWindowSnapshot>> {
+    ) -> QuantResult<HashMap<MarketId, FinalizedExecutionWindowSnapshot>> {
         let market_ids: Vec<MarketId> = markets
             .iter()
             .map(|market| market.market_id.clone())
@@ -400,11 +400,11 @@ impl FeatureWindowProvider {
             return Ok(HashMap::new());
         }
 
-        let cutoff = boundary.cutoff_for(DecisionSource::TradeTape);
-        let from = window_start(cutoff, lookback, "trade-tape lookback")?;
+        let cutoff = boundary.cutoff_for(DecisionSource::FinalizedExecution);
+        let from = window_start(cutoff, lookback, "finalized execution lookback")?;
         let rows = self
             .fact_read
-            .market_tape_window(
+            .market_execution_window(
                 market_ids,
                 from.timestamp_millis(),
                 cutoff.timestamp_millis(),
@@ -412,14 +412,15 @@ impl FeatureWindowProvider {
             )
             .await?;
 
-        let mut grouped: HashMap<MarketId, Vec<TradeTapePrint>> = HashMap::new();
+        let mut grouped: HashMap<MarketId, Vec<ExecutionParticipantPrint>> = HashMap::new();
         for row in rows {
-            let event_time = timestamp_millis(row.event_time, "trade-tape event_time")?;
-            let available_at = timestamp_millis(row.ingestion_time, "trade-tape ingestion_time")?;
+            let event_time = timestamp_millis(row.effective_at, "execution effective_at")?;
+            let available_at =
+                timestamp_millis(row.model_available_at, "execution model_available_at")?;
             if event_time < from || event_time >= cutoff {
                 return Err(ResearchError::PitResolution {
                     detail: format!(
-                        "trade-tape row for market {} at {event_time} is outside [{from}, {cutoff})",
+                        "execution row for market {} at {event_time} is outside [{from}, {cutoff})",
                         row.market_id
                     ),
                 }
@@ -428,16 +429,17 @@ impl FeatureWindowProvider {
             if available_at > boundary.decision_at() {
                 return Err(ResearchError::PitResolution {
                     detail: format!(
-                        "trade-tape row for market {} available at {available_at} is after decision {}",
+                        "execution row for market {} available at {available_at} is after decision {}",
                         row.market_id,
                         boundary.decision_at()
                     ),
                 }
                 .into());
             }
-            grouped.entry(row.market_id.clone()).or_default().push(
-                TradeTapePrint::from_clickhouse_row_at(&row, event_time, available_at),
-            );
+            let market_id = row.market_id.clone();
+            let print = ExecutionParticipantPrint::try_from(row)
+                .map_err(|detail| ResearchError::PitResolution { detail })?;
+            grouped.entry(market_id).or_default().push(print);
         }
 
         let mut windows = HashMap::with_capacity(markets.len());
@@ -446,7 +448,7 @@ impl FeatureWindowProvider {
             let prints = grouped.remove(&market_id).unwrap_or_default();
             windows.insert(
                 market_id.clone(),
-                TradeTapeWindowSnapshot::available(
+                FinalizedExecutionWindowSnapshot::available(
                     market_id,
                     boundary.decision_at(),
                     cutoff,

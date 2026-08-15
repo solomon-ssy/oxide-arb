@@ -1221,10 +1221,18 @@ pub enum CpcvEstimatorIdentity {
 }
 
 /// Immutable evidence for one ephemeral fold/trial estimator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpcvFoldValidationRegime {
+    PredictiveUtility,
+    PortfolioEconomics,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CpcvFoldArtifact {
     pub identity: CpcvEstimatorIdentity,
+    pub validation_regime: CpcvFoldValidationRegime,
     pub training_groups_hash: ContentHash,
     pub training_group_count: u64,
     pub calibration_fit_groups_hash: ContentHash,
@@ -1267,25 +1275,19 @@ impl CpcvFoldArtifacts {
         {
             return Err(CpcvEvidenceError::NonCanonicalFoldArtifacts);
         }
+        let validation_regime = self.0[0].validation_regime;
+        if self
+            .0
+            .iter()
+            .any(|artifact| artifact.validation_regime != validation_regime)
+        {
+            return Err(CpcvEvidenceError::MixedValidationRegimes);
+        }
         let mut expected_validation_index = 0u32;
         let mut validation_holdouts = Vec::new();
         let mut trials = BTreeMap::<u32, (u32, Vec<u32>)>::new();
         for artifact in &self.0 {
-            if artifact.training_group_count == 0 {
-                return Err(CpcvEvidenceError::EmptyTrainingGroups {
-                    identity: artifact.identity,
-                });
-            }
-            if artifact.calibration_fit_group_count == 0 {
-                return Err(CpcvEvidenceError::EmptyCalibrationGroups {
-                    identity: artifact.identity,
-                });
-            }
-            if artifact.scenario_fit_group_count == 0 {
-                return Err(CpcvEvidenceError::EmptyScenarioGroups {
-                    identity: artifact.identity,
-                });
-            }
+            Self::validate_artifact(artifact)?;
             match artifact.identity {
                 CpcvEstimatorIdentity::Validation {
                     combination_index,
@@ -1410,6 +1412,40 @@ impl CpcvFoldArtifacts {
         Ok(())
     }
 
+    fn validate_artifact(artifact: &CpcvFoldArtifact) -> Result<(), CpcvEvidenceError> {
+        if artifact.training_group_count == 0 {
+            return Err(CpcvEvidenceError::EmptyTrainingGroups {
+                identity: artifact.identity,
+            });
+        }
+        if artifact.validation_regime == CpcvFoldValidationRegime::PortfolioEconomics
+            && artifact.calibration_fit_group_count == 0
+        {
+            return Err(CpcvEvidenceError::EmptyCalibrationGroups {
+                identity: artifact.identity,
+            });
+        }
+        if artifact.validation_regime == CpcvFoldValidationRegime::PortfolioEconomics
+            && artifact.scenario_fit_group_count == 0
+        {
+            return Err(CpcvEvidenceError::EmptyScenarioGroups {
+                identity: artifact.identity,
+            });
+        }
+        if artifact.validation_regime == CpcvFoldValidationRegime::PredictiveUtility
+            && (artifact.calibration_fit_group_count != 0 || artifact.scenario_fit_group_count != 0)
+        {
+            return Err(CpcvEvidenceError::NonCanonicalFoldArtifacts);
+        }
+        Ok(())
+    }
+
+    /// Return the single validation semantics shared by every fold and trial.
+    pub fn validation_regime(&self) -> Result<CpcvFoldValidationRegime, CpcvEvidenceError> {
+        self.validate()?;
+        Ok(self.0[0].validation_regime)
+    }
+
     pub fn validate_for(&self, binding: &CpcvTrialPathBinding) -> Result<(), CpcvEvidenceError> {
         self.validate()?;
         binding.validate()?;
@@ -1506,6 +1542,8 @@ pub enum CpcvEvidenceError {
     UnsupportedVersion { expected: u32, actual: u32 },
     #[error("CPCV fold-artifact ledger must not be empty")]
     EmptyFoldArtifacts,
+    #[error("CPCV fold-artifact ledger mixes predictive and portfolio validation regimes")]
+    MixedValidationRegimes,
     #[error("CPCV {identity:?} artifact has no training groups")]
     EmptyTrainingGroups { identity: CpcvEstimatorIdentity },
     #[error("CPCV {identity:?} artifact has no nested calibration-fit groups")]
@@ -2019,8 +2057,8 @@ mod tests {
 
     use super::{
         BacktestPortfolioFunnel, BacktestTierExclusionCount, CpcvEstimatorIdentity,
-        CpcvEvidenceError, CpcvFoldArtifact, CpcvFoldArtifacts, CpcvTrialPathBinding,
-        ExpectedVsRealized,
+        CpcvEvidenceError, CpcvFoldArtifact, CpcvFoldArtifacts, CpcvFoldValidationRegime,
+        CpcvTrialPathBinding, ExpectedVsRealized,
     };
     use crate::types::{ContentHash, PortfolioRejectionReason};
 
@@ -2128,6 +2166,7 @@ mod tests {
     ) -> CpcvFoldArtifact {
         CpcvFoldArtifact {
             identity,
+            validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
             training_groups_hash: hash('a'),
             training_group_count: 2,
             calibration_fit_groups_hash: hash('b'),

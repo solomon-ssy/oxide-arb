@@ -33,7 +33,7 @@ impl AppContext {
                 "gamma-sync",
                 move || Duration::from_secs(interval_secs),
                 0.0,
-                false,
+                true,
                 token,
                 move || {
                     let gamma = Arc::clone(&gamma);

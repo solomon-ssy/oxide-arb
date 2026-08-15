@@ -23,8 +23,8 @@ use serde::Serialize;
 
 use crate::{
     features::{
-        FeatureCell, FeatureCellState, FeatureName, FeatureSchema, FeatureSpec, FeatureStaleness,
-        FeatureValue, FeatureValueKind, FeatureVector, NullReason,
+        ExecutableFeatureSchema, FeatureCell, FeatureCellState, FeatureName, FeatureSpec,
+        FeatureStaleness, FeatureValue, FeatureValueKind, FeatureVector, NullReason,
     },
     hashing::ResearchHasher,
 };
@@ -102,7 +102,7 @@ pub fn feature_events(
     persisted: &FeatureVectorInfo,
     boundary: &DecisionBoundary,
     decision_policy_snapshot_id: &DecisionPolicySnapshotId,
-    schema: &FeatureSchema,
+    schema: &ExecutableFeatureSchema,
     ingestion_time: i64,
 ) -> QuantResult<Vec<QuantFeatureEventRow>> {
     validate_boundary(vector, boundary)?;
@@ -459,8 +459,8 @@ const fn null_reason_label(reason: NullReason) -> &'static str {
         NullReason::InsufficientHistory => "insufficient_history",
         NullReason::NotApplicable => "not_applicable",
         NullReason::LegBookMissing => "leg_book_missing",
-        NullReason::TradeTapeUnavailable => "trade_tape_unavailable",
-        NullReason::InsufficientTradeTape => "insufficient_trade_tape",
+        NullReason::FinalizedExecutionUnavailable => "execution_history_unavailable",
+        NullReason::InsufficientExecutionHistory => "insufficient_execution_history",
         NullReason::InsufficientRoleCoverage => "insufficient_role_coverage",
         NullReason::DomainSourceUnavailable => "domain_source_unavailable",
         NullReason::LinkageUnresolved => "linkage_unresolved",

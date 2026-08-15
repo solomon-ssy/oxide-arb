@@ -1021,27 +1021,47 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_trade_tape_block_cursor",
-        column: "last_finalized_block",
+        table: "quant_exchange_history_chunk",
+        column: "attempt_count",
         value: DefaultValue::Integer(0),
     },
     ColumnDefaultSpec {
-        table: "quant_trade_tape_block_cursor",
-        column: "last_log_index",
-        value: DefaultValue::Integer(0),
-    },
-    ColumnDefaultSpec {
-        table: "quant_trade_tape_block_cursor",
-        column: "head_lag_blocks",
-        value: DefaultValue::Integer(0),
-    },
-    ColumnDefaultSpec {
-        table: "quant_trade_tape_block_cursor",
+        table: "quant_exchange_history_chunk",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_trade_tape_block_cursor",
+        table: "quant_exchange_history_chunk",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_exchange_history_plan",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_exchange_history_quarantine",
+        column: "quarantined_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_fresh_boot_run",
+        column: "revision",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_fresh_boot_run",
+        column: "started_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_fresh_boot_run",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_fresh_boot_run",
         column: "updated_at",
         value: DefaultValue::StatementTimestamp,
     },

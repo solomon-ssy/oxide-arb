@@ -21,11 +21,11 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use chrono_tz::Tz;
 use futures_util::future::join_all;
 use quant_pivot_compute::ComputeExecutor;
-use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
+use quant_pivot_error::{QuantError, QuantResult, report::ReportError, research::ResearchError};
 use quant_pivot_models::{
-    config::TradeTapeOnChainConfig,
+    config::FinalizedExchangeHistoryConfig,
     domain::{
-        data_plane::{DecisionBoundary, DecisionSource, TradeTapeSourceKind},
+        data_plane::{DecisionBoundary, DecisionSource, ExchangeHistoryFrontier},
         quant::{
             FeatureVectorInfo, MarketLinkage, MarketLinkageInfo, MarketSubject, NewFeatureVector,
             NewReportDataQualitySnapshot, WeatherSubject,
@@ -34,13 +34,13 @@ use quant_pivot_models::{
     enums::{domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig},
     types::{
-        DecisionPolicySnapshotId, DomainInstrumentKey, MarketId, NullReason, TokenId,
-        TradeTapeSourceEvidence, Usd, stable_name::FeatureName,
+        DecisionPolicySnapshotId, DomainInstrumentKey, FinalizedExecutionEvidence, MarketId,
+        NullReason, ResearchFeatureContract, TokenId, Usd, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
-    BasisAlertRepository, CalibrationArtifactRepository, FeatureRepository,
-    MarketLinkageRepository, TradeTapeBlockCursorRepository,
+    BasisAlertRepository, CalibrationArtifactRepository, ExchangeHistoryRepository,
+    FeatureRepository, MarketLinkageRepository,
 };
 use quant_pivot_research::{
     domain::{
@@ -48,16 +48,16 @@ use quant_pivot_research::{
         weather_history_start,
     },
     features::{
-        ConfiguredFeatureBuilder, DomainSliceInputs, FeatureSchema, FeatureSourceWindows,
-        FeatureVector, MarketDecisionCapture, MarketWindowSnapshot, RejectedMarketDraft,
-        ResolvedMarketBundle, TradeTapeWindowSnapshot, draft_data_quality_snapshot, feature_events,
+        ConfiguredFeatureBuilder, DomainSliceInputs, ExecutableFeatureSchema, FeatureSourceWindows,
+        FeatureVector, FinalizedExecutionWindowSnapshot, MarketDecisionCapture,
+        MarketWindowSnapshot, RejectedMarketDraft, ResolvedMarketBundle,
+        draft_data_quality_snapshot, feature_events,
     },
     pit::PointInTimeSnapshotSource,
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
 
 use crate::{
-    ingest::trade_tape_health::{cursors_by_contract_address, market_tape_available},
     observability::{
         feature_fact_writer::FeatureEventWriter, serving_evidence::FeatureEvidenceCommitment,
     },
@@ -69,6 +69,8 @@ use crate::{
 pub struct FeaturePipelineRequest<'a> {
     /// Markets selected for this round.
     pub included: &'a [SelectedMarket],
+    /// Exact immutable profile feature contract served by this round.
+    pub feature_contract: ResearchFeatureContract,
     /// Decision time and the single, already-derived source visibility cutoff.
     pub boundary: DecisionBoundary,
     /// Frozen feature config.
@@ -130,11 +132,11 @@ pub struct FeaturePipelineService {
     window_provider: FeatureWindowProvider,
     feature_repo: Arc<dyn FeatureRepository>,
     event_writer: Arc<FeatureEventWriter>,
-    block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
+    exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     basis_alert_repo: Arc<dyn BasisAlertRepository>,
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
-    trade_tape_on_chain: TradeTapeOnChainConfig,
+    finalized_exchange_history: FinalizedExchangeHistoryConfig,
 }
 
 /// Boot-time dependencies for [`FeaturePipelineService::new`].
@@ -143,11 +145,11 @@ pub struct FeaturePipelineDeps {
     pub window_provider: FeatureWindowProvider,
     pub feature_repo: Arc<dyn FeatureRepository>,
     pub event_writer: Arc<FeatureEventWriter>,
-    pub block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
+    pub exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
     pub linkage_repo: Arc<dyn MarketLinkageRepository>,
     pub basis_alert_repo: Arc<dyn BasisAlertRepository>,
     pub calibration_repo: Arc<dyn CalibrationArtifactRepository>,
-    pub trade_tape_on_chain: TradeTapeOnChainConfig,
+    pub finalized_exchange_history: FinalizedExchangeHistoryConfig,
 }
 
 impl FeaturePipelineService {
@@ -159,11 +161,11 @@ impl FeaturePipelineService {
             window_provider: deps.window_provider,
             feature_repo: deps.feature_repo,
             event_writer: deps.event_writer,
-            block_cursor_repo: deps.block_cursor_repo,
+            exchange_history_repo: deps.exchange_history_repo,
             linkage_repo: deps.linkage_repo,
             basis_alert_repo: deps.basis_alert_repo,
             calibration_repo: deps.calibration_repo,
-            trade_tape_on_chain: deps.trade_tape_on_chain,
+            finalized_exchange_history: deps.finalized_exchange_history,
         }
     }
 
@@ -178,7 +180,11 @@ impl FeaturePipelineService {
         &self,
         request: FeaturePipelineRequest<'_>,
     ) -> QuantResult<FeaturePipelineResult> {
-        let builder = ConfiguredFeatureBuilder::new(request.features, request.domain)?;
+        let builder = ConfiguredFeatureBuilder::new_for_contract(
+            request.features,
+            request.domain,
+            request.feature_contract,
+        )?;
         let windows = self.load_windows(&builder, &request).await?;
 
         let max_concurrent = usize::try_from(request.features.max_concurrent_market_resolves)
@@ -204,17 +210,20 @@ impl FeaturePipelineService {
                             ),
                         })
                     })?;
-                let trade_tape = windows.trade_tape.get(&market.market_id).ok_or_else(|| {
-                    QuantError::from(ReportError::InvariantViolation {
-                        stage: "feature_pipeline",
-                        detail: format!(
-                            "missing prefetched trade-tape window for market {}",
-                            market.market_id.as_str()
-                        ),
-                    })
-                })?;
+                let execution_history = windows
+                    .execution_history
+                    .get(&market.market_id)
+                    .ok_or_else(|| {
+                        QuantError::from(ReportError::InvariantViolation {
+                            stage: "feature_pipeline",
+                            detail: format!(
+                                "missing prefetched finalized-execution window for market {}",
+                                market.market_id.as_str()
+                            ),
+                        })
+                    })?;
                 let domain = windows.domain.get(&market.market_id);
-                Ok((index, market, window, trade_tape, domain))
+                Ok((index, market, window, execution_history, domain))
             })
             .collect::<QuantResult<Vec<_>>>()?;
 
@@ -238,7 +247,7 @@ impl FeaturePipelineService {
             .await?;
 
         let required_names: HashSet<FeatureName> = required.iter().cloned().collect();
-        let partition = partition_feature_vectors(&bundles, &vectors, &required_names);
+        let partition = partition_feature_vectors(&bundles, &vectors, &required_names)?;
         let persistence = self
             .persist_vectors(&vectors, &partition.captures, builder.schema(), &request)
             .await?;
@@ -271,7 +280,7 @@ impl FeaturePipelineService {
         &self,
         vectors: &[FeatureVector],
         captures: &HashMap<MarketId, MarketDecisionCapture>,
-        schema: &FeatureSchema,
+        schema: &ExecutableFeatureSchema,
         request: &FeaturePipelineRequest<'_>,
     ) -> QuantResult<PersistedFeatureVectors> {
         let rows = vectors
@@ -421,48 +430,37 @@ impl FeaturePipelineService {
         } else {
             empty_windows(request.included, &request.boundary)
         };
-        let trade_tape = if !builder.needs_trade_tape() {
-            empty_trade_tape_windows(request.included, &request.boundary)
-        } else if self.trade_tape_on_chain.enabled {
-            let cursors = self
-                .block_cursor_repo
-                .list_by_source(TradeTapeSourceKind::OnChain)
+        let execution_history = if !builder.needs_execution_history() {
+            empty_execution_history_windows(request.included, &request.boundary)
+        } else if self.finalized_exchange_history.enabled {
+            let accepted = self
+                .exchange_history_repo
+                .latest_accepted(ExchangeHistoryFrontier::Activation)
                 .await?;
-            let cursors_by_address = cursors_by_contract_address(&cursors);
+            let accepted_block = accepted
+                .as_ref()
+                .and_then(|row| u64::try_from(row.to_block).ok());
+            let accepted_through_at = accepted.as_ref().and_then(|row| row.effective_through_at);
             let source_evidence =
-                TradeTapeSourceEvidence::runtime(true, cursors.clone()).map_err(|detail| {
-                    ReportError::InvariantViolation {
-                        stage: "feature_pipeline",
-                        detail,
-                    }
-                })?;
+                FinalizedExecutionEvidence::runtime(true, accepted_block, accepted_through_at);
             let trade_lookback =
-                Duration::from_secs(request.features.structural.trade_tape_window_secs);
+                Duration::from_secs(request.features.structural.execution_window_secs);
             let mut windows = self
                 .window_provider
-                .load_trade_tape_windows(request.included, &request.boundary, trade_lookback)
+                .load_execution_windows(request.included, &request.boundary, trade_lookback)
                 .await?;
             for market in request.included {
-                let neg_risk = request
-                    .pit
-                    .market_snapshot_at(&market.market_id, &request.boundary)
-                    .await?
-                    .ok_or_else(|| ReportError::InvariantViolation {
-                        stage: "feature_pipeline",
-                        detail: format!(
-                            "selected market {} has no PIT snapshot at the decision boundary",
-                            market.market_id
-                        ),
-                    })?
-                    .market
-                    .neg_risk;
-                let available =
-                    market_tape_available(&self.trade_tape_on_chain, &cursors_by_address, neg_risk);
+                let available = accepted_through_at.is_some_and(|through| {
+                    through
+                        >= request
+                            .boundary
+                            .cutoff_for(DecisionSource::FinalizedExecution)
+                });
                 let window = windows.get_mut(&market.market_id).ok_or_else(|| {
                     ReportError::InvariantViolation {
                         stage: "feature_pipeline",
                         detail: format!(
-                            "trade-tape prefetch omitted selected market {}",
+                            "finalized-execution prefetch omitted selected market {}",
                             market.market_id
                         ),
                     }
@@ -473,14 +471,8 @@ impl FeaturePipelineService {
             }
             windows
         } else {
-            let source_evidence =
-                TradeTapeSourceEvidence::runtime(false, Vec::new()).map_err(|detail| {
-                    ReportError::InvariantViolation {
-                        stage: "feature_pipeline",
-                        detail,
-                    }
-                })?;
-            empty_trade_tape_windows(request.included, &request.boundary)
+            let source_evidence = FinalizedExecutionEvidence::runtime(false, None, None);
+            empty_execution_history_windows(request.included, &request.boundary)
                 .into_iter()
                 .map(|(market_id, window)| {
                     (
@@ -497,7 +489,7 @@ impl FeaturePipelineService {
         };
         Ok(FeaturePrefetchWindows {
             microstructure,
-            trade_tape,
+            execution_history,
             domain,
         })
     }
@@ -627,28 +619,29 @@ impl FeaturePipelineService {
             usize,
             &'a SelectedMarket,
             &'a MarketWindowSnapshot,
-            &'a TradeTapeWindowSnapshot,
+            &'a FinalizedExecutionWindowSnapshot,
             Option<&'a DomainSliceInputs>,
         )],
         max_concurrent: usize,
     ) -> QuantResult<Vec<ResolvedMarketBundle<'a>>> {
         let mut bundles = Vec::with_capacity(resolve_jobs.len());
         for chunk in resolve_jobs.chunks(max_concurrent) {
-            let chunk_results =
-                join_all(chunk.iter().map(|(_, market, window, trade_tape, domain)| {
+            let chunk_results = join_all(chunk.iter().map(
+                |(_, market, window, execution_history, domain)| {
                     builder.resolve_inputs(
                         market,
                         &request.boundary,
                         request.pit,
                         FeatureSourceWindows {
                             microstructure: window,
-                            trade_tape,
+                            execution_history,
                             domain: *domain,
                         },
                         request.liquidity_cap_usd,
                     )
-                }))
-                .await;
+                },
+            ))
+            .await;
             for ((index, _, _, _, _), bundle) in chunk.iter().zip(chunk_results) {
                 bundles.push((*index, bundle?));
             }
@@ -756,7 +749,7 @@ fn weather_local_day_end(subject: &WeatherSubject) -> QuantResult<DateTime<Utc>>
 
 struct FeaturePrefetchWindows {
     microstructure: HashMap<TokenId, MarketWindowSnapshot>,
-    trade_tape: HashMap<MarketId, TradeTapeWindowSnapshot>,
+    execution_history: HashMap<MarketId, FinalizedExecutionWindowSnapshot>,
     domain: HashMap<MarketId, DomainSliceInputs>,
 }
 
@@ -782,7 +775,7 @@ fn partition_feature_vectors(
     bundles: &[ResolvedMarketBundle<'_>],
     vectors: &[FeatureVector],
     required_names: &HashSet<FeatureName>,
-) -> FeatureVectorPartition {
+) -> QuantResult<FeatureVectorPartition> {
     let mut accepted = Vec::with_capacity(vectors.len());
     let mut rejected = Vec::new();
     let mut rejected_drafts = Vec::new();
@@ -798,13 +791,13 @@ fn partition_feature_vectors(
             accepted.push(vector.clone());
         }
     }
-    let captures = finalize_captures(bundles, vectors);
-    FeatureVectorPartition {
+    let captures = finalize_captures(bundles, vectors)?;
+    Ok(FeatureVectorPartition {
         accepted,
         rejected,
         captures,
         rejected_drafts,
-    }
+    })
 }
 
 /// Reorder `INSERT ... RETURNING` rows to submission order and reject any
@@ -912,14 +905,20 @@ fn insert_mismatch(info: &FeatureVectorInfo, row: &NewFeatureVector) -> Option<&
 fn finalize_captures(
     bundles: &[ResolvedMarketBundle<'_>],
     vectors: &[FeatureVector],
-) -> HashMap<MarketId, MarketDecisionCapture> {
+) -> QuantResult<HashMap<MarketId, MarketDecisionCapture>> {
     bundles
         .iter()
         .zip(vectors)
-        .map(|(bundle, vector)| {
-            let mut capture = bundle.capture.clone();
+        .map(|(bundle, vector)| -> QuantResult<_> {
+            let mut capture = bundle
+                .capture
+                .clone()
+                .ok_or_else(|| ResearchError::Determinism {
+                    detail: "online feature pipeline requires recommendation execution capture"
+                        .to_owned(),
+                })?;
             capture.data_quality = vector.data_quality;
-            (capture.market_id.clone(), capture)
+            Ok((capture.market_id.clone(), capture))
         })
         .collect()
 }
@@ -965,17 +964,17 @@ fn empty_windows(
         .collect()
 }
 
-fn empty_trade_tape_windows(
+fn empty_execution_history_windows(
     markets: &[SelectedMarket],
     boundary: &DecisionBoundary,
-) -> HashMap<MarketId, TradeTapeWindowSnapshot> {
+) -> HashMap<MarketId, FinalizedExecutionWindowSnapshot> {
     markets
         .iter()
         .map(|market| {
             let market_id = market.market_id.clone();
             (
                 market_id.clone(),
-                TradeTapeWindowSnapshot::empty(
+                FinalizedExecutionWindowSnapshot::empty(
                     market_id,
                     boundary.decision_at(),
                     boundary.knowledge_cutoff(),
@@ -1005,8 +1004,8 @@ mod tests {
             BookSnapshotRef, BookSnapshotSource, CatalogDecisionRef, CatalogEventChangeId,
             CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, DecisionCaptureEvidence,
             DecisionSnapshotEvidence, EventId, FeatureSourceRefs, FeatureVectorId,
-            FeatureVectorPayload, MarketContext, MarketId, Probability, RecommendationIdentity,
-            SchemaVersion, SelectionMemberEvidence, TokenId, TradeTapeSourceEvidence, Usd,
+            FeatureVectorPayload, FinalizedExecutionEvidence, MarketContext, MarketId, Probability,
+            RecommendationIdentity, SchemaVersion, SelectionMemberEvidence, TokenId, Usd,
         },
     };
     use quant_pivot_research::hashing::ResearchHasher;
@@ -1070,7 +1069,7 @@ mod tests {
                     source_refs: Vec::new(),
                 },
             },
-            trade_tape_source: TradeTapeSourceEvidence::not_required(),
+            finalized_execution_evidence: FinalizedExecutionEvidence::not_required(),
             identity: RecommendationIdentity {
                 category: MarketCategory::Other,
                 question: format!("question-{suffix}"),

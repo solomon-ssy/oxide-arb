@@ -75,12 +75,13 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ClobMarketInfoRepository, DomainSourceCursorRepository,
-    EntryConditionRepository, ExecutionAttemptOutcomeRepository, ExecutionOrderRepository,
-    ExecutionSubmissionRepository, FactorRepository, FeatureParityRepository, MarketRepository,
-    ModelRegistryRepository, OperationLogRepository, OrderIntentRepository, PolicyRepository,
-    PositionRepository, RecommendationExecutionRollupRepository, RecommendationReportRepository,
+    EntryConditionRepository, ExchangeHistoryRepository, ExecutionAttemptOutcomeRepository,
+    ExecutionOrderRepository, ExecutionSubmissionRepository, FactorRepository,
+    FeatureParityRepository, MarketRepository, ModelRegistryRepository, OperationLogRepository,
+    OrderIntentRepository, PolicyRepository, PositionRepository,
+    RecommendationExecutionRollupRepository, RecommendationReportRepository,
     RecommendationRepository, RecommendationResolutionOutcomeRepository, ReconciliationRepository,
-    ResolutionObservationRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
+    ResolutionObservationRepository, TradePolicyRepository,
     quant::{
         settlement_governance::{
             SettlementExternalCursorRepository, SettlementGovernanceRepository,
@@ -495,9 +496,9 @@ fn build_exit_monitor(
         factors: Arc::clone(&wiring.research.factor_repo) as Arc<dyn FactorRepository>,
         pit_source: Arc::clone(&wiring.data.pit_source),
         window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
-        block_cursor_repo: Arc::clone(&repos.trade_tape_block_cursor)
-            as Arc<dyn TradeTapeBlockCursorRepository>,
-        trade_tape_on_chain: wiring.deploy.market_data.trade_tape_on_chain.clone(),
+        exchange_history_repo: Arc::clone(&repos.exchange_history)
+            as Arc<dyn ExchangeHistoryRepository>,
+        finalized_exchange_history: wiring.deploy.market_data.finalized_exchange_history.clone(),
     });
     // thesis-invalidation re-inference (invalidation-first).
     let reinference: Arc<dyn ExitSignalEvaluator> = Arc::new(ReinferenceSignalEvaluator::new(
@@ -519,9 +520,13 @@ fn build_exit_monitor(
             factors: Arc::clone(&wiring.research.factor_repo) as Arc<dyn FactorRepository>,
             pit_source: Arc::clone(&wiring.data.pit_source),
             window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
-            block_cursor_repo: Arc::clone(&repos.trade_tape_block_cursor)
-                as Arc<dyn TradeTapeBlockCursorRepository>,
-            trade_tape_on_chain: wiring.deploy.market_data.trade_tape_on_chain.clone(),
+            exchange_history_repo: Arc::clone(&repos.exchange_history)
+                as Arc<dyn ExchangeHistoryRepository>,
+            finalized_exchange_history: wiring
+                .deploy
+                .market_data
+                .finalized_exchange_history
+                .clone(),
         });
     let opportunistic: Arc<dyn ExitSignalEvaluator> = Arc::new(
         OpportunisticSellSignalEvaluator::new(OpportunisticSellSignalEvaluatorDeps {

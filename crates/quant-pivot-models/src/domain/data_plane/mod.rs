@@ -5,9 +5,9 @@ pub mod decision_boundary;
 pub mod domain_event;
 pub mod domain_observation;
 pub mod domain_source_expectation;
+pub mod exchange_history;
 pub mod latency;
 pub mod pipeline;
-pub mod trade_tape;
 
 pub use data_quality::{DataQualityInput, DataQualityReport, DataQualitySnapshot};
 pub use decision_boundary::{DecisionBoundary, DecisionClock, DecisionSource};
@@ -27,17 +27,28 @@ pub use domain_source_expectation::{
     AffectedMarketIds, AffectedProfileIds, DomainSourceExpectationDefinition,
     DomainSourceExpectationInfo, DomainSourceExpectationTransition, UpsertDomainSourceExpectation,
 };
+pub use exchange_history::{
+    ColdStartSloStatus, ExchangeHistoryChunkInfo, ExchangeHistoryChunkStatus,
+    ExchangeHistoryChunkStatusEnum, ExchangeHistoryChunkStatusIter,
+    ExchangeHistoryChunkStatusParseError, ExchangeHistoryChunkStatusVariant,
+    ExchangeHistoryChunkStatusVariantIter, ExchangeHistoryContinuityBasis,
+    ExchangeHistoryContinuityBasisEnum, ExchangeHistoryContinuityBasisIter,
+    ExchangeHistoryContinuityBasisParseError, ExchangeHistoryContinuityBasisVariant,
+    ExchangeHistoryContinuityBasisVariantIter, ExchangeHistoryFrontier,
+    ExchangeHistoryFrontierEnum, ExchangeHistoryFrontierIter, ExchangeHistoryFrontierParseError,
+    ExchangeHistoryFrontierProgress, ExchangeHistoryFrontierVariant,
+    ExchangeHistoryFrontierVariantIter, ExchangeHistoryPlanInfo,
+    ExchangeHistoryQuarantineDisposition, ExchangeHistoryQuarantineInfo,
+    ExchangeHistoryQuarantineReason, ExchangeHistoryQuarantineReasonEnum,
+    ExchangeHistoryQuarantineReasonIter, ExchangeHistoryQuarantineReasonParseError,
+    ExchangeHistoryQuarantineReasonVariant, ExchangeHistoryQuarantineReasonVariantIter,
+    ExchangeHistoryQuarantineResolutionInfo, ExchangeHistoryStage, ExecutionParticipantPrint,
+    ExecutionParticipantRole, NewExchangeHistoryChunk, NewExchangeHistoryPlan,
+    NewExchangeHistoryQuarantine, NewExchangeHistoryQuarantineResolution,
+    ResolveAcceptedHistoryRange,
+};
 pub use latency::LatencyTrace;
 pub use pipeline::{
     BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta,
     StreamSessionEndReason,
-};
-pub use trade_tape::{
-    TradeParticipantRole, TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus,
-    TradeTapeBlockCursorStatusEnum, TradeTapeBlockCursorStatusIter,
-    TradeTapeBlockCursorStatusParseError, TradeTapeBlockCursorStatusVariant,
-    TradeTapeBlockCursorStatusVariantIter, TradeTapePrint, TradeTapeSourceKind,
-    TradeTapeSourceKindEnum, TradeTapeSourceKindIter, TradeTapeSourceKindParseError,
-    TradeTapeSourceKindVariant, TradeTapeSourceKindVariantIter, UpsertTradeTapeBlockCursor,
-    ch_trade_side, trade_tape_coverage,
 };

@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::{config::DeployConfig, domain::ports::ResearchJobPort};
+use quant_pivot_models::{
+    config::DeployConfig,
+    domain::{data_plane::ExchangeHistoryStage, ports::ResearchJobPort},
+};
 use quant_pivot_repository::traits::{
     PolicyRepository, ResearchJobRepository, TrainingDatasetRepository,
 };
@@ -27,7 +30,13 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
         ctx.runtime_controls().quant_runtime_mode(),
     );
     ctx.register_runtime_control_sync(&mut runner);
-    ctx.register_runtime_tasks(&mut runner);
+    // Historical projection is identity-strict. Complete the active + closed
+    // Gamma baseline before the history worker can observe any chain log.
+    ctx.data
+        .exchange_history_progress
+        .set_stage(ExchangeHistoryStage::IdentitySync);
+    ctx.data.gamma_service.sync().await?;
+    ctx.register_runtime_tasks(&mut runner).await?;
     ctx.register_periodic_services(&mut runner);
     ctx.register_equity_snapshot_worker(&mut runner);
     ctx.register_report_coordinator(&mut runner);
@@ -48,14 +57,17 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
         Arc::clone(&ctx.infra.repos.research_job) as Arc<dyn ResearchJobRepository>,
         ctx.events.clone(),
     );
-    let research_jobs: Arc<dyn ResearchJobPort> = Arc::new(CoreResearchJobPort::new(
+    let core_research_jobs = Arc::new(CoreResearchJobPort::new(
         job_engine.clone(),
         Arc::clone(&ctx.infra.repos.training_dataset) as Arc<dyn TrainingDatasetRepository>,
         Arc::clone(&ctx.infra.repos.runtime_config) as Arc<dyn PolicyRepository>,
         ctx.config.quant.research_jobs.max_recovery_attempts,
     ));
+    let research_jobs: Arc<dyn ResearchJobPort> =
+        Arc::<CoreResearchJobPort>::clone(&core_research_jobs);
     let feedback_wake = job_engine.feedback_wake();
     ctx.register_research_runtime(&mut runner, job_engine)?;
+    ctx.register_fresh_boot(&mut runner, core_research_jobs);
     ctx.register_readiness_worker(&mut runner)?;
     ctx.register_feature_parity_scheduler(&mut runner);
 

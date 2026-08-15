@@ -48,9 +48,10 @@ use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookMicrostructureRow, ChDecimal64, ChSchemaVersion, DomainObservationRow,
-        MarketResolutionRow, MidPriceBucketRow, TradeTapeRow, WeatherForecastFactRow,
+        ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
+        MarketResolutionRow, MidPriceBucketRow, WeatherForecastFactRow,
     },
-    config::{PortfolioSolverDeployConfig, TradeTapeOnChainConfig},
+    config::PortfolioSolverDeployConfig,
     domain::{
         api::{BasisAlertListQuery, MarketLinkageListQuery},
         data_plane::DecisionBoundary,
@@ -70,11 +71,12 @@ use quant_pivot_models::{
             NewRecommendationReport, NewReportDataQualitySnapshot, NewReportRouteRun,
             NewReportTransaction, OverrideContext, PortfolioConstraintEvidence,
             PortfolioDecisionResult, PortfolioObjectiveEvidence, PortfolioScenario,
-            PortfolioScenarioArtifact, PortfolioScenarioKind, PortfolioScenarioVisibility,
-            RecommendationInfo, RecommendationReportInfo, ReportRunClaimConfig,
-            RepresentedRouteSet, ResolvedBinding, ResolvedSourceBinding, RouteCandidateFunnel,
-            RouteModelLineage, RouteRunOutcome, ScenarioCashflow, ScenarioDistribution,
-            ScenarioWeight, SolverEvidence, WeatherDecisionGroupKey, WeatherSubject,
+            PortfolioScenarioArtifact, PortfolioScenarioEvidenceRegime, PortfolioScenarioKind,
+            PortfolioScenarioVisibility, RecommendationInfo, RecommendationReportInfo,
+            ReportRunClaimConfig, RepresentedRouteSet, ResolvedBinding, ResolvedSourceBinding,
+            RouteCandidateFunnel, RouteModelLineage, RouteRunOutcome, ScenarioCashflow,
+            ScenarioDistribution, ScenarioWeight, SolverEvidence, WeatherDecisionGroupKey,
+            WeatherSubject,
         },
         runtime::CoreEventPublisher,
     },
@@ -110,9 +112,10 @@ use quant_pivot_models::{
         PolicyBundleGeneration, PortfolioPlanId, PortfolioScenarioArtifactId,
         PortfolioScenarioModelArtifactId, Price, Probability, RecommendationId,
         RecommendationReportId, ReportDataQualityTokens, ReportRouteRunId, ResearchProfileRef,
-        ResolverVersion, RoleCode, SchemaVersion, SelectionExclusionSummary, Shares,
-        TemperatureBand, TemperatureUnit, TokenId, TradePolicyArtifactId, TrainingDatasetId, Usd,
-        UsdHours, WeatherContractFinalizationPolicy, WeatherTemperatureStatistic, WorkerId,
+        ResolverVersion, RoleCode, SchemaVersion, SelectionExclusionSummary, ServingAuthority,
+        Shares, TemperatureBand, TemperatureUnit, TokenId, TradePolicyArtifactId,
+        TrainingDatasetId, Usd, UsdHours, WeatherContractFinalizationPolicy,
+        WeatherTemperatureStatistic, WorkerId,
         domain_capability::{DomainMeasurementUnit, WeatherVariable},
         factor::FactorServingPlane,
         model_lineage::ModelVersionDerivation,
@@ -142,7 +145,7 @@ use quant_pivot_repository::{
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
     factors::FactorEngine,
-    features::FeatureSchema,
+    features::ExecutableFeatureSchema,
     hashing::ResearchHasher,
     model::{CalibratedReturnModel, CalibrationArtifactLoader, ReturnModelSpec},
     pit::PointInTimeSnapshotSource,
@@ -158,6 +161,9 @@ use super::{
     SelectorFixture,
     artifact_store::VersionedArtifactStoreFixture,
     catalog_fixtures::{make_event, make_market},
+    execution_history_fixtures::{
+        WHALE_FIXTURE_EXECUTION_COUNT, live_history_config, live_history_repo, whale_execution_rows,
+    },
     execution_pg_seed::{fixture_profile_ref, seed_score_calibration},
     fact_sink::DiscardFactWriter,
     factor_definitions::register_all_factor_definitions,
@@ -175,7 +181,6 @@ use super::{
     report_fixtures,
     report_lifecycle_seed::{persist_and_publish_report, persist_prepared_report},
     trade_policy_fixtures::{PublishedTradePolicyFixture, PublishedTradePolicyFixtureInput},
-    trade_tape_fixtures::live_tape_cursor_repo,
 };
 
 /// Seeded catalog ids shared across report pipeline E2E tests.
@@ -630,23 +635,70 @@ impl QuantFactReadRepository for ReportFactRead {
         Ok(Vec::new())
     }
 
-    async fn market_tape_window(
+    async fn market_execution_window(
         &self,
-        _market_ids: Vec<MarketId>,
-        _from_ms: i64,
-        _to_ms: i64,
-        _decision_at_ms: i64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
-        Ok(Vec::new())
+        market_ids: Vec<MarketId>,
+        from_ms: i64,
+        to_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<ExecutionParticipantFactRow>, StorageError> {
+        let event_time_ms = to_ms
+            .min(decision_at_ms)
+            .checked_sub(ChronoDuration::minutes(1).num_milliseconds())
+            .expect("report execution fixture time");
+        Ok(market_ids
+            .into_iter()
+            .filter_map(|market_id| {
+                let token_id = match market_id.as_str() {
+                    MARKET_ID => TokenId::new(YES_TOKEN),
+                    MARKET_ID_2 => TokenId::new(YES_TOKEN_2),
+                    _ => return None,
+                };
+                Some(whale_execution_rows(
+                    &market_id,
+                    &token_id,
+                    event_time_ms,
+                    WHALE_FIXTURE_EXECUTION_COUNT,
+                    dec!(0.90),
+                    Decimal::from(10_000),
+                ))
+            })
+            .flatten()
+            .filter(|row| {
+                row.effective_at >= from_ms
+                    && row.effective_at < to_ms
+                    && row.model_available_at <= decision_at_ms
+            })
+            .collect())
     }
 
-    async fn last_trades(
+    async fn last_executions(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _limit: u64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn market_executions_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn execution_participants_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<ExecutionParticipantRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -747,9 +799,21 @@ impl ReportPipelineHarness {
         let factor_repo =
             Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
         let domain = DomainConfig::default();
-        register_all_factor_definitions(factor_repo.as_ref(), &factors, &features, &domain)
+        for profile_ref in [pooled_profile_ref(), fixture_profile_ref()] {
+            let profile = profile_ref
+                .resolve_builtin_research_profile()
+                .expect("resolve report factor profile");
+            register_all_factor_definitions(
+                factor_repo.as_ref(),
+                &factors,
+                &features,
+                &domain,
+                profile.spec.feature_contract,
+                profile.spec.category,
+            )
             .await
             .expect("register immutable factor definitions");
+        }
         let model_version_id = ModelVersionId::from_v7();
         let generic_model_version_id = ModelVersionId::from_v7();
 
@@ -907,6 +971,7 @@ struct FixtureRouteLineage {
     feature_contract_digest: ContentHash,
     pit_lineage_digest: ContentHash,
     serving_contract_digest: ContentHash,
+    recommendation_contract_hash: ContentHash,
 }
 
 /// Seed a published `TopN` report with two shared [`report_fixtures`] recommendations.
@@ -1004,6 +1069,7 @@ async fn seed_fixture_report(
         feature_contract_digest: bindings.transform.input_contract_hash,
         pit_lineage_digest: bindings.dataset.manifest.source_fingerprint,
         serving_contract_digest: serving_contract.contract_hash(),
+        recommendation_contract_hash: trade_policy.content_hash,
     };
     report.represented_routes_json =
         RepresentedRouteSet::from_routes([lineage.route]).expect("fixture represented Route set");
@@ -1371,13 +1437,15 @@ fn fixture_route_runs(
         model_version_id: lineage.model_version_id,
         model_run_id: Some(lineage.model_run_id),
         calibration_artifact_id: lineage.calibration_artifact_id,
-        trade_policy_artifact_id: lineage.trade_policy_artifact_id,
+        trade_policy_artifact_id: Some(lineage.trade_policy_artifact_id),
         research_profile_artifact_id: lineage.research_profile_ref.artifact_id(),
         research_profile_ref: lineage.research_profile_ref,
         prediction_horizon_secs: lineage.prediction_horizon_secs,
         feature_contract_digest: lineage.feature_contract_digest,
         pit_lineage_digest: lineage.pit_lineage_digest,
         serving_contract_digest: lineage.serving_contract_digest,
+        recommendation_contract_hash: lineage.recommendation_contract_hash,
+        serving_authority: ServingAuthority::ExecutionEligible,
     };
     vec![NewReportRouteRun {
         report_route_run_id: lineage.report_route_run_id,
@@ -1391,7 +1459,7 @@ fn fixture_route_runs(
         model_version_id: Some(route_lineage.model_version_id),
         model_run_id: route_lineage.model_run_id,
         calibration_artifact_id: Some(route_lineage.calibration_artifact_id),
-        trade_policy_artifact_id: Some(route_lineage.trade_policy_artifact_id),
+        trade_policy_artifact_id: route_lineage.trade_policy_artifact_id,
         research_profile_artifact_id: Some(route_lineage.research_profile_artifact_id.clone()),
         lineage_json: Some(route_lineage),
         funnel_json: RouteCandidateFunnel {
@@ -1449,7 +1517,8 @@ fn fixture_scenario_artifact(
         route_set_digest: represented_routes.digest,
         serving_contract_digest: fixture_content_hash("serving-contract"),
         calibration_contract_digest: fixture_content_hash("calibration-contract"),
-        trade_policy_contract_digest: fixture_content_hash("trade-policy-contract"),
+        recommendation_contract_digest: fixture_content_hash("recommendation-contract"),
+        evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
         capital_time_bucket_contract_digest: CapitalTimeBucketContract::try_from(
             policy.tail_risk.capital_time_buckets.as_slice(),
         )
@@ -1755,11 +1824,11 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
             window_provider: FeatureWindowProvider::new(Arc::new(ReportFactRead)),
             feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
             event_writer: noop_feature_writer(),
-            block_cursor_repo: live_tape_cursor_repo(),
+            exchange_history_repo: live_history_repo(),
             linkage_repo: Arc::new(PgMarketLinkageRepository::new(db.clone())),
             basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
             calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
-            trade_tape_on_chain: TradeTapeOnChainConfig::default(),
+            finalized_exchange_history: live_history_config(),
         })),
         model_runner,
         account_provider_factory: account_factory,
@@ -2331,11 +2400,18 @@ async fn publish_pooled_model(input: &PooledModelFixture<'_>) {
     let profile = profile_ref
         .resolve_builtin_research_profile()
         .expect("resolve pooled ResearchProfile");
-    let factor_engine =
-        FactorEngine::for_model_scope(input.factors, input.features, input.domain, None, None);
+    let factor_engine = FactorEngine::for_model_scope(
+        input.factors,
+        input.features,
+        input.domain,
+        profile.spec.feature_contract,
+        None,
+        None,
+    );
     let factor_plane = factor_engine.serving_plane().expect("pooled factor plane");
     let feature_schema_hash = ResearchHasher::feature_schema(
-        &FeatureSchema::build(input.features).expect("pooled feature schema"),
+        &ExecutableFeatureSchema::build(input.features, profile.spec.feature_contract)
+            .expect("pooled feature schema"),
     )
     .expect("pooled feature schema hash");
     let model_spec_id = ModelSpecId::from_v7();
@@ -2445,10 +2521,14 @@ async fn publish_pooled_model(input: &PooledModelFixture<'_>) {
 }
 
 async fn prepare_weighted_model(input: &WeightedModelFixture<'_>) -> PreparedWeightedModel {
+    let research_profile = fixture_profile_ref()
+        .resolve_builtin_research_profile()
+        .expect("resolve Weather ResearchProfile");
     let engine = FactorEngine::for_model_scope(
         input.factors,
         input.features,
         input.domain,
+        research_profile.spec.feature_contract,
         Some(MarketCategory::Weather),
         None,
     );
@@ -2477,7 +2557,8 @@ async fn prepare_weighted_model(input: &WeightedModelFixture<'_>) -> PreparedWei
         None
     };
     let feature_schema_hash = ResearchHasher::feature_schema(
-        &FeatureSchema::build(input.features).expect("feature schema"),
+        &ExecutableFeatureSchema::build(input.features, research_profile.spec.feature_contract)
+            .expect("feature schema"),
     )
     .expect("feature hash");
     let input_contract = ModelInputContract::single_required("book.mid");

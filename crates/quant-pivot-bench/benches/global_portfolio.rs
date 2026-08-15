@@ -7,8 +7,9 @@ use quant_pivot_models::{
     domain::quant::{
         CapitalOccupancyBucket, DiscountCurvePoint, EntryEconomics, ExecutableEconomicTier,
         ExistingPortfolioState, PortfolioScenario, PortfolioScenarioArtifact,
-        PortfolioScenarioKind, PortfolioScenarioVisibility, RecommendationEconomics,
-        RepresentedRouteSet, ScenarioCashflow, ScenarioDistribution, ScenarioWeight,
+        PortfolioScenarioEvidenceRegime, PortfolioScenarioKind, PortfolioScenarioVisibility,
+        RecommendationEconomics, RepresentedRouteSet, ScenarioCashflow, ScenarioDistribution,
+        ScenarioWeight,
     },
     enums::{
         common::MarketCategory,
@@ -76,7 +77,7 @@ impl BenchmarkFixture {
                 .expect("capital-time contract hash");
         let serving_contract_digest = hash("serving");
         let calibration_contract_digest = hash("calibration");
-        let trade_policy_contract_digest = hash("trade-policy");
+        let recommendation_contract_digest = hash("trade-policy");
         let scenario_model_content_hash = hash("scenario-model");
         let scenario_model_artifact_id =
             PortfolioScenarioModelArtifactId::from_content_hash(&scenario_model_content_hash);
@@ -87,12 +88,13 @@ impl BenchmarkFixture {
             schema_version: SchemaVersion::FIRST,
             decision_at,
             visibility: PortfolioScenarioVisibility::PointInTime,
+            evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
             input_universe_hash: hash("input-universe"),
             ordered_routes: represented_routes.routes.clone(),
             route_set_digest: represented_routes.digest,
             serving_contract_digest,
             calibration_contract_digest,
-            trade_policy_contract_digest,
+            recommendation_contract_digest,
             capital_time_bucket_contract_digest,
             scenarios: vec![
                 scenario(0, PortfolioScenarioKind::PitBootstrap, "pit"),
@@ -130,7 +132,7 @@ impl BenchmarkFixture {
             route_set_digest: represented_routes.digest,
             serving_contract_digest,
             calibration_contract_digest,
-            trade_policy_contract_digest,
+            recommendation_contract_digest,
             scenario_model_schema_version: SchemaVersion::FIRST,
             capital_time_bucket_contract_digest,
             model_content_hash: scenario_model_content_hash,

@@ -22,8 +22,7 @@ use quant_pivot_models::{
         quant::{LinkageOutcome, MarketLinkage, MarketSubject, ModelVersionInfo},
     },
     enums::{
-        clickhouse::{ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource},
-        common::{MarketCategory, Side, TickSize},
+        common::{MarketCategory, TickSize},
         domain::LinkageSourceRole,
         execution::ExitReason,
         quant::{OutcomeSide, PriceComparison},
@@ -38,7 +37,7 @@ use quant_pivot_models::{
         EntryConditionTemplate, EntryConditionTemplateV1, EntryConditionV1, EntryOrderTemplate,
         ExecutablePriceInput, FactorCondition, FactorSnapshotInput, MarketEventCondition,
         MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, Price,
-        PriceCondition, RecommendationId, ResearchProfileArtifact, ShadowLatencyProfileV1, Shares,
+        PriceCondition, RecommendationId, ResearchProfileArtifact, ShadowLatencyProfileV1,
         StructuralVolatilityOosEvidence, StructuralVolatilityOosFoldRow, TemperatureCelsius,
         TokenId, TradePolicyCandidateSpec, TradePolicyCandidateTrialRow, TradePolicyCohort,
         TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortTrialRow,
@@ -1316,7 +1315,7 @@ fn base_observations(
                 previous_at,
                 *at,
                 boundary,
-            )?;
+            );
             previous_at = *at;
             Ok(PolicyReplayObservation {
                 at: *at,
@@ -1390,63 +1389,19 @@ fn market_info_at<'a>(
         })
 }
 
-fn passive_trades(
-    page: &ReplayPage,
-    token_id: &TokenId,
-    after: DateTime<Utc>,
-    at: DateTime<Utc>,
-    boundary: &DecisionBoundary,
-) -> QuantResult<(Vec<PolicyReplayTrade>, bool)> {
-    let cutoff = boundary.cutoff_for(DecisionSource::TradeTape);
-    let mut coverage = true;
-    let mut trades = Vec::new();
-    for row in page.trade_tape.iter().filter(|row| {
-        &row.token_id == token_id
-            && row.event_time <= cutoff.timestamp_millis()
-            && row.ingestion_time > after.timestamp_millis()
-            && row.ingestion_time <= at.timestamp_millis()
-    }) {
-        if row.source != ChTradeTapeSource::MarketWs {
-            continue;
-        }
-        let Some(stream_session_id) = row.stream_session_id else {
-            coverage = false;
-            continue;
-        };
-        let side = match row.side {
-            ChTradeSide::Buy => Side::Buy,
-            ChTradeSide::Sell => Side::Sell,
-            ChTradeSide::Unknown => {
-                coverage = false;
-                continue;
-            }
-        };
-        if row.reconciliation_status != ChTradeReconciliationStatus::Matched {
-            coverage = false;
-        }
-        let event_at = DateTime::from_timestamp_millis(row.event_time)
-            .ok_or_else(|| methodology("trade tape event timestamp is invalid".to_owned()))?;
-        let available_at = DateTime::from_timestamp_millis(row.ingestion_time)
-            .ok_or_else(|| methodology("trade tape ingestion timestamp is invalid".to_owned()))?;
-        trades.push(PolicyReplayTrade {
-            event_at,
-            available_at,
-            stream_session_id,
-            side,
-            price: Price::from(row.price),
-            shares: Shares::from(row.size_shares),
-            reconciliation_status: row.reconciliation_status,
-            source_event_id: row.source_event_id.clone(),
-        });
-    }
-    trades.sort_by(|left, right| {
-        (left.event_at, left.available_at, &left.source_event_id).cmp(&(
-            right.event_at,
-            right.available_at,
-            &right.source_event_id,
-        ))
-    });
-    Ok((trades, coverage))
+const fn passive_trades(
+    _page: &ReplayPage,
+    _token_id: &TokenId,
+    _after: DateTime<Utc>,
+    _at: DateTime<Utc>,
+    _boundary: &DecisionBoundary,
+) -> (Vec<PolicyReplayTrade>, bool) {
+    // Finalized Polygon executions have exact economic identity but cannot be
+    // bound retroactively to a historical CLOB stream session. Treating them
+    // as queue-depleting prints would invent execution fidelity. Passive replay
+    // therefore remains fail-closed; bootstrap profiles never build a
+    // TradePolicy and use a separate reference-scenario contract.
+    (Vec::new(), false)
 }
 
 fn resolution_at(

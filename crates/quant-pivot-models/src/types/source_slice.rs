@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-pub const SOURCE_SLICE_MANIFEST_FORMAT_VERSION: u32 = 3;
+pub const SOURCE_SLICE_MANIFEST_FORMAT_VERSION: u32 = 4;
 
 /// Immutable artifact-store location and content identity of one source slice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +29,7 @@ pub struct SourceSliceManifestRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceSliceObjectKind {
+    GammaMarketIdentity,
     CatalogMarket,
     CatalogEvent,
     ClobMarketInfo,
@@ -36,7 +37,8 @@ pub enum SourceSliceObjectKind {
     L2Session,
     L2Gap,
     BookMicrostructure,
-    TradeTape,
+    MarketExecution,
+    ExecutionParticipant,
     MarketLinkage,
     DomainObservation,
     CryptoPriceReport,
@@ -97,14 +99,9 @@ pub struct SourceSliceInvalidSession {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourceSlicePitCutoffs {
-    pub catalog_available_at: DateTime<Utc>,
-    pub clob_market_info_available_at: DateTime<Utc>,
-    pub l2_available_at: DateTime<Utc>,
-    pub trade_tape_available_at: DateTime<Utc>,
-    pub weather_available_at: Option<DateTime<Utc>>,
-    pub calibration_available_at: Option<DateTime<Utc>>,
-    pub resolution_available_at: DateTime<Utc>,
+pub struct SourceSlicePitCutoff {
+    pub source: ResearchProfileDataSource,
+    pub available_at: DateTime<Utc>,
 }
 
 /// The only readable input to fitting and validation after materialization.
@@ -126,7 +123,7 @@ pub struct SourceSliceManifest {
     pub runtime_config_hash: ContentHash,
     pub dataset_format_version: u32,
     pub capability_registry_hashes: CapabilityRegistryHashes,
-    pub pit_cutoffs: SourceSlicePitCutoffs,
+    pub pit_cutoffs: Vec<SourceSlicePitCutoff>,
     pub invalid_sessions: Vec<SourceSliceInvalidSession>,
     pub objects: Vec<SourceSliceObjectRef>,
 }
@@ -149,10 +146,9 @@ impl SourceSliceManifest {
             return Err("source-slice catalog proof must contain markets and events".to_owned());
         }
         if self
-            .pit_cutoff_values()
-            .into_iter()
-            .flatten()
-            .any(|cutoff| cutoff > self.materialized_at)
+            .pit_cutoffs
+            .iter()
+            .any(|cutoff| cutoff.available_at > self.materialized_at)
         {
             return Err(
                 "source-slice availability cutoffs cannot be after materialization".to_owned(),
@@ -223,19 +219,16 @@ impl SourceSliceManifest {
         if self.objects.is_empty() {
             return Err("source-slice contains no objects".to_owned());
         }
+        if self
+            .pit_cutoffs
+            .windows(2)
+            .any(|pair| pair[0].source >= pair[1].source)
+        {
+            return Err(
+                "source-slice PIT cutoffs must be unique and canonically sorted".to_owned(),
+            );
+        }
         Ok(())
-    }
-
-    const fn pit_cutoff_values(&self) -> [Option<DateTime<Utc>>; 7] {
-        [
-            Some(self.pit_cutoffs.catalog_available_at),
-            Some(self.pit_cutoffs.clob_market_info_available_at),
-            Some(self.pit_cutoffs.l2_available_at),
-            Some(self.pit_cutoffs.trade_tape_available_at),
-            self.pit_cutoffs.weather_available_at,
-            self.pit_cutoffs.calibration_available_at,
-            Some(self.pit_cutoffs.resolution_available_at),
-        ]
     }
 
     pub fn content_hash(&self) -> Result<ContentHash, String> {
@@ -249,17 +242,36 @@ impl SourceSliceManifest {
     pub fn required_object_kinds(
         profile: &ResearchProfileArtifact,
     ) -> BTreeSet<SourceSliceObjectKind> {
-        let mut required = BTreeSet::from([
-            SourceSliceObjectKind::CatalogMarket,
-            SourceSliceObjectKind::CatalogEvent,
-            SourceSliceObjectKind::ClobMarketInfo,
-            SourceSliceObjectKind::L2Ledger,
-            SourceSliceObjectKind::L2Session,
-            SourceSliceObjectKind::L2Gap,
-            SourceSliceObjectKind::BookMicrostructure,
-            SourceSliceObjectKind::TradeTape,
-            SourceSliceObjectKind::Resolution,
-        ]);
+        let mut required = BTreeSet::new();
+        if profile.required_sources_contains(ResearchProfileDataSource::GammaMarketIdentity) {
+            required.insert(SourceSliceObjectKind::GammaMarketIdentity);
+        }
+        if profile.required_sources_contains(ResearchProfileDataSource::CatalogLedger) {
+            required.extend([
+                SourceSliceObjectKind::CatalogMarket,
+                SourceSliceObjectKind::CatalogEvent,
+            ]);
+        }
+        if profile.required_sources_contains(ResearchProfileDataSource::ClobMarketInfo) {
+            required.insert(SourceSliceObjectKind::ClobMarketInfo);
+        }
+        if profile.required_sources_contains(ResearchProfileDataSource::ClobL2) {
+            required.extend([
+                SourceSliceObjectKind::L2Ledger,
+                SourceSliceObjectKind::L2Session,
+                SourceSliceObjectKind::L2Gap,
+                SourceSliceObjectKind::BookMicrostructure,
+            ]);
+        }
+        if profile.required_sources_contains(ResearchProfileDataSource::MarketExecution) {
+            required.insert(SourceSliceObjectKind::MarketExecution);
+        }
+        if profile.required_sources_contains(ResearchProfileDataSource::ExecutionParticipant) {
+            required.insert(SourceSliceObjectKind::ExecutionParticipant);
+        }
+        if profile.required_sources_contains(ResearchProfileDataSource::PolymarketResolution) {
+            required.insert(SourceSliceObjectKind::Resolution);
+        }
         let crypto_required = profile
             .required_sources_contains(ResearchProfileDataSource::BinanceMarketData)
             || profile.required_sources_contains(ResearchProfileDataSource::PolymarketRtds);
@@ -328,33 +340,21 @@ impl SourceSliceManifest {
                 self.window_start, self.window_end, profile.spec.target_horizon_secs
             ));
         }
-        let cutoffs = &self.pit_cutoffs;
-        if cutoffs.catalog_available_at > pit_cutoff
-            || cutoffs.clob_market_info_available_at > pit_cutoff
-            || cutoffs.l2_available_at > pit_cutoff
-            || cutoffs.trade_tape_available_at > pit_cutoff
-            || cutoffs.resolution_available_at > pit_cutoff
+        if self
+            .pit_cutoffs
+            .iter()
+            .any(|cutoff| cutoff.available_at > pit_cutoff)
         {
             return Err("source-slice contains facts unavailable at the PIT cutoff".to_owned());
         }
-        let weather_required = profile
-            .required_sources_contains(ResearchProfileDataSource::AviationWeather)
-            || profile.required_sources_contains(ResearchProfileDataSource::GefsEnsemble);
-        if weather_required
-            && cutoffs
-                .weather_available_at
-                .is_none_or(|available_at| available_at > pit_cutoff)
-        {
-            return Err("source-slice weather facts are unavailable at the PIT cutoff".to_owned());
-        }
-        if profile.required_sources_contains(ResearchProfileDataSource::GhcnhCalibration)
-            && cutoffs
-                .calibration_available_at
-                .is_none_or(|available_at| available_at > pit_cutoff)
-        {
-            return Err(
-                "source-slice calibration facts are unavailable at the PIT cutoff".to_owned(),
-            );
+        let actual_sources = self
+            .pit_cutoffs
+            .iter()
+            .map(|cutoff| cutoff.source)
+            .collect::<BTreeSet<_>>();
+        let required_sources = profile.spec.required_sources().into_iter().collect();
+        if actual_sources != required_sources {
+            return Err("source-slice PIT source contract does not match the profile".to_owned());
         }
 
         let kinds = self
@@ -411,22 +411,7 @@ mod tests {
             .find(|profile| profile.profile_ref.id.as_str() == "weather_forecast_24h")
             .expect("weather profile");
         let program_hash = hash(200);
-        let kinds = [
-            SourceSliceObjectKind::CatalogMarket,
-            SourceSliceObjectKind::CatalogEvent,
-            SourceSliceObjectKind::ClobMarketInfo,
-            SourceSliceObjectKind::L2Ledger,
-            SourceSliceObjectKind::L2Session,
-            SourceSliceObjectKind::L2Gap,
-            SourceSliceObjectKind::BookMicrostructure,
-            SourceSliceObjectKind::TradeTape,
-            SourceSliceObjectKind::MarketLinkage,
-            SourceSliceObjectKind::DomainObservation,
-            SourceSliceObjectKind::WeatherObservation,
-            SourceSliceObjectKind::WeatherForecast,
-            SourceSliceObjectKind::CalibrationReference,
-            SourceSliceObjectKind::Resolution,
-        ];
+        let kinds = SourceSliceManifest::required_object_kinds(&profile);
         let objects = kinds
             .into_iter()
             .enumerate()
@@ -473,15 +458,15 @@ mod tests {
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![hash(204)])
                 .expect("capability registry hashes"),
-            pit_cutoffs: SourceSlicePitCutoffs {
-                catalog_available_at: materialized_at,
-                clob_market_info_available_at: materialized_at,
-                l2_available_at: materialized_at,
-                trade_tape_available_at: materialized_at,
-                weather_available_at: Some(materialized_at),
-                calibration_available_at: Some(materialized_at),
-                resolution_available_at: materialized_at,
-            },
+            pit_cutoffs: profile
+                .spec
+                .required_sources()
+                .into_iter()
+                .map(|source| SourceSlicePitCutoff {
+                    source,
+                    available_at: materialized_at,
+                })
+                .collect(),
             invalid_sessions: Vec::new(),
             objects,
         };
@@ -534,15 +519,10 @@ mod tests {
             runtime_config_hash: hash,
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             capability_registry_hashes: CapabilityRegistryHashes::default(),
-            pit_cutoffs: SourceSlicePitCutoffs {
-                catalog_available_at: now,
-                clob_market_info_available_at: now,
-                l2_available_at: now,
-                trade_tape_available_at: now,
-                weather_available_at: None,
-                calibration_available_at: None,
-                resolution_available_at: now,
-            },
+            pit_cutoffs: vec![SourceSlicePitCutoff {
+                source: ResearchProfileDataSource::GammaMarketIdentity,
+                available_at: now,
+            }],
             invalid_sessions: Vec::new(),
             objects: vec![object.clone(), object],
         };
@@ -588,9 +568,8 @@ mod tests {
         let pooled_kinds = SourceSliceManifest::required_object_kinds(pooled);
         let crypto_kinds = SourceSliceManifest::required_object_kinds(crypto);
         let weather_kinds = SourceSliceManifest::required_object_kinds(weather);
-        assert_eq!(pooled_kinds.len(), 9);
-        assert_eq!(crypto_kinds.len(), 12);
-        assert_eq!(weather_kinds.len(), 14);
+        assert!(pooled_kinds.contains(&SourceSliceObjectKind::MarketExecution));
+        assert!(pooled_kinds.contains(&SourceSliceObjectKind::ExecutionParticipant));
         assert!(crypto_kinds.contains(&SourceSliceObjectKind::CryptoPriceReport));
         assert!(!crypto_kinds.contains(&SourceSliceObjectKind::WeatherForecast));
         assert!(weather_kinds.contains(&SourceSliceObjectKind::WeatherForecast));
@@ -625,7 +604,12 @@ mod tests {
         let pit_cutoff = Utc::now();
         let fit_start = pit_cutoff - Duration::days(91);
         let (mut manifest, _, _) = weather_manifest(fit_start, pit_cutoff, pit_cutoff);
-        manifest.pit_cutoffs.weather_available_at = Some(pit_cutoff + Duration::seconds(1));
+        let weather = manifest
+            .pit_cutoffs
+            .iter_mut()
+            .find(|cutoff| cutoff.source == ResearchProfileDataSource::GefsEnsemble)
+            .expect("weather cutoff");
+        weather.available_at = pit_cutoff + Duration::seconds(1);
         assert!(manifest.validate().is_err());
     }
 }

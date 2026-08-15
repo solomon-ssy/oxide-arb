@@ -175,6 +175,30 @@ where
         })
     }
 
+    async fn find_by_tokens(
+        &self,
+        token_ids: &[TokenId],
+    ) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
+        if token_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        MarketEntity::find()
+            .filter(
+                Condition::any()
+                    .add(MarketColumn::YesTokenId.is_in(token_ids.to_vec()))
+                    .add(MarketColumn::NoTokenId.is_in(token_ids.to_vec())),
+            )
+            .all(self.db.connection())
+            .await
+            .map_err(StorageError::from)
+            .map(|markets| {
+                markets
+                    .into_iter()
+                    .map(|model| Arc::new(model.into()))
+                    .collect()
+            })
+    }
+
     async fn page(&self, query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError> {
         paginate_mapped(
             MarketEntity::find()

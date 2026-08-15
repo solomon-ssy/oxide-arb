@@ -209,6 +209,7 @@ expression: "TopNReportSnapshot::non_empty()"
       },
       "trade_plan": {
         "policy": {
+          "kind": "trade_policy",
           "artifact_id": "a8f80211-bf62-5e7b-acd9-54e24dfe89df",
           "artifact_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
           "cohort_index": 0,
@@ -216,7 +217,7 @@ expression: "TopNReportSnapshot::non_empty()"
             "profile_ref": {
               "id": "pooled_1h_control",
               "version": 4,
-              "content_hash": "blake3:5ead2ec431de352cce70974f7b86c33b6b4e2f5300e8c6a24e179db2285becd8"
+              "content_hash": "blake3:92654501879377a7e6373f52c030112a95dd4ce48539655497ce4ea207f3a953"
             },
             "category": "politics",
             "horizon_secs": 86400,
@@ -266,30 +267,33 @@ expression: "TopNReportSnapshot::non_empty()"
           "sizing_reason": "selected executable tier from the exact global MILP"
         },
         "exit": {
-          "take_profit_price": "0.7",
-          "take_profit_pct": "0.6",
-          "stop_loss_price": "0.3",
-          "stop_loss_pct": "0.3",
-          "time_exit_at": null,
-          "max_hold_secs": 86400,
-          "scale_out_targets": [],
-          "trailing_stop": null,
-          "thesis_invalidation": {
-            "min_score_retention": "0.6",
-            "min_expected_return_bps": "0",
-            "require_route_gate_eligibility": true
-          },
-          "opportunistic_exit": {
-            "min_confidence": "0.65",
-            "min_expected_alpha_bps": "50",
-            "min_p_exit_better": "0.5",
-            "max_cumulative_exit_pct": "1",
-            "min_incremental_exit_pct": "0.1"
-          },
-          "settlement_mode": "hold_to_resolution",
-          "redeem_policy": "manual",
-          "manual_review_at": null,
-          "exit_reason": "tp/sl"
+          "kind": "executable",
+          "plan": {
+            "take_profit_price": "0.7",
+            "take_profit_pct": "0.6",
+            "stop_loss_price": "0.3",
+            "stop_loss_pct": "0.3",
+            "time_exit_at": null,
+            "max_hold_secs": 86400,
+            "scale_out_targets": [],
+            "trailing_stop": null,
+            "thesis_invalidation": {
+              "min_score_retention": "0.6",
+              "min_expected_return_bps": "0",
+              "require_route_gate_eligibility": true
+            },
+            "opportunistic_exit": {
+              "min_confidence": "0.65",
+              "min_expected_alpha_bps": "50",
+              "min_p_exit_better": "0.5",
+              "max_cumulative_exit_pct": "1",
+              "min_incremental_exit_pct": "0.1"
+            },
+            "settlement_mode": "hold_to_resolution",
+            "redeem_policy": "manual",
+            "manual_review_at": null,
+            "exit_reason": "tp/sl"
+          }
         },
         "risk_envelope": {
           "max_loss_usd": "120",
@@ -436,6 +440,7 @@ expression: "TopNReportSnapshot::non_empty()"
       },
       "trade_plan": {
         "policy": {
+          "kind": "trade_policy",
           "artifact_id": "a8f80211-bf62-5e7b-acd9-54e24dfe89df",
           "artifact_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
           "cohort_index": 0,
@@ -443,7 +448,7 @@ expression: "TopNReportSnapshot::non_empty()"
             "profile_ref": {
               "id": "pooled_1h_control",
               "version": 4,
-              "content_hash": "blake3:5ead2ec431de352cce70974f7b86c33b6b4e2f5300e8c6a24e179db2285becd8"
+              "content_hash": "blake3:92654501879377a7e6373f52c030112a95dd4ce48539655497ce4ea207f3a953"
             },
             "category": "politics",
             "horizon_secs": 86400,
@@ -493,30 +498,33 @@ expression: "TopNReportSnapshot::non_empty()"
           "sizing_reason": "selected executable tier from the exact global MILP"
         },
         "exit": {
-          "take_profit_price": "0.7",
-          "take_profit_pct": "0.6",
-          "stop_loss_price": "0.3",
-          "stop_loss_pct": "0.3",
-          "time_exit_at": null,
-          "max_hold_secs": 86400,
-          "scale_out_targets": [],
-          "trailing_stop": null,
-          "thesis_invalidation": {
-            "min_score_retention": "0.6",
-            "min_expected_return_bps": "0",
-            "require_route_gate_eligibility": true
-          },
-          "opportunistic_exit": {
-            "min_confidence": "0.65",
-            "min_expected_alpha_bps": "50",
-            "min_p_exit_better": "0.5",
-            "max_cumulative_exit_pct": "1",
-            "min_incremental_exit_pct": "0.1"
-          },
-          "settlement_mode": "hold_to_resolution",
-          "redeem_policy": "manual",
-          "manual_review_at": null,
-          "exit_reason": "tp/sl"
+          "kind": "executable",
+          "plan": {
+            "take_profit_price": "0.7",
+            "take_profit_pct": "0.6",
+            "stop_loss_price": "0.3",
+            "stop_loss_pct": "0.3",
+            "time_exit_at": null,
+            "max_hold_secs": 86400,
+            "scale_out_targets": [],
+            "trailing_stop": null,
+            "thesis_invalidation": {
+              "min_score_retention": "0.6",
+              "min_expected_return_bps": "0",
+              "require_route_gate_eligibility": true
+            },
+            "opportunistic_exit": {
+              "min_confidence": "0.65",
+              "min_expected_alpha_bps": "50",
+              "min_p_exit_better": "0.5",
+              "max_cumulative_exit_pct": "1",
+              "min_incremental_exit_pct": "0.1"
+            },
+            "settlement_mode": "hold_to_resolution",
+            "redeem_policy": "manual",
+            "manual_review_at": null,
+            "exit_reason": "tp/sl"
+          }
         },
         "risk_envelope": {
           "max_loss_usd": "120",

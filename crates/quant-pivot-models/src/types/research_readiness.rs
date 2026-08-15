@@ -20,9 +20,11 @@ wire_enum! {
     @derive(PartialOrd, Ord)
     pub enum ResearchReadinessSource {
         CatalogLedger => "catalog_ledger",
+        GammaMarketIdentity => "gamma_market_identity",
         ClobMarketInfo => "clob_market_info",
         ClobL2 => "clob_l2",
-        TradeTape => "trade_tape",
+        MarketExecution => "market_execution",
+        ExecutionParticipant => "execution_participant",
         BinanceMarketData => "binance_market_data",
         PolymarketRtds => "polymarket_rtds",
         DomainObservation => "domain_observation",
@@ -102,7 +104,7 @@ impl ResearchSourceRegistry {
 pub fn research_source_registry() -> Result<ResearchSourceRegistry, String> {
     let profile_sources = builtin_research_profiles()?
         .into_iter()
-        .flat_map(|profile| profile.spec.required_sources)
+        .flat_map(|profile| profile.spec.required_sources())
         .collect::<BTreeSet<_>>();
     let mut required_sources = profile_sources
         .iter()
@@ -141,9 +143,11 @@ impl From<ResearchProfileDataSource> for ResearchReadinessSource {
     fn from(value: ResearchProfileDataSource) -> Self {
         match value {
             ResearchProfileDataSource::CatalogLedger => Self::CatalogLedger,
+            ResearchProfileDataSource::GammaMarketIdentity => Self::GammaMarketIdentity,
             ResearchProfileDataSource::ClobMarketInfo => Self::ClobMarketInfo,
             ResearchProfileDataSource::ClobL2 => Self::ClobL2,
-            ResearchProfileDataSource::TradeTape => Self::TradeTape,
+            ResearchProfileDataSource::MarketExecution => Self::MarketExecution,
+            ResearchProfileDataSource::ExecutionParticipant => Self::ExecutionParticipant,
             ResearchProfileDataSource::BinanceMarketData => Self::BinanceMarketData,
             ResearchProfileDataSource::PolymarketRtds => Self::PolymarketRtds,
             ResearchProfileDataSource::AviationWeather => Self::AviationWeather,
@@ -167,6 +171,12 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             Storage::PostgresLedger,
             "catalog_market_change",
             "source_effective_at",
+        ),
+        pg_binding(
+            Source::GammaMarketIdentity,
+            Storage::PostgresVersionedProjection,
+            "market",
+            "updated_at",
         ),
         pg_binding(
             Source::ClobMarketInfo,
@@ -199,9 +209,17 @@ fn source_bindings() -> Vec<ResearchSourceBinding> {
             None,
         ),
         ch_binding(
-            Source::TradeTape,
-            "quant_trade_tape",
-            "event_time",
+            Source::MarketExecution,
+            "quant_market_execution",
+            "model_available_at",
+            ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
+            "toYYYYMM(event_date)",
+            None,
+        ),
+        ch_binding(
+            Source::ExecutionParticipant,
+            "quant_execution_participant",
+            "model_available_at",
             ResearchSourceTimeEncoding::ClickHouseDateTime64Milliseconds,
             "toYYYYMM(event_date)",
             None,

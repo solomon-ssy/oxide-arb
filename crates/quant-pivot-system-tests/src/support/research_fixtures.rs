@@ -38,14 +38,14 @@ use quant_pivot_models::{
         DATASET_COHORT_MANIFEST_FORMAT_VERSION, DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
         DatasetCohortArtifactRef, DatasetCohortCounts, DatasetCohortManifest, DatasetCoverage,
         DatasetManifest, DatasetSourceLineage, DecisionCaptureEvidence, DecisionPolicySnapshotId,
-        DecisionSnapshotEvidence, EvmBlockHash, EvmTransactionHash, FeatureValue, MarketContext,
-        ModelSpecId, PayoutRatio, Price, Probability, ReaderContractVersion,
-        RecommendationIdentity, ResearchEvaluationTrack, ResearchProfileArtifact,
-        ResearchProfileDataSource, ResearchProfileRef, SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
+        DecisionSnapshotEvidence, EvmBlockHash, EvmTransactionHash, FeatureValue,
+        FinalizedExecutionEvidence, MarketContext, ModelSpecId, PayoutRatio, Price, Probability,
+        ReaderContractVersion, RecommendationIdentity, ResearchEvaluationTrack,
+        ResearchProfileArtifact, ResearchProfileRef, SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
         SchemaContractVersion, SchemaVersion, Shares, SourceSliceCatalogProof, SourceSliceId,
         SourceSliceManifest, SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef,
-        SourceSlicePitCutoffs, TokenId, TradeTapeSourceEvidence, TrainingDatasetId,
-        TrainingHorizonsSecs, TrainingSampleSources, Usd,
+        SourceSlicePitCutoff, TokenId, TrainingDatasetId, TrainingHorizonsSecs,
+        TrainingSampleSources, Usd,
         backtest::{
             BacktestPortfolioFunnel, CscvSelectionEvidence, CscvTrialDescriptor,
             CscvTrialGridBinding,
@@ -291,7 +291,7 @@ pub fn bind_fixture_decision_capture(example: &mut TrainingExample) {
             book_available_at: decision_at,
             selection: (&example.selected_market).into(),
         },
-        trade_tape_source: TradeTapeSourceEvidence::not_required(),
+        finalized_execution_evidence: FinalizedExecutionEvidence::not_required(),
         identity: RecommendationIdentity {
             category: example.selected_market.category,
             question: "Fixture market?".to_owned(),
@@ -336,13 +336,15 @@ fn source_record<T: Serialize>(
 const fn source_object_slug(kind: SourceSliceObjectKind) -> &'static str {
     match kind {
         SourceSliceObjectKind::CatalogMarket => "catalog-market",
+        SourceSliceObjectKind::GammaMarketIdentity => "gamma-market-identity",
         SourceSliceObjectKind::CatalogEvent => "catalog-event",
         SourceSliceObjectKind::ClobMarketInfo => "clob-market-info",
         SourceSliceObjectKind::L2Ledger => "l2-ledger",
         SourceSliceObjectKind::L2Session => "l2-session",
         SourceSliceObjectKind::L2Gap => "l2-gap",
         SourceSliceObjectKind::BookMicrostructure => "book-microstructure",
-        SourceSliceObjectKind::TradeTape => "trade-tape",
+        SourceSliceObjectKind::MarketExecution => "market-execution",
+        SourceSliceObjectKind::ExecutionParticipant => "execution-participant",
         SourceSliceObjectKind::MarketLinkage => "market-linkage",
         SourceSliceObjectKind::DomainObservation => "domain-observation",
         SourceSliceObjectKind::CryptoPriceReport => "crypto-price-report",
@@ -857,7 +859,8 @@ struct ReplayableSourceRecords {
     sessions: Vec<SourceSliceRecord>,
     gaps: Vec<SourceSliceRecord>,
     microstructure: Vec<SourceSliceRecord>,
-    trades: Vec<SourceSliceRecord>,
+    executions: Vec<SourceSliceRecord>,
+    participants: Vec<SourceSliceRecord>,
     resolutions: Vec<SourceSliceRecord>,
 }
 
@@ -1340,6 +1343,12 @@ async fn persist_replayable_objects(
     let mut objects = vec![
         persist_source_object(
             store,
+            SourceSliceObjectKind::GammaMarketIdentity,
+            Vec::new(),
+        )
+        .await?,
+        persist_source_object(
+            store,
             SourceSliceObjectKind::CatalogMarket,
             records.catalog_markets,
         )
@@ -1365,7 +1374,18 @@ async fn persist_replayable_objects(
             records.microstructure,
         )
         .await?,
-        persist_source_object(store, SourceSliceObjectKind::TradeTape, records.trades).await?,
+        persist_source_object(
+            store,
+            SourceSliceObjectKind::MarketExecution,
+            records.executions,
+        )
+        .await?,
+        persist_source_object(
+            store,
+            SourceSliceObjectKind::ExecutionParticipant,
+            records.participants,
+        )
+        .await?,
         persist_source_object(
             store,
             SourceSliceObjectKind::Resolution,
@@ -1392,6 +1412,23 @@ async fn persist_replayable_objects(
     Ok(objects)
 }
 
+fn profile_pit_cutoffs(
+    profile: &ResearchProfileArtifact,
+    available_at: DateTime<Utc>,
+) -> Vec<SourceSlicePitCutoff> {
+    let mut cutoffs = profile
+        .spec
+        .required_sources()
+        .into_iter()
+        .map(|source| SourceSlicePitCutoff {
+            source,
+            available_at,
+        })
+        .collect::<Vec<_>>();
+    cutoffs.sort_by_key(|cutoff| cutoff.source);
+    cutoffs
+}
+
 fn replayable_manifest(
     fixture: &ReplayableSourceSliceFixture,
     profile: &ResearchProfileArtifact,
@@ -1399,11 +1436,6 @@ fn replayable_manifest(
     objects: Vec<SourceSliceObjectRef>,
 ) -> QuantResult<SourceSliceManifest> {
     let pit_cutoff = fixture.window_end;
-    let weather_required = profile
-        .required_sources_contains(ResearchProfileDataSource::AviationWeather)
-        || profile.required_sources_contains(ResearchProfileDataSource::GefsEnsemble);
-    let calibration_required =
-        profile.required_sources_contains(ResearchProfileDataSource::GhcnhCalibration);
     Ok(SourceSliceManifest {
         format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
         profile_ref: fixture.profile_ref.clone(),
@@ -1452,15 +1484,7 @@ fn replayable_manifest(
         .map_err(|error| ResearchError::DatasetBuild {
             detail: error.to_string(),
         })?,
-        pit_cutoffs: SourceSlicePitCutoffs {
-            catalog_available_at: pit_cutoff,
-            clob_market_info_available_at: pit_cutoff,
-            l2_available_at: pit_cutoff,
-            trade_tape_available_at: pit_cutoff,
-            weather_available_at: weather_required.then_some(pit_cutoff),
-            calibration_available_at: calibration_required.then_some(pit_cutoff),
-            resolution_available_at: pit_cutoff,
-        },
+        pit_cutoffs: profile_pit_cutoffs(profile, pit_cutoff),
         invalid_sessions: Vec::new(),
         objects,
     })
@@ -1672,15 +1696,7 @@ pub async fn seed_dataset_source(
         runtime_config_hash,
         dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         capability_registry_hashes,
-        pit_cutoffs: SourceSlicePitCutoffs {
-            catalog_available_at: input.pit_cutoff,
-            clob_market_info_available_at: input.pit_cutoff,
-            l2_available_at: input.pit_cutoff,
-            trade_tape_available_at: input.pit_cutoff,
-            weather_available_at: Some(input.pit_cutoff),
-            calibration_available_at: Some(input.pit_cutoff),
-            resolution_available_at: input.pit_cutoff,
-        },
+        pit_cutoffs: profile_pit_cutoffs(&profile, input.pit_cutoff),
         invalid_sessions: Vec::new(),
         objects,
     };
@@ -1765,21 +1781,9 @@ async fn seed_evaluation_source(
             &input.scope,
         ))?,
     };
-    manifest.pit_cutoffs = SourceSlicePitCutoffs {
-        catalog_available_at: input.pit_cutoff,
-        clob_market_info_available_at: input.pit_cutoff,
-        l2_available_at: input.pit_cutoff,
-        trade_tape_available_at: input.pit_cutoff,
-        weather_available_at: template
-            .pit_cutoffs
-            .weather_available_at
-            .map(|_| input.pit_cutoff),
-        calibration_available_at: template
-            .pit_cutoffs
-            .calibration_available_at
-            .map(|_| input.pit_cutoff),
-        resolution_available_at: input.pit_cutoff,
-    };
+    for cutoff in &mut manifest.pit_cutoffs {
+        cutoff.available_at = input.pit_cutoff;
+    }
     manifest.invalid_sessions.clear();
     for (index, object) in manifest.objects.iter_mut().enumerate() {
         object.uri = ArtifactUri::parse(format!(

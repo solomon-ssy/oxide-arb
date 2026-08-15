@@ -1,23 +1,32 @@
 //! System status + quant runtime mode endpoints.
 
-use actix_web::{http::Method, web::Data};
+use actix_web::{
+    http::Method,
+    web::{Data, Path},
+};
+use chrono::Utc;
 use quant_pivot_models::{
     domain::{
         api::{
             ActionEligibilityDecision, ActionEligibilityView, CapabilityView,
-            ExecutionRecoveryView, SetKillSwitchRequest, SwitchQuantModeRequest,
-            SwitchSettlementWritePolicyRequest, SystemStatusView,
+            ExecutionRecoveryView, FreshBootProfileProgressView, FreshBootProgressView,
+            FreshBootRunDetailView, FreshBootRunEventView, FreshBootRunProgressView,
+            RetryFreshBootRunRequest, SetKillSwitchRequest, SupersedeFreshBootRunRequest,
+            SwitchQuantModeRequest, SwitchSettlementWritePolicyRequest, SystemStatusView,
         },
+        data_plane::{ExchangeHistoryFrontier, ExchangeHistoryFrontierProgress},
         governance::{HealthReport, KillSwitchView, RuntimeControlSnapshot},
         ports::{QuantModeTransitionReport, SetKillSwitchCommand},
+        quant::{FreshBootRunContract, SupersedeFreshBootRun},
     },
     enums::{
         execution::KillSwitchState,
         operation_log::OperationCategory,
+        quant::{FreshBootBlockedReason, FreshBootStatus},
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::ContentHash,
+    types::{ContentHash, FreshBootRunId},
 };
 use serde::Serialize;
 
@@ -25,7 +34,7 @@ use crate::{
     audit::OperationCtx,
     auth::casbin::{Rule, checker::SUPER_ADMIN_ROLE},
     error::WebError,
-    extractors::{ActingRole, AuthedActor, ValidatedJson},
+    extractors::{ActingRole, AuthedActor, RequestId, ValidatedJson},
     response::WebResponse,
     routes::registry::{RouteSpec, spec},
     state::AppState,
@@ -38,6 +47,36 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/system/status",
             Rule::ResourceOp(ResourceType::System, Operation::Read),
             status,
+        ),
+        spec(
+            Method::GET,
+            "/system/exchange-history",
+            Rule::ResourceOp(ResourceType::System, Operation::Read),
+            exchange_history,
+        ),
+        spec(
+            Method::GET,
+            "/system/fresh-boot",
+            Rule::ResourceOp(ResourceType::System, Operation::Read),
+            fresh_boot,
+        ),
+        spec(
+            Method::GET,
+            "/system/fresh-boot/{run_id}",
+            Rule::ResourceOp(ResourceType::System, Operation::Read),
+            fresh_boot_run,
+        ),
+        spec(
+            Method::POST,
+            "/system/fresh-boot/{run_id}/retry-now",
+            Rule::ActingRoleGoverned(ResourceType::System, Operation::Update),
+            retry_fresh_boot,
+        ),
+        spec(
+            Method::POST,
+            "/system/fresh-boot/{run_id}/supersede",
+            Rule::ActingRoleGoverned(ResourceType::System, Operation::Resolve),
+            supersede_fresh_boot,
         ),
         spec(
             Method::GET,
@@ -93,6 +132,213 @@ pub async fn status(state: Data<AppState>) -> Result<WebResponse<SystemStatusVie
         runtime,
         capabilities,
     }))
+}
+
+pub async fn exchange_history(
+    state: Data<AppState>,
+) -> WebResponse<ExchangeHistoryFrontierProgress> {
+    WebResponse::ok(state.exchange_history_progress.snapshot())
+}
+
+pub async fn fresh_boot(
+    state: Data<AppState>,
+) -> Result<WebResponse<FreshBootProgressView>, WebError> {
+    let mut runs = state.fresh_boot_runs.list_latest().await?;
+    runs.sort_unstable_by_key(|run| run.route);
+    let mut profiles = Vec::with_capacity(runs.len());
+    for run in runs {
+        let last_event = state
+            .fresh_boot_runs
+            .list_events(run.run_id)
+            .await?
+            .pop()
+            .map(FreshBootRunEventView::from);
+        let training = match run.training_dataset_id {
+            Some(id) => state.fresh_boot_datasets.find_by_id(&id).await?,
+            None => None,
+        };
+        let calibration = match run.calibration_dataset_id {
+            Some(id) => state.fresh_boot_datasets.find_by_id(&id).await?,
+            None => None,
+        };
+        let manual_report_ready = run.manual_report_ready_at.is_some();
+        profiles.push(FreshBootProfileProgressView {
+            run: run.into(),
+            last_event,
+            training_dataset_status: training.as_ref().map(|dataset| dataset.status),
+            training_sample_count: training.and_then(|dataset| dataset.sample_count),
+            calibration_dataset_status: calibration.as_ref().map(|dataset| dataset.status),
+            calibration_sample_count: calibration.and_then(|dataset| dataset.sample_count),
+            manual_report_ready,
+        });
+    }
+    Ok(WebResponse::ok(FreshBootProgressView {
+        observed_at: Utc::now(),
+        exchange_history: state.exchange_history_progress.snapshot(),
+        profiles,
+    }))
+}
+
+pub async fn fresh_boot_run(
+    state: Data<AppState>,
+    run_id: Path<FreshBootRunId>,
+) -> Result<WebResponse<FreshBootRunDetailView>, WebError> {
+    let run_id = run_id.into_inner();
+    let run = state
+        .fresh_boot_runs
+        .find(&run_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("fresh-boot run not found: {run_id}")))?;
+    let events = state
+        .fresh_boot_runs
+        .list_events(run_id)
+        .await?
+        .into_iter()
+        .map(FreshBootRunEventView::from)
+        .collect();
+    Ok(WebResponse::ok(FreshBootRunDetailView {
+        run: FreshBootRunProgressView::from(run),
+        events,
+    }))
+}
+
+pub async fn retry_fresh_boot(
+    state: Data<AppState>,
+    run_id: Path<FreshBootRunId>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<RetryFreshBootRunRequest>,
+) -> Result<WebResponse<FreshBootRunProgressView>, WebError> {
+    let run_id = run_id.into_inner();
+    let request = body.into_inner();
+    let now = Utc::now();
+    let run = state
+        .fresh_boot_runs
+        .retry_now(
+            run_id,
+            request.expected_revision,
+            actor.claims.username.clone(),
+            request.reason.clone(),
+            now,
+        )
+        .await?;
+    op_ctx.set_action(OperationCategory::System, "system.fresh_boot.retry_now");
+    op_ctx.set_resource(ResourceType::System, run_id.to_string());
+    op_ctx.set_detail(serde_json::json!({
+        "run_id": run_id,
+        "expected_revision": request.expected_revision,
+        "reason": request.reason,
+        "actor": actor.claims.username,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::accepted(FreshBootRunProgressView::from(run)))
+}
+
+pub async fn supersede_fresh_boot(
+    state: Data<AppState>,
+    run_id: Path<FreshBootRunId>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<SupersedeFreshBootRunRequest>,
+) -> Result<WebResponse<FreshBootRunProgressView>, WebError> {
+    let run_id = run_id.into_inner();
+    let request = body.into_inner();
+    let blocked = state
+        .fresh_boot_runs
+        .find(&run_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("fresh-boot run not found: {run_id}")))?;
+    if blocked.status != FreshBootStatus::BlockedTerminal {
+        return Err(WebError::Conflict(
+            "only a terminal fresh-boot blocker can be superseded".to_owned(),
+        ));
+    }
+    let plan = state
+        .exchange_history
+        .load_plan(137)
+        .await?
+        .ok_or_else(|| WebError::Conflict("exchange-history plan is unavailable".to_owned()))?;
+    let from_block = plan.required_from_block(blocked.route);
+    if matches!(
+        blocked.blocked_reason,
+        Some(
+            FreshBootBlockedReason::ProviderMismatch
+                | FreshBootBlockedReason::UnknownToken
+                | FreshBootBlockedReason::DecodeFailure
+                | FreshBootBlockedReason::HistoryQuarantined
+                | FreshBootBlockedReason::SourceCoverageInvalid
+        )
+    ) {
+        let (activation_blockers, retention_blockers) = tokio::try_join!(
+            state.exchange_history.active_quarantine(
+                ExchangeHistoryFrontier::Activation,
+                from_block,
+                plan.activation_through_block,
+                1,
+            ),
+            state.exchange_history.active_quarantine(
+                ExchangeHistoryFrontier::Retention,
+                from_block,
+                plan.activation_through_block,
+                1,
+            ),
+        )?;
+        if !activation_blockers.is_empty() || !retention_blockers.is_empty() {
+            return Err(WebError::Conflict(
+                "the overlapping exchange-history blocker is still active".to_owned(),
+            ));
+        }
+    }
+    let bundle = state
+        .runtime_config
+        .load_current_bundle()
+        .await?
+        .ok_or_else(|| WebError::Conflict("active policy bundle is unavailable".to_owned()))?;
+    let now = Utc::now();
+    let replacement = FreshBootRunContract {
+        profile_ref: blocked.research_profile_artifact_id.profile_ref(),
+        route: blocked.route,
+        history_plan_id: plan.plan_id,
+        history_policy_hash: plan.policy_hash,
+        history_from_block: from_block,
+        history_through_block: plan.activation_through_block,
+        decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
+        decision_policy_snapshot_hash: bundle.snapshot_hash,
+        supersedes_run_id: Some(blocked.run_id),
+    }
+    .seal(plan.created_at, now)?;
+    let replacement_run_id = replacement.run_id;
+    let run = state
+        .fresh_boot_runs
+        .supersede(
+            SupersedeFreshBootRun {
+                run_id,
+                expected_revision: request.expected_revision,
+                replacement_run_id,
+                reason: request.reason.clone(),
+                actor: actor.claims.username.clone(),
+                occurred_at: now,
+            },
+            replacement,
+        )
+        .await?;
+    op_ctx.set_action(OperationCategory::System, "system.fresh_boot.supersede");
+    op_ctx.set_resource(ResourceType::System, run_id.to_string());
+    op_ctx.set_detail(serde_json::json!({
+        "run_id": run_id,
+        "replacement_run_id": replacement_run_id,
+        "expected_revision": request.expected_revision,
+        "reason": request.reason,
+        "actor": actor.claims.username,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::accepted(FreshBootRunProgressView::from(run)))
 }
 
 pub async fn action_eligibility(

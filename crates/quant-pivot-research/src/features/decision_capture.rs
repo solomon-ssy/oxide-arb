@@ -19,9 +19,9 @@ use quant_pivot_models::{
     types::{
         BookSnapshotRef, BookSnapshotSource, Bps, CatalogDecisionRef, ContentHash,
         DecisionCaptureEvidence, DecisionPolicySnapshotId, DecisionSnapshotEvidence, EventId,
-        MarketContext, MarketId, MarketLinkageId, Probability, RecommendationIdentity,
-        ReportDataQualitySnapshotId, ReportDataQualityTokens, TokenDataQualityRecord, TokenId,
-        TradeTapeSourceEvidence, Usd,
+        FinalizedExecutionEvidence, MarketContext, MarketId, MarketLinkageId, Probability,
+        RecommendationIdentity, ReportDataQualitySnapshotId, ReportDataQualityTokens,
+        TokenDataQualityRecord, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -64,7 +64,7 @@ pub struct ResolvedMarketBundle<'a> {
     /// Source-agnostic inputs for the pure feature build step.
     pub inputs: ResolvedInputs<'a>,
     /// Decision capture frozen at resolve (identity, book ref, market context).
-    pub capture: MarketDecisionCapture,
+    pub capture: Option<MarketDecisionCapture>,
 }
 
 /// Everything frozen at feature resolve for downstream report composition.
@@ -104,7 +104,7 @@ pub struct MarketDecisionCapture {
     /// Durable source snapshot identity shared by online and replay.
     pub snapshot: DecisionSnapshotEvidence,
     /// Trade-tape source state consumed by this feature build.
-    pub trade_tape_source: TradeTapeSourceEvidence,
+    pub finalized_execution_evidence: FinalizedExecutionEvidence,
 }
 
 impl MarketDecisionCapture {
@@ -146,7 +146,7 @@ impl MarketDecisionCapture {
     pub fn evidence(&self) -> DecisionCaptureEvidence {
         DecisionCaptureEvidence {
             snapshot: self.snapshot.clone(),
-            trade_tape_source: self.trade_tape_source.clone(),
+            finalized_execution_evidence: self.finalized_execution_evidence.clone(),
             identity: self.identity.clone(),
             market_context: self.market_context.clone(),
             data_quality: self.data_quality,
@@ -333,7 +333,7 @@ pub struct MarketDecisionCaptureInput<'a> {
     pub registry: Option<&'a MarketRegistryInfo>,
     pub catalog: CatalogDecisionRef,
     pub domain: Option<&'a DomainSliceInputs>,
-    pub trade_tape_source: &'a TradeTapeSourceEvidence,
+    pub finalized_execution_evidence: &'a FinalizedExecutionEvidence,
     pub liquidity_cap_usd: Usd,
 }
 
@@ -350,7 +350,7 @@ pub fn capture_market_decision(
         registry,
         catalog,
         domain,
-        trade_tape_source,
+        finalized_execution_evidence,
         liquidity_cap_usd,
     } = input;
     let as_of = boundary.decision_at();
@@ -386,7 +386,7 @@ pub fn capture_market_decision(
         secondary_identity,
         data_quality: DataQualityStatus::Fresh,
         liquidity_score,
-        trade_tape_source: trade_tape_source.clone(),
+        finalized_execution_evidence: finalized_execution_evidence.clone(),
         snapshot: DecisionSnapshotEvidence {
             boundary: boundary.clone(),
             market_id: selected.market_id.clone(),
@@ -425,49 +425,57 @@ pub fn draft_data_quality_snapshot(
         .iter()
         .map(|row| (row.market_id.clone(), row))
         .collect();
-    let records = bundles
-        .iter()
-        .zip(vectors)
-        .zip(persisted)
-        .map(
-            |((bundle, vector), persisted)| -> QuantResult<TokenDataQualityRecord> {
-                let wrong_market = persisted.market_id != vector.market_id;
-                let wrong_token = persisted.token_id.as_ref() != vector.token_id.as_ref();
-                let wrong_decision = persisted.decision_at != as_of;
-                let wrong_data_quality = persisted.data_quality != vector.data_quality;
-                if wrong_market || wrong_token || wrong_decision || wrong_data_quality {
-                    return Err(ResearchError::Determinism {
+    let records =
+        bundles
+            .iter()
+            .zip(vectors)
+            .zip(persisted)
+            .map(
+                |((bundle, vector), persisted)| -> QuantResult<TokenDataQualityRecord> {
+                    let wrong_market = persisted.market_id != vector.market_id;
+                    let wrong_token = persisted.token_id.as_ref() != vector.token_id.as_ref();
+                    let wrong_decision = persisted.decision_at != as_of;
+                    let wrong_data_quality = persisted.data_quality != vector.data_quality;
+                    if wrong_market || wrong_token || wrong_decision || wrong_data_quality {
+                        return Err(ResearchError::Determinism {
                         detail: format!(
                             "persisted feature vector {} is not aligned with DQ row for market {}",
                             persisted.feature_vector_id, vector.market_id
                         ),
                     }
                     .into());
-                }
-                let book = &bundle.capture.book;
-                let missing = rejected_by_market
-                    .get(&vector.market_id)
-                    .map(|row| {
-                        row.missing_required
-                            .iter()
-                            .map(|(name, _)| name.to_string())
-                            .collect()
+                    }
+                    let capture = bundle.capture.as_ref().ok_or_else(|| {
+                        ResearchError::Determinism {
+                        detail:
+                            "online data-quality snapshot requires recommendation execution capture"
+                                .to_owned(),
+                    }
+                    })?;
+                    let book = &capture.book;
+                    let missing = rejected_by_market
+                        .get(&vector.market_id)
+                        .map(|row| {
+                            row.missing_required
+                                .iter()
+                                .map(|(name, _)| name.to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Ok(TokenDataQualityRecord {
+                        feature_vector_id: Some(persisted.feature_vector_id),
+                        token_id: capture.token_id.clone(),
+                        market_id: capture.market_id.clone(),
+                        status: vector.data_quality,
+                        book_age_ms: book_age_ms(as_of, book)?,
+                        crossed: book.is_crossed(),
+                        empty: book.is_empty(),
+                        fact_lag_ms: fact_lag_ms(as_of, bundle.inputs.window)?,
+                        missing_required: missing,
                     })
-                    .unwrap_or_default();
-                Ok(TokenDataQualityRecord {
-                    feature_vector_id: Some(persisted.feature_vector_id),
-                    token_id: bundle.capture.token_id.clone(),
-                    market_id: bundle.capture.market_id.clone(),
-                    status: vector.data_quality,
-                    book_age_ms: book_age_ms(as_of, book)?,
-                    crossed: book.is_crossed(),
-                    empty: book.is_empty(),
-                    fact_lag_ms: fact_lag_ms(as_of, bundle.inputs.window)?,
-                    missing_required: missing,
-                })
-            },
-        )
-        .collect::<QuantResult<Vec<_>>>()?;
+                },
+            )
+            .collect::<QuantResult<Vec<_>>>()?;
     Ok(NewReportDataQualitySnapshot {
         report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
         decision_at: as_of,

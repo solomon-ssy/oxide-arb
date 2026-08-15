@@ -5,23 +5,29 @@
 //! `ReportOnly`, and seals the complete model, validation, parity, policy, and
 //! actor preimage into one content-addressed transaction record.
 
+use std::iter;
+
 use chrono::{DateTime, Utc};
+use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use super::{CandidateExplanationValidation, ModelVersionInfo, PromotionPermitActor};
+use super::{
+    CandidateExplanationValidation, ModelVersionInfo, PromotionPermitActor, RepresentedRouteSet,
+};
 use crate::{
-    enums::{model::ModelFamily, quant::QuantRuntimeMode},
+    enums::{model::ModelFamily, quant::QuantRuntimeMode, runtime_config::PolicyActorKind},
     hashing::CanonicalDigest,
     runtime_config::{
         ActivePolicyBundle, BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot,
         DecisionPolicySnapshotDocument, ModelBinding, ModelBindingSource,
+        PortfolioScenarioModelArtifactBinding,
     },
     types::{
         AuditEventId, BacktestPathSetId, BacktestReportId, CalibrationArtifactId, ContentHash,
         DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId, ModelGovernanceAuditId,
         ModelSpecId, ModelVersionId, PolicyActivationId, PolicyApprovalId, PolicyBundleGeneration,
-        PolicyIdempotencyKey, PolicyRevisionId, ResearchProfileRef, RoleCode, TrainingDatasetId,
-        UserId,
+        PolicyIdempotencyKey, PolicyRevisionId, ResearchProfileRef, RoleCode, ServingAuthority,
+        TrainingDatasetId, UserId,
         model_quality::{GateIntent, GateSubject, QualityGateReport},
     },
 };
@@ -33,12 +39,50 @@ const BOOTSTRAP_PREFLIGHT_VERSION: u32 = 1;
 const BOOTSTRAP_PREFLIGHT_DOMAIN: &str = "quant-pivot/model-route-bootstrap-preflight";
 const BOOTSTRAP_NON_ROUTE_VERSION: u32 = 1;
 const BOOTSTRAP_NON_ROUTE_DOMAIN: &str = "quant-pivot/model-route-bootstrap-non-route";
-const BOOTSTRAP_TRANSACTION_VERSION: u32 = 1;
+const BOOTSTRAP_TRANSACTION_VERSION: u32 = 2;
 const BOOTSTRAP_TRANSACTION_DOMAIN: &str = "quant-pivot/model-route-bootstrap";
 const MAX_ACTOR_BYTES: usize = 256;
 const MAX_NOTE_BYTES: usize = 2_048;
 const MAX_REASON_CODE_BYTES: usize = 128;
-const MAX_ROLE_BYTES: usize = 64;
+
+/// Exact offline-validation evidence admitted by first-route bootstrap.
+///
+/// Predictive bootstrap deliberately has no portfolio backtest: its CPCV
+/// utility is allocation independent and makes no historical L2 execution
+/// claim. An execution-eligible route must additionally bind the canonical
+/// portfolio replay report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "regime", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelBootstrapValidationEvidence {
+    PredictiveCpcv {
+        path_set_id: BacktestPathSetId,
+        path_set_hash: ContentHash,
+    },
+    PortfolioEconomics {
+        path_set_id: BacktestPathSetId,
+        path_set_hash: ContentHash,
+        backtest_report_id: BacktestReportId,
+        backtest_report_hash: ContentHash,
+    },
+}
+
+impl ModelBootstrapValidationEvidence {
+    #[must_use]
+    pub const fn path_set_id(self) -> BacktestPathSetId {
+        match self {
+            Self::PredictiveCpcv { path_set_id, .. }
+            | Self::PortfolioEconomics { path_set_id, .. } => path_set_id,
+        }
+    }
+
+    #[must_use]
+    pub const fn path_set_hash(self) -> ContentHash {
+        match self {
+            Self::PredictiveCpcv { path_set_hash, .. }
+            | Self::PortfolioEconomics { path_set_hash, .. } => path_set_hash,
+        }
+    }
+}
 
 /// Complete immutable candidate plane required for a first champion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,10 +107,8 @@ pub struct ModelBootstrapManifest {
     calibration_artifact_hash: Option<ContentHash>,
     profile_ref: ResearchProfileRef,
     route: BuyModelRoute,
-    cpcv_path_set_id: BacktestPathSetId,
-    cpcv_path_set_hash: ContentHash,
-    backtest_report_id: BacktestReportId,
-    backtest_report_hash: ContentHash,
+    validation_evidence: ModelBootstrapValidationEvidence,
+    scenario_model_binding: PortfolioScenarioModelArtifactBinding,
     explanation_validation: CandidateExplanationValidation,
     quality_gate_report: QualityGateReport,
     feature_parity_run_id: FeatureParityRunId,
@@ -94,10 +136,8 @@ struct BootstrapManifestPreimage<'a> {
     calibration_artifact_hash: Option<ContentHash>,
     profile_ref: &'a ResearchProfileRef,
     route: BuyModelRoute,
-    cpcv_path_set_id: BacktestPathSetId,
-    cpcv_path_set_hash: ContentHash,
-    backtest_report_id: BacktestReportId,
-    backtest_report_hash: ContentHash,
+    validation_evidence: ModelBootstrapValidationEvidence,
+    scenario_model_binding: &'a PortfolioScenarioModelArtifactBinding,
     explanation_validation: &'a CandidateExplanationValidation,
     quality_gate_report: &'a QualityGateReport,
     feature_parity_run_id: FeatureParityRunId,
@@ -124,10 +164,8 @@ pub struct ModelBootstrapManifestInput {
     pub calibration_artifact_hash: Option<ContentHash>,
     pub profile_ref: ResearchProfileRef,
     pub route: BuyModelRoute,
-    pub cpcv_path_set_id: BacktestPathSetId,
-    pub cpcv_path_set_hash: ContentHash,
-    pub backtest_report_id: BacktestReportId,
-    pub backtest_report_hash: ContentHash,
+    pub validation_evidence: ModelBootstrapValidationEvidence,
+    pub scenario_model_binding: PortfolioScenarioModelArtifactBinding,
     pub explanation_validation: CandidateExplanationValidation,
     pub quality_gate_report: QualityGateReport,
     pub feature_parity_run_id: FeatureParityRunId,
@@ -156,10 +194,8 @@ impl ModelBootstrapManifest {
             calibration_artifact_hash: input.calibration_artifact_hash,
             profile_ref: &input.profile_ref,
             route: input.route,
-            cpcv_path_set_id: input.cpcv_path_set_id,
-            cpcv_path_set_hash: input.cpcv_path_set_hash,
-            backtest_report_id: input.backtest_report_id,
-            backtest_report_hash: input.backtest_report_hash,
+            validation_evidence: input.validation_evidence,
+            scenario_model_binding: &input.scenario_model_binding,
             explanation_validation: &input.explanation_validation,
             quality_gate_report: &input.quality_gate_report,
             feature_parity_run_id: input.feature_parity_run_id,
@@ -186,10 +222,8 @@ impl ModelBootstrapManifest {
             calibration_artifact_hash: input.calibration_artifact_hash,
             profile_ref: input.profile_ref,
             route: input.route,
-            cpcv_path_set_id: input.cpcv_path_set_id,
-            cpcv_path_set_hash: input.cpcv_path_set_hash,
-            backtest_report_id: input.backtest_report_id,
-            backtest_report_hash: input.backtest_report_hash,
+            validation_evidence: input.validation_evidence,
+            scenario_model_binding: input.scenario_model_binding,
             explanation_validation: input.explanation_validation,
             quality_gate_report: input.quality_gate_report,
             feature_parity_run_id: input.feature_parity_run_id,
@@ -214,8 +248,28 @@ impl ModelBootstrapManifest {
             .profile_ref
             .resolve_builtin_research_profile()
             .map_err(invalid_bootstrap)?;
+        let evidence_matches_authority = matches!(
+            (profile.spec.serving_authority, self.validation_evidence),
+            (
+                ServingAuthority::ReportOnlyWithLiveL2,
+                ModelBootstrapValidationEvidence::PredictiveCpcv { .. }
+            ) | (
+                ServingAuthority::ExecutionEligible,
+                ModelBootstrapValidationEvidence::PortfolioEconomics { .. }
+            )
+        );
+        let represented = RepresentedRouteSet::from_routes(
+            self.scenario_model_binding.ordered_routes.iter().copied(),
+        )
+        .map_err(|error| invalid_bootstrap(error.to_string()))?;
+        let scenario_matches = represented.routes.contains(&self.route)
+            && self.scenario_model_binding.ordered_routes == represented.routes
+            && self.scenario_model_binding.route_set_digest == represented.digest
+            && self.scenario_model_binding.bound_at == self.quality_gate_report.evaluated_at;
         let valid = self.format_version == BOOTSTRAP_MANIFEST_VERSION
             && profile.spec.category == self.route.category()
+            && evidence_matches_authority
+            && scenario_matches
             && matches!(
                 self.model_family,
                 ModelFamily::WeightedFactor | ModelFamily::ClassicalGradientBoostedTrees
@@ -294,10 +348,8 @@ impl ModelBootstrapManifest {
             calibration_artifact_hash: self.calibration_artifact_hash,
             profile_ref: &self.profile_ref,
             route: self.route,
-            cpcv_path_set_id: self.cpcv_path_set_id,
-            cpcv_path_set_hash: self.cpcv_path_set_hash,
-            backtest_report_id: self.backtest_report_id,
-            backtest_report_hash: self.backtest_report_hash,
+            validation_evidence: self.validation_evidence,
+            scenario_model_binding: &self.scenario_model_binding,
             explanation_validation: &self.explanation_validation,
             quality_gate_report: &self.quality_gate_report,
             feature_parity_run_id: self.feature_parity_run_id,
@@ -362,22 +414,22 @@ impl ModelBootstrapManifest {
 
     #[must_use]
     pub const fn cpcv_path_set_id(&self) -> BacktestPathSetId {
-        self.cpcv_path_set_id
+        self.validation_evidence.path_set_id()
     }
 
     #[must_use]
     pub const fn cpcv_path_set_hash(&self) -> ContentHash {
-        self.cpcv_path_set_hash
+        self.validation_evidence.path_set_hash()
     }
 
     #[must_use]
-    pub const fn backtest_report_id(&self) -> BacktestReportId {
-        self.backtest_report_id
+    pub const fn validation_evidence(&self) -> ModelBootstrapValidationEvidence {
+        self.validation_evidence
     }
 
     #[must_use]
-    pub const fn backtest_report_hash(&self) -> ContentHash {
-        self.backtest_report_hash
+    pub const fn scenario_model_binding(&self) -> &PortfolioScenarioModelArtifactBinding {
+        &self.scenario_model_binding
     }
 
     #[must_use]
@@ -422,6 +474,7 @@ impl ModelBootstrapPolicyProjection {
         bundle: &ActivePolicyBundle,
         route: BuyModelRoute,
         model_version_id: ModelVersionId,
+        mut scenario_binding: PortfolioScenarioModelArtifactBinding,
         bound_at: DateTime<Utc>,
     ) -> Result<Self, FeedbackError> {
         let actual_hash = bundle
@@ -443,6 +496,30 @@ impl ModelBootstrapPolicyProjection {
                 "bootstrap target already has a champion route",
             ));
         }
+        if model
+            .portfolio_scenario_model_bindings
+            .iter()
+            .any(|binding| binding.ordered_routes.contains(&route))
+        {
+            return Err(invalid_bootstrap(
+                "bootstrap target already belongs to a scenario-model binding",
+            ));
+        }
+        let represented =
+            RepresentedRouteSet::from_routes(scenario_binding.ordered_routes.iter().copied())
+                .map_err(|error| invalid_bootstrap(error.to_string()))?;
+        let expected_represented = RepresentedRouteSet::from_routes(
+            model.buy_routes.keys().copied().chain(iter::once(route)),
+        )
+        .map_err(|error| invalid_bootstrap(error.to_string()))?;
+        let binding_is_canonical = scenario_binding.ordered_routes == represented.routes
+            && scenario_binding.route_set_digest == represented.digest;
+        if represented != expected_represented || !binding_is_canonical {
+            return Err(invalid_bootstrap(
+                "bootstrap scenario binding does not represent the complete prospective active Route set",
+            ));
+        }
+        scenario_binding.bound_at = bound_at;
         let already_referenced = model.buy_routes.values().any(|binding| {
             binding.champion.model_version_id == model_version_id
                 || binding
@@ -458,7 +535,7 @@ impl ModelBootstrapPolicyProjection {
                 "bootstrap candidate is already referenced by another serving route",
             ));
         }
-        let non_route_policy_hash = Self::project_hash(&bundle.snapshot, route)?;
+        let non_route_policy_hash = Self::project_hash(&bundle.snapshot, route, &represented)?;
         let mut prospective_snapshot = bundle.snapshot.clone();
         let config_revision = bundle
             .generation
@@ -477,7 +554,34 @@ impl ModelBootstrapPolicyProjection {
                 shadow: None,
             },
         );
-        if Self::project_hash(&prospective_snapshot, route)? != non_route_policy_hash {
+        prospective_snapshot
+            .model_routing
+            .model
+            .portfolio_scenario_model_bindings
+            .retain(|binding| {
+                binding
+                    .ordered_routes
+                    .iter()
+                    .all(|bound_route| !represented.routes.contains(bound_route))
+            });
+        prospective_snapshot
+            .model_routing
+            .model
+            .portfolio_scenario_model_bindings
+            .push(scenario_binding);
+        prospective_snapshot
+            .model_routing
+            .model
+            .portfolio_scenario_model_bindings
+            .sort_by_key(|binding| {
+                (
+                    binding.route_set_digest,
+                    binding.model_content_hash,
+                    binding.portfolio_scenario_model_artifact_id.as_uuid(),
+                )
+            });
+        if Self::project_hash(&prospective_snapshot, route, &represented)? != non_route_policy_hash
+        {
             return Err(invalid_bootstrap(
                 "bootstrap projection changed policy outside the target Buy route",
             ));
@@ -493,11 +597,22 @@ impl ModelBootstrapPolicyProjection {
     fn project_hash(
         snapshot: &DecisionPolicySnapshot,
         route: BuyModelRoute,
+        represented: &RepresentedRouteSet,
     ) -> Result<ContentHash, FeedbackError> {
         let mut document = snapshot
             .persistence_document()
             .map_err(|error| invalid_bootstrap(error.to_string()))?;
         document.model_routing.model.buy_routes.remove(&route);
+        document
+            .model_routing
+            .model
+            .portfolio_scenario_model_bindings
+            .retain(|binding| {
+                binding
+                    .ordered_routes
+                    .iter()
+                    .all(|bound_route| !represented.routes.contains(bound_route))
+            });
         document.revisions.model_routing = None;
         CanonicalDigest::content_hash_typed(
             BOOTSTRAP_NON_ROUTE_DOMAIN,
@@ -520,9 +635,38 @@ impl ModelBootstrapPolicyProjection {
             .model
             .route_binding(self.route)
             .map_err(|error| invalid_bootstrap(error.to_string()))?;
+        let represented = RepresentedRouteSet::from_routes(
+            candidate.model_routing.model.buy_routes.keys().copied(),
+        )
+        .map_err(|error| invalid_bootstrap(error.to_string()))?;
         if binding.champion.model_version_id != self.model_version_id
             || binding.shadow.is_some()
-            || Self::project_hash(candidate, self.route)? != self.non_route_policy_hash
+            || candidate
+                .model_routing
+                .model
+                .portfolio_scenario_model_bindings
+                .iter()
+                .filter(|scenario| {
+                    scenario.ordered_routes == represented.routes
+                        && scenario.route_set_digest == represented.digest
+                })
+                .count()
+                != 1
+            || candidate
+                .model_routing
+                .model
+                .portfolio_scenario_model_bindings
+                .iter()
+                .filter(|scenario| {
+                    scenario
+                        .ordered_routes
+                        .iter()
+                        .any(|route| represented.routes.contains(route))
+                })
+                .count()
+                != 1
+            || Self::project_hash(candidate, self.route, &represented)?
+                != self.non_route_policy_hash
         {
             return Err(invalid_bootstrap(
                 "candidate snapshot differs from the exact bootstrap route delta",
@@ -553,7 +697,7 @@ impl ModelBootstrapPolicyProjection {
 }
 
 /// Complete side-effect-free bootstrap proof.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct ModelRouteBootstrapPreflight {
     format_version: u32,
@@ -716,6 +860,16 @@ impl ModelRouteBootstrapPreflight {
     }
 }
 
+/// Closed principal set allowed to initiate first-champion bootstrap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelRouteBootstrapActor {
+    Operator(PromotionPermitActor),
+    FreshBootOrchestrator,
+}
+
+/// Server-owned reason code for the dedicated fresh-boot service principal.
+pub const FRESH_BOOT_REASON_CODE: &str = "fresh_boot_first_champion";
+
 /// Authenticated first-champion intent. Route and all evidence are derived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapModelRoute {
@@ -723,7 +877,7 @@ pub struct BootstrapModelRoute {
     pub expected_policy_generation: PolicyBundleGeneration,
     pub expected_runtime_control_revision: i64,
     pub idempotency_key: PolicyIdempotencyKey,
-    pub actor: PromotionPermitActor,
+    pub actor: ModelRouteBootstrapActor,
     pub reason_code: String,
     pub note: String,
 }
@@ -735,7 +889,14 @@ impl BootstrapModelRoute {
                 "expected runtime-control revision cannot be negative",
             ));
         }
-        validate_role_note(&self.actor.acting_role, &self.note)?;
+        validate_actor(&self.actor, &self.note)?;
+        if self.actor == ModelRouteBootstrapActor::FreshBootOrchestrator
+            && self.reason_code != FRESH_BOOT_REASON_CODE
+        {
+            return Err(invalid_bootstrap(
+                "fresh-boot service principal requires the server-owned reason code",
+            ));
+        }
         validate_reason_code(&self.reason_code)
     }
 }
@@ -806,9 +967,10 @@ pub struct ModelRouteBootstrapPolicy {
 struct BootstrapTransactionPreimage<'a> {
     format_version: u32,
     preflight: &'a ModelRouteBootstrapPreflight,
-    actor_user_id: UserId,
+    actor_kind: PolicyActorKind,
+    actor_user_id: Option<UserId>,
     actor_username: &'a str,
-    actor_role: &'a RoleCode,
+    actor_role: Option<&'a RoleCode>,
     idempotency_key: &'a PolicyIdempotencyKey,
     reason_code: &'a str,
     note: &'a str,
@@ -819,9 +981,10 @@ struct BootstrapTransactionPreimage<'a> {
 /// Inputs jointly sealed into the bootstrap audit record.
 pub struct ModelRouteBootstrapRecordInput {
     pub preflight: ModelRouteBootstrapPreflight,
-    pub actor_user_id: UserId,
+    pub actor_kind: PolicyActorKind,
+    pub actor_user_id: Option<UserId>,
     pub actor_username: String,
-    pub actor_role: RoleCode,
+    pub actor_role: Option<RoleCode>,
     pub idempotency_key: PolicyIdempotencyKey,
     pub reason_code: String,
     pub note: String,
@@ -836,9 +999,10 @@ pub struct ModelRouteBootstrapRecord {
     format_version: u32,
     transaction_hash: ContentHash,
     preflight: ModelRouteBootstrapPreflight,
-    actor_user_id: UserId,
+    actor_kind: PolicyActorKind,
+    actor_user_id: Option<UserId>,
     actor_username: String,
-    actor_role: RoleCode,
+    actor_role: Option<RoleCode>,
     idempotency_key: PolicyIdempotencyKey,
     reason_code: String,
     note: String,
@@ -851,9 +1015,10 @@ impl ModelRouteBootstrapRecord {
         let transaction_hash = Self::derive_hash(&BootstrapTransactionPreimage {
             format_version: BOOTSTRAP_TRANSACTION_VERSION,
             preflight: &input.preflight,
+            actor_kind: input.actor_kind,
             actor_user_id: input.actor_user_id,
             actor_username: &input.actor_username,
-            actor_role: &input.actor_role,
+            actor_role: input.actor_role.as_ref(),
             idempotency_key: &input.idempotency_key,
             reason_code: &input.reason_code,
             note: &input.note,
@@ -864,6 +1029,7 @@ impl ModelRouteBootstrapRecord {
             format_version: BOOTSTRAP_TRANSACTION_VERSION,
             transaction_hash,
             preflight: input.preflight,
+            actor_kind: input.actor_kind,
             actor_user_id: input.actor_user_id,
             actor_username: input.actor_username,
             actor_role: input.actor_role,
@@ -879,7 +1045,13 @@ impl ModelRouteBootstrapRecord {
 
     pub fn validate(&self) -> Result<(), FeedbackError> {
         self.preflight.validate()?;
-        validate_actor(&self.actor_username, &self.actor_role, &self.note)?;
+        validate_actor_identity(
+            self.actor_kind,
+            self.actor_user_id,
+            &self.actor_username,
+            self.actor_role.as_ref(),
+            &self.note,
+        )?;
         validate_reason_code(&self.reason_code)?;
         let manifest = self.preflight.manifest();
         let next = self
@@ -911,9 +1083,10 @@ impl ModelRouteBootstrapRecord {
         BootstrapTransactionPreimage {
             format_version: self.format_version,
             preflight: &self.preflight,
+            actor_kind: self.actor_kind,
             actor_user_id: self.actor_user_id,
             actor_username: &self.actor_username,
-            actor_role: &self.actor_role,
+            actor_role: self.actor_role.as_ref(),
             idempotency_key: &self.idempotency_key,
             reason_code: &self.reason_code,
             note: &self.note,
@@ -944,7 +1117,12 @@ impl ModelRouteBootstrapRecord {
     }
 
     #[must_use]
-    pub const fn actor_user_id(&self) -> UserId {
+    pub const fn actor_kind(&self) -> PolicyActorKind {
+        self.actor_kind
+    }
+
+    #[must_use]
+    pub const fn actor_user_id(&self) -> Option<UserId> {
         self.actor_user_id
     }
 
@@ -954,8 +1132,8 @@ impl ModelRouteBootstrapRecord {
     }
 
     #[must_use]
-    pub const fn actor_role(&self) -> &RoleCode {
-        &self.actor_role
+    pub const fn actor_role(&self) -> Option<&RoleCode> {
+        self.actor_role.as_ref()
     }
 
     #[must_use]
@@ -999,7 +1177,31 @@ impl ModelRouteBootstrapRecord {
     }
 }
 
-fn validate_actor(username: &str, role: &RoleCode, note: &str) -> Result<(), FeedbackError> {
+fn validate_actor(actor: &ModelRouteBootstrapActor, note: &str) -> Result<(), FeedbackError> {
+    let valid = match actor {
+        ModelRouteBootstrapActor::Operator(actor) => actor.acting_role.is_governance_code(),
+        ModelRouteBootstrapActor::FreshBootOrchestrator => true,
+    };
+    if !valid
+        || note.is_empty()
+        || note.len() > MAX_NOTE_BYTES
+        || note != note.trim()
+        || note.chars().any(char::is_control)
+    {
+        return Err(invalid_bootstrap(
+            "bootstrap actor or note violates the governed contract",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_actor_identity(
+    kind: PolicyActorKind,
+    user_id: Option<UserId>,
+    username: &str,
+    role: Option<&RoleCode>,
+    note: &str,
+) -> Result<(), FeedbackError> {
     if username.is_empty()
         || username.len() > MAX_ACTOR_BYTES
         || username != username.trim()
@@ -1009,16 +1211,12 @@ fn validate_actor(username: &str, role: &RoleCode, note: &str) -> Result<(), Fee
             "actor username violates the governed text contract",
         ));
     }
-    validate_role_note(role, note)
-}
-
-fn validate_role_note(role: &RoleCode, note: &str) -> Result<(), FeedbackError> {
-    let role = role.as_str();
-    if role.is_empty()
-        || role.len() > MAX_ROLE_BYTES
-        || !role
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    let identity_valid = match (kind, user_id, role) {
+        (PolicyActorKind::Operator, Some(_), Some(role)) => role.is_governance_code(),
+        (PolicyActorKind::System, None, None) => username == "system",
+        _ => false,
+    };
+    if !identity_valid
         || note.is_empty()
         || note.len() > MAX_NOTE_BYTES
         || note != note.trim()
@@ -1053,16 +1251,40 @@ fn invalid_bootstrap(detail: impl Into<String>) -> FeedbackError {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
 
-    use super::ModelBootstrapPolicyProjection;
+    use super::{ModelBootstrapPolicyProjection, RepresentedRouteSet};
     use crate::{
         runtime_config::{
             ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, ModelBinding,
-            ModelBindingSource,
+            ModelBindingSource, PortfolioScenarioModelArtifactBinding,
         },
-        types::{DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration},
+        types::{
+            ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration,
+            PortfolioScenarioModelArtifactId, SchemaVersion,
+        },
     };
+
+    fn scenario_binding(
+        route: BuyModelRoute,
+        bound_at: DateTime<Utc>,
+    ) -> PortfolioScenarioModelArtifactBinding {
+        let represented = RepresentedRouteSet::from_routes([route]).expect("represented Route");
+        let content_hash = ContentHash::from_bytes([7_u8; 32]);
+        PortfolioScenarioModelArtifactBinding {
+            portfolio_scenario_model_artifact_id:
+                PortfolioScenarioModelArtifactId::from_content_hash(&content_hash),
+            ordered_routes: represented.routes,
+            route_set_digest: represented.digest,
+            serving_contract_digest: ContentHash::from_bytes([1_u8; 32]),
+            calibration_contract_digest: ContentHash::from_bytes([2_u8; 32]),
+            recommendation_contract_digest: ContentHash::from_bytes([3_u8; 32]),
+            scenario_model_schema_version: SchemaVersion::FIRST,
+            capital_time_bucket_contract_digest: ContentHash::from_bytes([4_u8; 32]),
+            model_content_hash: content_hash,
+            bound_at,
+        }
+    }
 
     impl ActivePolicyBundle {
         fn empty_fixture() -> Self {
@@ -1088,6 +1310,7 @@ mod tests {
             &bundle,
             BuyModelRoute::Pooled,
             model_version_id,
+            scenario_binding(BuyModelRoute::Pooled, bound_at),
             bound_at,
         )
         .expect("project first pooled champion");
@@ -1147,6 +1370,7 @@ mod tests {
                 ),
                 BuyModelRoute::Pooled,
                 model_version_id,
+                scenario_binding(BuyModelRoute::Pooled, bound_at),
                 bound_at,
             )
             .is_err()

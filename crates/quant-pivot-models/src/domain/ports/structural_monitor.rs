@@ -5,8 +5,8 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::api::{
-        NegRiskEventDriftView, ParticipantConcentrationDetailView,
-        ParticipantConcentrationSummaryView, TradeTapeCoverageView,
+        ExecutionHistoryCoverageView, NegRiskEventDriftView, ParticipantConcentrationDetailView,
+        ParticipantConcentrationSummaryView,
     },
     types::MarketId,
 };
@@ -22,8 +22,8 @@ pub trait StructuralMonitorPort: Send + Sync {
     /// ordered by descending absolute drift (most mispriced first).
     async fn negrisk_events(&self) -> QuantResult<Vec<NegRiskEventDriftView>>;
 
-    /// Snapshot source coverage and cursor health for trade-tape ingestion.
-    async fn trade_tape_coverage(&self) -> QuantResult<TradeTapeCoverageView>;
+    /// Snapshot accepted-frontier and quarantine health for exchange history.
+    async fn execution_history_coverage(&self) -> QuantResult<ExecutionHistoryCoverageView>;
 
     /// Cross-market participant concentration summary, most concentrated first.
     async fn participant_concentration(&self) -> QuantResult<ParticipantConcentrationSummaryView>;

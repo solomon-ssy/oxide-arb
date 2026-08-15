@@ -11,7 +11,6 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::market::book::BookLevel,
     enums::{
-        clickhouse::ChTradeReconciliationStatus,
         common::{Side, TickSize},
         execution::ExitReason,
         quant::{ExitSettlementMode, FillRequirement, OutcomeSide},
@@ -60,7 +59,7 @@ pub struct PolicyReplaySignal {
     pub opportunistic_p_exit_better: Option<Decimal>,
 }
 
-/// One reconciled tape print available to a passive queue simulation.
+/// One accepted finalized execution available to a passive queue simulation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyReplayTrade {
     pub event_at: DateTime<Utc>,
@@ -69,7 +68,6 @@ pub struct PolicyReplayTrade {
     pub side: Side,
     pub price: Price,
     pub shares: Shares,
-    pub reconciliation_status: ChTradeReconciliationStatus,
     pub source_event_id: String,
 }
 
@@ -576,7 +574,6 @@ fn passive_entry(
             side: trade.side,
             price: trade.price,
             shares: trade.shares,
-            reconciliation_status: trade.reconciliation_status,
         });
         if filled > Shares::ZERO {
             fill_at = Some(trade.event_at);
@@ -1217,7 +1214,6 @@ mod tests {
     use quant_pivot_models::{
         domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
         enums::{
-            clickhouse::ChTradeReconciliationStatus,
             common::{Side, TickSize},
             execution::ExitReason,
             quant::{ExitSettlementMode, FillRequirement, OutcomeSide, RedeemPolicy},
@@ -1507,7 +1503,6 @@ mod tests {
             side: Side::Sell,
             price: Price::new(dec!(0.49)),
             shares: Shares::new(dec!(1_100)),
-            reconciliation_status: ChTradeReconciliationStatus::Matched,
             source_event_id: "matched-passive-fill".to_owned(),
         });
         let outcome = replay_policy_candidate(

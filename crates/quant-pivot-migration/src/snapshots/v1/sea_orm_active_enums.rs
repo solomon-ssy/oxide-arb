@@ -709,6 +709,206 @@ pub enum QpMenuKind {
     Button,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_fresh_boot_stage")]
+pub enum QpFreshBootStage {
+    #[sea_orm(string_value = "awaiting_source_coverage")]
+    AwaitingSourceCoverage,
+    #[sea_orm(string_value = "dataset_queued")]
+    DatasetQueued,
+    #[sea_orm(string_value = "dataset_running")]
+    DatasetRunning,
+    #[sea_orm(string_value = "dataset_ready")]
+    DatasetReady,
+    #[sea_orm(string_value = "training_queued")]
+    TrainingQueued,
+    #[sea_orm(string_value = "training_running")]
+    TrainingRunning,
+    #[sea_orm(string_value = "training_ready")]
+    TrainingReady,
+    #[sea_orm(string_value = "calibration_dataset_queued")]
+    CalibrationDatasetQueued,
+    #[sea_orm(string_value = "calibration_dataset_running")]
+    CalibrationDatasetRunning,
+    #[sea_orm(string_value = "calibration_dataset_ready")]
+    CalibrationDatasetReady,
+    #[sea_orm(string_value = "calibration_queued")]
+    CalibrationQueued,
+    #[sea_orm(string_value = "calibration_running")]
+    CalibrationRunning,
+    #[sea_orm(string_value = "calibration_ready")]
+    CalibrationReady,
+    #[sea_orm(string_value = "cpcv_queued")]
+    CpcvQueued,
+    #[sea_orm(string_value = "cpcv_running")]
+    CpcvRunning,
+    #[sea_orm(string_value = "cpcv_ready")]
+    CpcvReady,
+    #[sea_orm(string_value = "parity_ready")]
+    ParityReady,
+    #[sea_orm(string_value = "scenario_ready")]
+    ScenarioReady,
+    #[sea_orm(string_value = "bootstrap_preflight")]
+    BootstrapPreflight,
+    #[sea_orm(string_value = "bootstrap_committed")]
+    BootstrapCommitted,
+    #[sea_orm(string_value = "report_eligible")]
+    ReportEligible,
+    #[sea_orm(string_value = "first_report_published")]
+    FirstReportPublished,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_fresh_boot_status")]
+pub enum QpFreshBootStatus {
+    #[sea_orm(string_value = "waiting_evidence")]
+    WaitingEvidence,
+    #[sea_orm(string_value = "retry_scheduled")]
+    RetryScheduled,
+    #[sea_orm(string_value = "running")]
+    Running,
+    #[sea_orm(string_value = "blocked_terminal")]
+    BlockedTerminal,
+    #[sea_orm(string_value = "superseded")]
+    Superseded,
+    #[sea_orm(string_value = "succeeded")]
+    Succeeded,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_fresh_boot_event_kind"
+)]
+pub enum QpFreshBootEventKind {
+    #[sea_orm(string_value = "run_created")]
+    RunCreated,
+    #[sea_orm(string_value = "source_coverage_satisfied")]
+    SourceCoverageSatisfied,
+    #[sea_orm(string_value = "dataset_started")]
+    DatasetStarted,
+    #[sea_orm(string_value = "dataset_completed")]
+    DatasetCompleted,
+    #[sea_orm(string_value = "training_enqueued")]
+    TrainingEnqueued,
+    #[sea_orm(string_value = "training_started")]
+    TrainingStarted,
+    #[sea_orm(string_value = "training_completed")]
+    TrainingCompleted,
+    #[sea_orm(string_value = "calibration_dataset_enqueued")]
+    CalibrationDatasetEnqueued,
+    #[sea_orm(string_value = "calibration_dataset_started")]
+    CalibrationDatasetStarted,
+    #[sea_orm(string_value = "calibration_dataset_completed")]
+    CalibrationDatasetCompleted,
+    #[sea_orm(string_value = "calibration_enqueued")]
+    CalibrationEnqueued,
+    #[sea_orm(string_value = "calibration_started")]
+    CalibrationStarted,
+    #[sea_orm(string_value = "calibration_completed")]
+    CalibrationCompleted,
+    #[sea_orm(string_value = "cpcv_enqueued")]
+    CpcvEnqueued,
+    #[sea_orm(string_value = "cpcv_started")]
+    CpcvStarted,
+    #[sea_orm(string_value = "cpcv_completed")]
+    CpcvCompleted,
+    #[sea_orm(string_value = "parity_verified")]
+    ParityVerified,
+    #[sea_orm(string_value = "scenario_bound")]
+    ScenarioBound,
+    #[sea_orm(string_value = "bootstrap_prepared")]
+    BootstrapPrepared,
+    #[sea_orm(string_value = "preflight_refreshed")]
+    PreflightRefreshed,
+    #[sea_orm(string_value = "bootstrap_committed")]
+    BootstrapCommitted,
+    #[sea_orm(string_value = "report_enabled")]
+    ReportEnabled,
+    #[sea_orm(string_value = "report_retried")]
+    ReportRetried,
+    #[sea_orm(string_value = "report_published")]
+    ReportPublished,
+    #[sea_orm(string_value = "evidence_wait_scheduled")]
+    EvidenceWaitScheduled,
+    #[sea_orm(string_value = "retry_scheduled")]
+    RetryScheduled,
+    #[sea_orm(string_value = "retry_started")]
+    RetryStarted,
+    #[sea_orm(string_value = "terminal_blocked")]
+    TerminalBlocked,
+    #[sea_orm(string_value = "retry_accelerated")]
+    RetryAccelerated,
+    #[sea_orm(string_value = "superseded")]
+    Superseded,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_fresh_boot_retry_reason"
+)]
+pub enum QpFreshBootRetryReason {
+    #[sea_orm(string_value = "source_coverage_incomplete")]
+    SourceCoverageIncomplete,
+    #[sea_orm(string_value = "dependency_unavailable")]
+    DependencyUnavailable,
+    #[sea_orm(string_value = "storage_transient")]
+    StorageTransient,
+    #[sea_orm(string_value = "provider_unavailable")]
+    ProviderUnavailable,
+    #[sea_orm(string_value = "job_retry_scheduled")]
+    JobRetryScheduled,
+    #[sea_orm(string_value = "preflight_stale")]
+    PreflightStale,
+    #[sea_orm(string_value = "report_pending")]
+    ReportPending,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_fresh_boot_blocked_reason"
+)]
+pub enum QpFreshBootBlockedReason {
+    #[sea_orm(string_value = "provider_mismatch")]
+    ProviderMismatch,
+    #[sea_orm(string_value = "unknown_token")]
+    UnknownToken,
+    #[sea_orm(string_value = "decode_failure")]
+    DecodeFailure,
+    #[sea_orm(string_value = "history_quarantined")]
+    HistoryQuarantined,
+    #[sea_orm(string_value = "insufficient_mature_labels")]
+    InsufficientMatureLabels,
+    #[sea_orm(string_value = "dataset_build_failed")]
+    DatasetBuildFailed,
+    #[sea_orm(string_value = "model_training_failed")]
+    ModelTrainingFailed,
+    #[sea_orm(string_value = "calibration_failed")]
+    CalibrationFailed,
+    #[sea_orm(string_value = "cpcv_failed")]
+    CpcvFailed,
+    #[sea_orm(string_value = "quality_gate_failed")]
+    QualityGateFailed,
+    #[sea_orm(string_value = "parity_failed")]
+    ParityFailed,
+    #[sea_orm(string_value = "scenario_binding_failed")]
+    ScenarioBindingFailed,
+    #[sea_orm(string_value = "bootstrap_conflict")]
+    BootstrapConflict,
+    #[sea_orm(string_value = "report_enqueue_failed")]
+    ReportEnqueueFailed,
+    #[sea_orm(string_value = "report_publication_failed")]
+    ReportPublicationFailed,
+    #[sea_orm(string_value = "policy_unavailable")]
+    PolicyUnavailable,
+    #[sea_orm(string_value = "source_slice_mismatch")]
+    SourceSliceMismatch,
+    #[sea_orm(string_value = "retry_budget_exhausted")]
+    RetryBudgetExhausted,
+    #[sea_orm(string_value = "source_coverage_invalid")]
+    SourceCoverageInvalid,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_model_family")]
 pub enum QpModelFamily {
     #[sea_orm(string_value = "weighted_factor")]
@@ -1444,29 +1644,83 @@ pub enum QpResearchJobResultKind {
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
-    enum_name = "qp_trade_tape_block_cursor_status"
+    enum_name = "qp_exchange_history_frontier"
 )]
-pub enum QpTradeTapeBlockCursorStatus {
-    #[sea_orm(string_value = "bootstrap")]
-    Bootstrap,
-    #[sea_orm(string_value = "catching_up")]
-    CatchingUp,
-    #[sea_orm(string_value = "live")]
-    Live,
-    #[sea_orm(string_value = "error")]
-    Faulted,
+pub enum QpExchangeHistoryFrontier {
+    #[sea_orm(string_value = "activation")]
+    Activation,
+    #[sea_orm(string_value = "retention")]
+    Retention,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
-    enum_name = "qp_trade_tape_source_kind"
+    enum_name = "qp_exchange_history_continuity_basis"
 )]
-pub enum QpTradeTapeSourceKind {
-    #[sea_orm(string_value = "market_ws")]
-    MarketWs,
-    #[sea_orm(string_value = "on_chain")]
-    OnChain,
+pub enum QpExchangeHistoryContinuityBasis {
+    #[sea_orm(string_value = "hypersync_rollback_guard")]
+    HyperSyncRollbackGuard,
+    #[sea_orm(string_value = "hypersync_boundary_headers")]
+    HyperSyncBoundaryHeaders,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_exchange_history_chunk_status"
+)]
+pub enum QpExchangeHistoryChunkStatus {
+    #[sea_orm(string_value = "planned")]
+    Planned,
+    #[sea_orm(string_value = "extracting")]
+    Extracting,
+    #[sea_orm(string_value = "attesting")]
+    Attesting,
+    #[sea_orm(string_value = "projecting")]
+    Projecting,
+    #[sea_orm(string_value = "accepted")]
+    Accepted,
+    #[sea_orm(string_value = "rewound")]
+    Rewound,
+    #[sea_orm(string_value = "quarantined")]
+    Quarantined,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_exchange_history_quarantine_reason"
+)]
+pub enum QpExchangeHistoryQuarantineReason {
+    #[sea_orm(string_value = "provider_mismatch")]
+    ProviderMismatch,
+    #[sea_orm(string_value = "decode_failure")]
+    DecodeFailure,
+    #[sea_orm(string_value = "unknown_token")]
+    UnknownToken,
+    #[sea_orm(string_value = "missing_correlation")]
+    MissingCorrelation,
+    #[sea_orm(string_value = "continuity_mismatch")]
+    ContinuityMismatch,
+    #[sea_orm(string_value = "parent_hash_mismatch")]
+    ParentHashMismatch,
+    #[sea_orm(string_value = "contract_mismatch")]
+    ContractMismatch,
+    #[sea_orm(string_value = "archive_probe_failure")]
+    ArchiveProbeFailure,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_exchange_history_quarantine_disposition"
+)]
+pub enum QpExchangeHistoryQuarantineDisposition {
+    #[sea_orm(string_value = "accepted_replacement")]
+    AcceptedReplacement,
+    #[sea_orm(string_value = "canonical_supersession")]
+    CanonicalSupersession,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(

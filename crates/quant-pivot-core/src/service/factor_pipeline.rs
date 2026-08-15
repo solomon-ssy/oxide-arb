@@ -24,7 +24,7 @@ use quant_pivot_models::{
     runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy},
     types::{
         ContentHash, FactorDefinitionId, FeatureVectorId, MarketId, ModelRunId,
-        factor::FactorDefinitionRef,
+        ResearchFeatureContract, factor::FactorDefinitionRef,
     },
 };
 use quant_pivot_repository::traits::FactorRepository;
@@ -62,12 +62,19 @@ impl FactorExecutionPlane {
         factors: &FactorsConfig,
         features: &FeaturesConfig,
         domain: &DomainConfig,
+        feature_contract: ResearchFeatureContract,
         category_scope: Option<MarketCategory>,
         bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
     ) -> QuantResult<Self> {
         let bias_table_hash = bias_table.as_ref().map(|table| table.content_hash);
-        let engine =
-            FactorEngine::for_model_scope(factors, features, domain, category_scope, bias_table);
+        let engine = FactorEngine::for_model_scope(
+            factors,
+            features,
+            domain,
+            feature_contract,
+            category_scope,
+            bias_table,
+        );
         engine.serving_plane()?;
         Ok(Self {
             engine: Arc::new(engine),

@@ -83,35 +83,37 @@ pub enum ChSnapshotReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
-pub enum ChTradeParticipantRole {
-    Maker = 1,
-    Taker = 2,
-    Unknown = 3,
+pub enum ChExchangeVersion {
+    V1 = 1,
+    V2 = 2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
-pub enum ChTradeTapeSource {
-    MarketWs = 1,
-    OnChainOrderFilled = 2,
+pub enum ChExchangeEventKind {
+    OrderFilled = 1,
+    OrdersMatched = 2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
-pub enum ChTradeReconciliationStatus {
-    Pending = 1,
-    Matched = 2,
-    Unavailable = 3,
-    Ambiguous = 4,
-    OnChainOnly = 5,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
-#[repr(i8)]
-pub enum ChTradeSide {
+pub enum ChExchangeSide {
+    Unknown = 0,
     Buy = 1,
     Sell = 2,
-    Unknown = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChAvailabilityBasis {
+    BlockConfirmation = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChExecutionParticipantRole {
+    Maker = 1,
+    Taker = 2,
 }
 
 // ── Quant pipeline facts (snake_case SQL labels) ─────────────────────────
@@ -336,7 +338,7 @@ pub enum ChFeatureSourceKind {
     Book = 1,
     GammaMetadata = 2,
     ClickHouseFact = 3,
-    TradeTape = 4,
+    FinalizedExecution = 4,
     Derived = 5,
     DomainCrypto = 6,
     Linkage = 7,
@@ -350,7 +352,7 @@ impl ChFeatureSourceKind {
             Self::Book => "book",
             Self::GammaMetadata => "gamma_metadata",
             Self::ClickHouseFact => "clickhouse_fact",
-            Self::TradeTape => "trade_tape",
+            Self::FinalizedExecution => "finalized_execution",
             Self::Derived => "derived",
             Self::DomainCrypto => "domain_crypto",
             Self::Linkage => "linkage",
@@ -365,7 +367,7 @@ impl ChFeatureSourceKind {
             "book" => Some(Self::Book),
             "gamma_metadata" => Some(Self::GammaMetadata),
             "clickhouse_fact" => Some(Self::ClickHouseFact),
-            "trade_tape" => Some(Self::TradeTape),
+            "finalized_execution" => Some(Self::FinalizedExecution),
             "derived" => Some(Self::Derived),
             "domain_crypto" => Some(Self::DomainCrypto),
             "linkage" => Some(Self::Linkage),

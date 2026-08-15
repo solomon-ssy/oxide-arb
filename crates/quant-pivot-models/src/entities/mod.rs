@@ -50,6 +50,10 @@ pub mod quant_entry_condition_audit;
 pub mod quant_entry_condition_evaluation_outbox;
 pub mod quant_entry_condition_instance;
 pub mod quant_equity_snapshot;
+pub mod quant_exchange_history_chunk;
+pub mod quant_exchange_history_plan;
+pub mod quant_exchange_history_quarantine;
+pub mod quant_exchange_history_quarantine_resolution;
 pub mod quant_execution_account;
 pub mod quant_execution_attempt_outcome;
 pub mod quant_execution_attempt_reconciliation_task;
@@ -73,6 +77,8 @@ pub mod quant_feedback_recipe_template;
 pub mod quant_feedback_scheduler_state;
 pub mod quant_feedback_stage_event;
 pub mod quant_feedback_trigger_event;
+pub mod quant_fresh_boot_run;
+pub mod quant_fresh_boot_run_event;
 pub mod quant_market_linkage;
 #[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_market_linkage_source;
@@ -120,7 +126,6 @@ pub mod quant_trade_policy_governance_audit;
 pub mod quant_trade_policy_trial_attempt;
 pub mod quant_trade_policy_validation;
 pub mod quant_trade_policy_validation_row;
-pub mod quant_trade_tape_block_cursor;
 pub mod quant_training_dataset;
 #[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_weather_daily_temperature_projection;

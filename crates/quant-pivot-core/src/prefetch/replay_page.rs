@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, MarketResolutionRow,
-        TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ExecutionParticipantFactRow,
+        MarketResolutionRow,
     },
     domain::{
         data_plane::{
@@ -97,7 +97,7 @@ pub struct ReplayPage {
     pub gaps: Vec<SourceSliceInvalidSession>,
     pub l2_ledger: Vec<BookL2LedgerRow>,
     pub microstructure: Vec<BookMicrostructureRow>,
-    pub trade_tape: Vec<TradeTapeRow>,
+    pub finalized_executions: Vec<ExecutionParticipantFactRow>,
     pub resolutions: Vec<MarketResolutionRow>,
     pub linkages: Vec<MarketLinkage>,
     pub domain_observations: Vec<DomainObservation>,
@@ -388,7 +388,7 @@ impl FrozenSourceSlice {
             gaps: books.gaps,
             l2_ledger: books.l2_ledger,
             microstructure: market_facts.microstructure,
-            trade_tape: market_facts.trade_tape,
+            finalized_executions: market_facts.finalized_executions,
             resolutions: market_facts.resolutions,
             linkages: market_facts.linkages,
             domain_observations: domain.observations,
@@ -600,7 +600,7 @@ fn page_books(source: &FrozenSourceSlice, scope: &ReplayPageScope<'_>) -> BookPa
 
 struct MarketFactPage {
     microstructure: Vec<BookMicrostructureRow>,
-    trade_tape: Vec<TradeTapeRow>,
+    finalized_executions: Vec<ExecutionParticipantFactRow>,
     resolutions: Vec<MarketResolutionRow>,
     linkages: Vec<MarketLinkage>,
 }
@@ -622,27 +622,27 @@ fn page_market_facts(
         })
         .cloned()
         .collect();
-    let trade_tape = scope
+    let finalized_executions = scope
         .request
         .market_ids
         .iter()
         .flat_map(|market| {
             source
                 .prefetched
-                .trade_tape
+                .finalized_executions
                 .get(market)
                 .into_iter()
                 .flatten()
         })
         .filter(|row| {
             scope.tokens.contains(&row.token_id)
-                && row.event_time
+                && row.effective_at
                     >= replay_starts
                         .get(&row.token_id)
                         .copied()
                         .unwrap_or(scope.start_ms)
-                && row.event_time < scope.end_ms
-                && row.ingestion_time <= scope.available_ms
+                && row.effective_at < scope.end_ms
+                && row.model_available_at <= scope.available_ms
         })
         .cloned()
         .collect();
@@ -674,7 +674,7 @@ fn page_market_facts(
         .collect();
     MarketFactPage {
         microstructure,
-        trade_tape,
+        finalized_executions,
         resolutions,
         linkages,
     }
@@ -820,9 +820,8 @@ mod tests {
             DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId, MarketId,
             ReaderContractVersion, ResearchEvaluationTrack, SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
             SchemaContractVersion, SourceSliceCatalogProof, SourceSliceInvalidSession,
-            SourceSliceManifest, SourceSliceObjectKind, SourceSliceObjectRef,
-            SourceSlicePitCutoffs, SourceSliceSessionInvalidationReason, TokenId,
-            builtin_research_profiles,
+            SourceSliceManifest, SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoff,
+            SourceSliceSessionInvalidationReason, TokenId, builtin_research_profiles,
         },
     };
     use uuid::Uuid;
@@ -839,12 +838,21 @@ mod tests {
         let window_end = Utc.timestamp_opt(120, 0).single().expect("source end");
         let pit_cutoff = Utc.timestamp_opt(130, 0).single().expect("source cutoff");
         let materialized_at = Utc.timestamp_opt(140, 0).single().expect("materialized at");
+        let profile = builtin_research_profiles()
+            .expect("built-in profiles")
+            .remove(0);
+        let pit_cutoffs = profile
+            .spec
+            .required_sources()
+            .into_iter()
+            .map(|source| SourceSlicePitCutoff {
+                source,
+                available_at: pit_cutoff,
+            })
+            .collect();
         SourceSliceManifest {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
-            profile_ref: builtin_research_profiles()
-                .expect("built-in profiles")
-                .remove(0)
-                .profile_ref,
+            profile_ref: profile.profile_ref,
             evaluation_track: ResearchEvaluationTrack::ResearchOnly,
             research_program_hash: hash('1'),
             window_start,
@@ -867,15 +875,7 @@ mod tests {
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![hash('5')])
                 .expect("canonical capabilities"),
-            pit_cutoffs: SourceSlicePitCutoffs {
-                catalog_available_at: pit_cutoff,
-                clob_market_info_available_at: pit_cutoff,
-                l2_available_at: pit_cutoff,
-                trade_tape_available_at: pit_cutoff,
-                weather_available_at: None,
-                calibration_available_at: None,
-                resolution_available_at: pit_cutoff,
-            },
+            pit_cutoffs,
             invalid_sessions,
             objects: vec![SourceSliceObjectRef {
                 kind: SourceSliceObjectKind::L2Ledger,
@@ -956,7 +956,7 @@ mod tests {
         let prefetched = Prefetched {
             books: HashMap::from([(token_id.clone(), vec![snapshot])]),
             micro: HashMap::new(),
-            trade_tape: HashMap::new(),
+            finalized_executions: HashMap::new(),
             resolutions: HashMap::new(),
             catalog: CatalogWindowInfo {
                 market_changes: Vec::new(),

@@ -19,7 +19,9 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::ModelRegistryRepository;
 use quant_pivot_research::{
-    features::{FeatureSchema, FeatureUnit, NullPolicy, PitRule, SourceRequirement, StalenessRule},
+    features::{
+        AuthoringFeatureCatalog, FeatureUnit, NullPolicy, PitRule, SourceRequirement, StalenessRule,
+    },
     hashing::ResearchHasher,
 };
 
@@ -60,7 +62,7 @@ fn validate_input_contract(
         ));
     }
 
-    let schema = FeatureSchema::build(features)?;
+    let schema = AuthoringFeatureCatalog::build(features)?;
     if requested_version != schema.version() {
         return Err(QuantError::config(format!(
             "feature_schema_version {} does not match active governed schema {}",
@@ -103,7 +105,7 @@ const fn source_requirement_wire(source: SourceRequirement) -> &'static str {
         SourceRequirement::ResolvedLinkage => "resolved_linkage",
         SourceRequirement::MicrostructureWindow => "microstructure_window",
         SourceRequirement::NegRiskSiblingLegs => "neg_risk_sibling_legs",
-        SourceRequirement::TradeTapeWindow => "trade_tape_window",
+        SourceRequirement::FinalizedExecutionWindow => "execution_history_window",
         SourceRequirement::DomainCryptoObservationWindow => "domain_crypto_observation_window",
         SourceRequirement::DomainWeatherObservationWindow => "domain_weather_observation_window",
     }
@@ -127,7 +129,7 @@ const fn staleness_policy_wire(policy: StalenessRule) -> &'static str {
         StalenessRule::None => "none",
         StalenessRule::MaxBookAge => "max_book_age",
         StalenessRule::MaxFeatureBucketAge => "max_feature_bucket_age",
-        StalenessRule::MaxTradeTapeAge => "max_trade_tape_age",
+        StalenessRule::MaxExecutionAge => "max_execution_history_age",
         StalenessRule::MaxDomainObservationAge => "max_domain_observation_age",
     }
 }
@@ -154,8 +156,8 @@ fn null_policy_view(policy: &NullPolicy) -> FeatureNullPolicyView {
 }
 
 fn build_feature_contract(features: &FeaturesConfig) -> QuantResult<FeatureContractView> {
-    let schema = FeatureSchema::build(features)?;
-    let feature_schema_hash = ResearchHasher::feature_schema(&schema)?;
+    let schema = AuthoringFeatureCatalog::build(features)?;
+    let feature_schema_hash = ResearchHasher::authoring_catalog(&schema)?;
     let mut entries = schema
         .specs()
         .iter()

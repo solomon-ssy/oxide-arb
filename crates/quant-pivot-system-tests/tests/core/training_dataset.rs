@@ -22,8 +22,9 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storag
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChDecimal64, ChDigest,
-        ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow, MarketResolutionFactInput,
-        MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
+        ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow,
+        ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
+        MarketResolutionFactInput, MarketResolutionRow, MidPriceBucketRow,
     },
     domain::{
         data_plane::{DecisionBoundary, DecisionSource},
@@ -465,23 +466,43 @@ impl QuantFactReadRepository for ControllableFactRead {
         Ok(Vec::new())
     }
 
-    async fn market_tape_window(
+    async fn market_execution_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<ExecutionParticipantFactRow>, StorageError> {
         Ok(Vec::new())
     }
 
-    async fn last_trades(
+    async fn last_executions(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _limit: u64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn market_executions_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn execution_participants_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<ExecutionParticipantRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -889,7 +910,7 @@ fn features_config() -> FeaturesConfig {
 
 /// As [`features_config`], plus `Domain` — required for any test whose model
 /// spec requires a `domain.crypto.*` feature, so the governed
-/// [`quant_pivot_research::features::FeatureSchema`] actually registers the
+/// [`quant_pivot_research::features::ExecutableFeatureSchema`] actually registers the
 /// spec (an unregistered name is unavailable regardless of
 /// `domain_availability` — see `FeatureAvailabilityOracle::is_available`).
 fn crypto_features_config() -> FeaturesConfig {
@@ -1265,9 +1286,9 @@ fn assert_no_feature_leakage(artifact: &TrainingDatasetArtifact, knowledge_lag_s
                 EvidenceSourceKind::ClickHouseFact => example
                     .decision_boundary
                     .cutoff_for(DecisionSource::Microstructure),
-                EvidenceSourceKind::TradeTape => example
+                EvidenceSourceKind::FinalizedExecution => example
                     .decision_boundary
-                    .cutoff_for(DecisionSource::TradeTape),
+                    .cutoff_for(DecisionSource::FinalizedExecution),
                 EvidenceSourceKind::DomainCrypto => example
                     .decision_boundary
                     .cutoff_for(DecisionSource::DomainCrypto),

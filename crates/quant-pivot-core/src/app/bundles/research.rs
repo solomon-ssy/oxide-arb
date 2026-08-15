@@ -16,8 +16,8 @@ use quant_pivot_repository::{
     traits::{
         BacktestPathSetRepository, BacktestReportRepository, BasisAlertRepository,
         CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
-        FactWriter, FactorRepository, FeatureParityRepository, FeatureRepository,
-        FeedbackCycleRepository, MarketLinkageRepository, MarketRepository,
+        ExchangeHistoryRepository, FactWriter, FactorRepository, FeatureParityRepository,
+        FeatureRepository, FeedbackCycleRepository, MarketLinkageRepository, MarketRepository,
         MarketSelectionRepository, ModelCandidateManifestRepository,
         ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
         ModelRouteBootstrapRepository, ModelRoutePromotionRepository,
@@ -25,8 +25,7 @@ use quant_pivot_repository::{
         PositionRepository, PromotionPermitRepository, QuantFactReadRepository,
         RecommendationReportRepository, ResearchJobRepository, ResearchReadinessEvidenceRepository,
         RuntimeControlRepository, ServingEvidenceRepository, ShadowComparisonRepository,
-        SourceSliceRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
-        TrainingDatasetRepository,
+        SourceSliceRepository, TradePolicyRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -273,14 +272,14 @@ fn assemble_research_pipelines(
         window_provider: FeatureWindowProvider::new(Arc::clone(&deps.infra.quant_fact_read)),
         feature_repo: Arc::clone(&feature_repo),
         event_writer: Arc::clone(&deps.infra.feature_event_writer),
-        block_cursor_repo: Arc::clone(&deps.infra.repos.trade_tape_block_cursor)
-            as Arc<dyn TradeTapeBlockCursorRepository>,
+        exchange_history_repo: Arc::clone(&deps.infra.repos.exchange_history)
+            as Arc<dyn ExchangeHistoryRepository>,
         linkage_repo: Arc::clone(market_linkage_repo),
         basis_alert_repo: Arc::clone(&deps.infra.repos.basis_alert)
             as Arc<dyn BasisAlertRepository>,
         calibration_repo: Arc::clone(&deps.infra.repos.calibration_artifact)
             as Arc<dyn CalibrationArtifactRepository>,
-        trade_tape_on_chain: deps.deploy.market_data.trade_tape_on_chain.clone(),
+        finalized_exchange_history: deps.deploy.market_data.finalized_exchange_history.clone(),
     }));
     let factor_repo: Arc<dyn FactorRepository> =
         Arc::clone(&deps.infra.repos.factor) as Arc<dyn FactorRepository>;
@@ -639,6 +638,10 @@ impl ResearchBundle {
                 backtests: Arc::clone(&offline.backtest_report),
                 cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
                 model_governance: Arc::clone(model_governance),
+                calibrations: Arc::clone(&repos.calibration_artifact)
+                    as Arc<dyn CalibrationArtifactRepository>,
+                datasets: Arc::clone(&offline.training_dataset),
+                artifacts: Arc::clone(artifact_store),
             },
         ));
         let governance = Arc::new(ModelRouteGovernanceService::new(

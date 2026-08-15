@@ -186,6 +186,7 @@ impl VerifiedModelServingPlaneLoader {
             &profiles.scoring.definition,
             &profiles.features.definition,
             &profiles.domain.definition,
+            source.profile().spec.feature_contract,
             source.profile().spec.category,
             bias_table,
         )

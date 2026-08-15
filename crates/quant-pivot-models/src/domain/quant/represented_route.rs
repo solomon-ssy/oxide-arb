@@ -38,7 +38,7 @@ pub struct RouteContractHash {
 pub struct RouteCompatibilityDigests {
     pub serving_contract_digest: ContentHash,
     pub calibration_contract_digest: ContentHash,
-    pub trade_policy_contract_digest: ContentHash,
+    pub recommendation_contract_digest: ContentHash,
 }
 
 /// Invalid Route-owned contract set.
@@ -59,12 +59,16 @@ impl RouteCompatibilityDigests {
         routes: &RepresentedRouteSet,
         serving: &[RouteContractHash],
         calibration: &[RouteContractHash],
-        trade_policy: &[RouteContractHash],
+        recommendation: &[RouteContractHash],
     ) -> Result<Self, RouteCompatibilityError> {
         Ok(Self {
             serving_contract_digest: contract_digest(routes, "serving", serving)?,
             calibration_contract_digest: contract_digest(routes, "calibration", calibration)?,
-            trade_policy_contract_digest: contract_digest(routes, "trade-policy", trade_policy)?,
+            recommendation_contract_digest: contract_digest(
+                routes,
+                "recommendation",
+                recommendation,
+            )?,
         })
     }
 }

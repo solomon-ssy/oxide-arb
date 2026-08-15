@@ -7,9 +7,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Absolute reconciliation input cap enforced at config validation and the
-/// native-SQL repository boundary.
-pub const MAX_TRADE_TAPE_RECONCILIATION_ROWS: usize = 1_000_000;
+use super::{polymarket::PolygonRpcEndpoint, secret::SecretText};
 
 /// Market-data connections (CLOB WebSocket + Gamma catalog + Data API).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -21,8 +19,8 @@ pub struct MarketDataDeployConfig {
     pub gamma: GammaConfig,
     /// Polymarket Data API client (keyless positions reads).
     pub data_api: DataApiConfig,
-    /// On-chain trade-tape ingestion for structural participant-concentration facts.
-    pub trade_tape_on_chain: TradeTapeOnChainConfig,
+    /// Finalized exchange-history extraction and independent Polygon attestation.
+    pub finalized_exchange_history: FinalizedExchangeHistoryConfig,
 }
 
 /// Polymarket CLOB WebSocket sharding and reconnect policy.
@@ -90,6 +88,8 @@ pub struct GammaConfig {
     pub max_keyset_pages: u32,
     /// Maximum HTTP attempts, including retries, in one scan. Default: `50_000`.
     pub max_keyset_requests: u32,
+    /// Closed-event identity horizon required by fresh-boot history projection. Default: `200` days.
+    pub historical_identity_days: u32,
 }
 
 impl Default for GammaConfig {
@@ -100,6 +100,7 @@ impl Default for GammaConfig {
             page_size: default_gamma_page_size(),
             max_keyset_pages: default_gamma_pages(),
             max_keyset_requests: default_gamma_requests(),
+            historical_identity_days: default_gamma_history_days(),
         }
     }
 }
@@ -118,6 +119,9 @@ const fn default_gamma_pages() -> u32 {
 }
 const fn default_gamma_requests() -> u32 {
     50_000
+}
+const fn default_gamma_history_days() -> u32 {
+    200
 }
 /// Polymarket Data API configuration (keyless positions reads).
 ///
@@ -155,45 +159,124 @@ const fn default_api_size_limit() -> u32 {
     1
 }
 
-/// On-chain trade-tape ingestion configuration.
+/// `HyperSync` primary extraction endpoint and credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct TradeTapeOnChainConfig {
-    /// Enable periodic on-chain `OrderFilled` ingestion. Default: true.
-    pub enabled: bool,
-    /// Poll interval in seconds. Default: 30.
-    pub poll_secs: u64,
-    /// Block confirmations before a chunk is considered finalized. Default: 12.
-    pub confirmations: u64,
-    /// Maximum blocks scanned per contract per tick. Default: 2000.
-    pub max_blocks_per_tick: u64,
-    /// Maximum inclusive block range sent in one `eth_getLogs` request. Default: 2000.
-    pub max_blocks_per_request: u64,
-    /// Maximum rows written per `ClickHouse` batch. Default: 1000.
-    pub batch_size: usize,
-    /// Re-read horizon for WS/on-chain reconciliation. Default: 3600 seconds.
-    pub reconciliation_lookback_secs: u64,
-    /// Maximum absolute event-time distance for an exact match. Default: 2000 ms.
-    pub reconciliation_match_window_ms: u64,
-    /// Age after which a still-unmatched WS print becomes unavailable. Default: 600 seconds.
-    pub reconciliation_terminal_age_secs: u64,
-    /// Hard row cap per reconciliation cycle; overflow fails without truncation.
-    pub reconciliation_max_rows: usize,
+pub struct HyperSyncConfig {
+    /// Primary finalized Polygon exchange-history extraction endpoint.
+    pub endpoint: String,
+    /// Bearer credential used only by the primary historical extraction adapter.
+    #[serde(serialize_with = "super::secret::serialize_empty")]
+    pub api_token: SecretText,
 }
 
-impl Default for TradeTapeOnChainConfig {
+impl Default for HyperSyncConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            endpoint: "https://polygon.hypersync.xyz".to_owned(),
+            api_token: SecretText::default(),
+        }
+    }
+}
+
+/// Independent archive-capable Polygon JSON-RPC witness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExchangeHistoryAttestorConfig {
+    /// JSON-RPC endpoint in a trust and failure domain independent of Envio.
+    pub rpc_endpoint: PolygonRpcEndpoint,
+    /// Maximum inclusive block span in one `eth_getLogs` request.
+    pub max_blocks_per_log_request: u64,
+    /// Maximum concurrent `eth_getLogs` subrequests within one logical chunk.
+    pub max_concurrent_log_requests: usize,
+}
+
+impl Default for ExchangeHistoryAttestorConfig {
+    fn default() -> Self {
+        Self {
+            rpc_endpoint: PolygonRpcEndpoint::Public {
+                url: "https://polygon-rpc.com".to_owned(),
+            },
+            max_blocks_per_log_request: 10,
+            max_concurrent_log_requests: 2,
+        }
+    }
+}
+
+impl ExchangeHistoryAttestorConfig {
+    /// Resolve the endpoint only at the attestation adapter boundary.
+    #[must_use]
+    pub fn rpc_url(&self) -> &str {
+        self.rpc_endpoint.resolved_url()
+    }
+}
+
+/// Finalized Polygon exchange-history extraction, proof and projection policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FinalizedExchangeHistoryConfig {
+    /// Enable finalized history extraction and projection.
+    pub enabled: bool,
+    /// Poll interval after the activation frontier reaches the finalized head.
+    pub poll_secs: u64,
+    /// Primary history extractor.
+    pub hypersync: HyperSyncConfig,
+    /// Independent archive JSON-RPC witness.
+    pub attestor: ExchangeHistoryAttestorConfig,
+    /// HTTP connect timeout in milliseconds.
+    pub connect_timeout_ms: u64,
+    /// Per-request timeout in milliseconds.
+    pub request_timeout_ms: u64,
+    /// Maximum decoded response body accepted from either provider.
+    pub max_response_bytes: usize,
+    /// Minimum inclusive chunk span after adaptive contraction.
+    pub min_blocks_per_chunk: u64,
+    /// Maximum inclusive chunk span after adaptive expansion.
+    pub max_blocks_per_chunk: u64,
+    /// First retry delay in milliseconds.
+    pub retry_initial_ms: u64,
+    /// Maximum retry delay in milliseconds.
+    pub retry_max_ms: u64,
+    /// Maximum attempts per provider pair before the frontier fails closed.
+    pub retry_max_attempts: u32,
+    /// Confirmation delay used to reconstruct `model_available_at`.
+    pub model_confirmation_blocks: u64,
+    /// Reconciliation buffer behind the accepted frontier.
+    pub rollback_buffer_blocks: u64,
+    /// Recent history window prioritized for the first pooled activation.
+    pub activation_frontier_days: u32,
+    /// Long-term raw history target filled after activation.
+    pub retention_frontier_days: u32,
+    /// Maximum blocks assigned to the activation frontier per scheduling turn.
+    pub hot_window_blocks_per_tick: u64,
+    /// Maximum blocks assigned to the retention frontier per scheduling turn.
+    pub full_history_blocks_per_tick: u64,
+    /// Maximum rows written in one fact batch.
+    pub batch_size: usize,
+}
+
+impl Default for FinalizedExchangeHistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
             poll_secs: 30,
-            confirmations: 12,
-            max_blocks_per_tick: 2_000,
-            max_blocks_per_request: 2_000,
+            hypersync: HyperSyncConfig::default(),
+            attestor: ExchangeHistoryAttestorConfig::default(),
+            connect_timeout_ms: 10_000,
+            request_timeout_ms: 60_000,
+            max_response_bytes: 64 * 1_024 * 1_024,
+            min_blocks_per_chunk: 100,
+            max_blocks_per_chunk: 2_000,
+            retry_initial_ms: 500,
+            retry_max_ms: 30_000,
+            retry_max_attempts: 8,
+            model_confirmation_blocks: 12,
+            rollback_buffer_blocks: 200,
+            activation_frontier_days: 33,
+            retention_frontier_days: 200,
+            hot_window_blocks_per_tick: 50_000,
+            full_history_blocks_per_tick: 5_000,
             batch_size: 1_000,
-            reconciliation_lookback_secs: 3_600,
-            reconciliation_match_window_ms: 2_000,
-            reconciliation_terminal_age_secs: 600,
-            reconciliation_max_rows: 100_000,
         }
     }
 }

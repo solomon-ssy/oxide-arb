@@ -48,7 +48,8 @@ use quant_pivot_models::{
         CapitalAllocationId, ContentHash, EntryConditionInstanceId, EntryOrderPolicy,
         EntryOrderSpec, ExecutionAccountId, ExitPolicySpec, ModelVersionId,
         OperationDetailDocument, OperationLogId, OrderAmount, OrderIntentId, Price, Probability,
-        RecommendationId, RecommendationReportId, ResearchProfileRef, Usd,
+        RecommendationExitPlan, RecommendationId, RecommendationReportId, ResearchProfileRef,
+        ServingAuthority, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -190,6 +191,19 @@ impl CoreOrderIntentService {
             .ok_or_else(|| ExecutionError::IntentDenied {
                 reason: "recommendation model version no longer exists".to_owned(),
             })?;
+        let profile = version
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(|error| ExecutionError::IntentDenied {
+                reason: format!("recommendation research profile cannot be verified: {error}"),
+            })?;
+        if profile.spec.serving_authority != ServingAuthority::ExecutionEligible {
+            return Err(ExecutionError::IntentDenied {
+                reason: "recommendation model authority is report-only and cannot create an order intent"
+                    .to_owned(),
+            }
+            .into());
+        }
         require_frozen_trade_policy(self.trade_policies.as_ref(), &version, recommendation).await
     }
 
@@ -235,7 +249,7 @@ impl CoreOrderIntentService {
         };
         let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
         let entry = project_entry_order_spec(&rec, now)?;
-        let exit = project_exit_policy_spec(&rec, entry.limit_price);
+        let exit = project_exit_policy_spec(&rec, entry.limit_price)?;
         if requires_automatic_settlement_recovery(&exit) {
             let route = if rec.market_context.neg_risk {
                 SettlementRoute::NegRiskV2
@@ -869,9 +883,14 @@ fn project_entry_order_spec(
 fn project_exit_policy_spec(
     rec: &RecommendationInfo,
     entry_reference_price: Price,
-) -> ExitPolicySpec {
-    let exit = &rec.trade_plan.exit;
-    ExitPolicySpec {
+) -> QuantResult<ExitPolicySpec> {
+    let RecommendationExitPlan::Executable { plan: exit } = rec.trade_plan.exit.as_ref() else {
+        return Err(ExecutionError::IntentDenied {
+            reason: "bootstrap advisory has no executable exit policy".to_owned(),
+        }
+        .into());
+    };
+    Ok(ExitPolicySpec {
         take_profit_price: exit.take_profit_price,
         take_profit_pct: exit.take_profit_pct,
         stop_loss_price: exit.stop_loss_price,
@@ -889,7 +908,7 @@ fn project_exit_policy_spec(
         entry_composite_score: Probability::new(
             rec.economics_json.profit_probability_bps.to_fraction(),
         ),
-    }
+    })
 }
 
 fn execution_time_conversion(
@@ -1015,8 +1034,8 @@ mod tests {
         types::{
             Bps, ContentHash, DecisionPolicySnapshotId, EntryOrderPolicy, EntryOrderSpec,
             EntryPlan, EvmAddress, EvmBlockHash, ExitPlan, OrderAmount, OrderIntentId, Price,
-            RecommendationId, RecommendationReportId, RiskEnvelope, RoleCode, Shares, SizingPlan,
-            TokenId, Usd, UserId,
+            RecommendationExitPlan, RecommendationId, RecommendationReportId, RiskEnvelope,
+            RoleCode, Shares, SizingPlan, TokenId, Usd, UserId,
         },
     };
     use rust_decimal_macros::dec;
@@ -1073,7 +1092,12 @@ mod tests {
     }
 
     fn exit(rec: &RecommendationInfo) -> &ExitPlan {
-        &rec.trade_plan.exit
+        match rec.trade_plan.exit.as_ref() {
+            RecommendationExitPlan::Executable { plan } => plan,
+            RecommendationExitPlan::BootstrapAdvisory { .. } => {
+                panic!("execution test fixture must carry an executable exit plan")
+            }
+        }
     }
 
     fn risk(rec: &RecommendationInfo) -> &RiskEnvelope {
@@ -1213,7 +1237,8 @@ mod tests {
     #[test]
     fn exit_projection_drops_nodes() {
         let rec = rec();
-        let projected = project_exit_policy_spec(&rec, Price::new(dec!(0.60)));
+        let projected = project_exit_policy_spec(&rec, Price::new(dec!(0.60)))
+            .expect("full-L2 fixture must project an executable exit plan");
         assert_eq!(projected.take_profit_price, exit(&rec).take_profit_price);
         assert!(
             projected

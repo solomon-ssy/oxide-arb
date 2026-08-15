@@ -92,6 +92,19 @@ pub struct CorrelationId(Arc<str>);
 #[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RoleCode(Arc<str>);
 
+impl RoleCode {
+    /// Whether this value is a canonical persisted RBAC role code.
+    #[must_use]
+    pub fn is_governance_code(&self) -> bool {
+        let value = self.as_str();
+        !value.is_empty()
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    }
+}
+
 /// Stable semantic operation name recorded in the append-only audit log.
 #[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OperationAction(Arc<str>);
@@ -344,11 +357,27 @@ pub struct FactorValueId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelSpecId(Uuid);
 
+impl ModelSpecId {
+    /// Project an immutable model-spec definition into its stable primary key.
+    #[must_use]
+    pub fn from_definition_hash(definition_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_fb10);
+        Self::new(uuid_v5_for_content(&NAMESPACE, definition_hash))
+    }
+}
+
 /// Immutable model version identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelVersionId(Uuid);
 
 impl ModelVersionId {
+    /// Stable identity for one fresh-boot training result.
+    #[must_use]
+    pub fn from_fresh_boot(run_id: FreshBootRunId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_fb11);
+        Self::new(Uuid::new_v5(&NAMESPACE, run_id.to_string().as_bytes()))
+    }
+
     /// Stable identity of one feedback candidate's uncalibrated model.
     #[must_use]
     pub fn from_feedback_candidate(
@@ -398,6 +427,14 @@ impl SignalCandidateId {
 pub struct TrainingDatasetId(Uuid);
 
 impl TrainingDatasetId {
+    /// Stable identity for one run-owned dataset purpose.
+    #[must_use]
+    pub fn from_fresh_boot_stage(run_id: FreshBootRunId, stage: &str) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_fb12);
+        let identity = format!("{run_id}:{stage}");
+        Self::new(Uuid::new_v5(&NAMESPACE, identity.as_bytes()))
+    }
+
     /// Project one server-frozen feedback Dataset plan into a stable identity.
     #[must_use]
     pub fn from_feedback_plan_hash(plan_hash: &ContentHash) -> Self {
@@ -501,6 +538,13 @@ pub struct BacktestReportId(Uuid);
 pub struct BacktestPathSetId(Uuid);
 
 impl BacktestPathSetId {
+    /// Stable identity for the run-owned fresh-boot CPCV path set.
+    #[must_use]
+    pub fn from_fresh_boot(run_id: FreshBootRunId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_fb13);
+        Self::new(Uuid::new_v5(&NAMESPACE, run_id.to_string().as_bytes()))
+    }
+
     /// Stable identity of one feedback candidate's CPCV path set.
     #[must_use]
     pub fn from_feedback_candidate(
@@ -821,6 +865,14 @@ impl BacktestReportId {
 }
 
 impl ModelRunId {
+    /// Stable run identity for one fresh-boot research stage.
+    #[must_use]
+    pub fn from_fresh_boot_stage(run_id: FreshBootRunId, stage: &str) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_fb14);
+        let identity = format!("{run_id}:{stage}");
+        Self::new(Uuid::new_v5(&NAMESPACE, identity.as_bytes()))
+    }
+
     /// Stable run identity for one candidate in a feedback learning stage.
     #[must_use]
     pub fn from_feedback_stage(
@@ -917,6 +969,43 @@ pub struct BasisAlertId(Uuid);
 /// Durable research job identifier (async dataset build / model train / backtest).
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResearchJobId(Uuid);
+
+/// Durable identity of one content-addressed fresh-boot orchestration run.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FreshBootRunId(Uuid);
+
+impl FreshBootRunId {
+    /// Derive the run identity from its complete idempotency preimage.
+    #[must_use]
+    pub fn from_idempotency_hash(idempotency_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_fb01);
+        Self::new(uuid_v5_for_content(&NAMESPACE, idempotency_hash))
+    }
+}
+
+/// One content-addressed append-only event in a fresh-boot run timeline.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FreshBootRunEventId(Uuid);
+
+impl FreshBootRunEventId {
+    /// Project the complete immutable event hash into its UUID domain.
+    #[must_use]
+    pub fn from_event_hash(event_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_fb03);
+        Self::new(uuid_v5_for_content(&NAMESPACE, event_hash))
+    }
+}
+
+impl ResearchJobId {
+    /// Stable job identity for one run-owned stage. Crash recovery therefore
+    /// converges on the existing ledger row instead of enqueueing a duplicate.
+    #[must_use]
+    pub fn from_fresh_boot_stage(run_id: FreshBootRunId, stage: &str) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_fb02);
+        let identity = format!("{run_id}:{stage}");
+        Self::new(Uuid::new_v5(&NAMESPACE, identity.as_bytes()))
+    }
+}
 
 impl ResearchJobId {
     /// Project one canonical feedback stage/retry identity into its durable job id.

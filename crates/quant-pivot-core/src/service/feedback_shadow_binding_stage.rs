@@ -721,14 +721,14 @@ impl FeedbackShadowBindingStageAdapter {
             != current_compatibility.serving_contract_digest
             || input.active_binding.calibration_contract_digest
                 != current_compatibility.calibration_contract_digest
-            || input.active_binding.trade_policy_contract_digest
-                != current_compatibility.trade_policy_contract_digest
+            || input.active_binding.recommendation_contract_digest
+                != current_compatibility.recommendation_contract_digest
             || promoted_template.serving_contract_digest
                 != current_compatibility.serving_contract_digest
             || promoted_template.calibration_contract_digest
                 != current_compatibility.calibration_contract_digest
-            || promoted_template.trade_policy_contract_digest
-                != current_compatibility.trade_policy_contract_digest
+            || promoted_template.recommendation_contract_digest
+                != current_compatibility.recommendation_contract_digest
         {
             return Err(Self::invalid(
                 "active scenario model differs from current Route serving contracts",
@@ -751,7 +751,7 @@ impl FeedbackShadowBindingStageAdapter {
                     model_lineage: *model_lineage,
                     calibration_artifact_id: contract.calibration_artifact_id,
                     calibration_artifact_hash: contract.calibration_contract_hash,
-                    trade_policy_contract_hash: contract.trade_policy_contract_hash,
+                    recommendation_contract_hash: contract.recommendation_contract_hash,
                     prediction_horizon_secs: u64::try_from(contract.prediction_horizon_secs)
                         .map_err(|error| {
                             Self::invalid(format!(
@@ -767,6 +767,7 @@ impl FeedbackShadowBindingStageAdapter {
             methodology: &methodology,
             represented_routes: &represented,
             compatibility,
+            evidence_regime: promoted_template.evidence_regime,
             routes: route_inputs,
             bound_at: input.bound_at,
         })?;
@@ -1071,7 +1072,7 @@ impl FeedbackShadowBindingStageAdapter {
                 .iter()
                 .map(|contract| RouteContractHash {
                     route: contract.route,
-                    content_hash: contract.trade_policy_contract_hash,
+                    content_hash: contract.recommendation_contract_hash,
                 })
                 .collect::<Vec<_>>(),
         )

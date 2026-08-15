@@ -168,7 +168,7 @@ pub struct PortfolioScenarioRouteFitLineage {
     pub fit_evidence: PortfolioScenarioFitEvidence,
     pub calibration_artifact_id: CalibrationArtifactId,
     pub calibration_artifact_hash: ContentHash,
-    pub trade_policy_contract_hash: ContentHash,
+    pub recommendation_contract_hash: ContentHash,
     pub fit_window_start: DateTime<Utc>,
     pub fit_window_end: DateTime<Utc>,
 }
@@ -352,6 +352,13 @@ pub struct DiscountCurvePoint {
 /// This artifact deliberately contains no concrete market or token identity. It
 /// can therefore remain valid across report universes while every report still
 /// materializes and persists a separate concrete scenario artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PortfolioScenarioEvidenceRegime {
+    FullL2ExecutionEconomics,
+    FinalizedReferenceReturns,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioScenarioModelArtifact {
@@ -367,7 +374,8 @@ pub struct PortfolioScenarioModelArtifact {
     pub route_set_digest: ContentHash,
     pub serving_contract_digest: ContentHash,
     pub calibration_contract_digest: ContentHash,
-    pub trade_policy_contract_digest: ContentHash,
+    pub recommendation_contract_digest: ContentHash,
+    pub evidence_regime: PortfolioScenarioEvidenceRegime,
     /// Canonical ordered capital-time boundary grid shared with the discount curve.
     /// This is distinct from the statistical resampling interval in `time_bucket_secs`.
     pub capital_time_bucket_contract_digest: ContentHash,
@@ -401,7 +409,8 @@ impl PortfolioScenarioModelArtifact {
             route_set_digest: ContentHash,
             serving_contract_digest: ContentHash,
             calibration_contract_digest: ContentHash,
-            trade_policy_contract_digest: ContentHash,
+            recommendation_contract_digest: ContentHash,
+            evidence_regime: PortfolioScenarioEvidenceRegime,
             capital_time_bucket_contract_digest: ContentHash,
             scenario_random_stream_hash: ContentHash,
             pit_residual_panel_hash: ContentHash,
@@ -430,7 +439,8 @@ impl PortfolioScenarioModelArtifact {
                 route_set_digest: self.route_set_digest,
                 serving_contract_digest: self.serving_contract_digest,
                 calibration_contract_digest: self.calibration_contract_digest,
-                trade_policy_contract_digest: self.trade_policy_contract_digest,
+                recommendation_contract_digest: self.recommendation_contract_digest,
+                evidence_regime: self.evidence_regime,
                 capital_time_bucket_contract_digest: self.capital_time_bucket_contract_digest,
                 scenario_random_stream_hash: self.scenario_random_stream_hash,
                 pit_residual_panel_hash: self.pit_residual_panel_hash,
@@ -480,7 +490,8 @@ pub struct PortfolioScenarioArtifact {
     pub route_set_digest: ContentHash,
     pub serving_contract_digest: ContentHash,
     pub calibration_contract_digest: ContentHash,
-    pub trade_policy_contract_digest: ContentHash,
+    pub recommendation_contract_digest: ContentHash,
+    pub evidence_regime: PortfolioScenarioEvidenceRegime,
     /// Canonical ordered capital-time boundary grid inherited from the promoted model.
     pub capital_time_bucket_contract_digest: ContentHash,
     pub scenarios: Vec<PortfolioScenario>,
@@ -518,7 +529,8 @@ impl PortfolioScenarioArtifact {
             route_set_digest: ContentHash,
             serving_contract_digest: ContentHash,
             calibration_contract_digest: ContentHash,
-            trade_policy_contract_digest: ContentHash,
+            recommendation_contract_digest: ContentHash,
+            evidence_regime: PortfolioScenarioEvidenceRegime,
             capital_time_bucket_contract_digest: ContentHash,
             scenario_hashes: &'a [ContentHash],
             distributions: &'a [ScenarioDistribution],
@@ -544,7 +556,8 @@ impl PortfolioScenarioArtifact {
                 route_set_digest: self.route_set_digest,
                 serving_contract_digest: self.serving_contract_digest,
                 calibration_contract_digest: self.calibration_contract_digest,
-                trade_policy_contract_digest: self.trade_policy_contract_digest,
+                recommendation_contract_digest: self.recommendation_contract_digest,
+                evidence_regime: self.evidence_regime,
                 capital_time_bucket_contract_digest: self.capital_time_bucket_contract_digest,
                 scenario_hashes: &scenario_hashes,
                 distributions: &self.distributions,

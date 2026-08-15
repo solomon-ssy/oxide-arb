@@ -22,7 +22,7 @@ use quant_pivot_models::{
 use serde::Serialize;
 
 use crate::{
-    features::FeatureSchema,
+    features::AuthoringFeatureCatalog,
     hashing::ResearchHasher,
     selection::{ExcludedMarket, MarketSelectionBuildRequest, SelectedMarket},
 };
@@ -210,9 +210,9 @@ impl SelectorHashInput {
             reject_crossed_books: data_quality.reject_crossed_books,
             reject_empty_books: data_quality.reject_empty_books,
             knowledge_lag_secs: request.knowledge_lag_secs,
-            feature_schema_hash: ResearchHasher::feature_schema(&FeatureSchema::build(
-                &request.features,
-            )?)?,
+            feature_schema_hash: ResearchHasher::authoring_catalog(
+                &AuthoringFeatureCatalog::build(&request.features)?,
+            )?,
             model_requirements_hash: ResearchHasher::model_feature_requirements(
                 &request.model_requirements,
             )?,

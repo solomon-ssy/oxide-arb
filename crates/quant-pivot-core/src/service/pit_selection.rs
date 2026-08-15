@@ -612,7 +612,7 @@ mod tests {
             Self {
                 books: HashMap::new(),
                 micro: HashMap::new(),
-                trade_tape: HashMap::new(),
+                finalized_executions: HashMap::new(),
                 resolutions: HashMap::new(),
                 catalog: CatalogWindowInfo {
                     market_changes: Vec::new(),

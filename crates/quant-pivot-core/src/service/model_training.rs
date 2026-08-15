@@ -72,7 +72,7 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     factors::{FactorEngine, names::STRUCT_FAVORITE_LONGSHOT},
-    features::{FeatureSchema, SourceRequirement},
+    features::{ExecutableFeatureSchema, SourceRequirement},
     hashing::ResearchHasher,
     model::{
         CancellationProbe, FavoriteLongshotBiasTable, HorizonMultipliers, LabelSelector,
@@ -177,7 +177,7 @@ pub struct TrainModelOutcome {
 }
 
 struct VerifiedServingInputs {
-    feature_schema: FeatureSchema,
+    feature_schema: ExecutableFeatureSchema,
     factor_plane: FactorServingPlane,
     training_dataset_hash: ContentHash,
     policy_snapshot: ModelServingPolicySnapshotBinding,
@@ -618,10 +618,27 @@ impl ModelTrainerService {
         dataset: &TrainingDatasetInfo,
         input: &TrainModelInput,
         policy_snapshot: &ModelServingPolicySnapshotBinding,
-    ) -> QuantResult<(FeatureSchema, FactorServingPlane, ResearchProfileArtifact)> {
+    ) -> QuantResult<(
+        ExecutableFeatureSchema,
+        FactorServingPlane,
+        ResearchProfileArtifact,
+    )> {
         let materialization = Self::validate_dataset_lineage(dataset, input, policy_snapshot)?;
         let runtime = &self.config.policy_snapshot.snapshot;
-        let feature_schema = FeatureSchema::build(&runtime.profile_artifacts.features.definition)?;
+        let profile_ref = materialization
+            .manifest
+            .source_lineage
+            .research_profile_artifact_id
+            .profile_ref();
+        let profile = profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(|detail| ResearchError::DatasetBuild {
+                detail: format!("research profile preimage verification failed: {detail}"),
+            })?;
+        let feature_schema = ExecutableFeatureSchema::build(
+            &runtime.profile_artifacts.features.definition,
+            profile.spec.feature_contract,
+        )?;
         let feature_schema_hash = ResearchHasher::feature_schema(&feature_schema)?;
         if feature_schema.version() != dataset.feature_schema_version
             || feature_schema.version() != input.model_spec.feature_schema_version
@@ -645,16 +662,6 @@ impl ModelTrainerService {
             }
             .into());
         }
-        let profile_ref = materialization
-            .manifest
-            .source_lineage
-            .research_profile_artifact_id
-            .profile_ref();
-        let profile = profile_ref
-            .resolve_builtin_research_profile()
-            .map_err(|detail| ResearchError::DatasetBuild {
-                detail: format!("research profile preimage verification failed: {detail}"),
-            })?;
         if dataset.research_profile_artifact_id != profile.profile_ref.artifact_id()
             || dataset.source_lineage.research_profile_artifact_id
                 != profile.profile_ref.artifact_id()
@@ -686,6 +693,7 @@ impl ModelTrainerService {
                 &runtime.profile_artifacts.scoring.definition,
                 &runtime.profile_artifacts.features.definition,
                 &runtime.profile_artifacts.domain.definition,
+                profile.spec.feature_contract,
                 profile.spec.category,
                 None,
             )
@@ -1007,7 +1015,7 @@ impl ModelTrainerService {
     }
 
     fn required_domain_families(
-        schema: &FeatureSchema,
+        schema: &ExecutableFeatureSchema,
         plane: &FactorServingPlane,
         input_contract: &ModelInputContract,
         category_scope: Option<MarketCategory>,
@@ -1658,7 +1666,7 @@ pub(crate) fn classical_output_semantics(
 ///
 /// Examples are time-ordered (so the rolling-validation holdout splits on
 /// wall-clock time, never leaking). Columns come from the governed
-/// [`FeatureSchema`] — not an ad hoc scan of whichever
+/// [`ExecutableFeatureSchema`] — not an ad hoc scan of whichever
 /// numeric names happen to appear in this particular example batch — so the
 /// classical path respects the same requiredness / `unit` / `value_kind`
 /// contract the online governed path enforces (e.g. `Bps`-unit features are
@@ -1669,12 +1677,12 @@ pub(crate) fn classical_output_semantics(
 /// Shared by [`ModelTrainerService::train_classical`] and the
 /// CPCV/trial-grid orchestration (`quant-pivot-core::service::cpcv_backtest`),
 /// so every classical fold — production or validation — builds its matrix
-/// through the identical governed [`FeatureSchema`] column contract.
+/// through the identical governed [`ExecutableFeatureSchema`] column contract.
 #[cfg(feature = "ml-classical")]
 pub(crate) fn build_classical_matrix<'a>(
     examples: impl IntoIterator<Item = &'a TrainingExample>,
     label: &LabelSelector,
-    schema: &FeatureSchema,
+    schema: &ExecutableFeatureSchema,
     input_contract: &ModelInputContract,
 ) -> QuantResult<TrainingMatrix> {
     let mut sorted: Vec<_> = examples.into_iter().collect();
@@ -1720,10 +1728,12 @@ mod tests {
     use quant_pivot_models::{
         enums::{common::MarketCategory, domain::DomainFamily},
         runtime_config::FeaturesConfig,
-        types::{ModelInputContract, ModelInputSpec, factor::FactorServingPlane},
+        types::{
+            ModelInputContract, ModelInputSpec, ResearchFeatureContract, factor::FactorServingPlane,
+        },
     };
     use quant_pivot_research::features::{
-        FeatureSchema,
+        ExecutableFeatureSchema,
         names::{
             book::MID, domain_crypto::DISTANCE_TO_STRIKE, domain_weather::CONTRACT_PROBABILITY,
         },
@@ -1744,7 +1754,10 @@ mod tests {
 
     #[test]
     fn domain_union_tracks_contract() -> Result<(), QuantError> {
-        let schema = FeatureSchema::build(&FeaturesConfig::default())?;
+        let schema = ExecutableFeatureSchema::build(
+            &FeaturesConfig::default(),
+            ResearchFeatureContract::FullL2,
+        )?;
         let plane =
             FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("empty factor plane failed: {error}"),

@@ -496,7 +496,7 @@ fn validate_artifact_contract(input: &GlobalPortfolioInput<'_>) -> QuantResult<(
         || binding.ordered_routes != artifact.ordered_routes
         || binding.serving_contract_digest != artifact.serving_contract_digest
         || binding.calibration_contract_digest != artifact.calibration_contract_digest
-        || binding.trade_policy_contract_digest != artifact.trade_policy_contract_digest
+        || binding.recommendation_contract_digest != artifact.recommendation_contract_digest
         || binding.scenario_model_schema_version != artifact.schema_version
         || binding.capital_time_bucket_contract_digest
             != artifact.capital_time_bucket_contract_digest

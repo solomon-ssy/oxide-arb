@@ -3,7 +3,9 @@
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::quant::NewFactorDefinition,
+    enums::common::MarketCategory,
     runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
+    types::ResearchFeatureContract,
 };
 use quant_pivot_repository::traits::FactorRepository;
 use quant_pivot_research::factors::FactorEngine;
@@ -18,8 +20,17 @@ pub async fn register_all_factor_definitions(
     factors: &FactorsConfig,
     features: &FeaturesConfig,
     domain: &DomainConfig,
+    feature_contract: ResearchFeatureContract,
+    category_scope: Option<MarketCategory>,
 ) -> QuantResult<()> {
-    let engine = FactorEngine::new(factors, features, domain, None);
+    let engine = FactorEngine::for_model_scope(
+        factors,
+        features,
+        domain,
+        feature_contract,
+        category_scope,
+        None,
+    );
     let definitions = engine
         .serving_plane()?
         .definitions()

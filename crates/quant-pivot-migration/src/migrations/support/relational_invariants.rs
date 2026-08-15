@@ -1906,7 +1906,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "ck_quant_source_slice_manifest",
         table: "quant_source_slice",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'profile_ref'::text, 'evaluation_track'::text, 'research_program_hash'::text, 'window_start'::text, 'window_end'::text, 'pit_cutoff'::text, 'reader_contract_version'::text, 'schema_contract_version'::text, 'decision_policy_snapshot_id'::text, 'runtime_config_hash'::text, 'dataset_format_version'::text, 'capability_registry_hashes'::text, 'objects'::text]) AND (((manifest ->> 'format_version'::text))::integer = 3) AND ((manifest -> 'profile_ref'::text) = profile_ref) AND ((manifest ->> 'evaluation_track'::text) = (evaluation_track)::text) AND ((manifest ->> 'research_program_hash'::text) = research_program_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND (((manifest ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND ((manifest ->> 'reader_contract_version'::text) = (reader_contract_version)::text) AND ((manifest ->> 'schema_contract_version'::text) = (schema_contract_version)::text) AND (((manifest ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((manifest ->> 'runtime_config_hash'::text) = runtime_config_hash) AND (((manifest ->> 'dataset_format_version'::text))::integer = 3) AND (jsonb_typeof((manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (jsonb_typeof((manifest -> 'objects'::text)) = 'array'::text) AND (jsonb_array_length((manifest -> 'objects'::text)) > 0))))",
+        definition: "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'profile_ref'::text, 'evaluation_track'::text, 'research_program_hash'::text, 'window_start'::text, 'window_end'::text, 'pit_cutoff'::text, 'reader_contract_version'::text, 'schema_contract_version'::text, 'decision_policy_snapshot_id'::text, 'runtime_config_hash'::text, 'dataset_format_version'::text, 'capability_registry_hashes'::text, 'objects'::text]) AND (((manifest ->> 'format_version'::text))::integer = 4) AND ((manifest -> 'profile_ref'::text) = profile_ref) AND ((manifest ->> 'evaluation_track'::text) = (evaluation_track)::text) AND ((manifest ->> 'research_program_hash'::text) = research_program_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND (((manifest ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND ((manifest ->> 'reader_contract_version'::text) = (reader_contract_version)::text) AND ((manifest ->> 'schema_contract_version'::text) = (schema_contract_version)::text) AND (((manifest ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((manifest ->> 'runtime_config_hash'::text) = runtime_config_hash) AND (((manifest ->> 'dataset_format_version'::text))::integer = 3) AND (jsonb_typeof((manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (jsonb_typeof((manifest -> 'objects'::text)) = 'array'::text) AND (jsonb_array_length((manifest -> 'objects'::text)) > 0))))",
     },
     ConstraintSpec {
         name: "ck_quant_execution_account_identity",
@@ -2065,10 +2065,202 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK ((transaction_hash ~ '^0x[0-9a-f]{64}$'::text))",
     },
     ConstraintSpec {
-        name: "ck_quant_trade_tape_block_cursor_contract_address",
-        table: "quant_trade_tape_block_cursor",
+        name: "ck_quant_exchange_history_chunk_range",
+        table: "quant_exchange_history_chunk",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((contract_address)::text ~ '^0x[0-9a-f]{40}$'::text))",
+        definition: "CHECK (((from_block > 0) AND (to_block >= from_block) AND (attempt_count >= 0) AND ((hypersync_count IS NULL) OR (hypersync_count >= 0)) AND ((attestor_count IS NULL) OR (attestor_count >= 0)) AND ((archive_height IS NULL) OR (archive_height >= to_block)) AND ((continuity_block IS NULL) OR (continuity_block = (from_block - 1)))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_exchange_history_chunk_acceptance",
+        table: "quant_exchange_history_chunk",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((status <> 'accepted'::qp_exchange_history_chunk_status) OR ((hypersync_count IS NOT NULL) AND (attestor_count IS NOT NULL) AND (hypersync_count = attestor_count) AND (hypersync_digest IS NOT NULL) AND (attestor_digest IS NOT NULL) AND (hypersync_digest = attestor_digest) AND (first_block_hash IS NOT NULL) AND (last_block_hash IS NOT NULL) AND (archive_height IS NOT NULL) AND (continuity_basis IS NOT NULL) AND (continuity_block IS NOT NULL) AND (continuity_hash IS NOT NULL) AND (accepted_at IS NOT NULL))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_exchange_history_chunk_hashes",
+        table: "quant_exchange_history_chunk",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((hypersync_digest IS NULL) OR (hypersync_digest ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((attestor_digest IS NULL) OR (attestor_digest ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((first_block_hash IS NULL) OR (first_block_hash ~ '^0x[0-9a-f]{64}$'::text)) AND ((last_block_hash IS NULL) OR (last_block_hash ~ '^0x[0-9a-f]{64}$'::text)) AND ((continuity_hash IS NULL) OR (continuity_hash ~ '^0x[0-9a-f]{64}$'::text))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_exchange_history_plan_ranges",
+        table: "quant_exchange_history_plan",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((chain_id = 137) AND (finalized_anchor_block > activation_through_block) AND (finalized_anchor_timestamp > 0) AND (retention_from_block > 0) AND (retention_from_block <= weather_required_from_block) AND (weather_required_from_block <= crypto_required_from_block) AND (crypto_required_from_block <= activation_from_block) AND (activation_from_block <= activation_through_block) AND (retention_through_block = (activation_from_block - 1))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_exchange_history_plan_hashes",
+        table: "quant_exchange_history_plan",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((policy_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (bootstrap_profile_set_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (finalized_anchor_hash ~ '^0x[0-9a-f]{64}$'::text)))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_exchange_history_quarantine_detail",
+        table: "quant_exchange_history_quarantine",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (length(btrim(detail)) BETWEEN 1 AND 2048) AND (octet_length(detail) = length(detail))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_exchange_history_quarantine_resolution",
+        table: "quant_exchange_history_quarantine_resolution",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text AND char_length(btrim(actor)) BETWEEN 1 AND 128 AND actor !~ '[[:cntrl:]]'::text AND char_length(btrim(detail)) BETWEEN 1 AND 2048 AND octet_length(detail) = char_length(detail)))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_fresh_boot_run_identity",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((profile_hash ~ '^blake3:[0-9a-f]{64}$'::text AND jsonb_typeof(route) = 'string'::text AND route #>> '{}' = ANY (ARRAY['pooled'::text, 'crypto'::text, 'weather'::text]) AND char_length(btrim(idempotency_key)) BETWEEN 8 AND 128 AND idempotency_key !~ '[[:space:][:cntrl:]]'::text AND revision >= 0 AND retry_count >= 0 AND started_at <= created_at AND created_at <= stage_entered_at AND stage_entered_at <= updated_at AND ((source_coverage_manifest IS NULL) = (source_coverage_hash IS NULL)) AND (source_coverage_manifest IS NULL OR jsonb_typeof(source_coverage_manifest) = 'object'::text) AND (source_coverage_hash IS NULL OR source_coverage_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((source_slice_id IS NULL) = (source_slice_hash IS NULL)) AND (source_slice_hash IS NULL OR source_slice_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((scenario_artifact_id IS NULL) = (scenario_artifact_hash IS NULL)) AND (scenario_artifact_hash IS NULL OR scenario_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((bootstrap_preflight IS NULL) = (bootstrap_preflight_hash IS NULL)) AND (bootstrap_preflight IS NULL OR jsonb_typeof(bootstrap_preflight) = 'object'::text) AND (bootstrap_preflight_hash IS NULL OR bootstrap_preflight_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((lease_owner IS NULL) = (lease_expires_at IS NULL)) AND (retry_detail IS NULL OR (char_length(btrim(retry_detail)) >= 1 AND char_length(btrim(retry_detail)) <= 2048 AND octet_length(retry_detail) = char_length(retry_detail))) AND (blocked_detail IS NULL OR (char_length(btrim(blocked_detail)) >= 1 AND char_length(btrim(blocked_detail)) <= 2048 AND octet_length(blocked_detail) = char_length(blocked_detail)))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_fresh_boot_run_status",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((status = ANY (ARRAY['waiting_evidence'::qp_fresh_boot_status, 'retry_scheduled'::qp_fresh_boot_status])) AND retry_reason IS NOT NULL AND retry_detail IS NOT NULL AND next_attempt_at IS NOT NULL AND blocked_reason IS NULL AND blocked_detail IS NULL AND lease_owner IS NULL AND completed_at IS NULL) OR ((status = 'running'::qp_fresh_boot_status) AND retry_reason IS NULL AND retry_detail IS NULL AND next_attempt_at IS NULL AND blocked_reason IS NULL AND blocked_detail IS NULL AND completed_at IS NULL) OR ((status = 'blocked_terminal'::qp_fresh_boot_status) AND blocked_reason IS NOT NULL AND blocked_detail IS NOT NULL AND retry_reason IS NULL AND retry_detail IS NULL AND next_attempt_at IS NULL AND lease_owner IS NULL AND completed_at IS NOT NULL) OR ((status = 'superseded'::qp_fresh_boot_status) AND blocked_reason IS NOT NULL AND blocked_detail IS NOT NULL AND retry_reason IS NULL AND retry_detail IS NULL AND next_attempt_at IS NULL AND lease_owner IS NULL AND completed_at IS NOT NULL) OR ((status = 'succeeded'::qp_fresh_boot_status) AND stage = 'first_report_published'::qp_fresh_boot_stage AND retry_reason IS NULL AND retry_detail IS NULL AND next_attempt_at IS NULL AND blocked_reason IS NULL AND blocked_detail IS NULL AND lease_owner IS NULL AND completed_at IS NOT NULL AND first_report_id IS NOT NULL AND manual_report_ready_at IS NOT NULL)))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_fresh_boot_run_stage",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((stage = 'awaiting_source_coverage'::qp_fresh_boot_stage OR (source_coverage_manifest IS NOT NULL AND source_coverage_hash IS NOT NULL AND model_spec_id IS NOT NULL)) AND (stage < 'dataset_ready'::qp_fresh_boot_stage OR (training_dataset_id IS NOT NULL AND source_slice_id IS NOT NULL AND source_slice_hash IS NOT NULL)) AND (stage < 'training_ready'::qp_fresh_boot_stage OR source_model_version_id IS NOT NULL) AND (stage < 'calibration_dataset_ready'::qp_fresh_boot_stage OR calibration_dataset_id IS NOT NULL) AND (stage < 'calibration_ready'::qp_fresh_boot_stage OR (model_version_id IS NOT NULL AND calibration_id IS NOT NULL)) AND (stage < 'cpcv_ready'::qp_fresh_boot_stage OR path_set_id IS NOT NULL) AND (stage < 'parity_ready'::qp_fresh_boot_stage OR parity_run_id IS NOT NULL) AND (stage < 'scenario_ready'::qp_fresh_boot_stage OR (scenario_artifact_id IS NOT NULL AND scenario_artifact_hash IS NOT NULL)) AND (stage < 'bootstrap_preflight'::qp_fresh_boot_stage OR (bootstrap_preflight IS NOT NULL AND bootstrap_preflight_hash IS NOT NULL)) AND (stage < 'bootstrap_committed'::qp_fresh_boot_stage OR bootstrap_policy_activation_id IS NOT NULL) AND (stage < 'report_eligible'::qp_fresh_boot_stage OR (manual_report_ready_at IS NOT NULL AND first_report_run_id IS NOT NULL)) AND (stage < 'first_report_published'::qp_fresh_boot_stage OR first_report_id IS NOT NULL)))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_fresh_boot_run_active_job",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((stage = ANY (ARRAY['dataset_queued'::qp_fresh_boot_stage, 'dataset_running'::qp_fresh_boot_stage, 'training_queued'::qp_fresh_boot_stage, 'training_running'::qp_fresh_boot_stage, 'calibration_dataset_queued'::qp_fresh_boot_stage, 'calibration_dataset_running'::qp_fresh_boot_stage, 'calibration_queued'::qp_fresh_boot_stage, 'calibration_running'::qp_fresh_boot_stage, 'cpcv_queued'::qp_fresh_boot_stage, 'cpcv_running'::qp_fresh_boot_stage])) = (active_job_id IS NOT NULL)))",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_profile",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (research_profile_artifact_id) REFERENCES public.research_profile_artifact(research_profile_artifact_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_policy",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES public.decision_policy_snapshot(decision_policy_snapshot_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_spec",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (model_spec_id) REFERENCES public.quant_model_spec(model_spec_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_training_dataset",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (training_dataset_id) REFERENCES public.quant_training_dataset(training_dataset_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_calibration_dataset",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (calibration_dataset_id) REFERENCES public.quant_training_dataset(training_dataset_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_source_model",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (source_model_version_id) REFERENCES public.quant_model_version(model_version_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_model",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (model_version_id) REFERENCES public.quant_model_version(model_version_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_path_set",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (path_set_id) REFERENCES public.quant_backtest_path_set(path_set_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_calibration",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (calibration_id) REFERENCES public.quant_calibration_artifact(artifact_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_parity",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (parity_run_id) REFERENCES public.quant_feature_parity_run(run_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_active_job",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (active_job_id) REFERENCES public.quant_research_job(job_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_last_job",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (last_job_id) REFERENCES public.quant_research_job(job_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_supersedes",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (supersedes_run_id) REFERENCES public.quant_fresh_boot_run(run_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_activation",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (bootstrap_policy_activation_id) REFERENCES public.policy_activation(policy_activation_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_report_run",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (first_report_run_id) REFERENCES public.quant_report_run(report_run_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_report",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (first_report_id) REFERENCES public.quant_recommendation_report(recommendation_report_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_source_slice",
+        table: "quant_fresh_boot_run",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (source_slice_id) REFERENCES public.quant_source_slice(source_slice_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "ck_quant_fresh_boot_run_event",
+        table: "quant_fresh_boot_run_event",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((event_sequence >= 0 AND attempt >= 0 AND event_hash ~ '^blake3:[0-9a-f]{64}$'::text AND (evidence_hash IS NULL OR evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND char_length(btrim(actor)) BETWEEN 1 AND 128 AND actor !~ '[[:cntrl:]]'::text AND (detail IS NULL OR (char_length(btrim(detail)) >= 1 AND char_length(btrim(detail)) <= 2048 AND octet_length(detail) = char_length(detail)))))",
+    },
+    ConstraintSpec {
+        name: "uq_quant_fresh_boot_run_event_sequence",
+        table: "quant_fresh_boot_run_event",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (run_id, event_sequence)",
+    },
+    ConstraintSpec {
+        name: "uq_quant_fresh_boot_run_event_hash",
+        table: "quant_fresh_boot_run_event",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (event_hash)",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_event_run",
+        table: "quant_fresh_boot_run_event",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (run_id) REFERENCES public.quant_fresh_boot_run(run_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_fresh_boot_run_event_job",
+        table: "quant_fresh_boot_run_event",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (research_job_id) REFERENCES public.quant_research_job(job_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
         name: "quant_trade_policy_trial_attempt_check",
@@ -2360,8 +2552,9 @@ mod tests {
     }
 
     #[test]
-    fn dataset_v3_is_relational() {
+    fn artifact_versions_are_relational() {
         let source = constraint("ck_quant_source_slice_manifest").definition;
+        assert!(source.contains("format_version'::text))::integer = 4"));
         assert!(source.contains("dataset_format_version'::text))::integer = 3"));
         assert!(!source.contains("dataset_format_version'::text))::integer = 2"));
 

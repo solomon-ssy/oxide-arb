@@ -6,7 +6,7 @@ use quant_pivot_models::{
         book::BookLevel,
         fee::{BuilderFeeAttribution, MarketFeeSchedule},
     },
-    enums::{clickhouse::ChTradeReconciliationStatus, common::Side, quant::FillRequirement},
+    enums::{common::Side, quant::FillRequirement},
     hashing::CanonicalDigest,
     types::{Bps, ContentHash, PayoutRatio, Price, Shares, Usd},
 };
@@ -527,11 +527,10 @@ impl PassiveQueueState {
         }
     }
 
-    /// Only reconciled opposing prints at the exact price consume queue.
+    /// Only accepted opposing executions at the exact price consume queue.
     pub fn apply_trade(&mut self, trade: PassiveTrade) -> Shares {
         if self.availability != PassiveQueueAvailability::Available
             || trade.stream_session_id != self.stream_session_id
-            || trade.reconciliation_status != ChTradeReconciliationStatus::Matched
             || trade.side != Side::Sell
             || trade.price != self.price
             || !trade.shares.is_positive()
@@ -563,7 +562,6 @@ pub struct PassiveTrade {
     pub side: Side,
     pub price: Price,
     pub shares: Shares,
-    pub reconciliation_status: ChTradeReconciliationStatus,
 }
 
 #[cfg(test)]
@@ -571,7 +569,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
-        enums::{clickhouse::ChTradeReconciliationStatus, common::Side, quant::FillRequirement},
+        enums::{common::Side, quant::FillRequirement},
         types::{Bps, ContentHash, Price, Shares, Usd},
     };
     use rust_decimal::Decimal;
@@ -818,21 +816,19 @@ mod tests {
         );
         queue.apply_cancellation(Shares::new(dec!(10)));
         assert_eq!(queue.queue_ahead, Shares::new(dec!(10)));
-        let unavailable = queue.apply_trade(PassiveTrade {
-            stream_session_id: session,
-            side: Side::Sell,
-            price: Price::new(dec!(0.5)),
-            shares: Shares::new(dec!(20)),
-            reconciliation_status: ChTradeReconciliationStatus::Pending,
-        });
-        assert_eq!(unavailable, Shares::ZERO);
         let filled = queue.apply_trade(PassiveTrade {
             stream_session_id: session,
             side: Side::Sell,
             price: Price::new(dec!(0.5)),
-            shares: Shares::new(dec!(12)),
-            reconciliation_status: ChTradeReconciliationStatus::Matched,
+            shares: Shares::new(dec!(20)),
         });
-        assert_eq!(filled, Shares::new(dec!(2)));
+        assert_eq!(filled, Shares::new(dec!(5)));
+        let exhausted = queue.apply_trade(PassiveTrade {
+            stream_session_id: session,
+            side: Side::Sell,
+            price: Price::new(dec!(0.5)),
+            shares: Shares::new(dec!(12)),
+        });
+        assert_eq!(exhausted, Shares::ZERO);
     }
 }

@@ -44,10 +44,9 @@ use quant_pivot_models::{
     runtime_config::{BuyModelRoute, DecisionPolicySnapshot},
     types::{
         ContentHash, DecisionCaptureEvidence, DecisionPolicySnapshotId, FeatureParityDetailSource,
-        FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
-        RecommendationReportId, SelectionExclusionSummary, SelectorHashEvidence,
-        SelectorParityEvidence, TradeTapeSourceEvidence, Usd, factor::FactorServingPlane,
-        stable_name::FeatureName,
+        FeatureVectorId, FinalizedExecutionEvidence, MarketId, MarketSelectionId, ModelRunId,
+        ModelVersionId, RecommendationReportId, SelectionExclusionSummary, SelectorHashEvidence,
+        SelectorParityEvidence, Usd, factor::FactorServingPlane, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -59,7 +58,7 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     factors::{FactorEngine, FactorValue, MarketFactorOutcome},
     features::{
-        ConfiguredFeatureBuilder, FeatureSchema, FeatureVector, MarketDecisionCapture,
+        ConfiguredFeatureBuilder, ExecutableFeatureSchema, FeatureVector, MarketDecisionCapture,
         feature_events,
     },
     hashing::ResearchHasher,
@@ -93,7 +92,7 @@ use crate::{
         },
         historical_replay::{
             CrossSectionRequest, ReplayCaptureKey, ReplayConfig, ReplayCrossSection,
-            ReplayFactorMode, ReplayTradeTapeSource, materialize_cross_section,
+            ReplayExecutionSource, ReplayFactorMode, materialize_cross_section,
         },
         model_serving_generation::{
             ModelServingGenerationRequest, ModelServingGenerationStore, ModelServingRouteSnapshot,
@@ -148,7 +147,7 @@ struct ReplayRunContext {
     selection: MarketSelectionInfo,
     members: Vec<MarketSelectionMemberInfo>,
     samples: Vec<ReplaySample>,
-    trade_tape_sources: HashMap<MarketId, TradeTapeSourceEvidence>,
+    finalized_execution_evidences: HashMap<MarketId, FinalizedExecutionEvidence>,
 }
 
 struct ReportReplayContext {
@@ -215,7 +214,7 @@ struct FeatureComparisonInputs<'a> {
     vector_binding: &'a HashMap<MarketId, FeatureVectorId>,
     boundary: &'a DecisionBoundary,
     decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
-    schema: &'a FeatureSchema,
+    schema: &'a ExecutableFeatureSchema,
 }
 
 struct PreparedReportReplay {
@@ -1161,8 +1160,8 @@ impl DurableFeatureParitySource {
             online_features,
             feature_infos,
         )?;
-        let trade_tape_sources =
-            frozen_trade_tape_sources(&boundary, online_features, feature_infos)?;
+        let finalized_execution_evidences =
+            frozen_finalized_execution_evidences(&boundary, online_features, feature_infos)?;
         Ok(ReplayRunContext {
             model_version_id,
             decision_policy_snapshot_id: run.decision_policy_snapshot_id,
@@ -1174,7 +1173,7 @@ impl DurableFeatureParitySource {
             selection,
             members,
             samples,
-            trade_tape_sources,
+            finalized_execution_evidences,
         })
     }
 
@@ -1227,6 +1226,7 @@ impl DurableFeatureParitySource {
                 knowledge_lag: boundary.knowledge_lag(),
                 max_horizon_secs: 0,
                 domain: config.profile_artifacts.domain.definition.clone(),
+                feature_contract: selection_replay.replay_config.feature_contract,
             })
             .await?;
         let cross = materialize_cross_section(
@@ -1238,8 +1238,8 @@ impl DurableFeatureParitySource {
             &CrossSectionRequest {
                 pit: selection_replay.snapshot_source.as_ref(),
                 prefetched: &window.prefetched,
-                trade_tape_source: ReplayTradeTapeSource::FrozenRuntime(
-                    &context.trade_tape_sources,
+                finalized_execution_evidence: ReplayExecutionSource::FrozenRuntime(
+                    &context.finalized_execution_evidences,
                 ),
                 decision_at: boundary.decision_at(),
                 group: &samples,
@@ -1275,6 +1275,14 @@ impl DurableFeatureParitySource {
             &config.profile_artifacts.scoring.definition,
         )
         .await?;
+        let serving = self.replay_serving(context).await?;
+        let feature_contract = serving
+            .active_version()
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(determinism)?
+            .spec
+            .feature_contract;
         let replay_config = ReplayConfig {
             features: config.profile_artifacts.features.definition.clone(),
             factors: config.profile_artifacts.scoring.definition.clone(),
@@ -1288,17 +1296,19 @@ impl DurableFeatureParitySource {
                     .max_single_recommendation_usd
                     .value,
             ),
+            feature_contract,
             bias_table: bias_table.as_ref().map(Arc::clone),
         };
-        let builder = ConfiguredFeatureBuilder::new(
+        let builder = ConfiguredFeatureBuilder::new_for_contract(
             &config.profile_artifacts.features.definition,
             &config.profile_artifacts.domain.definition,
+            feature_contract,
         )?;
-        let serving = self.replay_serving(context).await?;
         let factor_engine = FactorEngine::for_model_scope(
             &config.profile_artifacts.scoring.definition,
             &config.profile_artifacts.features.definition,
             &config.profile_artifacts.domain.definition,
+            feature_contract,
             serving.active_version().category_scope,
             bias_table.clone(),
         );
@@ -1581,8 +1591,17 @@ impl DurableFeatureParitySource {
         &self,
         request: ModelRouteReplayRequest<'_>,
     ) -> QuantResult<ReplayedModelOutput> {
-        let feature_schema_hash = ResearchHasher::feature_schema(&FeatureSchema::build(
+        let feature_contract = request
+            .serving
+            .active_version()
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(determinism)?
+            .spec
+            .feature_contract;
+        let feature_schema_hash = ResearchHasher::feature_schema(&ExecutableFeatureSchema::build(
             &request.config.profile_artifacts.features.definition,
+            feature_contract,
         )?)?;
         let factor_plane = request.factor_engine.serving_plane()?;
         let market_by_id = request
@@ -2354,25 +2373,28 @@ fn replay_feature_population(
         .collect()
 }
 
-fn frozen_trade_tape_sources(
+fn frozen_finalized_execution_evidences(
     boundary: &DecisionBoundary,
     online_features: &HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
     feature_infos: &HashMap<FeatureVectorId, FeatureVectorInfo>,
-) -> QuantResult<HashMap<MarketId, TradeTapeSourceEvidence>> {
+) -> QuantResult<HashMap<MarketId, FinalizedExecutionEvidence>> {
     let mut by_market = HashMap::with_capacity(feature_infos.len());
     for (vector_id, info) in feature_infos {
         let rows = online_features.get(vector_id).ok_or_else(|| {
             determinism(format!(
-                "feature rows disappeared while freezing trade-tape evidence for vector {vector_id}"
+                "feature rows disappeared while freezing finalized-execution evidence for vector {vector_id}"
             ))
         })?;
         let capture = persisted_capture(info, rows, boundary)?;
         if by_market
-            .insert(info.market_id.clone(), capture.trade_tape_source.clone())
+            .insert(
+                info.market_id.clone(),
+                capture.finalized_execution_evidence.clone(),
+            )
             .is_some()
         {
             return Err(determinism(format!(
-                "serving evidence contains duplicate trade-tape source snapshots for market {}",
+                "serving evidence contains duplicate finalized-execution source snapshots for market {}",
                 info.market_id
             )));
         }
@@ -3468,8 +3490,8 @@ mod tests {
         runtime_config::{BuyModelRoute, DomainConfig, FactorsConfig, FeaturesConfig},
         types::{
             DecisionPolicySnapshotId, EventId, FeatureParityDetailSource, FeatureVectorId,
-            MarketSelectionId, ModelVersionId, ReportDataQualityTokens, TokenDataQualityRecord,
-            TokenId, Usd,
+            MarketSelectionId, ModelVersionId, ReportDataQualityTokens, ResearchFeatureContract,
+            TokenDataQualityRecord, TokenId, Usd,
         },
     };
     use rust_decimal_macros::dec;
@@ -3831,6 +3853,7 @@ mod tests {
             &factors,
             &features,
             &domain,
+            ResearchFeatureContract::FullL2Weather,
             Some(MarketCategory::Weather),
             None,
         );

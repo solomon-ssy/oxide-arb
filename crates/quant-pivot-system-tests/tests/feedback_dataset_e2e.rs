@@ -64,8 +64,8 @@ use quant_pivot_models::{
         ContentHash, DatasetSourceLineage, DecisionCaptureEvidence, DecisionPolicySnapshotId,
         DecisionSnapshotEvidence, DomainInstrumentKey, DomainSourceId, EvidenceSourceRef,
         EvmAddress, EvmBlockHash, EvmTransactionHash, FeatureCell, FeatureStaleness, FeatureValue,
-        MarketId, PayoutRatio, Probability, ResearchEvaluationTrack, SchemaVersion,
-        TradeTapeSourceEvidence, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd,
+        FinalizedExecutionEvidence, MarketId, PayoutRatio, Probability, ResearchEvaluationTrack,
+        SchemaVersion, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -90,7 +90,7 @@ use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
     factors::{FactorValue, FactorValueInsertContext},
     features::{
-        FeatureSchema, FeatureVector, feature_events,
+        ExecutableFeatureSchema, FeatureVector, feature_events,
         names::book::{BEST_ASK, MID, SECONDARY_BEST_ASK},
     },
     model::{FactorInferenceRow, FactorInferenceTable, WeightedInputAuditContract},
@@ -193,7 +193,14 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
         .await?
         .context("seeded runtime policy")?
         .snapshot;
-    let schema = FeatureSchema::build(&runtime.profile_artifacts.features.definition)?;
+    let profile = model
+        .profile_ref
+        .resolve_builtin_research_profile()
+        .map_err(AnyhowError::msg)?;
+    let schema = ExecutableFeatureSchema::build(
+        &runtime.profile_artifacts.features.definition,
+        profile.spec.feature_contract,
+    )?;
     let sinks = ServingEvidenceSinks::new(&ch, stack.clickhouse_config.max_concurrent_inserts);
     let population = seed_feedback_population(
         &FeedbackReportSeedContext {
@@ -489,7 +496,7 @@ struct FeedbackReportSeedContext<'a> {
     infra: &'a SharedDemoInfra,
     artifacts: &'a Arc<dyn ArtifactStore>,
     clickhouse: &'a ClickHouseConfig,
-    schema: &'a FeatureSchema,
+    schema: &'a ExecutableFeatureSchema,
     model: &'a ModelVersionInfo,
     sinks: &'a ServingEvidenceSinks,
 }
@@ -768,7 +775,7 @@ fn serving_evidence(
             book_available_at: ids.decision_at,
             selection: (&selected_market).into(),
         },
-        trade_tape_source: TradeTapeSourceEvidence::not_required(),
+        finalized_execution_evidence: FinalizedExecutionEvidence::not_required(),
         identity: recommendation.identity.clone(),
         market_context: recommendation.market_context.clone(),
         data_quality: DataQualityStatus::Fresh,

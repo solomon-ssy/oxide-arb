@@ -70,8 +70,8 @@ use quant_pivot_models::{
     runtime_config::{ActivePolicyBundle, BuyModelRoute},
     types::{
         ContentHash, DeploymentEnvironment, FeatureParityRunId, FeatureParityStateId,
-        FeedbackCycleId, MarketId, ModelVersionId, RecommendationId, RecommendationReportId,
-        ReportRouteRunId, ResearchJobId, ResearchProfileRef, TradeTapeSourceEvidence, WorkerId,
+        FeedbackCycleId, FinalizedExecutionEvidence, MarketId, ModelVersionId, RecommendationId,
+        RecommendationReportId, ReportRouteRunId, ResearchJobId, ResearchProfileRef, WorkerId,
         builtin_research_profiles,
     },
 };
@@ -118,7 +118,7 @@ use toml::{Table, Value};
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
-    matchers::{method, path, path_regex},
+    matchers::{method, path, path_regex, query_param},
 };
 
 use crate::{
@@ -127,8 +127,9 @@ use crate::{
     stack::{BOOTSTRAP_ADMIN_PASSWORD, SystemStack},
     support::execution_pg_seed::{
         FeedbackServingFixtureConfig, ReportSeedConfig, SharedDemoInfra, enable_test_admission,
-        fill_entry_lot, fixture_profile_ref, seed_approved_intent, seed_demo_with_store,
-        seed_feedback_serving_infra, seed_pending_intent, seed_production_report,
+        fill_entry_lot, fixture_no_token_id, fixture_profile_ref, seed_approved_intent,
+        seed_demo_with_store, seed_feedback_serving_infra, seed_pending_intent,
+        seed_production_report,
     },
     support::feedback_closure_seed::{
         CLOSURE_REPORT_HORIZON_HOURS, FeedbackClosureFixture, FeedbackClosureOutcome,
@@ -157,7 +158,7 @@ const DETERMINISTIC_POLYGON_BLOCK_SECS: i64 = 2;
 // The full-stack fixture deliberately exercises the explicit source-unavailable
 // serving path. Keep this single constant shared by generated deploy config and
 // the frozen evidence attached to pre-startup live-inference fixtures.
-const FIXTURE_TRADE_TAPE_ON_CHAIN_ENABLED: bool = false;
+const FIXTURE_EXECUTION_HISTORY_ON_CHAIN_ENABLED: bool = false;
 const STANDARD_ADAPTER: &str = "0xada100db00ca00073811820692005400218fce1f";
 const NEG_RISK_ADAPTER: &str = "0xada2005600dec949baf300f4c6120000bdb6eaab";
 const CONTRACT_OWNER: &str = "0x47ebfac3353314c788b96cdcbf41daadfe03629c";
@@ -934,10 +935,22 @@ impl ProductionStackFixture {
             .await;
         Mock::given(method("GET"))
             .and(path("/events/keyset"))
+            .and(query_param("active", "true"))
+            .and(query_param("closed", "false"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(self.deterministic_gamma(report_resolves_at)?),
             )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/events/keyset"))
+            .and(query_param("active", "false"))
+            .and(query_param("closed", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "events": [],
+                "next_cursor": null,
+            })))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -3155,12 +3168,11 @@ async fn seed_browser_fixture(
         research.cancellable_research_job_id,
     );
     ensure!(
-        !FIXTURE_TRADE_TAPE_ON_CHAIN_ENABLED,
-        "pre-startup closure serving evidence requires the deterministic trade-tape source to remain disabled"
+        !FIXTURE_EXECUTION_HISTORY_ON_CHAIN_ENABLED,
+        "pre-startup closure serving evidence requires deterministic execution history to remain disabled"
     );
-    let runtime_trade_tape_source =
-        TradeTapeSourceEvidence::runtime(FIXTURE_TRADE_TAPE_ON_CHAIN_ENABLED, Vec::new())
-            .map_err(AnyhowError::msg)?;
+    let runtime_finalized_execution_evidence =
+        FinalizedExecutionEvidence::runtime(FIXTURE_EXECUTION_HISTORY_ON_CHAIN_ENABLED, None, None);
     let closure = Box::pin(seed_optional_closure(OptionalClosureSeed {
         db,
         clickhouse_config,
@@ -3170,7 +3182,7 @@ async fn seed_browser_fixture(
         historical_feedback_cycle_id: research.feedback_cycle_id,
         fixture,
         report_resolves_at,
-        runtime_trade_tape_source,
+        runtime_finalized_execution_evidence,
     }))
     .await?;
     if closure.is_some() {
@@ -3296,7 +3308,7 @@ struct OptionalClosureSeed<'a> {
     historical_feedback_cycle_id: FeedbackCycleId,
     fixture: ProductionStackFixture,
     report_resolves_at: DateTime<Utc>,
-    runtime_trade_tape_source: TradeTapeSourceEvidence,
+    runtime_finalized_execution_evidence: FinalizedExecutionEvidence,
 }
 
 async fn seed_optional_closure(
@@ -3311,7 +3323,7 @@ async fn seed_optional_closure(
         historical_feedback_cycle_id,
         fixture,
         report_resolves_at,
-        runtime_trade_tape_source,
+        runtime_finalized_execution_evidence,
     } = input;
     if !matches!(
         fixture,
@@ -3327,7 +3339,7 @@ async fn seed_optional_closure(
         champion_model_version_id: model_version_id,
         historical_feedback_cycle_id,
         report_resolves_at,
-        runtime_trade_tape_source,
+        runtime_finalized_execution_evidence,
     }))
     .await
     .map(Some)
@@ -3638,8 +3650,18 @@ fn deterministic_market_by_condition(request: &Request) -> ResponseTemplate {
             &condition_id,
             "production-stack-external-event",
             "Crypto",
-            900_001,
-            900_002,
+            &900_001.to_string(),
+            &900_002.to_string(),
+        );
+    }
+    if condition_id == "0xmarket" {
+        let no_token_id = fixture_no_token_id(&condition_id, "token-1");
+        return gamma_market_response(
+            &condition_id,
+            "evt-1",
+            "Weather",
+            "token-1",
+            no_token_id.as_str(),
         );
     }
     let Some(identity) = condition_id.strip_prefix("feedback-closure-") else {
@@ -3674,8 +3696,8 @@ fn deterministic_market_by_condition(request: &Request) -> ResponseTemplate {
         &condition_id,
         &event_id,
         category,
-        yes_base + ordinal,
-        no_base + ordinal,
+        &(yes_base + ordinal).to_string(),
+        &(no_base + ordinal).to_string(),
     )
 }
 
@@ -3722,8 +3744,8 @@ fn gamma_market_response(
     condition_id: &str,
     event_id: &str,
     category: &str,
-    yes_token_id: usize,
-    no_token_id: usize,
+    yes_token_id: &str,
+    no_token_id: &str,
 ) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(serde_json::json!([{
         "conditionId": condition_id,
@@ -3731,7 +3753,7 @@ fn gamma_market_response(
         "active": true,
         "closed": false,
         "feesEnabled": true,
-        "clobTokenIds": [yes_token_id.to_string(), no_token_id.to_string()],
+        "clobTokenIds": [yes_token_id, no_token_id],
         "outcomes": ["Yes", "No"],
         "events": [{
             "id": event_id,
@@ -4223,8 +4245,8 @@ fn configure_upstreams(
     )?;
     set(
         config,
-        &["market_data", "trade_tape_on_chain", "enabled"],
-        FIXTURE_TRADE_TAPE_ON_CHAIN_ENABLED,
+        &["market_data", "finalized_exchange_history", "enabled"],
+        FIXTURE_EXECUTION_HISTORY_ON_CHAIN_ENABLED,
     )?;
     for source in DISABLED_DOMAIN_SOURCES {
         set(config, &["domain_sources", source, "enabled"], false)?;

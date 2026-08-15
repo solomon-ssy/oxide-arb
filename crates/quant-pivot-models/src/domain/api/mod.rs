@@ -171,15 +171,18 @@ pub use runtime_config::{
     SchedulePreviewView, ValidatePolicyDraftRequest,
 };
 pub use structural_monitor::{
-    MissingReasonCountView, NegRiskEventDriftView, NegRiskLegView,
-    ParticipantConcentrationDetailView, ParticipantConcentrationMarketView,
-    ParticipantConcentrationParticipantView, ParticipantConcentrationSummaryView,
-    TradeTapeCoverageView, TradeTapeSourceHealthView,
+    ExchangeHistorySourceView, ExecutionHistoryCoverageView, MissingReasonCountView,
+    NegRiskEventDriftView, NegRiskLegView, ParticipantConcentrationDetailView,
+    ParticipantConcentrationMarketView, ParticipantConcentrationParticipantView,
+    ParticipantConcentrationSummaryView,
 };
 pub use system::{
-    ActionEligibilityDecision, ActionEligibilityView, CapabilityView, SetKillSwitchRequest,
-    SwitchQuantModeRequest, SwitchSettlementWritePolicyRequest, SystemCapabilities,
-    SystemStatusView,
+    ActionEligibilityDecision, ActionEligibilityView, CapabilityView, FreshBootBlockerCode,
+    FreshBootBlockerScope, FreshBootBlockerView, FreshBootProfileProgressView,
+    FreshBootProgressView, FreshBootRecommendedAction, FreshBootRunDetailView,
+    FreshBootRunEventView, FreshBootRunProgressView, RetryFreshBootRunRequest,
+    SetKillSwitchRequest, SupersedeFreshBootRunRequest, SwitchQuantModeRequest,
+    SwitchSettlementWritePolicyRequest, SystemCapabilities, SystemStatusView,
 };
 pub use trade_policy::{
     FitTradePolicyRequest, TradePolicyAuditListQuery, TradePolicyDetailView,

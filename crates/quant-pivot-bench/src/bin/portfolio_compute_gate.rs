@@ -10,11 +10,12 @@ use quant_pivot_models::{
     domain::{
         market::{book::BookLevel, fee::BuilderFeeAttribution},
         quant::{
-            DiscountCurvePoint, GlobalPortfolioPlan, PortfolioScenarioFitEvidence,
-            PortfolioScenarioKind, PortfolioScenarioModelArtifact, PortfolioScenarioModelState,
-            PortfolioScenarioResamplingMethod, PortfolioScenarioRouteFactor,
-            PortfolioScenarioRouteFitLineage, PortfolioScenarioRouteModelLineage,
-            PortfolioScenarioVisibility, RepresentedRouteSet, ScenarioDistribution, ScenarioWeight,
+            DiscountCurvePoint, GlobalPortfolioPlan, PortfolioScenarioEvidenceRegime,
+            PortfolioScenarioFitEvidence, PortfolioScenarioKind, PortfolioScenarioModelArtifact,
+            PortfolioScenarioModelState, PortfolioScenarioResamplingMethod,
+            PortfolioScenarioRouteFactor, PortfolioScenarioRouteFitLineage,
+            PortfolioScenarioRouteModelLineage, PortfolioScenarioVisibility, RepresentedRouteSet,
+            ScenarioDistribution, ScenarioWeight,
         },
     },
     enums::{
@@ -329,7 +330,7 @@ fn scenario_contract(
 )> {
     let serving_contract_digest = hash("serving-contract")?;
     let calibration_contract_digest = hash("calibration-contract")?;
-    let trade_policy_contract_digest = hash("trade-policy-contract")?;
+    let recommendation_contract_digest = hash("recommendation-contract")?;
     let discount_curve = policy
         .tail_risk
         .capital_time_buckets
@@ -364,7 +365,7 @@ fn scenario_contract(
         .copied()
         .enumerate()
         .map(|(index, route)| {
-            route_lineage(index, route, decision_at, trade_policy_contract_digest)
+            route_lineage(index, route, decision_at, recommendation_contract_digest)
         })
         .collect::<QuantResult<Vec<_>>>()?;
     let pending_hash = hash("pending-model")?;
@@ -373,6 +374,7 @@ fn scenario_contract(
             &pending_hash,
         ),
         schema_version: SchemaVersion::FIRST,
+        evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
         as_of: decision_at,
         fit_window_start: decision_at - Duration::days(30),
         time_bucket_secs: 3_600,
@@ -380,7 +382,7 @@ fn scenario_contract(
         route_set_digest: routes.digest,
         serving_contract_digest,
         calibration_contract_digest,
-        trade_policy_contract_digest,
+        recommendation_contract_digest,
         capital_time_bucket_contract_digest,
         scenario_random_stream_hash: hash("scenario-random-stream")?,
         pit_residual_panel_hash: hash("pit-residual-panel")?,
@@ -405,7 +407,7 @@ fn scenario_contract(
         route_set_digest: routes.digest,
         serving_contract_digest,
         calibration_contract_digest,
-        trade_policy_contract_digest,
+        recommendation_contract_digest,
         scenario_model_schema_version: SchemaVersion::FIRST,
         capital_time_bucket_contract_digest,
         model_content_hash: model.content_hash,
@@ -471,7 +473,7 @@ fn route_lineage(
     index: usize,
     route: BuyModelRoute,
     decision_at: DateTime<Utc>,
-    trade_policy_contract_hash: ContentHash,
+    recommendation_contract_hash: ContentHash,
 ) -> QuantResult<PortfolioScenarioRouteFitLineage> {
     let offset = u128::try_from(index).map_err(|error| QuantError::config(error.to_string()))?;
     let evaluated_id = ModelVersionId::new(Uuid::from_u128(1_000 + offset * 10));
@@ -493,7 +495,7 @@ fn route_lineage(
         },
         calibration_artifact_id: CalibrationArtifactId::new(Uuid::from_u128(3_000 + offset)),
         calibration_artifact_hash: hash(&format!("calibration-{route:?}"))?,
-        trade_policy_contract_hash,
+        recommendation_contract_hash,
         fit_window_start: decision_at - Duration::days(30),
         fit_window_end: decision_at,
     })

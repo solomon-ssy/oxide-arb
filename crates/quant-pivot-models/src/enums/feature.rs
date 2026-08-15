@@ -18,8 +18,8 @@ pub enum EvidenceSourceKind {
     GammaMetadata,
     /// A persisted `ClickHouse` fact (microstructure / tick window).
     ClickHouseFact,
-    /// Persisted full-market trade tape.
-    TradeTape,
+    /// Dual-provider-attested finalized economic executions.
+    FinalizedExecution,
     /// Derived/computed from other in-memory inputs.
     Derived,
     /// A crypto-domain observation (`quant_domain_observation`: Binance
@@ -41,7 +41,7 @@ impl EvidenceSourceKind {
             Self::Book => "book",
             Self::GammaMetadata => "gamma_metadata",
             Self::ClickHouseFact => "clickhouse_fact",
-            Self::TradeTape => "trade_tape",
+            Self::FinalizedExecution => "finalized_execution",
             Self::Derived => "derived",
             Self::DomainCrypto => "domain_crypto",
             Self::DomainWeather => "domain_weather",
@@ -59,7 +59,7 @@ impl EvidenceSourceKind {
             Self::Book => Some(DecisionSource::Book),
             Self::GammaMetadata => Some(DecisionSource::Catalog),
             Self::ClickHouseFact => Some(DecisionSource::Microstructure),
-            Self::TradeTape => Some(DecisionSource::TradeTape),
+            Self::FinalizedExecution => Some(DecisionSource::FinalizedExecution),
             Self::Derived => None,
             Self::DomainCrypto => Some(DecisionSource::DomainCrypto),
             Self::DomainWeather => Some(DecisionSource::DomainWeather),

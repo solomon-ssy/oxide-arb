@@ -25,9 +25,9 @@ use quant_pivot_models::{
             FeedbackCycleKeyInput, FeedbackSchedulerClaim, FeedbackSchedulerControl,
             FeedbackSchedulerSuccess, FeedbackStageEventInput, GovernedFeedbackCancellation,
             GovernedFeedbackTrigger, IssuePromotionPermit, ModelGovernanceAuditDetail,
-            NewFeedbackCycle, NewFeedbackSchedulerState, NewFeedbackStageEvent, PromoteModelRoute,
-            PromotionPermitActor, PromotionPermitInfo, RemediateResolutionProjection,
-            RevokePromotionPermit,
+            ModelRouteBootstrapActor, NewFeedbackCycle, NewFeedbackSchedulerState,
+            NewFeedbackStageEvent, PromoteModelRoute, PromotionPermitActor, PromotionPermitInfo,
+            RemediateResolutionProjection, RevokePromotionPermit,
         },
     },
     enums::{
@@ -71,6 +71,20 @@ use crate::{
 
 const FEEDBACK_SOURCE_PROGRAM_DOMAIN: &str = "quant-pivot/feedback-source-program";
 const FEEDBACK_SOURCE_PROGRAM_VERSION: u32 = 1;
+const INACTIVE_SERVING_PROFILE_REASON: &str = "inactive_serving_profile";
+const INACTIVE_SERVING_PROFILE_NOTE: &str = "Automatically paused because this profile is not the published champion for its canonical route.";
+
+const fn scheduler_pause_action(
+    route_active: bool,
+    paused: bool,
+    automatically_paused: bool,
+) -> Option<bool> {
+    match (route_active, paused, automatically_paused) {
+        (false, false, _) => Some(true),
+        (true, true, true) => Some(false),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone)]
 struct FeedbackCycleAttempt {
@@ -548,10 +562,42 @@ impl CoreFeedbackMutationPort {
     /// Reconcile every governed built-in profile into durable scheduler state.
     pub(crate) async fn sync_scheduler_profiles(&self) -> QuantResult<()> {
         let database_now = self.deps.cycles.database_time().await?;
+        let active_profile_ids = [
+            BuyModelRoute::Pooled,
+            BuyModelRoute::Crypto,
+            BuyModelRoute::Weather,
+        ]
+        .into_iter()
+        .filter_map(|route| {
+            self.deps
+                .serving_generations
+                .current_route(route)
+                .map(|snapshot| snapshot.active_version().profile_ref.id.clone())
+        })
+        .collect::<Vec<_>>();
         for profile in builtin_research_profiles().map_err(Self::invalid)? {
             self.deps
                 .scheduler
                 .sync_state(NewFeedbackSchedulerState::try_new(&profile, database_now)?)
+                .await?;
+        }
+        for state in self.deps.scheduler.list_states().await? {
+            let route_active = active_profile_ids.contains(&state.research_profile_id);
+            let automatically_paused =
+                state.pause_reason_code.as_deref() == Some(INACTIVE_SERVING_PROFILE_REASON);
+            let pause = scheduler_pause_action(route_active, state.paused, automatically_paused);
+            let Some(pause) = pause else {
+                continue;
+            };
+            self.deps
+                .scheduler
+                .apply_control(FeedbackSchedulerControl {
+                    research_profile_id: state.research_profile_id,
+                    expected_pause_revision: state.pause_revision,
+                    pause,
+                    reason_code: INACTIVE_SERVING_PROFILE_REASON.to_owned(),
+                    note: INACTIVE_SERVING_PROFILE_NOTE.to_owned(),
+                })
                 .await?;
         }
         Ok(())
@@ -1032,10 +1078,10 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
             expected_policy_generation: request.expected_policy_generation,
             expected_runtime_control_revision: request.expected_runtime_control_revision,
             idempotency_key: request.idempotency_key,
-            actor: PromotionPermitActor {
+            actor: ModelRouteBootstrapActor::Operator(PromotionPermitActor {
                 user_id: actor.user_id,
                 acting_role: actor.acting_role,
-            },
+            }),
             reason_code: request.reason_code,
             note: request.note,
         }))
@@ -1073,7 +1119,15 @@ mod tests {
         builtin_research_profiles,
     };
 
-    use super::FeedbackCycleFreezePlan;
+    use super::{FeedbackCycleFreezePlan, scheduler_pause_action};
+
+    #[test]
+    fn scheduler_pause_is_governed() {
+        assert_eq!(scheduler_pause_action(false, false, false), Some(true));
+        assert_eq!(scheduler_pause_action(true, true, true), Some(false));
+        assert_eq!(scheduler_pause_action(true, true, false), None);
+        assert_eq!(scheduler_pause_action(false, true, true), None);
+    }
 
     #[test]
     fn cadence_cutoff_is_stable() {

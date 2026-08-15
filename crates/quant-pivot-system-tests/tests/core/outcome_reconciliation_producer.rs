@@ -40,8 +40,8 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
-        MidPriceBucketRow, TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, ExecutionParticipantFactRow,
+        ExecutionParticipantRow, MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow,
     },
     domain::{
         data_plane::{
@@ -201,23 +201,43 @@ impl QuantFactReadRepository for MemoryResolutionFacts {
         Ok(Vec::new())
     }
 
-    async fn last_trades(
+    async fn last_executions(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _limit: u64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
         Ok(Vec::new())
     }
 
-    async fn market_tape_window(
+    async fn market_executions_between(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn execution_participants_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<ExecutionParticipantRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn market_execution_window(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<ExecutionParticipantFactRow>, StorageError> {
         Ok(Vec::new())
     }
 

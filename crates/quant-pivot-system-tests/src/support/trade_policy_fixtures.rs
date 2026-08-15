@@ -78,7 +78,7 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     execution_semantics::EXECUTION_SEMANTICS_VERSION,
     factors::FactorEngine,
-    features::FeatureSchema,
+    features::ExecutableFeatureSchema,
     hashing::ResearchHasher,
     model::ReturnModelSpec,
     policy_evidence::{PolicyEvidenceParquetCodec, PolicyEvidenceRecord},
@@ -393,11 +393,20 @@ impl<'a> TradePolicyFixtureContext<'a> {
         let features = &policy.snapshot.profile_artifacts.features.definition;
         let scoring = &policy.snapshot.profile_artifacts.scoring.definition;
         let domain = &policy.snapshot.profile_artifacts.domain.definition;
-        let feature_schema_hash = ResearchHasher::feature_schema(&FeatureSchema::build(features)?)?;
-        let factor_plane =
-            FactorEngine::for_model_scope(scoring, features, domain, profile.spec.category, None)
-                .serving_plane()?
-                .clone();
+        let feature_schema_hash = ResearchHasher::feature_schema(&ExecutableFeatureSchema::build(
+            features,
+            profile.spec.feature_contract,
+        )?)?;
+        let factor_plane = FactorEngine::for_model_scope(
+            scoring,
+            features,
+            domain,
+            profile.spec.feature_contract,
+            profile.spec.category,
+            None,
+        )
+        .serving_plane()?
+        .clone();
         let research_program_hash =
             ResearchHasher::canonical(&("system-trade-policy-program-v1", scope, category))?;
         let fit_window = PolicyFitWindow::derive(&profile, training_window_start)?;

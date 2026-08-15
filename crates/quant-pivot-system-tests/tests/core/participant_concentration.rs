@@ -1,8 +1,8 @@
-//! Structural trade-tape participant-concentration system contracts.
+//! Finalized execution-participant concentration system contracts.
 //!
 //! # Contract
 //!
-//! Given a whale-heavy on-chain trade-tape fixture, the test locks three planes
+//! Given a whale-heavy finalized-execution fixture, the test locks three planes
 //! on the **same Postgres catalog** and a **domain-disabled** runtime config
 //! (this path is intentionally orthogonal to the crypto domain vertical):
 //!
@@ -48,10 +48,9 @@ use quant_pivot_core::{
 use quant_pivot_error::{control::ControlError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
-        MidPriceBucketRow, TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, ExecutionParticipantFactRow,
+        ExecutionParticipantRow, MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow,
     },
-    config::TradeTapeOnChainConfig,
     domain::{
         data_plane::DecisionClock,
         market::{
@@ -74,7 +73,8 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FeatureValue,
-        FeatureVectorId, MarketId, ModelRunId, Price, Shares, TokenId, Usd,
+        FeatureVectorId, MarketId, ModelRunId, Price, ResearchFeatureContract, Shares, TokenId,
+        Usd,
     },
 };
 use quant_pivot_repository::{
@@ -88,29 +88,30 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_research::{
+    execution_history::{
+        ConcentrationCompositeWeights, participant_concentration::composite_concentration,
+    },
     factors::{FactorEngine, names::STRUCT_PARTICIPANT_CONCENTRATION},
     features::{
         FeatureVector,
         names::structural::{PARTICIPANT_CR1_SHARE, PARTICIPANT_GINI, PARTICIPANT_HHI},
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
-    trade_tape::{
-        ConcentrationCompositeWeights, participant_concentration::composite_concentration,
-    },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
 use quant_pivot_system_tests::{
     postgres::{ScenarioDatabase, setup_pg},
     support::{
         catalog_fixtures::{make_event, make_market},
+        execution_history_fixtures::{
+            ConfigurableFactRead, live_history_config, live_history_repo,
+            whale_concentration_by_market,
+        },
         fact_sink::DiscardFactWriter,
         factor_definitions::register_all_factor_definitions,
         pit::InMemoryDecisionSnapshotSource,
         publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
-        trade_tape_fixtures::{
-            ConfigurableFactRead, live_tape_cursor_repo, whale_concentration_by_market,
-        },
     },
 };
 use rust_decimal::Decimal;
@@ -179,23 +180,43 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn market_tape_window(
+    async fn market_execution_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<ExecutionParticipantFactRow>, StorageError> {
         Ok(Vec::new())
     }
 
-    async fn last_trades(
+    async fn last_executions(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _limit: u64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn market_executions_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn execution_participants_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<ExecutionParticipantRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -286,7 +307,7 @@ impl Catalog {
             event_id: EventId::new(self.event_id),
             token_yes: TokenId::new(self.yes_token),
             token_no: TokenId::new(self.no_token),
-            question: "Trade tape concentration E2E?".into(),
+            question: "Execution history concentration E2E?".into(),
             slug: "tape-conc-e2e".into(),
             description: None,
             categories: CategorySet::from(MarketCategory::Sports),
@@ -338,7 +359,7 @@ async fn seed_catalog(db: &DatabaseConnection, catalog: &Catalog) {
         .upsert(make_market(
             catalog.market_id,
             catalog.event_id,
-            "Trade tape concentration E2E?",
+            "Execution history concentration E2E?",
             "tape-conc-e2e",
             MarketCategory::Sports,
             Some(Utc::now() + ChronoDuration::days(5)),
@@ -490,11 +511,11 @@ impl WhaleTapeConcHarness {
             window_provider: FeatureWindowProvider::new(Arc::clone(&self.fact_read)),
             feature_repo: Arc::clone(&feature_repo),
             event_writer: noop_feature_writer(),
-            block_cursor_repo: live_tape_cursor_repo(),
+            exchange_history_repo: live_history_repo(),
             linkage_repo: Arc::new(EmptyLinkageRepo),
             basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
             calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(self.db.clone())),
-            trade_tape_on_chain: TradeTapeOnChainConfig::default(),
+            finalized_exchange_history: live_history_config(),
         });
 
         let domain = DomainConfig::disabled();
@@ -502,6 +523,7 @@ impl WhaleTapeConcHarness {
         feature_pipeline
             .run(FeaturePipelineRequest {
                 included: &included,
+                feature_contract: ResearchFeatureContract::FullL2,
                 boundary: DecisionClock::new(0)
                     .boundary(self.as_of)
                     .expect("decision boundary"),
@@ -539,8 +561,8 @@ fn concentration_feature_decimals(vector: &FeatureVector) -> (Decimal, Decimal, 
 fn assert_whale_concentration_features(vector: &FeatureVector) -> Decimal {
     let (gini, cr1, hhi) = concentration_feature_decimals(vector);
     assert!(
-        cr1 >= Decimal::new(85, 2),
-        "whale window cr1 should reflect ~90% top share, got {cr1}"
+        cr1 >= Decimal::new(40, 2),
+        "bilateral whale window cr1 should reflect the concentrated maker, got {cr1}"
     );
     assert!(
         gini > Decimal::ZERO,
@@ -561,9 +583,16 @@ async fn run_factor_round_concentration(
 
     let factor_repo =
         Arc::new(PgFactorRepository::new(harness.db.clone())) as Arc<dyn FactorRepository>;
-    register_all_factor_definitions(factor_repo.as_ref(), &factors, &features, &domain)
-        .await
-        .expect("register immutable factor definitions");
+    register_all_factor_definitions(
+        factor_repo.as_ref(),
+        &factors,
+        &features,
+        &domain,
+        ResearchFeatureContract::FullL2,
+        None,
+    )
+    .await
+    .expect("register immutable factor definitions");
 
     let model_run_id = ModelRunId::from_v7();
     PgModelRunRepository::new(harness.db.clone())
@@ -596,8 +625,15 @@ async fn run_factor_round_concentration(
         noop_factor_writer(),
         Arc::new(ComputeExecutor::new().expect("test compute executor")),
     );
-    let factor_execution = FactorExecutionPlane::try_new(&factors, &features, &domain, None, None)
-        .expect("factor execution plane");
+    let factor_execution = FactorExecutionPlane::try_new(
+        &factors,
+        &features,
+        &domain,
+        ResearchFeatureContract::FullL2,
+        None,
+        None,
+    )
+    .expect("factor execution plane");
     let factor_result = factor_service
         .run(FactorPipelineRequest {
             model_run_id: &model_run_id,
@@ -634,7 +670,7 @@ async fn run_factor_round_concentration(
     let raw = concentration
         .value
         .raw_value
-        .expect("participant concentration must score from whale trade tape");
+        .expect("participant concentration must score from finalized executions");
     assert_eq!(
         raw.round_dp(12),
         expected_composite.round_dp(12),
@@ -651,9 +687,9 @@ async fn assert_monitor_matches_canonical(
         Arc::clone(&harness.registry),
         Arc::clone(&harness.book_store),
         Arc::new(FeatureWindowProvider::new(Arc::clone(&harness.fact_read))),
-        live_tape_cursor_repo(),
+        live_history_repo(),
         Arc::new(FixedRuntimeConfig(runtime)),
-        TradeTapeOnChainConfig::default(),
+        live_history_config(),
     );
     let summary = monitor
         .participant_concentration()
@@ -692,7 +728,7 @@ async fn assert_monitor_matches_canonical(
     );
 }
 
-pub async fn whale_trade_tape_monitor() {
+pub async fn whale_execution_history_monitor() {
     let harness = WhaleTapeConcHarness::fixture().await;
     let feature_result = harness.run_whale_feature_pipeline().await;
 

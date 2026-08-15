@@ -12,8 +12,7 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
         api::{
-            BasisAlertListQuery, EquitySnapshotView, ExecutionOrderListQuery,
-            FactorDefinitionListQuery, LiveAccountView, ModelVersionListQuery,
+            BasisAlertListQuery, EquitySnapshotView, ExecutionOrderListQuery, LiveAccountView,
             OrderIntentListQuery, QuantReportListQuery, QuantReportView, ReconciliationListQuery,
             ReportRunListQuery, RuntimeActivityReadQuery, SystemStatusView,
             dashboard::{
@@ -22,8 +21,8 @@ use quant_pivot_models::{
                 DashboardDataPlaneView, DashboardExecutionRuntimeView, DashboardExposureView,
                 DashboardLifecycleView, DashboardOverviewQuery, DashboardOverviewView,
                 DashboardPrimaryAction, DashboardReasonCode, DashboardReportRuntimeView,
-                DashboardReportView, DashboardResearchReadinessView, DashboardRuntimeActivityView,
-                DashboardSection, DashboardSubsystemHealthView, DashboardWindow,
+                DashboardReportView, DashboardRuntimeActivityView, DashboardSection,
+                DashboardSubsystemHealthView, DashboardWindow,
             },
         },
         data_plane::DataQualitySnapshot,
@@ -52,7 +51,6 @@ use crate::{
 
 const SECTION_TIMEOUT: Duration = Duration::from_secs(3);
 const EQUITY_STALE_AFTER_SECS: i64 = 86_400;
-const RESEARCH_HISTORY_GATE_DAYS: u32 = 200;
 
 #[derive(Clone, Copy)]
 struct DashboardPermissions(u16);
@@ -211,7 +209,6 @@ impl DashboardRequest {
             equity_curve,
             latest_report,
             report_lifecycle,
-            research_readiness,
             subsystem_health,
             runtime_activity,
             report_runtime,
@@ -233,10 +230,6 @@ impl DashboardRequest {
                 self.permissions.allows(DashboardPermission::ReadReports)
             ),
             load_report_lifecycle(state, self.permissions, window_start, self.generated_at),
-            load_research_readiness(
-                state,
-                self.permissions.allows(DashboardPermission::ReadResearch)
-            ),
             load_subsystem_health(
                 state,
                 self.permissions.allows(DashboardPermission::ReadSystem)
@@ -260,7 +253,6 @@ impl DashboardRequest {
             report_lifecycle,
             exposures,
             data_quality,
-            research_readiness,
             subsystem_health,
             action_inbox,
             runtime_activity,
@@ -317,50 +309,6 @@ async fn overview(
     Ok(HttpResponse::Ok()
         .insert_header((CACHE_CONTROL, "private, no-store"))
         .json(WebResponse::ok(response)))
-}
-
-async fn load_research_readiness(
-    state: &AppState,
-    allowed: bool,
-) -> DashboardSection<DashboardResearchReadinessView> {
-    guarded(allowed, DashboardReasonCode::EvidenceMissing, None, async {
-        let (snapshot, factors, models) = tokio::try_join!(
-            state.research_readiness.snapshot(),
-            state
-                .research_catalog
-                .list_factors(FactorDefinitionListQuery {
-                    page: PageRequest::new(1, 1),
-                    ..FactorDefinitionListQuery::default()
-                }),
-            state.research_catalog.list_models(ModelVersionListQuery {
-                page: PageRequest::new(1, 1),
-                ..ModelVersionListQuery::default()
-            }),
-        )?;
-        let Some(snapshot) = snapshot else {
-            return Ok(None);
-        };
-        let required_history_days = snapshot
-            .required_history_days
-            .max(RESEARCH_HISTORY_GATE_DAYS);
-        let history_ready = snapshot.retention_ready
-            && snapshot
-                .observed_history_days
-                .is_some_and(|days| days >= required_history_days);
-        let factor_gate_ready = history_ready && !factors.items.is_empty();
-        let model_gate_ready =
-            factor_gate_ready && snapshot.latency_ready && !models.items.is_empty();
-        Ok(Some((
-            snapshot.observed_at,
-            DashboardResearchReadinessView {
-                required_history_days,
-                observed_history_days: snapshot.observed_history_days,
-                factor_gate_ready,
-                model_gate_ready,
-            },
-        )))
-    })
-    .await
 }
 
 async fn permission(

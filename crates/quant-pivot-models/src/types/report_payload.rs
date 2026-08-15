@@ -38,8 +38,9 @@ use crate::{
     types::{
         BookSnapshotRef, Bps, ContentHash, DecisionPolicySnapshotId, EconomicTierId,
         EntryConditionPlan, EventId, FactorDefinitionId, FeatureVectorId, MarketSelectionId,
-        ModelRunId, ModelVersionId, Price, Probability, ReportDataQualitySnapshotId, Shares,
-        SignalCandidateId, TradePolicyArtifactId, TradePolicyCohortKey, Usd, UsdHours,
+        ModelRunId, ModelVersionId, Price, Probability, ReportDataQualitySnapshotId,
+        ResearchFeatureContract, ResearchProfileRef, Shares, SignalCandidateId,
+        TradePolicyArtifactId, TradePolicyCohortKey, Usd, UsdHours,
     },
 };
 
@@ -177,18 +178,79 @@ pub struct TradePolicyCohortProvenance {
     pub cohort_key: TradePolicyCohortKey,
 }
 
-/// The single authoritative recommendation trade-plan contract.
+/// Exact decision-policy lineage behind one published recommendation.
 ///
-/// A published Recommendation always owns a complete, executable and globally
-/// verified plan. Missing calibration, policy, scenario or L2 evidence fails
-/// the report run before publication, so no unavailable wire variant exists.
+/// Bootstrap recommendations bind their immutable L2-free profile instead of
+/// pretending that a historical execution-policy fit exists.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum RecommendationPolicyProvenance {
+    TradePolicy {
+        artifact_id: TradePolicyArtifactId,
+        artifact_hash: ContentHash,
+        cohort_index: u32,
+        cohort_key: Box<TradePolicyCohortKey>,
+    },
+    BootstrapProfile {
+        profile_ref: ResearchProfileRef,
+        feature_contract: ResearchFeatureContract,
+        recommendation_contract_hash: ContentHash,
+    },
+}
+
+impl From<TradePolicyCohortProvenance> for RecommendationPolicyProvenance {
+    fn from(value: TradePolicyCohortProvenance) -> Self {
+        Self::TradePolicy {
+            artifact_id: value.artifact_id,
+            artifact_hash: value.artifact_hash,
+            cohort_index: value.cohort_index,
+            cohort_key: Box::new(value.cohort_key),
+        }
+    }
+}
+
+/// Honest report-only exit guidance for an L2-free bootstrap model.
+///
+/// This intentionally contains no synthetic take-profit, stop-loss, trailing,
+/// or opportunistic-exit thresholds. It is not accepted by execution paths.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapExitGuidance {
+    pub reference_horizon_secs: u64,
+    pub manual_review_at: DateTime<Utc>,
+    pub settlement_value_is_terminal: bool,
+    pub guidance: String,
+}
+
+/// Exit authority carried by a recommendation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum RecommendationExitPlan {
+    Executable { plan: Box<ExitPlan> },
+    BootstrapAdvisory { guidance: BootstrapExitGuidance },
+}
+
+impl From<ExitPlan> for RecommendationExitPlan {
+    fn from(value: ExitPlan) -> Self {
+        Self::Executable {
+            plan: Box::new(value),
+        }
+    }
+}
+
+/// The single authoritative recommendation plan contract.
+///
+/// Full-L2 recommendations own an executable exit plan. Bootstrap
+/// recommendations instead own explicit, non-executable manual guidance. Both
+/// regimes require calibration, an exact scenario binding, and live L2 entry
+/// and sizing evidence before publication.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct RecommendationTradePlan {
-    pub policy: Box<TradePolicyCohortProvenance>,
+    pub policy: Box<RecommendationPolicyProvenance>,
     pub entry: EntryPlan,
     pub sizing: Box<SizingPlan>,
-    pub exit: Box<ExitPlan>,
+    pub exit: Box<RecommendationExitPlan>,
     pub risk_envelope: Box<RiskEnvelope>,
 }
 

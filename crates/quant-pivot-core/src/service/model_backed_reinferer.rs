@@ -14,9 +14,9 @@ use quant_pivot_error::{
     storage::{StorageError, entity::QUANT_FACTOR},
 };
 use quant_pivot_models::{
-    config::TradeTapeOnChainConfig,
+    config::FinalizedExchangeHistoryConfig,
     domain::{
-        data_plane::{DecisionBoundary, DecisionClock, DecisionSource, TradeTapeSourceKind},
+        data_plane::{DecisionBoundary, DecisionClock, DecisionSource, ExchangeHistoryFrontier},
         quant::{
             LatestFactorSnapshotBundleInfo, LatestFactorSnapshotValueInfo, ModelVersionInfo,
             OrderIntentInfo, PositionInfo,
@@ -30,21 +30,21 @@ use quant_pivot_models::{
         DataQualityConfig, DecisionPolicySnapshot, DomainConfig, FactorsConfig, FeaturesConfig,
     },
     types::{
-        Bps, ContentHash, DecisionPolicySnapshotId, MarketId, ModelRunId, ModelVersionId, Price,
-        TradeTapeSourceEvidence, Usd, stable_name::FactorName,
+        Bps, ContentHash, DecisionPolicySnapshotId, FinalizedExecutionEvidence, MarketId,
+        ModelRunId, ModelVersionId, Price, ResearchFeatureContract, Usd, stable_name::FactorName,
     },
 };
 use quant_pivot_repository::traits::{
-    FactorRepository, ModelRegistryRepository, PolicyRepository, RecommendationRepository,
-    TradeTapeBlockCursorRepository,
+    ExchangeHistoryRepository, FactorRepository, ModelRegistryRepository, PolicyRepository,
+    RecommendationRepository,
 };
 use quant_pivot_research::{
     factors::{
         FactorEligibility, FactorValue, MarketFactorOutcome, NormalizedFactor, ScoredFactor,
     },
     features::{
-        ConfiguredFeatureBuilder, FeatureSourceWindows, FeatureVector, MarketWindowSnapshot,
-        TradeTapeWindowSnapshot,
+        ConfiguredFeatureBuilder, FeatureSourceWindows, FeatureVector,
+        FinalizedExecutionWindowSnapshot, MarketWindowSnapshot,
     },
     model::{ModelRuntimeOutput, QuantModelRuntime, SignalCandidate, SignalWarning},
     pit::{PointInTimeSnapshotSource, ResolvedMarketSnapshot},
@@ -54,7 +54,6 @@ use rust_decimal::Decimal;
 
 use crate::{
     governance::quality_gate_load::model_contract_ok,
-    ingest::trade_tape_health::{cursors_by_contract_address, market_tape_available},
     prefetch::feature_window::FeatureWindowProvider,
     projection::inference_batch::build_runtime_input,
     service::{
@@ -74,8 +73,8 @@ pub struct ModelBackedExitSignalReinfererDeps {
     pub factors: Arc<dyn FactorRepository>,
     pub pit_source: Arc<dyn PointInTimeSnapshotSource>,
     pub window_provider: FeatureWindowProvider,
-    pub block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
-    pub trade_tape_on_chain: TradeTapeOnChainConfig,
+    pub exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
+    pub finalized_exchange_history: FinalizedExchangeHistoryConfig,
 }
 
 /// Production [`ExitSignalReinferer`] that re-scores one lot via the frozen
@@ -195,12 +194,17 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             market: &market,
             features: &config.profile_artifacts.features.definition,
             domain: &config.profile_artifacts.domain.definition,
+            feature_contract: version
+                .profile_ref
+                .resolve_builtin_research_profile()
+                .map_err(QuantError::config)?
+                .spec
+                .feature_contract,
             data_quality: &config.recommendation.data_quality,
             requirements: &requirements,
             boundary: &boundary,
-            neg_risk: snapshot.market.neg_risk,
-            block_cursor_repo: self.deps.block_cursor_repo.as_ref(),
-            trade_tape_on_chain: &self.deps.trade_tape_on_chain,
+            exchange_history_repo: self.deps.exchange_history_repo.as_ref(),
+            finalized_exchange_history: &self.deps.finalized_exchange_history,
             liquidity_cap_usd,
         };
         let Some(vector) = build_live_feature_vector(&request).await? else {
@@ -258,57 +262,60 @@ pub(crate) struct LiveFeatureBuildRequest<'a> {
     pub market: &'a SelectedMarket,
     pub features: &'a FeaturesConfig,
     pub domain: &'a DomainConfig,
+    pub feature_contract: ResearchFeatureContract,
     pub data_quality: &'a DataQualityConfig,
     pub requirements: &'a ModelFeatureRequirements,
     pub boundary: &'a DecisionBoundary,
-    pub neg_risk: bool,
-    pub block_cursor_repo: &'a dyn TradeTapeBlockCursorRepository,
-    pub trade_tape_on_chain: &'a TradeTapeOnChainConfig,
+    pub exchange_history_repo: &'a dyn ExchangeHistoryRepository,
+    pub finalized_exchange_history: &'a FinalizedExchangeHistoryConfig,
     pub liquidity_cap_usd: Usd,
 }
 
 impl LiveFeatureBuildRequest<'_> {
-    async fn load_trade_tape(
+    async fn load_execution_history(
         &self,
         builder: &ConfiguredFeatureBuilder,
-    ) -> QuantResult<TradeTapeWindowSnapshot> {
-        if !builder.needs_trade_tape() {
-            return Ok(TradeTapeWindowSnapshot::empty(
+    ) -> QuantResult<FinalizedExecutionWindowSnapshot> {
+        if !builder.needs_execution_history() {
+            return Ok(FinalizedExecutionWindowSnapshot::empty(
                 self.market.market_id.clone(),
                 self.boundary.decision_at(),
-                self.boundary.cutoff_for(DecisionSource::TradeTape),
+                self.boundary.cutoff_for(DecisionSource::FinalizedExecution),
             ));
         }
-        if !self.trade_tape_on_chain.enabled {
-            let evidence =
-                TradeTapeSourceEvidence::runtime(false, Vec::new()).map_err(QuantError::config)?;
-            return Ok(TradeTapeWindowSnapshot::empty(
+        if !self.finalized_exchange_history.enabled {
+            let evidence = FinalizedExecutionEvidence::runtime(false, None, None);
+            return Ok(FinalizedExecutionWindowSnapshot::empty(
                 self.market.market_id.clone(),
                 self.boundary.decision_at(),
-                self.boundary.cutoff_for(DecisionSource::TradeTape),
+                self.boundary.cutoff_for(DecisionSource::FinalizedExecution),
             )
             .with_source_evidence(evidence, false));
         }
-        let cursors = self
-            .block_cursor_repo
-            .list_by_source(TradeTapeSourceKind::OnChain)
+        let accepted = self
+            .exchange_history_repo
+            .latest_accepted(ExchangeHistoryFrontier::Activation)
             .await?;
-        let by_address = cursors_by_contract_address(&cursors);
-        let source_available =
-            market_tape_available(self.trade_tape_on_chain, &by_address, self.neg_risk);
+        let accepted_block = accepted
+            .as_ref()
+            .and_then(|row| u64::try_from(row.to_block).ok());
+        let accepted_through_at = accepted.as_ref().and_then(|row| row.effective_through_at);
+        let source_available = accepted_through_at.is_some_and(|through| {
+            through >= self.boundary.cutoff_for(DecisionSource::FinalizedExecution)
+        });
         let evidence =
-            TradeTapeSourceEvidence::runtime(true, cursors).map_err(QuantError::config)?;
-        let lookback = Duration::from_secs(self.features.structural.trade_tape_window_secs);
+            FinalizedExecutionEvidence::runtime(true, accepted_block, accepted_through_at);
+        let lookback = Duration::from_secs(self.features.structural.execution_window_secs);
         let mut windows = self
             .window_provider
-            .load_trade_tape_windows(slice::from_ref(self.market), self.boundary, lookback)
+            .load_execution_windows(slice::from_ref(self.market), self.boundary, lookback)
             .await?;
         windows
             .remove(&self.market.market_id)
             .map(|window| window.with_source_evidence(evidence, source_available))
             .ok_or_else(|| {
                 QuantError::config(format!(
-                    "missing prefetched trade-tape window for market {}",
+                    "missing prefetched finalized-execution window for market {}",
                     self.market.market_id.as_str()
                 ))
             })
@@ -597,7 +604,11 @@ pub fn selected_market_for_lot(
 pub(crate) async fn build_live_feature_vector(
     request: &LiveFeatureBuildRequest<'_>,
 ) -> QuantResult<Option<FeatureVector>> {
-    let builder = ConfiguredFeatureBuilder::new(request.features, request.domain)?;
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        request.features,
+        request.domain,
+        request.feature_contract,
+    )?;
     let boundary = request.boundary;
     let window = load_window(
         request.window_provider,
@@ -607,7 +618,7 @@ pub(crate) async fn build_live_feature_vector(
         request.features,
     )
     .await?;
-    let trade_tape = request.load_trade_tape(&builder).await?;
+    let execution_history = request.load_execution_history(&builder).await?;
 
     let bundle = builder
         .resolve_inputs(
@@ -616,7 +627,7 @@ pub(crate) async fn build_live_feature_vector(
             request.pit,
             FeatureSourceWindows {
                 microstructure: &window,
-                trade_tape: &trade_tape,
+                execution_history: &execution_history,
                 // Exit-side factor truth is the FROZEN entry breakdown (domain
                 // factors included); the live vector only supplies price /
                 // liquidity context, so it carries no domain slice.
@@ -994,7 +1005,7 @@ mod tests {
             decision_at - ChronoDuration::seconds(10)
         );
         assert_eq!(
-            boundary.cutoff_for(DecisionSource::TradeTape),
+            boundary.cutoff_for(DecisionSource::FinalizedExecution),
             decision_at - ChronoDuration::seconds(10)
         );
         assert_eq!(

@@ -5,9 +5,9 @@ use quant_pivot_models::{
     domain::quant::{
         CapitalOccupancyBucket, DiscountCurvePoint, EntryEconomics, ExecutableEconomicTier,
         ExistingPortfolioState, PortfolioScenario, PortfolioScenarioArtifact,
-        PortfolioScenarioKind, PortfolioScenarioVisibility, RecommendationEconomics,
-        RepresentedRouteSet, ScenarioCashflow, ScenarioDistribution, ScenarioMarketOutcome,
-        ScenarioPayoutState, ScenarioWeight,
+        PortfolioScenarioEvidenceRegime, PortfolioScenarioKind, PortfolioScenarioVisibility,
+        RecommendationEconomics, RepresentedRouteSet, ScenarioCashflow, ScenarioDistribution,
+        ScenarioMarketOutcome, ScenarioPayoutState, ScenarioWeight,
     },
     enums::{
         common::MarketCategory,
@@ -60,7 +60,7 @@ impl ScenarioFixture {
                 .content_hash()?;
         let serving_contract_digest = hash("serving-contract")?;
         let calibration_contract_digest = hash("calibration-contract")?;
-        let trade_policy_contract_digest = hash("trade-policy-contract")?;
+        let recommendation_contract_digest = hash("recommendation-contract")?;
         let scenario_model_content_hash = hash("scenario-model")?;
         let scenario_model_artifact_id =
             PortfolioScenarioModelArtifactId::from_content_hash(&scenario_model_content_hash);
@@ -76,7 +76,8 @@ impl ScenarioFixture {
             route_set_digest: represented_routes.digest,
             serving_contract_digest,
             calibration_contract_digest,
-            trade_policy_contract_digest,
+            recommendation_contract_digest,
+            evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
             capital_time_bucket_contract_digest,
             scenarios: vec![
                 scenario(0, PortfolioScenarioKind::PitBootstrap, "pit_bootstrap")?,
@@ -163,7 +164,7 @@ impl ScenarioFixture {
             route_set_digest: represented_routes.digest,
             serving_contract_digest,
             calibration_contract_digest,
-            trade_policy_contract_digest,
+            recommendation_contract_digest,
             scenario_model_schema_version: SchemaVersion::FIRST,
             capital_time_bucket_contract_digest,
             model_content_hash: scenario_model_content_hash,

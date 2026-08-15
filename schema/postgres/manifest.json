@@ -6389,6 +6389,630 @@
       "default": null,
       "generated": "",
       "identity": "",
+      "name": "chunk_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "frontier",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "qp_exchange_history_frontier"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "from_block",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "to_block",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "status",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "qp_exchange_history_chunk_status"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "name": "attempt_count",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "integer"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "hypersync_count",
+      "nullable": true,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "attestor_count",
+      "nullable": true,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "hypersync_digest",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_exchange_history_chunk",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "attestor_digest",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_exchange_history_chunk",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "first_block_hash",
+      "nullable": true,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_exchange_history_chunk",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "last_block_hash",
+      "nullable": true,
+      "ordinal": 12,
+      "storage": "x",
+      "table": "quant_exchange_history_chunk",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "archive_height",
+      "nullable": true,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "continuity_basis",
+      "nullable": true,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "qp_exchange_history_continuity_basis"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "continuity_block",
+      "nullable": true,
+      "ordinal": 15,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "continuity_hash",
+      "nullable": true,
+      "ordinal": 16,
+      "storage": "x",
+      "table": "quant_exchange_history_chunk",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "effective_through_at",
+      "nullable": true,
+      "ordinal": 17,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "accepted_at",
+      "nullable": true,
+      "ordinal": 18,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 19,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 20,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "plan_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_exchange_history_plan",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "chain_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_exchange_history_plan",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "policy_hash",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_exchange_history_plan",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "bootstrap_profile_set_hash",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_exchange_history_plan",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "finalized_anchor_block",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_exchange_history_plan",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "finalized_anchor_hash",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_exchange_history_plan",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "finalized_anchor_timestamp",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_exchange_history_plan",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "activation_from_block",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_exchange_history_plan",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "activation_through_block",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_exchange_history_plan",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "crypto_required_from_block",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_exchange_history_plan",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "weather_required_from_block",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_exchange_history_plan",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "retention_from_block",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_exchange_history_plan",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "retention_through_block",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_exchange_history_plan",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "quant_exchange_history_plan",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "quarantine_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_exchange_history_quarantine",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "chunk_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_exchange_history_quarantine",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "reason",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_exchange_history_quarantine",
+      "type": "qp_exchange_history_quarantine_reason"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_exchange_history_quarantine",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "detail",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_exchange_history_quarantine",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "quarantined_at",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_exchange_history_quarantine",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "resolution_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "quarantine_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "disposition",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "qp_exchange_history_quarantine_disposition"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "replacement_chunk_id",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "actor",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "detail",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "resolved_at",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
       "name": "execution_account_id",
       "nullable": false,
       "ordinal": 1,
@@ -11361,6 +11985,812 @@
       "storage": "p",
       "table": "quant_feedback_trigger_event",
       "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "run_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "supersedes_run_id",
+      "nullable": true,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_profile_artifact_id",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_hash",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "route",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "stage",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "qp_fresh_boot_stage"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "status",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "qp_fresh_boot_status"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_coverage_manifest",
+      "nullable": true,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_coverage_hash",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_slice_id",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_slice_hash",
+      "nullable": true,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_policy_snapshot_id",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "model_spec_id",
+      "nullable": true,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "training_dataset_id",
+      "nullable": true,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "calibration_dataset_id",
+      "nullable": true,
+      "ordinal": 15,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_model_version_id",
+      "nullable": true,
+      "ordinal": 16,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "model_version_id",
+      "nullable": true,
+      "ordinal": 17,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "path_set_id",
+      "nullable": true,
+      "ordinal": 18,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "calibration_id",
+      "nullable": true,
+      "ordinal": 19,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "parity_run_id",
+      "nullable": true,
+      "ordinal": 20,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "scenario_artifact_id",
+      "nullable": true,
+      "ordinal": 21,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "scenario_artifact_hash",
+      "nullable": true,
+      "ordinal": 22,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "bootstrap_preflight",
+      "nullable": true,
+      "ordinal": 23,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "bootstrap_preflight_hash",
+      "nullable": true,
+      "ordinal": 24,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "active_job_id",
+      "nullable": true,
+      "ordinal": 25,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "last_job_id",
+      "nullable": true,
+      "ordinal": 26,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "bootstrap_policy_activation_id",
+      "nullable": true,
+      "ordinal": 27,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "manual_report_ready_at",
+      "nullable": true,
+      "ordinal": 28,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "first_report_run_id",
+      "nullable": true,
+      "ordinal": 29,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "first_report_id",
+      "nullable": true,
+      "ordinal": 30,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "next_scheduled_report_at",
+      "nullable": true,
+      "ordinal": 31,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "retry_reason",
+      "nullable": true,
+      "ordinal": 32,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "qp_fresh_boot_retry_reason"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "retry_detail",
+      "nullable": true,
+      "ordinal": 33,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "retry_count",
+      "nullable": false,
+      "ordinal": 34,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "integer"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "next_attempt_at",
+      "nullable": true,
+      "ordinal": 35,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "blocked_reason",
+      "nullable": true,
+      "ordinal": 36,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "qp_fresh_boot_blocked_reason"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "blocked_detail",
+      "nullable": true,
+      "ordinal": 37,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "lease_owner",
+      "nullable": true,
+      "ordinal": 38,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "lease_expires_at",
+      "nullable": true,
+      "ordinal": 39,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "idempotency_key",
+      "nullable": false,
+      "ordinal": 40,
+      "storage": "x",
+      "table": "quant_fresh_boot_run",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "name": "revision",
+      "nullable": false,
+      "ordinal": 41,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "stage_entered_at",
+      "nullable": false,
+      "ordinal": 42,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "started_at",
+      "nullable": false,
+      "ordinal": 43,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "completed_at",
+      "nullable": true,
+      "ordinal": 44,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 45,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 46,
+      "storage": "p",
+      "table": "quant_fresh_boot_run",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "event_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "run_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "event_sequence",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "from_stage",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "qp_fresh_boot_stage"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "to_stage",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "qp_fresh_boot_stage"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "from_status",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "qp_fresh_boot_status"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "to_status",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "qp_fresh_boot_status"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "event_kind",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "qp_fresh_boot_event_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_job_id",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "result_ref",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": true,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_fresh_boot_run_event",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "attempt",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "integer"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "actor",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "quant_fresh_boot_run_event",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "detail",
+      "nullable": true,
+      "ordinal": 14,
+      "storage": "x",
+      "table": "quant_fresh_boot_run_event",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "occurred_at",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "p",
+      "table": "quant_fresh_boot_run_event",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "event_hash",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "x",
+      "table": "quant_fresh_boot_run_event",
+      "type": "character varying"
     },
     {
       "collation": null,
@@ -21404,110 +22834,6 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "source",
-      "nullable": false,
-      "ordinal": 1,
-      "storage": "p",
-      "table": "quant_trade_tape_block_cursor",
-      "type": "qp_trade_tape_source_kind"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "contract_address",
-      "nullable": false,
-      "ordinal": 2,
-      "storage": "x",
-      "table": "quant_trade_tape_block_cursor",
-      "type": "character varying"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": "0",
-      "generated": "",
-      "identity": "",
-      "name": "last_finalized_block",
-      "nullable": false,
-      "ordinal": 3,
-      "storage": "p",
-      "table": "quant_trade_tape_block_cursor",
-      "type": "bigint"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": "0",
-      "generated": "",
-      "identity": "",
-      "name": "last_log_index",
-      "nullable": false,
-      "ordinal": 4,
-      "storage": "p",
-      "table": "quant_trade_tape_block_cursor",
-      "type": "integer"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": "0",
-      "generated": "",
-      "identity": "",
-      "name": "head_lag_blocks",
-      "nullable": false,
-      "ordinal": 5,
-      "storage": "p",
-      "table": "quant_trade_tape_block_cursor",
-      "type": "bigint"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "status",
-      "nullable": false,
-      "ordinal": 6,
-      "storage": "p",
-      "table": "quant_trade_tape_block_cursor",
-      "type": "qp_trade_tape_block_cursor_status"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": "statement_timestamp()",
-      "generated": "",
-      "identity": "",
-      "name": "created_at",
-      "nullable": false,
-      "ordinal": 7,
-      "storage": "p",
-      "table": "quant_trade_tape_block_cursor",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": "statement_timestamp()",
-      "generated": "",
-      "identity": "",
-      "name": "updated_at",
-      "nullable": false,
-      "ordinal": 8,
-      "storage": "p",
-      "table": "quant_trade_tape_block_cursor",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
       "name": "training_dataset_id",
       "nullable": false,
       "ordinal": 1,
@@ -24343,6 +25669,150 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((status <> 'accepted'::qp_exchange_history_chunk_status) OR ((hypersync_count IS NOT NULL) AND (attestor_count IS NOT NULL) AND (hypersync_count = attestor_count) AND (hypersync_digest IS NOT NULL) AND (attestor_digest IS NOT NULL) AND ((hypersync_digest)::text = (attestor_digest)::text) AND (first_block_hash IS NOT NULL) AND (last_block_hash IS NOT NULL) AND (archive_height IS NOT NULL) AND (continuity_basis IS NOT NULL) AND (continuity_block IS NOT NULL) AND (continuity_hash IS NOT NULL) AND (accepted_at IS NOT NULL))))",
+      "initially_deferred": false,
+      "name": "ck_quant_exchange_history_chunk_acceptance",
+      "table": "quant_exchange_history_chunk",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((hypersync_digest IS NULL) OR ((hypersync_digest)::text ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((attestor_digest IS NULL) OR ((attestor_digest)::text ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((first_block_hash IS NULL) OR ((first_block_hash)::text ~ '^0x[0-9a-f]{64}$'::text)) AND ((last_block_hash IS NULL) OR ((last_block_hash)::text ~ '^0x[0-9a-f]{64}$'::text)) AND ((continuity_hash IS NULL) OR ((continuity_hash)::text ~ '^0x[0-9a-f]{64}$'::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_exchange_history_chunk_hashes",
+      "table": "quant_exchange_history_chunk",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((from_block > 0) AND (to_block >= from_block) AND (attempt_count >= 0) AND ((hypersync_count IS NULL) OR (hypersync_count >= 0)) AND ((attestor_count IS NULL) OR (attestor_count >= 0)) AND ((archive_height IS NULL) OR (archive_height >= to_block)) AND ((continuity_block IS NULL) OR (continuity_block = (from_block - 1)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_exchange_history_chunk_range",
+      "table": "quant_exchange_history_chunk",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (chunk_id)",
+      "initially_deferred": false,
+      "name": "quant_exchange_history_chunk_pkey",
+      "table": "quant_exchange_history_chunk",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((policy_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((bootstrap_profile_set_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((finalized_anchor_hash)::text ~ '^0x[0-9a-f]{64}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_exchange_history_plan_hashes",
+      "table": "quant_exchange_history_plan",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((chain_id = 137) AND (finalized_anchor_block > activation_through_block) AND (finalized_anchor_timestamp > 0) AND (retention_from_block > 0) AND (retention_from_block <= weather_required_from_block) AND (weather_required_from_block <= crypto_required_from_block) AND (crypto_required_from_block <= activation_from_block) AND (activation_from_block <= activation_through_block) AND (retention_through_block = (activation_from_block - 1))))",
+      "initially_deferred": false,
+      "name": "ck_quant_exchange_history_plan_ranges",
+      "table": "quant_exchange_history_plan",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (chain_id)",
+      "initially_deferred": false,
+      "name": "quant_exchange_history_plan_chain_id_key",
+      "table": "quant_exchange_history_plan",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (plan_id)",
+      "initially_deferred": false,
+      "name": "quant_exchange_history_plan_pkey",
+      "table": "quant_exchange_history_plan",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((evidence_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((length(btrim((detail)::text)) >= 1) AND (length(btrim((detail)::text)) <= 2048)) AND (octet_length((detail)::text) = length((detail)::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_exchange_history_quarantine_detail",
+      "table": "quant_exchange_history_quarantine",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (chunk_id) REFERENCES quant_exchange_history_chunk(chunk_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_exchange_history_quarantine-chunk_id",
+      "table": "quant_exchange_history_quarantine",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (quarantine_id)",
+      "initially_deferred": false,
+      "name": "quant_exchange_history_quarantine_pkey",
+      "table": "quant_exchange_history_quarantine",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((evidence_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((char_length(btrim((actor)::text)) >= 1) AND (char_length(btrim((actor)::text)) <= 128)) AND ((actor)::text !~ '[[:cntrl:]]'::text) AND ((char_length(btrim((detail)::text)) >= 1) AND (char_length(btrim((detail)::text)) <= 2048)) AND (octet_length((detail)::text) = char_length((detail)::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_exchange_history_quarantine_resolution",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (quarantine_id) REFERENCES quant_exchange_history_quarantine(quarantine_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_exchange_history_quarantine_resolution-quarantine_id",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (replacement_chunk_id) REFERENCES quant_exchange_history_chunk(chunk_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_exchange_history_quarantine_resolution-replacement_chu",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (resolution_id)",
+      "initially_deferred": false,
+      "name": "quant_exchange_history_quarantine_resolution_pkey",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (quarantine_id)",
+      "initially_deferred": false,
+      "name": "quant_exchange_history_quarantine_resolution_quarantine_id_key",
+      "table": "quant_exchange_history_quarantine_resolution",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK (((chain_id > 0) AND (funder_address ~ '^0x[0-9a-f]{40}$'::text) AND (owner_address ~ '^0x[0-9a-f]{40}$'::text) AND (controller_address ~ '^0x[0-9a-f]{40}$'::text) AND ((wallet_factory_address IS NULL) OR (wallet_factory_address ~ '^0x[0-9a-f]{40}$'::text)) AND ((wallet_implementation_code_hash IS NULL) OR (wallet_implementation_code_hash ~ '^0x[0-9a-f]{64}$'::text)) AND ((wallet_factory_address IS NULL) = (wallet_implementation_code_hash IS NULL)) AND (identity_digest ~ '^blake3:[0-9a-f]{64}$'::text) AND (((wallet_kind = 'eoa'::qp_execution_wallet_kind) AND (funder_address = owner_address) AND (owner_address = controller_address) AND (wallet_factory_address IS NULL)) OR ((wallet_kind = 'deposit_wallet'::qp_execution_wallet_kind) AND (wallet_factory_address IS NOT NULL)) OR (wallet_kind = ANY (ARRAY['proxy'::qp_execution_wallet_kind, 'gnosis_safe'::qp_execution_wallet_kind])))))",
       "initially_deferred": false,
       "name": "ck_quant_execution_account_identity",
@@ -25653,6 +27123,267 @@
       "name": "quant_feedback_trigger_event_pkey",
       "table": "quant_feedback_trigger_event",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((stage = ANY (ARRAY['dataset_queued'::qp_fresh_boot_stage, 'dataset_running'::qp_fresh_boot_stage, 'training_queued'::qp_fresh_boot_stage, 'training_running'::qp_fresh_boot_stage, 'calibration_dataset_queued'::qp_fresh_boot_stage, 'calibration_dataset_running'::qp_fresh_boot_stage, 'calibration_queued'::qp_fresh_boot_stage, 'calibration_running'::qp_fresh_boot_stage, 'cpcv_queued'::qp_fresh_boot_stage, 'cpcv_running'::qp_fresh_boot_stage])) = (active_job_id IS NOT NULL)))",
+      "initially_deferred": false,
+      "name": "ck_quant_fresh_boot_run_active_job",
+      "table": "quant_fresh_boot_run",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((profile_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(route) = 'string'::text) AND ((route #>> '{}'::text[]) = ANY (ARRAY['pooled'::text, 'crypto'::text, 'weather'::text])) AND ((char_length(btrim(idempotency_key)) >= 8) AND (char_length(btrim(idempotency_key)) <= 128)) AND (idempotency_key !~ '[[:space:][:cntrl:]]'::text) AND (revision >= 0) AND (retry_count >= 0) AND (started_at <= created_at) AND (created_at <= stage_entered_at) AND (stage_entered_at <= updated_at) AND ((source_coverage_manifest IS NULL) = (source_coverage_hash IS NULL)) AND ((source_coverage_manifest IS NULL) OR (jsonb_typeof(source_coverage_manifest) = 'object'::text)) AND ((source_coverage_hash IS NULL) OR ((source_coverage_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((source_slice_id IS NULL) = (source_slice_hash IS NULL)) AND ((source_slice_hash IS NULL) OR ((source_slice_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((scenario_artifact_id IS NULL) = (scenario_artifact_hash IS NULL)) AND ((scenario_artifact_hash IS NULL) OR ((scenario_artifact_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((bootstrap_preflight IS NULL) = (bootstrap_preflight_hash IS NULL)) AND ((bootstrap_preflight IS NULL) OR (jsonb_typeof(bootstrap_preflight) = 'object'::text)) AND ((bootstrap_preflight_hash IS NULL) OR ((bootstrap_preflight_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((lease_owner IS NULL) = (lease_expires_at IS NULL)) AND ((retry_detail IS NULL) OR ((char_length(btrim((retry_detail)::text)) >= 1) AND (char_length(btrim((retry_detail)::text)) <= 2048) AND (octet_length((retry_detail)::text) = char_length((retry_detail)::text)))) AND ((blocked_detail IS NULL) OR ((char_length(btrim((blocked_detail)::text)) >= 1) AND (char_length(btrim((blocked_detail)::text)) <= 2048) AND (octet_length((blocked_detail)::text) = char_length((blocked_detail)::text))))))",
+      "initially_deferred": false,
+      "name": "ck_quant_fresh_boot_run_identity",
+      "table": "quant_fresh_boot_run",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((stage = 'awaiting_source_coverage'::qp_fresh_boot_stage) OR ((source_coverage_manifest IS NOT NULL) AND (source_coverage_hash IS NOT NULL) AND (model_spec_id IS NOT NULL))) AND ((stage < 'dataset_ready'::qp_fresh_boot_stage) OR ((training_dataset_id IS NOT NULL) AND (source_slice_id IS NOT NULL) AND (source_slice_hash IS NOT NULL))) AND ((stage < 'training_ready'::qp_fresh_boot_stage) OR (source_model_version_id IS NOT NULL)) AND ((stage < 'calibration_dataset_ready'::qp_fresh_boot_stage) OR (calibration_dataset_id IS NOT NULL)) AND ((stage < 'calibration_ready'::qp_fresh_boot_stage) OR ((model_version_id IS NOT NULL) AND (calibration_id IS NOT NULL))) AND ((stage < 'cpcv_ready'::qp_fresh_boot_stage) OR (path_set_id IS NOT NULL)) AND ((stage < 'parity_ready'::qp_fresh_boot_stage) OR (parity_run_id IS NOT NULL)) AND ((stage < 'scenario_ready'::qp_fresh_boot_stage) OR ((scenario_artifact_id IS NOT NULL) AND (scenario_artifact_hash IS NOT NULL))) AND ((stage < 'bootstrap_preflight'::qp_fresh_boot_stage) OR ((bootstrap_preflight IS NOT NULL) AND (bootstrap_preflight_hash IS NOT NULL))) AND ((stage < 'bootstrap_committed'::qp_fresh_boot_stage) OR (bootstrap_policy_activation_id IS NOT NULL)) AND ((stage < 'report_eligible'::qp_fresh_boot_stage) OR ((manual_report_ready_at IS NOT NULL) AND (first_report_run_id IS NOT NULL))) AND ((stage < 'first_report_published'::qp_fresh_boot_stage) OR (first_report_id IS NOT NULL))))",
+      "initially_deferred": false,
+      "name": "ck_quant_fresh_boot_run_stage",
+      "table": "quant_fresh_boot_run",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((status = ANY (ARRAY['waiting_evidence'::qp_fresh_boot_status, 'retry_scheduled'::qp_fresh_boot_status])) AND (retry_reason IS NOT NULL) AND (retry_detail IS NOT NULL) AND (next_attempt_at IS NOT NULL) AND (blocked_reason IS NULL) AND (blocked_detail IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NULL)) OR ((status = 'running'::qp_fresh_boot_status) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (blocked_reason IS NULL) AND (blocked_detail IS NULL) AND (completed_at IS NULL)) OR ((status = 'blocked_terminal'::qp_fresh_boot_status) AND (blocked_reason IS NOT NULL) AND (blocked_detail IS NOT NULL) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'superseded'::qp_fresh_boot_status) AND (blocked_reason IS NOT NULL) AND (blocked_detail IS NOT NULL) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'succeeded'::qp_fresh_boot_status) AND (stage = 'first_report_published'::qp_fresh_boot_stage) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (blocked_reason IS NULL) AND (blocked_detail IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NOT NULL) AND (first_report_id IS NOT NULL) AND (manual_report_ready_at IS NOT NULL))))",
+      "initially_deferred": false,
+      "name": "ck_quant_fresh_boot_run_status",
+      "table": "quant_fresh_boot_run",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (bootstrap_policy_activation_id) REFERENCES policy_activation(policy_activation_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_activation",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (active_job_id) REFERENCES quant_research_job(job_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_active_job",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (calibration_id) REFERENCES quant_calibration_artifact(artifact_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_calibration",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (calibration_dataset_id) REFERENCES quant_training_dataset(training_dataset_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_calibration_dataset",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (last_job_id) REFERENCES quant_research_job(job_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_last_job",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (model_version_id) REFERENCES quant_model_version(model_version_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_model",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (parity_run_id) REFERENCES quant_feature_parity_run(run_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_parity",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (path_set_id) REFERENCES quant_backtest_path_set(path_set_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_path_set",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_policy",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_profile",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (first_report_id) REFERENCES quant_recommendation_report(recommendation_report_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_report",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (first_report_run_id) REFERENCES quant_report_run(report_run_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_report_run",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (source_model_version_id) REFERENCES quant_model_version(model_version_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_source_model",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (source_slice_id) REFERENCES quant_source_slice(source_slice_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_source_slice",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (model_spec_id) REFERENCES quant_model_spec(model_spec_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_spec",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (supersedes_run_id) REFERENCES quant_fresh_boot_run(run_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_supersedes",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (training_dataset_id) REFERENCES quant_training_dataset(training_dataset_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_training_dataset",
+      "table": "quant_fresh_boot_run",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (idempotency_key)",
+      "initially_deferred": false,
+      "name": "quant_fresh_boot_run_idempotency_key_key",
+      "table": "quant_fresh_boot_run",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (run_id)",
+      "initially_deferred": false,
+      "name": "quant_fresh_boot_run_pkey",
+      "table": "quant_fresh_boot_run",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((event_sequence >= 0) AND (attempt >= 0) AND ((event_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((evidence_hash IS NULL) OR ((evidence_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((char_length(btrim((actor)::text)) >= 1) AND (char_length(btrim((actor)::text)) <= 128)) AND ((actor)::text !~ '[[:cntrl:]]'::text) AND ((detail IS NULL) OR ((char_length(btrim((detail)::text)) >= 1) AND (char_length(btrim((detail)::text)) <= 2048) AND (octet_length((detail)::text) = char_length((detail)::text))))))",
+      "initially_deferred": false,
+      "name": "ck_quant_fresh_boot_run_event",
+      "table": "quant_fresh_boot_run_event",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_job_id) REFERENCES quant_research_job(job_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_event_job",
+      "table": "quant_fresh_boot_run_event",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (run_id) REFERENCES quant_fresh_boot_run(run_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_fresh_boot_run_event_run",
+      "table": "quant_fresh_boot_run_event",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (event_id)",
+      "initially_deferred": false,
+      "name": "quant_fresh_boot_run_event_pkey",
+      "table": "quant_fresh_boot_run_event",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (event_hash)",
+      "initially_deferred": false,
+      "name": "uq_quant_fresh_boot_run_event_hash",
+      "table": "quant_fresh_boot_run_event",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (run_id, event_sequence)",
+      "initially_deferred": false,
+      "name": "uq_quant_fresh_boot_run_event_sequence",
+      "table": "quant_fresh_boot_run_event",
+      "type": "u",
       "validated": true
     },
     {
@@ -28294,7 +30025,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'profile_ref'::text, 'evaluation_track'::text, 'research_program_hash'::text, 'window_start'::text, 'window_end'::text, 'pit_cutoff'::text, 'reader_contract_version'::text, 'schema_contract_version'::text, 'decision_policy_snapshot_id'::text, 'runtime_config_hash'::text, 'dataset_format_version'::text, 'capability_registry_hashes'::text, 'objects'::text]) AND (((manifest ->> 'format_version'::text))::integer = 3) AND ((manifest -> 'profile_ref'::text) = profile_ref) AND ((manifest ->> 'evaluation_track'::text) = (evaluation_track)::text) AND ((manifest ->> 'research_program_hash'::text) = research_program_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND (((manifest ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND ((manifest ->> 'reader_contract_version'::text) = (reader_contract_version)::text) AND ((manifest ->> 'schema_contract_version'::text) = (schema_contract_version)::text) AND (((manifest ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((manifest ->> 'runtime_config_hash'::text) = runtime_config_hash) AND (((manifest ->> 'dataset_format_version'::text))::integer = 3) AND (jsonb_typeof((manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (jsonb_typeof((manifest -> 'objects'::text)) = 'array'::text) AND (jsonb_array_length((manifest -> 'objects'::text)) > 0))))",
+      "definition": "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'profile_ref'::text, 'evaluation_track'::text, 'research_program_hash'::text, 'window_start'::text, 'window_end'::text, 'pit_cutoff'::text, 'reader_contract_version'::text, 'schema_contract_version'::text, 'decision_policy_snapshot_id'::text, 'runtime_config_hash'::text, 'dataset_format_version'::text, 'capability_registry_hashes'::text, 'objects'::text]) AND (((manifest ->> 'format_version'::text))::integer = 4) AND ((manifest -> 'profile_ref'::text) = profile_ref) AND ((manifest ->> 'evaluation_track'::text) = (evaluation_track)::text) AND ((manifest ->> 'research_program_hash'::text) = research_program_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND (((manifest ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND ((manifest ->> 'reader_contract_version'::text) = (reader_contract_version)::text) AND ((manifest ->> 'schema_contract_version'::text) = (schema_contract_version)::text) AND (((manifest ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((manifest ->> 'runtime_config_hash'::text) = runtime_config_hash) AND (((manifest ->> 'dataset_format_version'::text))::integer = 3) AND (jsonb_typeof((manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (jsonb_typeof((manifest -> 'objects'::text)) = 'array'::text) AND (jsonb_array_length((manifest -> 'objects'::text)) > 0))))",
       "initially_deferred": false,
       "name": "ck_quant_source_slice_manifest",
       "table": "quant_source_slice",
@@ -28461,24 +30192,6 @@
       "name": "quant_trade_policy_validation_row_check",
       "table": "quant_trade_policy_validation_row",
       "type": "c",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "CHECK (((contract_address)::text ~ '^0x[0-9a-f]{40}$'::text))",
-      "initially_deferred": false,
-      "name": "ck_quant_trade_tape_block_cursor_contract_address",
-      "table": "quant_trade_tape_block_cursor",
-      "type": "c",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "PRIMARY KEY (source, contract_address)",
-      "initially_deferred": false,
-      "name": "pk-quant_trade_tape_block_cursor",
-      "table": "quant_trade_tape_block_cursor",
-      "type": "p",
       "validated": true
     },
     {
@@ -29038,6 +30751,52 @@
     },
     {
       "labels": [
+        "planned",
+        "extracting",
+        "attesting",
+        "projecting",
+        "accepted",
+        "rewound",
+        "quarantined"
+      ],
+      "name": "qp_exchange_history_chunk_status"
+    },
+    {
+      "labels": [
+        "hypersync_rollback_guard",
+        "hypersync_boundary_headers"
+      ],
+      "name": "qp_exchange_history_continuity_basis"
+    },
+    {
+      "labels": [
+        "activation",
+        "retention"
+      ],
+      "name": "qp_exchange_history_frontier"
+    },
+    {
+      "labels": [
+        "accepted_replacement",
+        "canonical_supersession"
+      ],
+      "name": "qp_exchange_history_quarantine_disposition"
+    },
+    {
+      "labels": [
+        "provider_mismatch",
+        "decode_failure",
+        "unknown_token",
+        "missing_correlation",
+        "continuity_mismatch",
+        "parent_hash_mismatch",
+        "contract_mismatch",
+        "archive_probe_failure"
+      ],
+      "name": "qp_exchange_history_quarantine_reason"
+    },
+    {
+      "labels": [
         "venue_rejected",
         "venue_cancelled",
         "venue_expired",
@@ -29327,6 +31086,115 @@
         "manual"
       ],
       "name": "qp_feedback_trigger_family"
+    },
+    {
+      "labels": [
+        "provider_mismatch",
+        "unknown_token",
+        "decode_failure",
+        "history_quarantined",
+        "insufficient_mature_labels",
+        "dataset_build_failed",
+        "model_training_failed",
+        "calibration_failed",
+        "cpcv_failed",
+        "quality_gate_failed",
+        "parity_failed",
+        "scenario_binding_failed",
+        "bootstrap_conflict",
+        "report_enqueue_failed",
+        "report_publication_failed",
+        "policy_unavailable",
+        "source_slice_mismatch",
+        "retry_budget_exhausted",
+        "source_coverage_invalid"
+      ],
+      "name": "qp_fresh_boot_blocked_reason"
+    },
+    {
+      "labels": [
+        "run_created",
+        "source_coverage_satisfied",
+        "dataset_started",
+        "dataset_completed",
+        "training_enqueued",
+        "training_started",
+        "training_completed",
+        "calibration_dataset_enqueued",
+        "calibration_dataset_started",
+        "calibration_dataset_completed",
+        "calibration_enqueued",
+        "calibration_started",
+        "calibration_completed",
+        "cpcv_enqueued",
+        "cpcv_started",
+        "cpcv_completed",
+        "parity_verified",
+        "scenario_bound",
+        "bootstrap_prepared",
+        "preflight_refreshed",
+        "bootstrap_committed",
+        "report_enabled",
+        "report_retried",
+        "report_published",
+        "evidence_wait_scheduled",
+        "retry_scheduled",
+        "retry_started",
+        "terminal_blocked",
+        "retry_accelerated",
+        "superseded"
+      ],
+      "name": "qp_fresh_boot_event_kind"
+    },
+    {
+      "labels": [
+        "source_coverage_incomplete",
+        "dependency_unavailable",
+        "storage_transient",
+        "provider_unavailable",
+        "job_retry_scheduled",
+        "preflight_stale",
+        "report_pending"
+      ],
+      "name": "qp_fresh_boot_retry_reason"
+    },
+    {
+      "labels": [
+        "awaiting_source_coverage",
+        "dataset_queued",
+        "dataset_running",
+        "dataset_ready",
+        "training_queued",
+        "training_running",
+        "training_ready",
+        "calibration_dataset_queued",
+        "calibration_dataset_running",
+        "calibration_dataset_ready",
+        "calibration_queued",
+        "calibration_running",
+        "calibration_ready",
+        "cpcv_queued",
+        "cpcv_running",
+        "cpcv_ready",
+        "parity_ready",
+        "scenario_ready",
+        "bootstrap_preflight",
+        "bootstrap_committed",
+        "report_eligible",
+        "first_report_published"
+      ],
+      "name": "qp_fresh_boot_stage"
+    },
+    {
+      "labels": [
+        "waiting_evidence",
+        "retry_scheduled",
+        "running",
+        "blocked_terminal",
+        "superseded",
+        "succeeded"
+      ],
+      "name": "qp_fresh_boot_status"
     },
     {
       "labels": [
@@ -30089,22 +31957,6 @@
         "cancelled"
       ],
       "name": "qp_trade_policy_validation_status"
-    },
-    {
-      "labels": [
-        "bootstrap",
-        "catching_up",
-        "live",
-        "error"
-      ],
-      "name": "qp_trade_tape_block_cursor_status"
-    },
-    {
-      "labels": [
-        "market_ws",
-        "on_chain"
-      ],
-      "name": "qp_trade_tape_source_kind"
     },
     {
       "labels": [
@@ -32337,6 +34189,202 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_exchange_history_chunk",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_chunk",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_chunk",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_chunk",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_chunk",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_chunk",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_chunk",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_plan",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_plan",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_plan",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_plan",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_plan",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_plan",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_plan",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine_resolution",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine_resolution",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine_resolution",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine_resolution",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine_resolution",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine_resolution",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_exchange_history_quarantine_resolution",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_execution_account",
       "privilege": "DELETE"
     },
@@ -33458,6 +35506,104 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_feedback_trigger_event",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run_event",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run_event",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run_event",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run_event",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run_event",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run_event",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_fresh_boot_run_event",
       "privilege": "UPDATE"
     },
     {
@@ -35712,55 +37858,6 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_trade_policy_validation_row",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_tape_block_cursor",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_tape_block_cursor",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_tape_block_cursor",
-      "privilege": "REFERENCES"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_tape_block_cursor",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_tape_block_cursor",
-      "privilege": "TRIGGER"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_tape_block_cursor",
-      "privilege": "TRUNCATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_trade_tape_block_cursor",
       "privilege": "UPDATE"
     },
     {
@@ -37613,6 +39710,106 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_exchange_history_chunk_frontier ON public.quant_exchange_history_chunk USING btree (frontier, status, to_block DESC)",
+      "method": "btree",
+      "name": "idx_quant_exchange_history_chunk_frontier",
+      "primary": false,
+      "ready": true,
+      "table": "quant_exchange_history_chunk",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_exchange_history_chunk_range ON public.quant_exchange_history_chunk USING btree (frontier, from_block, to_block)",
+      "method": "btree",
+      "name": "idx_quant_exchange_history_chunk_range",
+      "primary": false,
+      "ready": true,
+      "table": "quant_exchange_history_chunk",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_exchange_history_chunk_pkey ON public.quant_exchange_history_chunk USING btree (chunk_id)",
+      "method": "btree",
+      "name": "quant_exchange_history_chunk_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_exchange_history_chunk",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_exchange_history_plan_chain_id_key ON public.quant_exchange_history_plan USING btree (chain_id)",
+      "method": "btree",
+      "name": "quant_exchange_history_plan_chain_id_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_exchange_history_plan",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_exchange_history_plan_pkey ON public.quant_exchange_history_plan USING btree (plan_id)",
+      "method": "btree",
+      "name": "quant_exchange_history_plan_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_exchange_history_plan",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_exchange_history_quarantine_chunk ON public.quant_exchange_history_quarantine USING btree (chunk_id, quarantined_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_exchange_history_quarantine_chunk",
+      "primary": false,
+      "ready": true,
+      "table": "quant_exchange_history_quarantine",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_exchange_history_quarantine_pkey ON public.quant_exchange_history_quarantine USING btree (quarantine_id)",
+      "method": "btree",
+      "name": "quant_exchange_history_quarantine_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_exchange_history_quarantine",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_exchange_history_quarantine_resolution_chunk ON public.quant_exchange_history_quarantine_resolution USING btree (replacement_chunk_id, resolved_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_exchange_history_quarantine_resolution_chunk",
+      "primary": false,
+      "ready": true,
+      "table": "quant_exchange_history_quarantine_resolution",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_exchange_history_quarantine_resolution_pkey ON public.quant_exchange_history_quarantine_resolution USING btree (resolution_id)",
+      "method": "btree",
+      "name": "quant_exchange_history_quarantine_resolution_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_exchange_history_quarantine_resolution",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_exchange_history_quarantine_resolution_quarantine_id_key ON public.quant_exchange_history_quarantine_resolution USING btree (quarantine_id)",
+      "method": "btree",
+      "name": "quant_exchange_history_quarantine_resolution_quarantine_id_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_exchange_history_quarantine_resolution",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_execution_account_funder ON public.quant_execution_account USING btree (chain_id, funder_address, created_at DESC)",
       "method": "btree",
       "name": "idx_quant_execution_account_funder",
@@ -38519,6 +40716,86 @@
       "primary": false,
       "ready": true,
       "table": "quant_feedback_trigger_event",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_fresh_boot_run_due ON public.quant_fresh_boot_run USING btree (status, next_attempt_at, lease_expires_at, created_at)",
+      "method": "btree",
+      "name": "idx_quant_fresh_boot_run_due",
+      "primary": false,
+      "ready": true,
+      "table": "quant_fresh_boot_run",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_fresh_boot_run_profile_created ON public.quant_fresh_boot_run USING btree (research_profile_artifact_id, created_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_fresh_boot_run_profile_created",
+      "primary": false,
+      "ready": true,
+      "table": "quant_fresh_boot_run",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_fresh_boot_run_idempotency_key_key ON public.quant_fresh_boot_run USING btree (idempotency_key)",
+      "method": "btree",
+      "name": "quant_fresh_boot_run_idempotency_key_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_fresh_boot_run",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_fresh_boot_run_pkey ON public.quant_fresh_boot_run USING btree (run_id)",
+      "method": "btree",
+      "name": "quant_fresh_boot_run_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_fresh_boot_run",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_fresh_boot_run_event_timeline ON public.quant_fresh_boot_run_event USING btree (run_id, event_sequence)",
+      "method": "btree",
+      "name": "idx_quant_fresh_boot_run_event_timeline",
+      "primary": false,
+      "ready": true,
+      "table": "quant_fresh_boot_run_event",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_fresh_boot_run_event_pkey ON public.quant_fresh_boot_run_event USING btree (event_id)",
+      "method": "btree",
+      "name": "quant_fresh_boot_run_event_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_fresh_boot_run_event",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_fresh_boot_run_event_hash ON public.quant_fresh_boot_run_event USING btree (event_hash)",
+      "method": "btree",
+      "name": "uq_quant_fresh_boot_run_event_hash",
+      "primary": false,
+      "ready": true,
+      "table": "quant_fresh_boot_run_event",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_fresh_boot_run_event_sequence ON public.quant_fresh_boot_run_event USING btree (run_id, event_sequence)",
+      "method": "btree",
+      "name": "uq_quant_fresh_boot_run_event_sequence",
+      "primary": false,
+      "ready": true,
+      "table": "quant_fresh_boot_run_event",
       "unique": true,
       "valid": true
     },
@@ -40283,26 +42560,6 @@
       "valid": true
     },
     {
-      "definition": "CREATE INDEX idx_quant_trade_tape_block_cursor_status_lag ON public.quant_trade_tape_block_cursor USING btree (status, head_lag_blocks DESC)",
-      "method": "btree",
-      "name": "idx_quant_trade_tape_block_cursor_status_lag",
-      "primary": false,
-      "ready": true,
-      "table": "quant_trade_tape_block_cursor",
-      "unique": false,
-      "valid": true
-    },
-    {
-      "definition": "CREATE UNIQUE INDEX \"pk-quant_trade_tape_block_cursor\" ON public.quant_trade_tape_block_cursor USING btree (source, contract_address)",
-      "method": "btree",
-      "name": "pk-quant_trade_tape_block_cursor",
-      "primary": true,
-      "ready": true,
-      "table": "quant_trade_tape_block_cursor",
-      "unique": true,
-      "valid": true
-    },
-    {
       "definition": "CREATE INDEX idx_quant_training_dataset_spec_created ON public.quant_training_dataset USING btree (model_spec_id, created_at DESC)",
       "method": "btree",
       "name": "idx_quant_training_dataset_spec_created",
@@ -40857,6 +43114,34 @@
     },
     {
       "kind": "r",
+      "name": "quant_exchange_history_chunk",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_exchange_history_plan",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_exchange_history_quarantine",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_exchange_history_quarantine_resolution",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_execution_account",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -41012,6 +43297,20 @@
     {
       "kind": "r",
       "name": "quant_feedback_trigger_event",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_fresh_boot_run",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_fresh_boot_run_event",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -41340,13 +43639,6 @@
     },
     {
       "kind": "r",
-      "name": "quant_trade_tape_block_cursor",
-      "owner": "$schema_owner",
-      "rls_enabled": false,
-      "rls_forced": false
-    },
-    {
-      "kind": "r",
       "name": "quant_training_dataset",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -41625,6 +43917,30 @@
       "table": "quant_entry_condition_instance"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_exchange_history_chunk_updated_at BEFORE UPDATE ON public.quant_exchange_history_chunk FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
+      "enabled": "O",
+      "name": "trg_quant_exchange_history_chunk_updated_at",
+      "table": "quant_exchange_history_chunk"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_exchange_history_plan_append_only BEFORE DELETE OR UPDATE ON public.quant_exchange_history_plan FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_exchange_history_plan_append_only",
+      "table": "quant_exchange_history_plan"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_exchange_history_quarantine_append_only BEFORE DELETE OR UPDATE ON public.quant_exchange_history_quarantine FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_exchange_history_quarantine_append_only",
+      "table": "quant_exchange_history_quarantine"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_exchange_history_quarantine_resolution_append_only BEFORE DELETE OR UPDATE ON public.quant_exchange_history_quarantine_resolution FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_exchange_history_quarantine_resolution_append_only",
+      "table": "quant_exchange_history_quarantine_resolution"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_execution_attempt_outcome_append_only BEFORE DELETE OR UPDATE ON public.quant_execution_attempt_outcome FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_execution_attempt_outcome_append_only",
@@ -41755,6 +44071,12 @@
       "enabled": "O",
       "name": "trg_quant_feedback_trigger_event_append_only",
       "table": "quant_feedback_trigger_event"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_fresh_boot_run_event_append_only BEFORE DELETE OR UPDATE ON public.quant_fresh_boot_run_event FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_fresh_boot_run_event_append_only",
+      "table": "quant_fresh_boot_run_event"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_model_candidate_manifest_append_only BEFORE DELETE OR UPDATE ON public.quant_model_candidate_manifest FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
@@ -41947,12 +44269,6 @@
       "enabled": "O",
       "name": "trg_quant_trade_policy_validation_row_append_only",
       "table": "quant_trade_policy_validation_row"
-    },
-    {
-      "definition": "CREATE TRIGGER trg_quant_trade_tape_block_cursor_updated_at BEFORE UPDATE ON public.quant_trade_tape_block_cursor FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
-      "enabled": "O",
-      "name": "trg_quant_trade_tape_block_cursor_updated_at",
-      "table": "quant_trade_tape_block_cursor"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_training_dataset_lifecycle_guard BEFORE DELETE OR UPDATE ON public.quant_training_dataset FOR EACH ROW EXECUTE FUNCTION trigger_guard_training_dataset()",

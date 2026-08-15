@@ -21,14 +21,14 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::{common::MarketCategory, domain::DomainFamily},
     hashing::CanonicalDigest,
-    types::{ContentHash, SchemaVersion},
+    types::{ContentHash, ResearchFeatureContract, SchemaVersion},
 };
 use serde::Serialize;
 
 use crate::{
     features::{
-        FeatureCell, FeatureName, FeatureSchema, FeatureSpec, FeatureStaleness, FeatureValue,
-        FeatureVector,
+        AuthoringFeatureCatalog, ExecutableFeatureSchema, FeatureCell, FeatureName, FeatureSpec,
+        FeatureStaleness, FeatureValue, FeatureVector,
     },
     model::{
         ModelArtifact,
@@ -40,7 +40,14 @@ use crate::{
 
 /// Canonical JSON shape for [`ResearchHasher::feature_schema`].
 #[derive(serde::Serialize)]
-struct FeatureSchemaCanonical {
+struct ExecutableFeatureSchemaCanonical {
+    contract: ResearchFeatureContract,
+    version: SchemaVersion,
+    specs: Vec<FeatureSpec>,
+}
+
+#[derive(serde::Serialize)]
+struct AuthoringFeatureCatalogCanonical {
     version: SchemaVersion,
     specs: Vec<FeatureSpec>,
 }
@@ -147,11 +154,22 @@ impl ResearchHasher {
     /// Specs are sorted by name before serialization so registry insertion order
     /// never perturbs the digest; the schema version folds in, so a version bump
     /// (or any spec change) changes the digest.
-    pub fn feature_schema(schema: &FeatureSchema) -> QuantResult<ContentHash> {
+    pub fn feature_schema(schema: &ExecutableFeatureSchema) -> QuantResult<ContentHash> {
         let mut specs = schema.specs().to_vec();
         specs.sort_by(|left, right| left.name.cmp(&right.name));
-        Self::canonical(&FeatureSchemaCanonical {
+        Self::canonical(&ExecutableFeatureSchemaCanonical {
+            contract: schema.contract(),
             version: schema.version(),
+            specs,
+        })
+    }
+
+    /// Order-independent hash of the non-executable authoring superset.
+    pub fn authoring_catalog(catalog: &AuthoringFeatureCatalog) -> QuantResult<ContentHash> {
+        let mut specs = catalog.specs().to_vec();
+        specs.sort_by(|left, right| left.name.cmp(&right.name));
+        Self::canonical(&AuthoringFeatureCatalogCanonical {
+            version: catalog.version(),
             specs,
         })
     }
@@ -254,16 +272,16 @@ mod tests {
             quant::DataQualityStatus,
         },
         runtime_config::FeatureFamily,
-        types::{MarketId, Probability, SchemaVersion, TokenId},
+        types::{MarketId, Probability, ResearchFeatureContract, SchemaVersion, TokenId},
     };
     use rust_decimal_macros::dec;
 
     use super::ResearchHasher;
     use crate::{
         features::{
-            DomainFeatureSlice, EvidenceSourceRef, FeatureCell, FeatureName, FeatureSchema,
-            FeatureSpec, FeatureStaleness, FeatureUnit, FeatureValue, FeatureValueKind,
-            FeatureVector, NullPolicy, PitRule, SourceRequirement, StalenessRule,
+            DomainFeatureSlice, EvidenceSourceRef, ExecutableFeatureSchema, FeatureCell,
+            FeatureName, FeatureSpec, FeatureStaleness, FeatureUnit, FeatureValue,
+            FeatureValueKind, FeatureVector, NullPolicy, PitRule, SourceRequirement, StalenessRule,
         },
         selection::ModelFeatureRequirements,
     };
@@ -329,13 +347,15 @@ mod tests {
 
     #[test]
     fn feature_schema_order_independent() {
-        let forward = FeatureSchema::new(
+        let forward = ExecutableFeatureSchema::new(
             SchemaVersion::new(1),
+            ResearchFeatureContract::FullL2,
             vec![sample_spec("alpha"), sample_spec("beta")],
         )
         .expect("schema");
-        let shuffled = FeatureSchema::new(
+        let shuffled = ExecutableFeatureSchema::new(
             SchemaVersion::new(1),
+            ResearchFeatureContract::FullL2,
             vec![sample_spec("beta"), sample_spec("alpha")],
         )
         .expect("schema");
@@ -347,10 +367,18 @@ mod tests {
 
     #[test]
     fn feature_version_changes_hash() {
-        let v1 =
-            FeatureSchema::new(SchemaVersion::new(1), vec![sample_spec("alpha")]).expect("schema");
-        let v2 =
-            FeatureSchema::new(SchemaVersion::new(2), vec![sample_spec("alpha")]).expect("schema");
+        let v1 = ExecutableFeatureSchema::new(
+            SchemaVersion::new(1),
+            ResearchFeatureContract::FullL2,
+            vec![sample_spec("alpha")],
+        )
+        .expect("schema");
+        let v2 = ExecutableFeatureSchema::new(
+            SchemaVersion::new(2),
+            ResearchFeatureContract::FullL2,
+            vec![sample_spec("alpha")],
+        )
+        .expect("schema");
         assert_ne!(
             ResearchHasher::feature_schema(&v1).expect("hash"),
             ResearchHasher::feature_schema(&v2).expect("hash"),

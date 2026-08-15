@@ -13,16 +13,17 @@ use super::{
 };
 
 /// The audited leaf count at the clean-break descriptor boundary.
-pub const DEPLOY_CONFIG_EXPECTED_LEAF_COUNT: usize = 315;
+pub const DEPLOY_CONFIG_EXPECTED_LEAF_COUNT: usize = 328;
 
 /// Every `SecretText` descriptor path. New secret fields must update this exhaustive set.
-pub const DEPLOY_SECRET_PATHS: [&str; 13] = [
+pub const DEPLOY_SECRET_PATHS: [&str; 14] = [
     "cache.redis.password",
     "db.clickhouse.password",
     "db.postgres.password",
     "domain_sources.chainlink_data_streams.api_key",
     "domain_sources.chainlink_data_streams.api_secret",
     "keys.private_key",
+    "market_data.finalized_exchange_history.hypersync.api_token",
     "notifications.telegram.bot_token",
     "notifications.webhook.authorization",
     "notifications.webhook.url",
@@ -649,8 +650,13 @@ impl DeployDescriptorCollector {
     }
 
     fn block_unit(leaf: &str) -> bool {
-        matches!(leaf, "confirmations" | "external_scan_block_span")
-            || leaf.contains("blocks_per_")
+        matches!(
+            leaf,
+            "confirmations"
+                | "external_scan_block_span"
+                | "model_confirmation_blocks"
+                | "rollback_buffer_blocks"
+        ) || leaf.contains("blocks_per_")
             || leaf.ends_with("_block_span")
     }
 
@@ -661,6 +667,7 @@ impl DeployDescriptorCollector {
             || matches!(leaf, "batch_size" | "page_size")
             || leaf.ends_with("_batch_size")
             || leaf.ends_with("_page_size")
+            || leaf.ends_with("_attempts")
             || leaf.ends_with("_limit")
             || leaf.ends_with("_count")
             || leaf.ends_with("_connections")
@@ -697,7 +704,9 @@ impl DeployDescriptorCollector {
             .unwrap_or(false)
             || matches!(
                 path,
-                "polymarket.onchain.rpc_endpoint.url"
+                "market_data.finalized_exchange_history.attestor.rpc_endpoint.url"
+                    | "market_data.finalized_exchange_history.hypersync.api_token"
+                    | "polymarket.onchain.rpc_endpoint.url"
                     | "polymarket.relayer.api_key"
                     | "domain_sources.chainlink_data_streams.api_key"
                     | "domain_sources.chainlink_data_streams.api_secret"

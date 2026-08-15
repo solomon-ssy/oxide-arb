@@ -63,6 +63,28 @@ pub mod ts {
     pub const MACD_NORM: FeatureName = FeatureName::from_static("ts.macd_norm");
 }
 
+/// Features derived exclusively from finalized economic executions.
+pub mod trade {
+    use super::FeatureName;
+
+    pub const LAST_FILL_RETURN: FeatureName = FeatureName::from_static("trade.last_fill_return");
+    pub const REALIZED_VOLATILITY: FeatureName =
+        FeatureName::from_static("trade.realized_volatility");
+    pub const LAGGED_MOMENTUM: FeatureName = FeatureName::from_static("trade.lagged_momentum");
+    pub const EMA_SLOPE: FeatureName = FeatureName::from_static("trade.ema_slope");
+    pub const MACD_NORM: FeatureName = FeatureName::from_static("trade.macd_norm");
+    pub const SIGNED_NOTIONAL_IMBALANCE: FeatureName =
+        FeatureName::from_static("trade.signed_execution_notional_imbalance");
+    pub const EXECUTION_INTENSITY: FeatureName =
+        FeatureName::from_static("trade.execution_intensity");
+    pub const PARTICIPANT_GINI: FeatureName = FeatureName::from_static("trade.participant_gini");
+    pub const PARTICIPANT_HHI: FeatureName = FeatureName::from_static("trade.participant_hhi");
+    pub const EXECUTION_STALENESS_SECS: FeatureName =
+        FeatureName::from_static("trade.execution_staleness_secs");
+    pub const EXECUTION_COVERAGE_RATIO: FeatureName =
+        FeatureName::from_static("trade.execution_coverage_ratio");
+}
+
 /// Microstructure features from `ClickHouse` tick windows.
 pub mod micro {
     use super::FeatureName;
@@ -102,18 +124,19 @@ pub mod structural {
     /// Book-churn intensity (delta-to-update ratio over the maker window).
     ///
     /// A book-derived liquidity-turnover proxy, not the participant
-    /// concentration signal computed from the trade tape.
+    /// concentration signal computed from finalized market executions.
     pub const BOOK_CHURN_INTENSITY: FeatureName =
         FeatureName::from_static("struct.book_churn_intensity");
-    /// Count of trade-tape participant rows in the configured PIT window.
-    pub const TRADE_TAPE_COUNT: FeatureName = FeatureName::from_static("struct.trade_tape_count");
-    /// Total trade-tape notional USD in the configured PIT window.
-    pub const TRADE_TAPE_NOTIONAL_USD: FeatureName =
-        FeatureName::from_static("struct.trade_tape_notional_usd");
-    /// Participant-address coverage ratio in the trade-tape window.
+    /// Count of execution-participant rows in the configured PIT window.
+    pub const EXECUTION_HISTORY_COUNT: FeatureName =
+        FeatureName::from_static("struct.execution_history_count");
+    /// Total finalized execution notional USD in the configured PIT window.
+    pub const EXECUTION_HISTORY_NOTIONAL_USD: FeatureName =
+        FeatureName::from_static("struct.execution_history_notional_usd");
+    /// Participant-address coverage ratio in the finalized-execution window.
     pub const PARTICIPANT_COVERAGE_RATIO: FeatureName =
         FeatureName::from_static("struct.participant_coverage_ratio");
-    /// Distinct fill-participant addresses in the trade-tape window.
+    /// Distinct participant addresses in the finalized-execution window.
     pub const PARTICIPANT_COUNT: FeatureName = FeatureName::from_static("struct.participant_count");
     /// Notional-weighted Gini concentration over fill-side participants.
     pub const PARTICIPANT_GINI: FeatureName = FeatureName::from_static("struct.participant_gini");

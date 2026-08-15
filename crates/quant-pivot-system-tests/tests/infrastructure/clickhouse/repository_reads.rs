@@ -7,15 +7,17 @@ use clickhouse::Client;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, ChDecimal64, ChDigest, ChPrice, ChSchemaVersion,
-        ChShares, ChUsd, EntryConditionEvaluationEventRow, MarketResolutionFactInput,
-        MarketResolutionRow, QuantFeatureParityEventRow, QuantReportRecommendationFactRow,
-        ReportMarketFunnelRow, TradeTapeRow, WeatherForecastFactRow, WeatherObservationFactRow,
+        BookL2LedgerRow, BookMicrostructureRow, ChAssetAmount, ChDecimal64, ChDigest, ChPrice,
+        ChSchemaVersion, ChShares, ChUsd, EntryConditionEvaluationEventRow,
+        ExchangeHistoryAcceptanceRow, ExecutionParticipantRow, MarketExecutionRow,
+        MarketResolutionFactInput, MarketResolutionRow, QuantFeatureParityEventRow,
+        QuantReportRecommendationFactRow, ReportMarketFunnelRow, WeatherForecastFactRow,
+        WeatherObservationFactRow,
     },
     domain::api::FeatureParityEventListQuery,
     enums::clickhouse::{
-        ChCanonicalBookEventType, ChOutcomeSide, ChTradeParticipantRole,
-        ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
+        ChAvailabilityBasis, ChCanonicalBookEventType, ChExchangeSide, ChExchangeVersion,
+        ChExecutionParticipantRole, ChOutcomeSide,
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId, EconomicTierId,
@@ -55,6 +57,88 @@ async fn insert_book_rows(client: &Client, rows: &[BookL2LedgerRow]) {
         insert.write(row).await.expect("write row");
     }
     insert.end().await.expect("end insert");
+}
+
+async fn insert_executions(client: &Client, rows: &[MarketExecutionRow]) {
+    let mut insert = client
+        .insert::<MarketExecutionRow>("quant_market_execution")
+        .await
+        .expect("insert executions");
+    for row in rows {
+        insert.write(row).await.expect("write execution");
+    }
+    insert.end().await.expect("end execution insert");
+}
+
+async fn insert_acceptances(client: &Client, rows: &[ExchangeHistoryAcceptanceRow]) {
+    let mut insert = client
+        .insert::<ExchangeHistoryAcceptanceRow>("quant_exchange_history_acceptance")
+        .await
+        .expect("insert acceptances");
+    for row in rows {
+        insert.write(row).await.expect("write acceptance");
+    }
+    insert.end().await.expect("end acceptance insert");
+}
+
+fn execution_row(
+    market_id: &MarketId,
+    token_id: &TokenId,
+    event_time: i64,
+    model_available_at: i64,
+    chunk_id: Uuid,
+    digest: ChDigest,
+) -> MarketExecutionRow {
+    MarketExecutionRow {
+        execution_id: digest,
+        match_id: None,
+        maker_order_filled_event_id: digest,
+        market_id: market_id.clone(),
+        token_id: token_id.clone(),
+        contract_key: "ctf_exchange_v2".to_owned(),
+        exchange_version: ChExchangeVersion::V2,
+        transaction_hash: format!("0x{}", "1".repeat(64)),
+        block_number: 100,
+        transaction_index: 0,
+        log_index: 0,
+        maker_address: format!("0x{}", "2".repeat(40)),
+        taker_address: format!("0x{}", "3".repeat(40)),
+        side: ChExchangeSide::Buy,
+        price: ChPrice::from(Price::new(Decimal::new(55, 2))),
+        size_shares: ChShares::from(Shares::new(Decimal::from(10))),
+        notional_usd: ChUsd::from(Usd::new(Decimal::from(5))),
+        fee_amount: ChAssetAmount::from(Decimal::ZERO),
+        fee_asset_id: "0".to_owned(),
+        effective_at: event_time,
+        observed_at: model_available_at,
+        model_available_at,
+        availability_basis: ChAvailabilityBasis::BlockConfirmation,
+        availability_policy_hash: digest,
+        chunk_id,
+        schema_version: MarketExecutionRow::SCHEMA_VERSION,
+    }
+}
+
+fn acceptance_row(
+    chunk_id: Uuid,
+    effective_through_at: i64,
+    digest: ChDigest,
+) -> ExchangeHistoryAcceptanceRow {
+    ExchangeHistoryAcceptanceRow {
+        chunk_id,
+        frontier: "activation".to_owned(),
+        from_block: 100,
+        to_block: 100,
+        log_count: 1,
+        provider_digest: digest,
+        first_block_hash: format!("0x{}", "4".repeat(64)),
+        last_block_hash: format!("0x{}", "4".repeat(64)),
+        effective_through_at,
+        accepted_at: effective_through_at,
+        active: 1,
+        state_revision: 1,
+        schema_version: ExchangeHistoryAcceptanceRow::SCHEMA_VERSION,
+    }
 }
 
 fn resolution_row(
@@ -666,16 +750,19 @@ pub async fn scans_reject_unavailable_rows() {
     let market_id = MarketId::new("0xavailability-axis");
     let token_id = TokenId::new("availability-axis-yes");
     let late_ingestion = event_time + 10_000;
-    let mut late_book = book_row(
-        token_id.as_str(),
+    let chunk_id = Uuid::now_v7();
+    let digest = ChDigest::new([8_u8; 32]);
+    let execution = execution_row(
+        &market_id,
+        &token_id,
         event_time,
         late_ingestion,
-        1,
-        Decimal::new(50, 2),
+        chunk_id,
+        digest,
     );
-    late_book.market_id = Some(market_id.clone());
-    insert_book_rows(&client, slice::from_ref(&late_book)).await;
-    wait_book_snapshot_rows(&client, &token_id, 1).await;
+    let acceptance = acceptance_row(chunk_id, event_time, digest);
+    insert_executions(&client, slice::from_ref(&execution)).await;
+    insert_acceptances(&client, slice::from_ref(&acceptance)).await;
 
     assert!(
         read.observed_markets_between(event_time - 1, event_time + 1, event_time)
@@ -1215,81 +1302,65 @@ async fn assert_weather_forecast_pit(
     );
 }
 
-pub async fn trade_preserves_after_merge() {
+pub async fn revoked_chunk_is_hidden() {
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(Arc::clone(&pool));
-    let market_id = MarketId::new("0xtrade-tape-dedupe");
-    let token_id = TokenId::new("tok-dedupe");
-    // Keep the test partition close to wall clock for compact integration scans.
+    let market_id = MarketId::new("0xexecution-revoke");
+    let token_id = TokenId::new("tok-revoke");
     let event_time = fresh_event_time_ms();
-
-    let base = TradeTapeRow {
+    let chunk_id = Uuid::now_v7();
+    let digest = ChDigest::new([4_u8; 32]);
+    let execution = execution_row(
+        &market_id, &token_id, event_time, event_time, chunk_id, digest,
+    );
+    let participant = ExecutionParticipantRow {
+        execution_id: digest,
         market_id: market_id.clone(),
         token_id: token_id.clone(),
-        event_time,
-        ingestion_time: event_time,
-        stream_session_id: None,
-        token_sequence: None,
-        participant_address: "0xparticipant".to_owned(),
-        participant_role: ChTradeParticipantRole::Maker,
-        side: ChTradeSide::Buy,
-        price: ChPrice::from(Price::new(Decimal::new(55, 2))),
-        size_shares: ChShares::from(Shares::new(Decimal::from(10))),
-        notional_usd: ChUsd::from(Usd::new(Decimal::from(5))),
-        tx_hash: Some("0xtx".to_owned()),
-        source_event_id: "trade-dedupe-1".to_owned(),
-        source: ChTradeTapeSource::OnChainOrderFilled,
-        observed_field_flags: u16::MAX,
-        fee_rate_bps: None,
-        reconciliation_status: ChTradeReconciliationStatus::OnChainOnly,
-        matched_source_event_id: None,
-        revision: 1,
-        reconciled_at: None,
-        raw_payload_json: None,
-        schema_version: ChSchemaVersion(2),
+        participant_address: format!("0x{}", "2".repeat(40)),
+        participant_role: ChExecutionParticipantRole::Maker,
+        participant_notional: ChUsd::from(Usd::new(Decimal::from(5))),
+        effective_at: event_time,
+        model_available_at: event_time,
+        availability_policy_hash: digest,
+        chunk_id,
+        schema_version: ExecutionParticipantRow::SCHEMA_VERSION,
     };
-    let mut stale = base.clone();
-    stale.ingestion_time = event_time - 1_000;
-    let mut fresh = base.clone();
-    fresh.ingestion_time = event_time + 1_000;
-    fresh.revision = 2;
-    fresh.reconciliation_status = ChTradeReconciliationStatus::Matched;
-    fresh.matched_source_event_id = Some("ws:trade-dedupe-1".to_owned());
-    fresh.reconciled_at = Some(fresh.ingestion_time);
-
-    let mut insert = client
-        .insert::<TradeTapeRow>("quant_trade_tape")
+    let acceptance = acceptance_row(chunk_id, event_time, digest);
+    insert_executions(&client, slice::from_ref(&execution)).await;
+    let mut participant_insert = client
+        .insert::<ExecutionParticipantRow>("quant_execution_participant")
         .await
-        .expect("insert");
-    insert.write(&stale).await.expect("write stale");
-    insert.write(&fresh).await.expect("write fresh");
-    insert.end().await.expect("end");
-    client
-        .query("OPTIMIZE TABLE quant_trade_tape FINAL")
-        .execute()
+        .expect("insert participant");
+    participant_insert
+        .write(&participant)
         .await
-        .expect("merge trade tape parts");
-
-    let rows_before_revision = read
-        .market_tape_window(
-            vec![market_id.clone()],
-            event_time - 1,
-            event_time + 1,
-            event_time + 1,
-        )
-        .await
-        .expect("read before revision");
-    assert!(rows_before_revision.is_empty());
+        .expect("write participant");
+    participant_insert.end().await.expect("end participant");
+    insert_acceptances(&client, slice::from_ref(&acceptance)).await;
 
     let rows = read
-        .market_tape_window(
+        .market_execution_window(
             vec![market_id.clone()],
             event_time - 1,
             event_time + 1,
-            event_time + 1_000,
+            event_time + 1,
         )
         .await
-        .expect("read after revision");
+        .expect("read accepted execution");
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].ingestion_time, fresh.ingestion_time);
+    let mut revoked = acceptance;
+    revoked.active = 0;
+    revoked.state_revision = 2;
+    insert_acceptances(&client, slice::from_ref(&revoked)).await;
+    let hidden = read
+        .market_execution_window(
+            vec![market_id],
+            event_time - 1,
+            event_time + 1,
+            event_time + 1,
+        )
+        .await
+        .expect("read after revocation");
+    assert!(hidden.is_empty());
 }

@@ -25,8 +25,8 @@ use quant_pivot_models::{
     },
     enums::quant::{DownsideSource, ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
-        BacktestPathSetId, BacktestReportId, DecisionPolicySnapshotId, ModelRunId, ModelSpecId,
-        ModelVersionId, ResearchJobError, ResearchJobId, ResearchJobParams, RoleCode,
+        BacktestPathSetId, BacktestReportId, DecisionPolicySnapshotId, FreshBootRunId, ModelRunId,
+        ModelSpecId, ModelVersionId, ResearchJobError, ResearchJobId, ResearchJobParams, RoleCode,
         TrainingDatasetId,
     },
 };
@@ -102,6 +102,37 @@ impl CoreResearchJobPort {
             self.engine.publish(&info, None, None);
         }
         Ok(ResearchJobView::from(info))
+    }
+
+    /// Enqueue one deterministic, system-owned fresh-boot stage.
+    ///
+    /// Replaying the same run/stage converges on the exact immutable job row;
+    /// a changed payload under that identity is rejected by the repository.
+    pub(crate) async fn enqueue_fresh_boot(
+        &self,
+        run_id: FreshBootRunId,
+        stage: &str,
+        params: ResearchJobParams,
+        model_spec_id: Option<ModelSpecId>,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        parent_job_id: Option<ResearchJobId>,
+    ) -> QuantResult<ResearchJobView> {
+        let job = NewResearchJob {
+            job_id: ResearchJobId::from_fresh_boot_stage(run_id, stage),
+            feedback_cycle_id: None,
+            feedback_stage: None,
+            kind: params.kind(),
+            status: ResearchJobStatus::Queued,
+            model_spec_id,
+            decision_policy_snapshot_id: Some(decision_policy_snapshot_id),
+            params_json: params,
+            requested_by: Some("system:fresh_boot_orchestrator".to_owned()),
+            acting_role: RoleCode::new("fresh_boot_orchestrator"),
+            parent_job_id,
+            recovery_attempt: 0,
+            max_recovery_attempts: self.max_recovery_attempts,
+        };
+        self.enqueue(job).await
     }
 }
 

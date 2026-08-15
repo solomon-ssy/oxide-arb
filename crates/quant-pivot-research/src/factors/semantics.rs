@@ -14,7 +14,7 @@
 //! - missing values carry zero confidence.
 //!
 //! `quant-pivot/raw-schema-null-policy-data-quality-score@2` freezes:
-//! - the active `FeatureSchema` as the authority for quality-bearing inputs;
+//! - the active `ExecutableFeatureSchema` as the authority for quality-bearing inputs;
 //! - only applicable `Penalize`/`RejectMarket` cells enter the denominator;
 //!   `Optional`, `NeutralValue`, and structural `NotApplicable` cells cannot
 //!   dilute or increase the missingness penalty;

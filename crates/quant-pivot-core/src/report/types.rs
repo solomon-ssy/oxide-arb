@@ -12,9 +12,10 @@ use quant_pivot_models::{
     runtime_config::BuyModelRoute,
     runtime_config::ReportDeliveryPolicy,
     types::{
-        Bps, CorrelationId, EconomicTierId, MarketId, ModelRunId, ModelVersionId, Price,
-        RecommendationReportId, ReportRouteRunId, ReportRunId, ReportScheduleId, ReportTriggerKey,
-        SemanticTextError, TradePolicyCohort, TradePolicyCohortProvenance, Usd,
+        Bps, ContentHash, CorrelationId, EconomicTierId, MarketId, ModelRunId, ModelVersionId,
+        Price, RecommendationPolicyProvenance, RecommendationReportId, ReportRouteRunId,
+        ReportRunId, ReportScheduleId, ReportTriggerKey, ResearchFeatureContract,
+        ResearchProfileRef, SemanticTextError, TradePolicyCohort, TradePolicyCohortProvenance, Usd,
     },
 };
 use quant_pivot_research::{model::SignalCandidate, portfolio::TierAdmissionRejectionCode};
@@ -70,7 +71,56 @@ pub struct EmptyReportContext {
     pub warnings: Vec<String>,
 }
 
-/// One globally selected executable tier enriched with its exact Route/model lineage.
+/// Exact recommendation regime behind a globally selected live-L2 tier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlannedRecommendationContract {
+    FullL2 {
+        provenance: TradePolicyCohortProvenance,
+        cohort: Box<TradePolicyCohort>,
+    },
+    Bootstrap {
+        profile_ref: ResearchProfileRef,
+        feature_contract: ResearchFeatureContract,
+        recommendation_contract_hash: ContentHash,
+        cash_budget_tier: Usd,
+        reference_horizon_secs: u64,
+        max_slippage_bps: Bps,
+        min_depth_usd: Usd,
+        max_book_age_ms: u64,
+    },
+}
+
+impl PlannedRecommendationContract {
+    #[must_use]
+    pub fn provenance(&self) -> RecommendationPolicyProvenance {
+        match self {
+            Self::FullL2 { provenance, .. } => provenance.clone().into(),
+            Self::Bootstrap {
+                profile_ref,
+                feature_contract,
+                recommendation_contract_hash,
+                ..
+            } => RecommendationPolicyProvenance::BootstrapProfile {
+                profile_ref: profile_ref.clone(),
+                feature_contract: *feature_contract,
+                recommendation_contract_hash: *recommendation_contract_hash,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn release_secs(&self) -> u64 {
+        match self {
+            Self::FullL2 { cohort, .. } => cohort.vertical_barrier_secs,
+            Self::Bootstrap {
+                reference_horizon_secs,
+                ..
+            } => *reference_horizon_secs,
+        }
+    }
+}
+
+/// One globally selected live-L2 tier enriched with its exact Route/model lineage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedReportRecommendation {
     pub rank: u32,
@@ -80,8 +130,7 @@ pub struct PlannedReportRecommendation {
     pub model_run_id: ModelRunId,
     pub candidate: SignalCandidate,
     pub tier: ExecutableEconomicTier,
-    pub trade_policy: TradePolicyCohortProvenance,
-    pub trade_policy_cohort: TradePolicyCohort,
+    pub contract: PlannedRecommendationContract,
     pub entry_limit_price: Price,
 }
 

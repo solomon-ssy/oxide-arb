@@ -9,7 +9,7 @@ use alloy::{
 
 sol! {
     #[derive(Debug)]
-    event OrderFilledV1(
+    event OrderFilled(
         bytes32 indexed orderHash,
         address indexed maker,
         address indexed taker,
@@ -22,7 +22,7 @@ sol! {
 }
 
 /// Topic hash for V1 `OrderFilled` logs.
-pub const ORDER_FILLED_TOPIC: B256 = OrderFilledV1::SIGNATURE_HASH;
+pub const ORDER_FILLED_TOPIC: B256 = OrderFilled::SIGNATURE_HASH;
 
 /// Decoded V1 fill leg from an RPC log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +40,7 @@ pub struct DecodedOrderFilledV1 {
 /// Decode a V1 `OrderFilled` log, returning `None` when topic/data do not match.
 #[must_use]
 pub fn decode_log(log: &Log) -> Option<DecodedOrderFilledV1> {
-    let decoded = OrderFilledV1::decode_log(log.as_ref()).ok()?;
+    let decoded = OrderFilled::decode_log(log.as_ref()).ok()?;
     Some(DecodedOrderFilledV1 {
         order_hash: decoded.orderHash,
         maker: decoded.maker,

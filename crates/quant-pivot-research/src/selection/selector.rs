@@ -14,7 +14,7 @@ use quant_pivot_models::{
 };
 
 use crate::{
-    features::FeatureSchema,
+    features::AuthoringFeatureCatalog,
     selection::{
         ExcludedMarket, FilterChain, FilterOutcome, MarketCandidateCtx,
         MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector, SelectedMarket,
@@ -49,7 +49,7 @@ impl ConfiguredMarketSelector {
         candidates: &[MarketCandidate],
     ) -> QuantResult<SelectionResult> {
         let thresholds = SelectionThresholds::resolve(&request.selection, &request.data_quality)?;
-        let feature_schema = FeatureSchema::build(&request.features)?;
+        let feature_catalog = AuthoringFeatureCatalog::build(&request.features)?;
 
         let mut included = Vec::new();
         let mut excluded = Vec::new();
@@ -61,7 +61,7 @@ impl ConfiguredMarketSelector {
                 thresholds: &thresholds,
                 decision_at: request.decision_at,
                 model_requirements: &request.model_requirements,
-                feature_schema: &feature_schema,
+                feature_catalog: &feature_catalog,
             };
             match self.chain.evaluate(&ctx) {
                 FilterOutcome::Keep => included.push(SelectedMarket::from(candidate)),

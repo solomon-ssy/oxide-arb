@@ -214,7 +214,7 @@ pub async fn microstructure(
         .await?;
     let trades = state
         .quant_facts
-        .last_trades(tokens, from_ms, to_ms, MICROSTRUCTURE_TRADE_LIMIT)
+        .last_executions(tokens, from_ms, to_ms, MICROSTRUCTURE_TRADE_LIMIT)
         .await?;
     // Rows arrive ordered by token then time; split into YES / NO series.
     let mut yes = Vec::new();

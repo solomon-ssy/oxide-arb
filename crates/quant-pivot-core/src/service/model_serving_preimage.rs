@@ -48,7 +48,7 @@ use quant_pivot_research::model::ClassicalRuntime;
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     factors::FactorEngine,
-    features::{FeatureSchema, SourceRequirement},
+    features::{ExecutableFeatureSchema, SourceRequirement},
     hashing::ResearchHasher,
     model::{
         FavoriteLongshotBiasTable, ModelArtifact, QuantModelRuntime, ResolvedCalibration,
@@ -1236,8 +1236,10 @@ impl ModelServingPreimageService {
         let bindings = contract.bindings();
         let materialization = require_dataset_materialization(dataset)?;
         let manifest = materialization.manifest;
-        let feature_schema =
-            FeatureSchema::build(&model_policy.snapshot.profile_artifacts.features.definition)?;
+        let feature_schema = ExecutableFeatureSchema::build(
+            &model_policy.snapshot.profile_artifacts.features.definition,
+            profile.spec.feature_contract,
+        )?;
         let feature_schema_hash = ResearchHasher::feature_schema(&feature_schema)?;
         let factor_plane = if model_spec.model_family.is_classical() {
             FactorServingPlane::try_empty().map_err(|error| {
@@ -1250,6 +1252,7 @@ impl ModelServingPreimageService {
                 &model_policy.snapshot.profile_artifacts.scoring.definition,
                 &model_policy.snapshot.profile_artifacts.features.definition,
                 &model_policy.snapshot.profile_artifacts.domain.definition,
+                profile.spec.feature_contract,
                 profile.spec.category,
                 None,
             )
@@ -1363,7 +1366,7 @@ impl ModelServingPreimageService {
     }
 
     pub(crate) fn required_domain_families(
-        schema: &FeatureSchema,
+        schema: &ExecutableFeatureSchema,
         plane: &FactorServingPlane,
         input_contract: &ModelInputContract,
         category_scope: Option<MarketCategory>,

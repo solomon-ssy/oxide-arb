@@ -382,7 +382,7 @@ CREATE TABLE IF NOT EXISTS quant_feature_event (
         'book' = 1,
         'gamma_metadata' = 2,
         'clickhouse_fact' = 3,
-        'trade_tape' = 4,
+        'finalized_execution' = 4,
         'derived' = 5,
         'domain_crypto' = 6,
         'linkage' = 7,
@@ -393,7 +393,7 @@ CREATE TABLE IF NOT EXISTS quant_feature_event (
             'book' = 1,
             'gamma_metadata' = 2,
             'clickhouse_fact' = 3,
-            'trade_tape' = 4,
+            'finalized_execution' = 4,
             'derived' = 5,
             'domain_crypto' = 6,
             'linkage' = 7,
@@ -582,111 +582,162 @@ CREATE TABLE IF NOT EXISTS quant_signal_candidate_event (
     `rejection_reason` LowCardinality(String)
 ) ENGINE = MergeTree
 ORDER BY (model_run_id, route_rank, market_id) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_trade_tape (
+CREATE TABLE IF NOT EXISTS quant_exchange_log_raw (
+    `chain_id` UInt64,
+    `contract_key` LowCardinality(String),
+    `exchange_version` Enum8('V1' = 1, 'V2' = 2),
+    `contract_address` String,
+    `block_number` UInt64,
+    `block_hash` String,
+    `parent_block_hash` String,
+    `block_timestamp` DateTime64(3, 'UTC'),
+    `transaction_hash` String,
+    `transaction_index` UInt64,
+    `log_index` UInt64,
+    `topic0` String,
+    `topic1` Nullable(String),
+    `topic2` Nullable(String),
+    `topic3` Nullable(String),
+    `data` String CODEC(ZSTD(3)),
+    `removed` Bool,
+    `hypersync_observed_at` DateTime64(3, 'UTC'),
+    `attestor_observed_at` DateTime64(3, 'UTC'),
+    `observed_at` DateTime64(3, 'UTC'),
+    `model_available_at` DateTime64(3, 'UTC'),
+    `availability_basis` Enum8('BlockConfirmation' = 1),
+    `availability_policy_hash` FixedString(32),
+    `chunk_id` UUID,
+    `raw_log_hash` FixedString(32),
+    `schema_version` UInt32,
+    `event_date` Date MATERIALIZED toDate(block_timestamp)
+) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
+ORDER BY (contract_address, block_number, transaction_index, log_index)
+SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
+CREATE TABLE IF NOT EXISTS quant_exchange_event (
+    `event_id` FixedString(32),
+    `raw_log_hash` FixedString(32),
+    `event_kind` Enum8('OrderFilled' = 1, 'OrdersMatched' = 2),
+    `contract_key` LowCardinality(String),
+    `exchange_version` Enum8('V1' = 1, 'V2' = 2),
+    `contract_address` String,
+    `block_number` UInt64,
+    `block_hash` String,
+    `block_timestamp` DateTime64(3, 'UTC'),
+    `transaction_hash` String,
+    `transaction_index` UInt64,
+    `log_index` UInt64,
+    `order_hash` String,
+    `maker` String,
+    `taker` Nullable(String),
+    `side` Enum8('Unknown' = 0, 'Buy' = 1, 'Sell' = 2),
+    `token_id` Nullable(String),
+    `maker_asset_id` Nullable(String),
+    `taker_asset_id` Nullable(String),
+    `maker_amount` String,
+    `taker_amount` String,
+    `fee_amount` Nullable(String),
+    `builder` Nullable(String),
+    `metadata` Nullable(String),
+    `observed_at` DateTime64(3, 'UTC'),
+    `model_available_at` DateTime64(3, 'UTC'),
+    `availability_policy_hash` FixedString(32),
+    `chunk_id` UUID,
+    `schema_version` UInt32,
+    `event_date` Date MATERIALIZED toDate(block_timestamp)
+) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
+ORDER BY (contract_address, block_number, transaction_index, log_index)
+SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
+CREATE TABLE IF NOT EXISTS quant_exchange_match (
+    `match_id` FixedString(32),
+    `orders_matched_event_id` FixedString(32),
+    `aggregate_taker_event_id` FixedString(32),
+    `contract_key` LowCardinality(String),
+    `exchange_version` Enum8('V1' = 1, 'V2' = 2),
+    `transaction_hash` String,
+    `block_number` UInt64,
+    `block_timestamp` DateTime64(3, 'UTC'),
+    `taker_order_hash` String,
+    `taker_address` String,
+    `side` Enum8('Unknown' = 0, 'Buy' = 1, 'Sell' = 2),
+    `token_id` Nullable(String),
+    `maker_asset_id` Nullable(String),
+    `taker_asset_id` Nullable(String),
+    `maker_amount` String,
+    `taker_amount` String,
+    `maker_execution_count` UInt32,
+    `observed_at` DateTime64(3, 'UTC'),
+    `model_available_at` DateTime64(3, 'UTC'),
+    `availability_policy_hash` FixedString(32),
+    `chunk_id` UUID,
+    `schema_version` UInt32,
+    `event_date` Date MATERIALIZED toDate(block_timestamp)
+) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
+ORDER BY (block_number, transaction_hash, match_id)
+SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
+CREATE TABLE IF NOT EXISTS quant_market_execution (
+    `execution_id` FixedString(32),
+    `match_id` Nullable(FixedString(32)),
+    `maker_order_filled_event_id` FixedString(32),
     `market_id` String,
     `token_id` String,
-    `event_time` DateTime64(3, 'UTC'),
-    `ingestion_time` DateTime64(3, 'UTC'),
-    `stream_session_id` Nullable(UUID),
-    `token_sequence` Nullable(UInt64),
-    `participant_address` String,
-    `participant_role` Enum8('Maker' = 1, 'Taker' = 2, 'Unknown' = 3),
-    `side` Enum8('Buy' = 1, 'Sell' = 2, 'Unknown' = 3),
+    `contract_key` LowCardinality(String),
+    `exchange_version` Enum8('V1' = 1, 'V2' = 2),
+    `transaction_hash` String,
+    `block_number` UInt64,
+    `transaction_index` UInt64,
+    `log_index` UInt64,
+    `maker_address` String,
+    `taker_address` String,
+    `side` Enum8('Buy' = 1, 'Sell' = 2),
     `price` Decimal(18, 8),
     `size_shares` Decimal(38, 18),
     `notional_usd` Decimal(38, 18),
-    `tx_hash` Nullable(String),
-    `source_event_id` String,
-    `source` Enum8('MarketWs' = 1, 'OnChainOrderFilled' = 2),
-    `observed_field_flags` UInt16,
-    `fee_rate_bps` Nullable(Decimal(18, 4)),
-    `reconciliation_status` Enum8(
-        'Pending' = 1,
-        'Matched' = 2,
-        'Unavailable' = 3,
-        'Ambiguous' = 4,
-        'OnChainOnly' = 5
-    ),
-    `matched_source_event_id` Nullable(String),
-    `revision` UInt32,
-    `reconciled_at` Nullable(DateTime64(3, 'UTC')),
-    `raw_payload_json` Nullable(String) CODEC(ZSTD(3)),
+    `fee_amount` Decimal(38, 18),
+    `fee_asset_id` String,
+    `effective_at` DateTime64(3, 'UTC'),
+    `observed_at` DateTime64(3, 'UTC'),
+    `model_available_at` DateTime64(3, 'UTC'),
+    `availability_basis` Enum8('BlockConfirmation' = 1),
+    `availability_policy_hash` FixedString(32),
+    `chunk_id` UUID,
     `schema_version` UInt32,
-    `event_date` Date MATERIALIZED toDate(event_time)
+    `event_date` Date MATERIALIZED toDate(effective_at)
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
-ORDER BY (
-        market_id,
-        token_id,
-        event_time,
-        source_event_id,
-        participant_address
-    ) SETTINGS non_replicated_deduplication_window = 10000,
-    index_granularity = 8192;
-CREATE MATERIALIZED VIEW IF NOT EXISTS quant_book_l2_trade_tape_mv TO quant_trade_tape AS
-SELECT assumeNotNull(market_id) AS market_id,
-    token_id,
-    venue_event_time AS event_time,
-    persisted_time AS ingestion_time,
-    toNullable(stream_session_id) AS stream_session_id,
-    toNullable(token_sequence) AS token_sequence,
-    '' AS participant_address,
-    CAST(
-        'Unknown',
-        'Enum8(\'Maker\' = 1, \'Taker\' = 2, \'Unknown\' = 3)'
-    ) AS participant_role,
-    multiIf(
-        isNull(trade_side),
-        CAST(
-            'Unknown',
-            'Enum8(\'Buy\' = 1, \'Sell\' = 2, \'Unknown\' = 3)'
-        ),
-        assumeNotNull(trade_side) = 'Buy',
-        CAST(
-            'Buy',
-            'Enum8(\'Buy\' = 1, \'Sell\' = 2, \'Unknown\' = 3)'
-        ),
-        CAST(
-            'Sell',
-            'Enum8(\'Buy\' = 1, \'Sell\' = 2, \'Unknown\' = 3)'
-        )
-    ) AS side,
-    assumeNotNull(trade_price) AS price,
-    ifNull(trade_size, toDecimal128(0, 18)) AS size_shares,
-    CAST(
-        assumeNotNull(trade_price) * ifNull(trade_size, toDecimal128(0, 18)),
-        'Decimal(38, 18)'
-    ) AS notional_usd,
-    CAST(NULL, 'Nullable(String)') AS tx_hash,
-    concat('blake3:', lower(hex(event_hash))) AS source_event_id,
-    CAST(
-        'MarketWs',
-        'Enum8(\'MarketWs\' = 1, \'OnChainOrderFilled\' = 2)'
-    ) AS source,
-    toUInt16(
-        135 + if(isNotNull(trade_side), 32, 0) + if(isNotNull(trade_size), 256, 0) + if(isNotNull(fee_rate_bps), 512, 0)
-    ) AS observed_field_flags,
-    fee_rate_bps,
-    if(
-        isNotNull(trade_side)
-        AND isNotNull(trade_size),
-        CAST(
-            'Pending',
-            'Enum8(\'Pending\' = 1, \'Matched\' = 2, \'Unavailable\' = 3, \'Ambiguous\' = 4, \'OnChainOnly\' = 5)'
-        ),
-        CAST(
-            'Unavailable',
-            'Enum8(\'Pending\' = 1, \'Matched\' = 2, \'Unavailable\' = 3, \'Ambiguous\' = 4, \'OnChainOnly\' = 5)'
-        )
-    ) AS reconciliation_status,
-    CAST(NULL, 'Nullable(String)') AS matched_source_event_id,
-    toUInt32(1) AS revision,
-    CAST(NULL, 'Nullable(DateTime64(3, \'UTC\'))') AS reconciled_at,
-    CAST(NULL, 'Nullable(String)') AS raw_payload_json,
-    toUInt32(1) AS schema_version
-FROM quant_book_l2_ledger
-WHERE event_type = 'LastTrade'
-    AND isNotNull(market_id)
-    AND isNotNull(trade_price);
+ORDER BY (market_id, token_id, effective_at, block_number, transaction_index, log_index)
+SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
+CREATE TABLE IF NOT EXISTS quant_execution_participant (
+    `execution_id` FixedString(32),
+    `market_id` String,
+    `token_id` String,
+    `participant_address` String,
+    `participant_role` Enum8('Maker' = 1, 'Taker' = 2),
+    `participant_notional` Decimal(38, 18),
+    `effective_at` DateTime64(3, 'UTC'),
+    `model_available_at` DateTime64(3, 'UTC'),
+    `availability_policy_hash` FixedString(32),
+    `chunk_id` UUID,
+    `schema_version` UInt32,
+    `event_date` Date MATERIALIZED toDate(effective_at)
+) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
+ORDER BY (market_id, token_id, effective_at, execution_id, participant_role)
+SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
+CREATE TABLE IF NOT EXISTS quant_exchange_history_acceptance (
+    `chunk_id` UUID,
+    `frontier` LowCardinality(String),
+    `from_block` UInt64,
+    `to_block` UInt64,
+    `log_count` UInt64,
+    `provider_digest` FixedString(32),
+    `first_block_hash` String,
+    `last_block_hash` String,
+    `effective_through_at` DateTime64(3, 'UTC'),
+    `accepted_at` DateTime64(3, 'UTC'),
+    `active` UInt8,
+    `state_revision` UInt64,
+    `schema_version` UInt32
+) ENGINE = ReplacingMergeTree(state_revision)
+ORDER BY (frontier, from_block, to_block, chunk_id)
+SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS quant_weather_forecast_fact (
     `source_id` LowCardinality(String),
     `instrument_key` String,

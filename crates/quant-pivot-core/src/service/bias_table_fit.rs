@@ -44,7 +44,10 @@ use quant_pivot_models::{
     },
     enums::{common::MarketCategory, quant::RecommendationResolutionKind},
     runtime_config::{DomainConfig, FactorsConfig, FavoriteLongshotConfig},
-    types::{CalibrationArtifactId, MarketId, PayoutRatio, ResearchJobProgress, TokenId},
+    types::{
+        CalibrationArtifactId, MarketId, PayoutRatio, ResearchFeatureContract, ResearchJobProgress,
+        TokenId,
+    },
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
@@ -361,6 +364,7 @@ impl BiasTableFitService {
             max_horizon_secs: 0,
             // The bias fit reads only settlement mids — no domain data.
             domain: DomainConfig::disabled(),
+            feature_contract: ResearchFeatureContract::FullL2,
         };
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.fact_read),

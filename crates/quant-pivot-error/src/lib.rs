@@ -32,6 +32,7 @@ pub mod auth;
 pub mod config;
 pub mod config_validation;
 pub mod control;
+pub mod exchange_history;
 pub mod execution;
 pub mod feedback;
 pub mod governance;
@@ -55,6 +56,7 @@ use auth::AuthError;
 use config::ConfigError;
 use config_validation::{ConfigValidationError, ConfigValidationReport};
 use control::ControlError;
+use exchange_history::ExchangeHistoryError;
 use execution::ExecutionError;
 use feedback::{
     FeedbackCycleCommandError, FeedbackError, PromotionCommitError, PromotionPermitCommandError,
@@ -153,6 +155,9 @@ pub enum QuantError {
     #[error(transparent)]
     Execution(#[from] ExecutionError),
 
+    #[error(transparent)]
+    ExchangeHistory(#[from] ExchangeHistoryError),
+
     // ── Process bootstrap / observability ─────────────────────────────────
     #[error(transparent)]
     Infra(#[from] InfraError),
@@ -189,6 +194,7 @@ impl QuantError {
             Self::Hashing(_) => "hashing",
             Self::Report(_) => "report",
             Self::Execution(_) => "execution",
+            Self::ExchangeHistory(_) => "exchange_history",
             Self::Infra(_) => "infra",
             Self::Control(_) => "control",
         }

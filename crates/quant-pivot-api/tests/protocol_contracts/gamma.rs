@@ -230,6 +230,23 @@ async fn gamma_full_sync_cursor() {
 
     Mock::given(method("GET"))
         .and(path("/events/keyset"))
+        .and(query_param("active", "false"))
+        .and(query_param("closed", "true"))
+        .and(query_param("limit", "100"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "events": [{
+                "id": "evt-historical",
+                "title": "Historical",
+                "slug": "historical",
+                "markets": []
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/events/keyset"))
         .and(query_param("active", "true"))
         .and(query_param("closed", "false"))
         .and(query_param("limit", "100"))
@@ -259,9 +276,10 @@ async fn gamma_full_sync_cursor() {
     .with_http_client(fast_http_client());
 
     let events = client.full_sync().await.expect("full_sync");
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].slug, "page-one");
-    assert_eq!(events[1].slug, "page-two");
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].slug, "historical");
+    assert_eq!(events[1].slug, "page-one");
+    assert_eq!(events[2].slug, "page-two");
 }
 
 #[tokio::test]
@@ -269,6 +287,8 @@ async fn gamma_invalid_without_body() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/events/keyset"))
+        .and(query_param("active", "true"))
+        .and(query_param("closed", "false"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/html")
@@ -280,8 +300,20 @@ async fn gamma_invalid_without_body() {
         .await;
     Mock::given(method("GET"))
         .and(path("/events/keyset"))
+        .and(query_param("active", "true"))
+        .and(query_param("closed", "false"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "events": [{ "id": "evt-recovered", "markets": [] }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/events/keyset"))
+        .and(query_param("active", "false"))
+        .and(query_param("closed", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "events": []
         })))
         .expect(1)
         .mount(&server)

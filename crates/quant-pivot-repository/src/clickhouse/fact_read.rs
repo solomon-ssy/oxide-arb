@@ -9,10 +9,10 @@ use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookLedgerReplayAnchor, BookMicrostructureRow, BookStreamSessionRow,
         CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
+        ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
         MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
-        TradeTapeRow, WeatherForecastFactRow, WeatherObservationFactRow,
+        WeatherForecastFactRow, WeatherObservationFactRow,
     },
-    enums::clickhouse::{ChTradeReconciliationStatus, ChTradeTapeSource},
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
         RecommendationReportId, TokenId,
@@ -29,12 +29,13 @@ use crate::{
             BOOK_LEDGER_SNAPSHOT_AT, BOOK_LEDGER_SNAPSHOTS_AT, BOOK_LEDGER_SNAPSHOTS_BETWEEN,
             BOOK_STREAM_SESSION_AT, BOOK_STREAM_SESSIONS, CRYPTO_REPORT_AT,
             CRYPTO_REPORTS_AVAILABLE, CRYPTO_REPORTS_BETWEEN, DOMAIN_OBSERVATION_AT,
-            DOMAIN_OBSERVATIONS_BETWEEN, ENTRY_EVALUATION_LATEST, LAST_TRADES,
+            DOMAIN_OBSERVATIONS_BETWEEN, ENTRY_EVALUATION_LATEST, EXECUTION_PARTICIPANTS_BETWEEN,
+            LAST_EXECUTIONS, MARKET_EXECUTION_WINDOW, MARKET_EXECUTIONS_BETWEEN,
             MICROSTRUCTURE_SERIES, MICROSTRUCTURE_WINDOW, MID_PRICE_SERIES,
             OBSERVED_MARKETS_BETWEEN, REPORT_FUNNEL_BETWEEN, REPORT_FUNNEL_COUNT,
             REPORT_FUNNEL_COUNTS, REPORT_FUNNEL_PAGE, RESOLUTION_AT, RESOLUTION_BY_CHECKPOINT,
-            RESOLUTION_BY_MARKET, RESOLUTIONS_BETWEEN, TRADE_TAPE_WINDOW,
-            WEATHER_FORECASTS_BETWEEN, WEATHER_OBSERVATIONS_BETWEEN,
+            RESOLUTION_BY_MARKET, RESOLUTIONS_BETWEEN, WEATHER_FORECASTS_BETWEEN,
+            WEATHER_OBSERVATIONS_BETWEEN,
         },
     },
     traits::QuantFactReadRepository,
@@ -527,71 +528,69 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         Ok(rows)
     }
 
-    async fn last_trades(
+    async fn last_executions(
         &self,
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
         limit: u64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
         let token_ids = canonical_values(token_ids);
         if token_ids.is_empty() {
             return Ok(Vec::new());
         }
         let mut rows = Vec::new();
-        for tokens in query_chunks(&token_ids, |token| token.as_str().len(), "quant_trade_tape")? {
-            let page = LAST_TRADES
+        for tokens in query_chunks(
+            &token_ids,
+            |token| token.as_str().len(),
+            "quant_market_execution",
+        )? {
+            let page = LAST_EXECUTIONS
                 .query(
                     self.pool.client(),
-                    "SELECT ?fields FROM quant_trade_tape \
+                    "SELECT ?fields FROM quant_market_execution \
                      WHERE token_id IN ? \
-                     AND source = ? \
-                     AND event_time >= fromUnixTimestamp64Milli(?) \
-                     AND event_time < fromUnixTimestamp64Milli(?) \
-                     ORDER BY event_time DESC, revision DESC, ingestion_time DESC, token_sequence DESC, \
-                     market_id, token_id, participant_role, source_event_id, participant_address \
-                     LIMIT 1 BY market_id, token_id, participant_role, event_time, source_event_id, participant_address \
+                     AND chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1) \
+                     AND effective_at >= fromUnixTimestamp64Milli(?) \
+                     AND effective_at < fromUnixTimestamp64Milli(?) \
+                     ORDER BY effective_at DESC, block_number DESC, transaction_index DESC, log_index DESC \
                      LIMIT ?",
                 )
                 .bind(tokens.to_vec())
-                .bind(ChTradeTapeSource::MarketWs)
                 .bind(from_ms)
                 .bind(to_ms)
                 .bind(limit)
-                .fetch_all::<TradeTapeRow>()
+                .fetch_all::<MarketExecutionRow>()
                 .await?;
-            extend_rows(&mut rows, page, LAST_TRADES, "quant_trade_tape")?;
+            extend_rows(&mut rows, page, LAST_EXECUTIONS, "quant_market_execution")?;
         }
         rows.sort_by(|left, right| {
             right
-                .event_time
-                .cmp(&left.event_time)
-                .then_with(|| right.revision.cmp(&left.revision))
-                .then_with(|| right.ingestion_time.cmp(&left.ingestion_time))
-                .then_with(|| right.token_sequence.cmp(&left.token_sequence))
+                .effective_at
+                .cmp(&left.effective_at)
+                .then_with(|| right.block_number.cmp(&left.block_number))
+                .then_with(|| right.transaction_index.cmp(&left.transaction_index))
+                .then_with(|| right.log_index.cmp(&left.log_index))
                 .then_with(|| left.market_id.cmp(&right.market_id))
                 .then_with(|| left.token_id.cmp(&right.token_id))
-                .then_with(|| (left.participant_role as i8).cmp(&(right.participant_role as i8)))
-                .then_with(|| left.source_event_id.cmp(&right.source_event_id))
-                .then_with(|| left.participant_address.cmp(&right.participant_address))
         });
         let limit = usize::try_from(limit).map_err(|error| {
             StorageError::invariant_violation(
-                Some("quant_trade_tape"),
-                format!("last-trade limit is not representable: {error}"),
+                Some("quant_market_execution"),
+                format!("last-execution limit is not representable: {error}"),
             )
         })?;
         rows.truncate(limit);
         Ok(rows)
     }
 
-    async fn market_tape_window(
+    async fn market_execution_window(
         &self,
         market_ids: Vec<MarketId>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<ExecutionParticipantFactRow>, StorageError> {
         let market_ids = canonical_values(market_ids);
         if market_ids.is_empty() {
             return Ok(Vec::new());
@@ -600,51 +599,140 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         for markets in query_chunks(
             &market_ids,
             |market| market.as_str().len(),
-            "quant_trade_tape",
+            "quant_market_execution",
         )? {
-            let page = TRADE_TAPE_WINDOW
+            let page = MARKET_EXECUTION_WINDOW
                 .query(
                     self.pool.client(),
-                    "SELECT ?fields FROM quant_trade_tape \
-                     WHERE market_id IN ? \
-                     AND source = ? \
-                     AND reconciliation_status = ? \
-                     AND event_time >= fromUnixTimestamp64Milli(?) \
-                     AND event_time < fromUnixTimestamp64Milli(?) \
-                     AND ingestion_time <= fromUnixTimestamp64Milli(?) \
-                     ORDER BY ingestion_time DESC, revision DESC, \
-                     cityHash64(tuple(side, price, size_shares, notional_usd, \
-                         ifNull(tx_hash, ''), source, observed_field_flags, \
-                         reconciliation_status, ifNull(matched_source_event_id, ''), \
-                         ifNull(raw_payload_json, ''), schema_version)) DESC \
-                     LIMIT 1 BY market_id, token_id, participant_role, event_time, source_event_id, participant_address",
+                    "SELECT e.execution_id AS execution_id, e.market_id AS market_id, \
+                     e.token_id AS token_id, p.participant_address AS participant_address, \
+                     p.participant_role AS participant_role, e.side AS side, e.price AS price, \
+                     e.size_shares AS size_shares, e.notional_usd AS notional_usd, \
+                     e.transaction_hash AS transaction_hash, e.effective_at AS effective_at, \
+                     e.observed_at AS observed_at, e.model_available_at AS model_available_at, \
+                     e.availability_policy_hash AS availability_policy_hash \
+                     FROM quant_market_execution AS e \
+                     INNER JOIN quant_execution_participant AS p \
+                     ON p.execution_id = e.execution_id AND p.chunk_id = e.chunk_id \
+                     WHERE e.market_id IN ? \
+                     AND e.chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1) \
+                     AND e.effective_at >= fromUnixTimestamp64Milli(?) \
+                     AND e.effective_at < fromUnixTimestamp64Milli(?) \
+                     AND e.model_available_at <= fromUnixTimestamp64Milli(?) \
+                     AND p.model_available_at <= fromUnixTimestamp64Milli(?) \
+                     AND p.availability_policy_hash = e.availability_policy_hash \
+                     ORDER BY e.market_id, e.effective_at, e.execution_id, p.participant_role",
                 )
                 .bind(markets.to_vec())
-                .bind(ChTradeTapeSource::OnChainOrderFilled)
-                .bind(ChTradeReconciliationStatus::Matched)
                 .bind(from_ms)
                 .bind(to_ms)
                 .bind(decision_at_ms)
-                .fetch_all::<TradeTapeRow>()
+                .bind(decision_at_ms)
+                .fetch_all::<ExecutionParticipantFactRow>()
                 .await?;
-            extend_rows(&mut rows, page, TRADE_TAPE_WINDOW, "quant_trade_tape")?;
+            extend_rows(
+                &mut rows,
+                page,
+                MARKET_EXECUTION_WINDOW,
+                "quant_market_execution",
+            )?;
         }
         rows.sort_by(|left, right| {
             (
                 left.market_id.as_str(),
-                left.event_time,
-                left.ingestion_time,
-                left.source_event_id.as_str(),
+                left.effective_at,
+                left.execution_id,
                 left.participant_role as i8,
             )
                 .cmp(&(
                     right.market_id.as_str(),
-                    right.event_time,
-                    right.ingestion_time,
-                    right.source_event_id.as_str(),
+                    right.effective_at,
+                    right.execution_id,
                     right.participant_role as i8,
                 ))
         });
+        Ok(rows)
+    }
+
+    async fn market_executions_between(
+        &self,
+        market_ids: Vec<MarketId>,
+        from_ms: i64,
+        to_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        let market_ids = canonical_values(market_ids);
+        let mut rows = Vec::new();
+        for markets in query_chunks(
+            &market_ids,
+            |market| market.as_str().len(),
+            "quant_market_execution",
+        )? {
+            let page = MARKET_EXECUTIONS_BETWEEN
+                .query(
+                    self.pool.client(),
+                    "SELECT ?fields FROM quant_market_execution \
+                     WHERE market_id IN ? \
+                     AND chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1) \
+                     AND effective_at >= fromUnixTimestamp64Milli(?) \
+                     AND effective_at < fromUnixTimestamp64Milli(?) \
+                     AND model_available_at <= fromUnixTimestamp64Milli(?) \
+                     ORDER BY market_id, effective_at, execution_id",
+                )
+                .bind(markets.to_vec())
+                .bind(from_ms)
+                .bind(to_ms)
+                .bind(decision_at_ms)
+                .fetch_all::<MarketExecutionRow>()
+                .await?;
+            extend_rows(
+                &mut rows,
+                page,
+                MARKET_EXECUTIONS_BETWEEN,
+                "quant_market_execution",
+            )?;
+        }
+        Ok(rows)
+    }
+
+    async fn execution_participants_between(
+        &self,
+        market_ids: Vec<MarketId>,
+        from_ms: i64,
+        to_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<ExecutionParticipantRow>, StorageError> {
+        let market_ids = canonical_values(market_ids);
+        let mut rows = Vec::new();
+        for markets in query_chunks(
+            &market_ids,
+            |market| market.as_str().len(),
+            "quant_execution_participant",
+        )? {
+            let page = EXECUTION_PARTICIPANTS_BETWEEN
+                .query(
+                    self.pool.client(),
+                    "SELECT ?fields FROM quant_execution_participant \
+                     WHERE market_id IN ? \
+                     AND chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1) \
+                     AND effective_at >= fromUnixTimestamp64Milli(?) \
+                     AND effective_at < fromUnixTimestamp64Milli(?) \
+                     AND model_available_at <= fromUnixTimestamp64Milli(?) \
+                     ORDER BY market_id, effective_at, execution_id, participant_role",
+                )
+                .bind(markets.to_vec())
+                .bind(from_ms)
+                .bind(to_ms)
+                .bind(decision_at_ms)
+                .fetch_all::<ExecutionParticipantRow>()
+                .await?;
+            extend_rows(
+                &mut rows,
+                page,
+                EXECUTION_PARTICIPANTS_BETWEEN,
+                "quant_execution_participant",
+            )?;
+        }
         Ok(rows)
     }
 
@@ -1132,16 +1220,14 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         to_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError> {
-        // `market_id` is Nullable in the ledger; `assumeNotNull` after the
-        // `IS NOT NULL` guard yields a non-nullable column the row can decode.
         let rows = OBSERVED_MARKETS_BETWEEN
             .query(
                 self.pool.client(),
-                "SELECT DISTINCT assumeNotNull(market_id) AS market_id FROM quant_book_l2_ledger \
-                 WHERE market_id IS NOT NULL AND event_type = 'Snapshot' \
-                 AND venue_event_time >= fromUnixTimestamp64Milli(?) \
-                 AND venue_event_time <= fromUnixTimestamp64Milli(?) \
-                 AND persisted_time <= fromUnixTimestamp64Milli(?) \
+                "SELECT DISTINCT market_id FROM quant_market_execution \
+                 WHERE effective_at >= fromUnixTimestamp64Milli(?) \
+                 AND chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1) \
+                 AND effective_at <= fromUnixTimestamp64Milli(?) \
+                 AND model_available_at <= fromUnixTimestamp64Milli(?) \
                  ORDER BY market_id",
             )
             .bind(from_ms)

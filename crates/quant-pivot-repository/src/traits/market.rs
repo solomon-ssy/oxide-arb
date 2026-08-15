@@ -14,13 +14,22 @@ use quant_pivot_models::{
         pagination::Paginated,
     },
     enums::market::MarketStatus,
-    types::{ClobMarketInfoVersion, EventId, HistoryCoverage, MarketId},
+    types::{ClobMarketInfoVersion, EventId, HistoryCoverage, MarketId, TokenId},
 };
 
 #[async_trait::async_trait]
 pub trait MarketRepository: Send + Sync {
     async fn find_by_id(&self, id: &MarketId) -> Result<Option<Arc<MarketInfo>>, StorageError>;
     async fn find_by_ids(&self, ids: &[MarketId]) -> Result<Vec<Arc<MarketInfo>>, StorageError>;
+    async fn find_by_tokens(
+        &self,
+        _token_ids: &[TokenId],
+    ) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
+        Err(StorageError::invariant_violation(
+            Some("market"),
+            "repository does not implement token identity lookup",
+        ))
+    }
     async fn page(&self, query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError>;
     async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError>;
     async fn find_by_event(&self, event_id: &str) -> Result<Vec<Arc<MarketInfo>>, StorageError>;

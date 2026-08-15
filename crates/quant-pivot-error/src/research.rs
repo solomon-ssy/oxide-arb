@@ -74,7 +74,7 @@ pub enum ResearchError {
 
     /// A model runtime's feature-schema hash did not match the active schema.
     #[error("feature schema hash mismatch: expected `{expected}`, got `{actual}`")]
-    FeatureSchemaMismatch {
+    ExecutableFeatureSchemaMismatch {
         /// The hash the runtime/artifact was built against.
         expected: String,
         /// The currently active schema hash.

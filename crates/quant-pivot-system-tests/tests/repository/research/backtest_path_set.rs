@@ -12,8 +12,8 @@ use quant_pivot_models::{
         ModelSpecId, ModelTrainingContract, ModelVersionId, TrainingDatasetId,
         backtest::{
             BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
-            CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
-            CpcvTrialPathBinding, SharpeDistribution,
+            CpcvFoldCalibrationPolicy, CpcvFoldValidationRegime, CpcvMethodologyBinding,
+            CpcvPathSetSubject, CpcvTrialPathBinding, SharpeDistribution,
         },
     },
 };
@@ -367,6 +367,7 @@ impl PathSetFixture<'_> {
 fn fold_artifacts_fixture() -> CpcvFoldArtifacts {
     CpcvFoldArtifacts::try_new(vec![
         CpcvFoldArtifact {
+            validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
             identity: CpcvEstimatorIdentity::Validation {
                 combination_index: 0,
                 test_partitions_hash: content_hash('b'),
@@ -389,6 +390,7 @@ fn fold_artifacts_fixture() -> CpcvFoldArtifacts {
             scenario_model_hash: content_hash('6'),
         },
         CpcvFoldArtifact {
+            validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
             identity: CpcvEstimatorIdentity::TrialPathValidation {
                 trial_id: 0,
                 path_index: 0,
@@ -413,6 +415,7 @@ fn fold_artifacts_fixture() -> CpcvFoldArtifacts {
             scenario_model_hash: content_hash('6'),
         },
         CpcvFoldArtifact {
+            validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
             identity: CpcvEstimatorIdentity::TrialPathValidation {
                 trial_id: 1,
                 path_index: 0,

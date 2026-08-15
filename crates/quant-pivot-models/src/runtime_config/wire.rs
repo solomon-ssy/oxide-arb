@@ -181,6 +181,8 @@ pub enum FeatureFamily {
     PriceBook,
     /// Windowed return / volatility / momentum / trend features.
     TimeSeries,
+    /// Finalized execution-derived price, flow, intensity, and participant features.
+    Trade,
     /// Order-flow microstructure (quote rate, churn, queue depletion, …).
     Microstructure,
     /// Prediction-market structural signals (neg-risk full-leg aggregates,
@@ -195,10 +197,11 @@ pub enum FeatureFamily {
 
 impl FeatureFamily {
     /// Every feature family in declaration order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::MarketMetadata,
         Self::PriceBook,
         Self::TimeSeries,
+        Self::Trade,
         Self::Microstructure,
         Self::Structural,
         Self::Domain,
@@ -211,6 +214,7 @@ impl FeatureFamily {
             Self::MarketMetadata => "market_metadata",
             Self::PriceBook => "price_book",
             Self::TimeSeries => "time_series",
+            Self::Trade => "trade",
             Self::Microstructure => "microstructure",
             Self::Structural => "structural",
             Self::Domain => "domain",

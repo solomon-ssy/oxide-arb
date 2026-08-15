@@ -1188,9 +1188,9 @@ pub(crate) mod fixtures {
             ArtifactUri, BookSnapshotRef, BookSnapshotSource, Bps, CapabilityRegistryHashes,
             CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash,
             DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetSourceLineage, DecisionPolicySnapshotId,
-            EventId, MarketContext, MarketId, Price, Probability, ReaderContractVersion,
-            RecommendationIdentity, ResearchProfileArtifactId, SchemaContractVersion,
-            SchemaVersion, SourceSliceId, SourceSliceManifestRef, TokenId, TradeTapeSourceEvidence,
+            EventId, FinalizedExecutionEvidence, MarketContext, MarketId, Price, Probability,
+            ReaderContractVersion, RecommendationIdentity, ResearchProfileArtifactId,
+            SchemaContractVersion, SchemaVersion, SourceSliceId, SourceSliceManifestRef, TokenId,
             TrainingExampleId, TrainingSampleSource, Usd, builtin_research_profiles,
         },
     };
@@ -1351,7 +1351,7 @@ pub(crate) mod fixtures {
                     book_available_at: decision_at,
                     selection: (&self.selected_market).into(),
                 },
-                trade_tape_source: TradeTapeSourceEvidence::not_required(),
+                finalized_execution_evidence: FinalizedExecutionEvidence::not_required(),
                 identity: RecommendationIdentity {
                     category: MarketCategory::Sports,
                     question: "Fixture market?".to_owned(),

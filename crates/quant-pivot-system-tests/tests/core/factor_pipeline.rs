@@ -28,10 +28,10 @@ use quant_pivot_core::{
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
-        MidPriceBucketRow, QuantFactorEventRow, TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, ExecutionParticipantFactRow,
+        ExecutionParticipantRow, MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow,
+        QuantFactorEventRow,
     },
-    config::TradeTapeOnChainConfig,
     domain::{
         data_plane::DecisionClock,
         market::{
@@ -57,7 +57,8 @@ use quant_pivot_models::{
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FactorDefinitionId,
         FactorValueId, FeatureCell, FeatureStaleness, FeatureValue, FeatureVectorId, MarketId,
-        ModelRunId, ModelVersionId, Price, Probability, SchemaVersion, Shares, TokenId, Usd,
+        ModelRunId, ModelVersionId, Price, Probability, ResearchFeatureContract, SchemaVersion,
+        Shares, TokenId, Usd,
         stable_name::{FactorName, FeatureName},
     },
 };
@@ -87,13 +88,16 @@ use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
         catalog_fixtures::{make_event, make_market},
+        execution_history_fixtures::{
+            ConfigurableFactRead, live_history_config, live_history_repo,
+            whale_concentration_by_market,
+        },
         execution_pg_seed::seed_shared_demo_infra,
         fact_sink::DiscardFactWriter,
         factor_definitions::register_all_factor_definitions,
         pit::InMemoryDecisionSnapshotSource,
         publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
-        trade_tape_fixtures::live_tape_cursor_repo,
     },
 };
 use rust_decimal::Decimal;
@@ -246,23 +250,43 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn market_tape_window(
+    async fn market_execution_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<ExecutionParticipantFactRow>, StorageError> {
         Ok(Vec::new())
     }
 
-    async fn last_trades(
+    async fn last_executions(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _limit: u64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn market_executions_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn execution_participants_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<ExecutionParticipantRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -403,18 +427,29 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
     wire_live_book(&registry, &book_store, &CATALOG);
     let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
+    let decision_at = Utc::now();
+    let market_id = MarketId::new(CATALOG.market_id);
+    let token_id = TokenId::new(CATALOG.yes_token);
+    let fact_read = Arc::new(ConfigurableFactRead::new(
+        Arc::new(EmptyFactRead),
+        whale_concentration_by_market(
+            &market_id,
+            &token_id,
+            (decision_at - ChronoDuration::seconds(60)).timestamp_millis(),
+        ),
+    ));
     let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
-    let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
+    let window_provider = FeatureWindowProvider::new(fact_read);
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
         compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
         window_provider,
         feature_repo,
         event_writer: noop_feature_writer(),
-        block_cursor_repo: live_tape_cursor_repo(),
+        exchange_history_repo: live_history_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
         calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
-        trade_tape_on_chain: TradeTapeOnChainConfig::default(),
+        finalized_exchange_history: live_history_config(),
     });
 
     let features = FeaturesConfig::default();
@@ -423,8 +458,9 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
+            feature_contract: ResearchFeatureContract::FullL2,
             boundary: DecisionClock::new(0)
-                .boundary(Utc::now())
+                .boundary(decision_at)
                 .expect("decision boundary"),
             features: &features,
             domain: &domain,
@@ -497,6 +533,8 @@ impl FactorPipelineScenario {
             &scenario.factors,
             &scenario.features,
             &DomainConfig::default(),
+            ResearchFeatureContract::FullL2,
+            None,
         )
         .await
         .expect("register immutable factor definitions");
@@ -518,6 +556,7 @@ impl FactorPipelineScenario {
             &scenario.factors,
             &scenario.features,
             &domain,
+            ResearchFeatureContract::FullL2,
             None,
             None,
         )
@@ -1559,8 +1598,15 @@ pub async fn unregistered_factor_definitions_pipeline() {
     let factors = factors_config();
     let features = FeaturesConfig::default();
     let domain = DomainConfig::default();
-    let factor_execution = FactorExecutionPlane::try_new(&factors, &features, &domain, None, None)
-        .expect("factor execution plane");
+    let factor_execution = FactorExecutionPlane::try_new(
+        &factors,
+        &features,
+        &domain,
+        ResearchFeatureContract::FullL2,
+        None,
+        None,
+    )
+    .expect("factor execution plane");
 
     // Definitions are no longer auto-registered on the hot path: a fresh,
     // unregistered factor set must hard-block (never a silent pass).
@@ -1582,9 +1628,16 @@ pub async fn unregistered_factor_definitions_pipeline() {
         "unexpected error: {error}"
     );
 
-    register_all_factor_definitions(factor_repo.as_ref(), &factors, &features, &domain)
-        .await
-        .expect("register immutable definitions");
+    register_all_factor_definitions(
+        factor_repo.as_ref(),
+        &factors,
+        &features,
+        &domain,
+        ResearchFeatureContract::FullL2,
+        None,
+    )
+    .await
+    .expect("register immutable definitions");
     service
         .run(FactorPipelineRequest {
             model_run_id: &model_run_id,

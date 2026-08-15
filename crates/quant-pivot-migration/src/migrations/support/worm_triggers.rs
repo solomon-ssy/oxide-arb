@@ -525,10 +525,34 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
-        name: "trg_quant_trade_tape_block_cursor_updated_at",
-        table: "quant_trade_tape_block_cursor",
+        name: "trg_quant_exchange_history_chunk_updated_at",
+        table: "quant_exchange_history_chunk",
         events: TriggerEvents::Update,
         program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_exchange_history_plan_append_only",
+        table: "quant_exchange_history_plan",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_exchange_history_quarantine_append_only",
+        table: "quant_exchange_history_quarantine",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_exchange_history_quarantine_resolution_append_only",
+        table: "quant_exchange_history_quarantine_resolution",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_fresh_boot_run_event_append_only",
+        table: "quant_fresh_boot_run_event",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
         name: "trg_quant_training_dataset_lifecycle_guard",

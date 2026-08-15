@@ -19,23 +19,23 @@ use quant_pivot_models::{
         common::{MarketCategory, TickSize},
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
-            EmptyReportReason, EntryConditionState, IneligibilityReason, QuantRuntimeMode,
-            RecommendationReportStatus, RecommendationStatus, ReportKind,
+            EmptyReportReason, EntryConditionState, FillRequirement, IneligibilityReason,
+            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, ReportKind,
         },
         rbac::ResourceType,
     },
     hashing::{CanonicalDigest, canonical_state_hash},
     runtime_config::{BuyModelRoute, DecisionPolicySnapshot},
     types::{
-        BookSnapshotRef, ConditionTruth, DecisionPolicySnapshotId, EligibilitySummary,
-        EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan, EntryOrderPolicy,
-        EntryOrderTemplate, EntryPlan, EventId, EvidenceRefs, EvidenceRefsInput,
+        BookSnapshotRef, BootstrapExitGuidance, ConditionTruth, DecisionPolicySnapshotId,
+        EligibilitySummary, EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
+        EntryOrderPolicy, EntryOrderTemplate, EntryPlan, EventId, EvidenceRefs, EvidenceRefsInput,
         ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FactorDefinitionId, FeatureVectorId,
         MarketId, OperationDetailDocument, OperationLogId, PortfolioRejectionReason, Price,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, RecommendationTradePlan, RejectionReasonCount,
-        ReportDataQualitySnapshotId, ReportRunId, ReportSummary, RiskEnvelope,
-        RiskEnvelopeHashInput, ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy,
+        RecommendationExitPlan, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
+        RejectionReasonCount, ReportDataQualitySnapshotId, ReportRunId, ReportSummary,
+        RiskEnvelope, RiskEnvelopeHashInput, ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy,
         TrailingStopPolicy, Usd, UsdHours,
     },
 };
@@ -49,7 +49,8 @@ use super::{
     funnel::{PublishedRecommendationRef, ReportFunnelInput, build_report_market_funnel},
     types::{
         ComposedReport, EmptyReportContext, NotificationRecommendation,
-        PlannedReportRecommendation, ReportNotificationPayload, ReportTierRejection, ReportTrigger,
+        PlannedRecommendationContract, PlannedReportRecommendation, ReportNotificationPayload,
+        ReportTierRejection, ReportTrigger,
     },
 };
 use crate::service::{feature_pipeline::RejectedMarket, model_runner::ModelMarketDecision};
@@ -396,24 +397,30 @@ fn compose_recommendation(
             planned.tier.economic_tier_id, planned.tier.economics.marginal_portfolio_value_usd
         ),
     };
-    let auto_allowed = auto_execution_allowed(
-        planned.rank,
-        sizing.suggested_usd,
-        auto_authorized_before,
-        input.runtime_config,
+    let bootstrap = matches!(
+        &planned.contract,
+        PlannedRecommendationContract::Bootstrap { .. }
     );
+    let auto_allowed = !bootstrap
+        && auto_execution_allowed(
+            planned.rank,
+            sizing.suggested_usd,
+            auto_authorized_before,
+            input.runtime_config,
+        );
     let risk_envelope = risk_envelope(planned, input.runtime_config, auto_allowed)?;
     let entry = immediate_entry_plan(planned, input.published_at, valid_until)?;
-    let exit = policy_exit_plan(input.decision_at, capture.market_context.tick_size, planned)?;
+    let exit =
+        recommendation_exit_plan(input.decision_at, capture.market_context.tick_size, planned)?;
     let trade_plan = RecommendationTradePlan {
-        policy: Box::new(planned.trade_policy.clone()),
+        policy: Box::new(planned.contract.provenance()),
         entry,
         sizing: Box::new(sizing),
         exit: Box::new(exit),
         risk_envelope: Box::new(risk_envelope),
     };
     let execution_eligibility =
-        execution_eligibility(auto_allowed, &input.decision_policy_snapshot_id);
+        execution_eligibility(bootstrap, auto_allowed, &input.decision_policy_snapshot_id);
     let recommendation_id = RecommendationId::from_v7();
     let recommendation = NewRecommendation {
         recommendation_id,
@@ -554,9 +561,25 @@ fn recommendation_evidence<'a>(
                 stage: "global_recommendation_compose",
                 detail: "selected Route run has no frozen lineage".to_owned(),
             })?;
+    let contract_matches = match &planned.contract {
+        PlannedRecommendationContract::FullL2 { provenance, .. } => {
+            lineage.trade_policy_artifact_id == Some(provenance.artifact_id)
+                && lineage.recommendation_contract_hash == provenance.artifact_hash
+        }
+        PlannedRecommendationContract::Bootstrap {
+            profile_ref,
+            feature_contract: _,
+            recommendation_contract_hash,
+            ..
+        } => {
+            lineage.trade_policy_artifact_id.is_none()
+                && lineage.research_profile_ref == *profile_ref
+                && lineage.recommendation_contract_hash == *recommendation_contract_hash
+        }
+    };
     if lineage.model_run_id != Some(planned.model_run_id)
         || lineage.model_version_id != planned.model_version_id
-        || lineage.trade_policy_artifact_id != planned.trade_policy.artifact_id
+        || !contract_matches
     {
         return Err(ReportError::InvariantViolation {
             stage: "global_recommendation_compose",
@@ -584,8 +607,38 @@ fn immediate_entry_plan(
     valid_from: DateTime<Utc>,
     valid_until: DateTime<Utc>,
 ) -> QuantResult<EntryPlan> {
+    if let PlannedRecommendationContract::Bootstrap {
+        max_slippage_bps,
+        min_depth_usd,
+        max_book_age_ms,
+        ..
+    } = &planned.contract
+    {
+        return Ok(EntryPlan {
+            condition: EntryConditionPlan::Immediate,
+            order_policy: EntryOrderPolicy::Aggressive {
+                worst_price: planned.entry_limit_price,
+                fill_requirement: FillRequirement::AllowPartial,
+            },
+            max_slippage_bps: *max_slippage_bps,
+            valid_from,
+            valid_until,
+            min_depth_usd: *min_depth_usd,
+            max_book_age_ms: *max_book_age_ms,
+            cancel_if_not_triggered: true,
+            entry_reason: "bootstrap report-only guidance priced and sized from frozen live L2"
+                .to_owned(),
+        });
+    }
+    let PlannedRecommendationContract::FullL2 { provenance, cohort } = &planned.contract else {
+        return Err(ReportError::InvariantViolation {
+            stage: "global_recommendation_compose",
+            detail: "recommendation contract is not supported".to_owned(),
+        }
+        .into());
+    };
     if !matches!(
-        &planned.trade_policy_cohort.entry_condition,
+        &cohort.entry_condition,
         quant_pivot_models::types::EntryConditionTemplate::Immediate
     ) {
         return Err(ReportError::InvariantViolation {
@@ -594,7 +647,7 @@ fn immediate_entry_plan(
         }
         .into());
     }
-    let (fill_requirement, max_slippage_bps) = match &planned.trade_policy_cohort.entry_order {
+    let (fill_requirement, max_slippage_bps) = match &cohort.entry_order {
         EntryOrderTemplate::Aggressive {
             fill_requirement,
             max_slippage_bps,
@@ -617,22 +670,43 @@ fn immediate_entry_plan(
         max_slippage_bps,
         valid_from,
         valid_until,
-        min_depth_usd: planned.trade_policy_cohort.key.cash_budget_tier,
-        max_book_age_ms: planned.trade_policy_cohort.max_book_age_ms,
+        min_depth_usd: cohort.key.cash_budget_tier,
+        max_book_age_ms: cohort.max_book_age_ms,
         cancel_if_not_triggered: true,
         entry_reason: format!(
             "published Trade Policy {} cohort {}",
-            planned.trade_policy.artifact_id, planned.trade_policy.cohort_index
+            provenance.artifact_id, provenance.cohort_index
         ),
     })
 }
 
-fn policy_exit_plan(
+fn recommendation_exit_plan(
     as_of: DateTime<Utc>,
     tick_size: TickSize,
     planned: &PlannedReportRecommendation,
-) -> QuantResult<ExitPlan> {
-    let cohort = &planned.trade_policy_cohort;
+) -> QuantResult<RecommendationExitPlan> {
+    let PlannedRecommendationContract::FullL2 { provenance, cohort } = &planned.contract else {
+        let PlannedRecommendationContract::Bootstrap {
+            reference_horizon_secs,
+            ..
+        } = &planned.contract
+        else {
+            return Err(ReportError::InvariantViolation {
+                stage: "global_recommendation_compose",
+                detail: "recommendation contract is not supported".to_owned(),
+            }
+            .into());
+        };
+        return Ok(RecommendationExitPlan::BootstrapAdvisory {
+            guidance: BootstrapExitGuidance {
+                reference_horizon_secs: *reference_horizon_secs,
+                manual_review_at: instant_plus_secs(as_of, *reference_horizon_secs)?,
+                settlement_value_is_terminal: true,
+                guidance: "ReportOnly bootstrap: reassess manually at the reference horizon or market settlement; no executable exit thresholds are authorized"
+                    .to_owned(),
+            },
+        });
+    };
     let entry = planned.tier.entry.entry_vwap.inner();
     let upper_factor = Decimal::ONE + cohort.upper_barrier_bps.inner() / Decimal::from(10_000);
     let lower_factor = Decimal::ONE - cohort.lower_barrier_bps.inner() / Decimal::from(10_000);
@@ -650,7 +724,7 @@ fn policy_exit_plan(
             min_price: None,
             valid_after: None,
             valid_until: Some(time_exit_at),
-            reason: format!("Trade Policy cohort {}", planned.trade_policy.cohort_index),
+            reason: format!("Trade Policy cohort {}", provenance.cohort_index),
         })
         .collect();
     let trailing_stop = cohort
@@ -685,9 +759,10 @@ fn policy_exit_plan(
         manual_review_at: None,
         exit_reason: format!(
             "published Trade Policy {} cohort {}",
-            planned.trade_policy.artifact_id, planned.trade_policy.cohort_index
+            provenance.artifact_id, provenance.cohort_index
         ),
-    })
+    }
+    .into())
 }
 
 fn tick_aligned_price(value: Decimal, tick_size: TickSize) -> Price {
@@ -705,7 +780,12 @@ fn risk_envelope(
     let tail = &config.execution_risk.portfolio.tail_risk;
     let input = RiskEnvelopeHashInput {
         loss_usd: planned.tier.economics.max_loss_usd,
-        slippage_bps: planned.trade_policy_cohort.max_slippage_bps,
+        slippage_bps: match &planned.contract {
+            PlannedRecommendationContract::FullL2 { cohort, .. } => cohort.max_slippage_bps,
+            PlannedRecommendationContract::Bootstrap {
+                max_slippage_bps, ..
+            } => *max_slippage_bps,
+        },
         position_usd: Usd::new(limits.max_single_recommendation_usd.value),
         market_exposure_usd: Usd::new(limits.max_market_exposure_usd.value),
         event_exposure_usd: Usd::new(limits.max_event_exposure_usd.value),
@@ -750,9 +830,18 @@ fn auto_execution_allowed(
 }
 
 fn execution_eligibility(
+    bootstrap: bool,
     auto_allowed: bool,
     policy_snapshot_id: &DecisionPolicySnapshotId,
 ) -> ExecutionEligibility {
+    if bootstrap {
+        return ExecutionEligibility {
+            eligible_modes: vec![QuantRuntimeMode::ReportOnly],
+            ineligibility_reasons: vec![IneligibilityReason::ReportOnlyMode],
+            approval_required: true,
+            auto_policy_id: None,
+        };
+    }
     let mut eligible_modes = vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto];
     if auto_allowed {
         eligible_modes.push(QuantRuntimeMode::AutoExecution);

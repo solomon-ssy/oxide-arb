@@ -7,9 +7,10 @@ use quant_pivot_models::{
     domain::quant::{
         BootstrapModelRoute, CandidateExplanationValidation, CommitModelRouteBootstrap,
         ModelBootstrapManifest, ModelBootstrapManifestInput, ModelBootstrapPolicyProjection,
-        ModelGovernanceAuditDetail, ModelRouteBootstrapPreflight,
-        ModelRouteBootstrapPreflightInput, NewBacktestPathSet, NewBacktestPathSetInput,
-        NewBacktestReport, NewModelRun, PromotionPermitActor,
+        ModelBootstrapValidationEvidence, ModelGovernanceAuditDetail, ModelRouteBootstrapActor,
+        ModelRouteBootstrapPreflight, ModelRouteBootstrapPreflightInput, NewBacktestPathSet,
+        NewBacktestPathSetInput, NewBacktestReport, NewModelRun, PromotionPermitActor,
+        RepresentedRouteSet,
     },
     entities::{
         decision_policy_snapshot::Entity as SnapshotEntity,
@@ -27,15 +28,16 @@ use quant_pivot_models::{
         quant::{DatasetPurpose, FeatureParityLatchState, ModelRunKind, QuantRuntimeMode},
         runtime_config::ConfigResourceKind,
     },
-    runtime_config::{ActivePolicyBundle, BuyModelRoute},
+    runtime_config::{ActivePolicyBundle, BuyModelRoute, PortfolioScenarioModelArtifactBinding},
     types::{
         BacktestPathSetId, BacktestReportId, ContentHash, ModelRunId, ModelVersionId,
-        PolicyIdempotencyKey, Probability, RoleCode,
+        PolicyIdempotencyKey, PortfolioScenarioModelArtifactId, Probability, RoleCode,
+        SchemaVersion,
         backtest::{
             BacktestPath, CategoryMetrics, CpcvEstimatorIdentity, CpcvFoldArtifact,
-            CpcvFoldArtifacts, CpcvFoldCalibrationPolicy, CpcvMethodologyBinding,
-            CpcvPathSetSubject, CpcvTrialPathBinding, ExpectedVsRealized, PnlSimulation,
-            SharpeDistribution,
+            CpcvFoldArtifacts, CpcvFoldCalibrationPolicy, CpcvFoldValidationRegime,
+            CpcvMethodologyBinding, CpcvPathSetSubject, CpcvTrialPathBinding, ExpectedVsRealized,
+            PnlSimulation, SharpeDistribution,
         },
         model_lineage::ModelVersionDerivation,
         model_quality::{
@@ -76,6 +78,28 @@ use quant_pivot_research::{artifact::ArtifactStore, hashing::ResearchHasher};
 fn hash(seed: char) -> ContentHash {
     ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
         .expect("bootstrap fixture hash")
+}
+
+fn scenario_binding(
+    route: BuyModelRoute,
+    bound_at: DateTime<Utc>,
+) -> PortfolioScenarioModelArtifactBinding {
+    let represented = RepresentedRouteSet::from_routes([route]).expect("represented route");
+    let content_hash = hash('7');
+    PortfolioScenarioModelArtifactBinding {
+        portfolio_scenario_model_artifact_id: PortfolioScenarioModelArtifactId::from_content_hash(
+            &content_hash,
+        ),
+        ordered_routes: represented.routes,
+        route_set_digest: represented.digest,
+        serving_contract_digest: hash('1'),
+        calibration_contract_digest: hash('2'),
+        recommendation_contract_digest: hash('3'),
+        scenario_model_schema_version: SchemaVersion::FIRST,
+        capital_time_bucket_contract_digest: hash('4'),
+        model_content_hash: content_hash,
+        bound_at,
+    }
 }
 
 fn quality_report(model_id: ModelVersionId, evaluated_at: DateTime<Utc>) -> QualityGateReport {
@@ -135,6 +159,7 @@ struct ValidationEvidence {
 fn bootstrap_fold_artifacts() -> CpcvFoldArtifacts {
     CpcvFoldArtifacts::try_new(vec![
         CpcvFoldArtifact {
+            validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
             identity: CpcvEstimatorIdentity::Validation {
                 combination_index: 0,
                 test_partitions_hash: hash('5'),
@@ -157,6 +182,7 @@ fn bootstrap_fold_artifacts() -> CpcvFoldArtifacts {
             scenario_model_hash: hash('f'),
         },
         CpcvFoldArtifact {
+            validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
             identity: CpcvEstimatorIdentity::TrialPathValidation {
                 trial_id: 0,
                 path_index: 0,
@@ -181,6 +207,7 @@ fn bootstrap_fold_artifacts() -> CpcvFoldArtifacts {
             scenario_model_hash: hash('f'),
         },
         CpcvFoldArtifact {
+            validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
             identity: CpcvEstimatorIdentity::TrialPathValidation {
                 trial_id: 1,
                 path_index: 0,
@@ -569,6 +596,7 @@ impl BootstrapFixture {
             .calibration
             .as_ref()
             .expect("first-champion calibration binding");
+        let scenario_binding = scenario_binding(route, evaluated_at);
         let manifest = ModelBootstrapManifest::try_seal(ModelBootstrapManifestInput {
             model_version_id: model.model_version_id,
             model_spec_id: model.model_spec_id,
@@ -587,10 +615,13 @@ impl BootstrapFixture {
             calibration_artifact_hash: Some(calibration.content_hash),
             profile_ref: model.profile_ref.clone(),
             route,
-            cpcv_path_set_id: validation.path_set_id,
-            cpcv_path_set_hash: validation.path_set_hash,
-            backtest_report_id: validation.backtest_report_id,
-            backtest_report_hash: validation.backtest_report_hash,
+            validation_evidence: ModelBootstrapValidationEvidence::PortfolioEconomics {
+                path_set_id: validation.path_set_id,
+                path_set_hash: validation.path_set_hash,
+                backtest_report_id: validation.backtest_report_id,
+                backtest_report_hash: validation.backtest_report_hash,
+            },
+            scenario_model_binding: scenario_binding.clone(),
             explanation_validation: CandidateExplanationValidation::try_from(bindings)
                 .expect("verify first-champion explanation"),
             quality_gate_report: quality_report(model.model_version_id, evaluated_at),
@@ -603,6 +634,7 @@ impl BootstrapFixture {
             &bundle,
             route,
             model.model_version_id,
+            scenario_binding,
             evaluated_at,
         )
         .expect("derive first-champion route projection");
@@ -660,7 +692,7 @@ impl BootstrapFixture {
                 idempotency_key: key
                     .parse::<PolicyIdempotencyKey>()
                     .expect("bootstrap idempotency key"),
-                actor: self.actor.clone(),
+                actor: ModelRouteBootstrapActor::Operator(self.actor.clone()),
                 reason_code: "first_champion".to_owned(),
                 note: note.to_owned(),
             },
@@ -860,6 +892,7 @@ pub async fn model_route_bootstrap_contracts() {
             &committed.bundle,
             fixture.route,
             fixture.model_id,
+            scenario_binding(fixture.route, committed.activation.activated_at),
             committed.activation.activated_at,
         )
         .is_err(),

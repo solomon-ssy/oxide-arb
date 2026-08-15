@@ -37,6 +37,8 @@ mod feedback_cycle;
 mod feedback_scheduler;
 #[allow(clippy::needless_update)] // Trigger inserts omit DB-managed timestamps.
 mod feedback_trigger;
+#[allow(clippy::needless_update)] // Initial DTO covers the complete fresh-boot row.
+mod fresh_boot;
 mod global_portfolio_plan;
 #[allow(clippy::needless_update)] // NewModelGovernanceAudit omits DB-managed created_at
 mod governance_audit;
@@ -173,6 +175,12 @@ pub use feedback_scheduler::{
 pub use feedback_trigger::{
     FeedbackTriggerEventInfo, FeedbackTriggerEventInput, NewFeedbackTriggerEvent,
 };
+pub use fresh_boot::{
+    AdvanceFreshBootRun, BlockFreshBootRun, DelayFreshBootRun, FRESH_BOOT_MAX_RETRY_COUNT,
+    FreshBootAdvancePatch, FreshBootRunContract, FreshBootRunEventInfo, FreshBootRunEventInput,
+    FreshBootRunInfo, FreshBootSourceCoverage, FreshBootSourceCoverageManifest, NewFreshBootRun,
+    NewFreshBootRunEvent, ResumeFreshBootRun, SupersedeFreshBootRun,
+};
 pub use global_portfolio_plan::{
     ExactVerificationEvidence, ExistingPortfolioState, GlobalPortfolioPlan,
     PortfolioConstraintEvidence, PortfolioDecisionResult, PortfolioObjectiveEvidence,
@@ -206,10 +214,11 @@ pub use model_candidate_manifest::{
     PromotionGateArtifactInput, scenario_model_bindings_hash,
 };
 pub use model_route_bootstrap::{
-    BootstrapModelRoute, CommitModelRouteBootstrap, ModelBootstrapManifest,
-    ModelBootstrapManifestInput, ModelBootstrapPolicyProjection, ModelRouteBootstrapPolicy,
-    ModelRouteBootstrapPreflight, ModelRouteBootstrapPreflightInput, ModelRouteBootstrapRecord,
-    ModelRouteBootstrapRecordInput, ModelRouteBootstrapRoute,
+    BootstrapModelRoute, CommitModelRouteBootstrap, FRESH_BOOT_REASON_CODE, ModelBootstrapManifest,
+    ModelBootstrapManifestInput, ModelBootstrapPolicyProjection, ModelBootstrapValidationEvidence,
+    ModelRouteBootstrapActor, ModelRouteBootstrapPolicy, ModelRouteBootstrapPreflight,
+    ModelRouteBootstrapPreflightInput, ModelRouteBootstrapRecord, ModelRouteBootstrapRecordInput,
+    ModelRouteBootstrapRoute,
 };
 pub use outcome_reconciliation::{
     ExecutionAttemptBarrier, ExecutionAttemptDeferredReason, ExecutionAttemptDerivation,
@@ -221,12 +230,13 @@ pub use outcome_reconciliation::{
 };
 pub use portfolio::{NewPortfolioPlan, PortfolioPlanInfo};
 pub use portfolio_scenario::{
-    DiscountCurvePoint, PortfolioScenario, PortfolioScenarioArtifact, PortfolioScenarioFitEvidence,
-    PortfolioScenarioKind, PortfolioScenarioModelArtifact, PortfolioScenarioModelState,
-    PortfolioScenarioResamplingMethod, PortfolioScenarioRouteFactor,
-    PortfolioScenarioRouteFitLineage, PortfolioScenarioRouteModelLineage,
-    PortfolioScenarioVisibility, ScenarioDistribution, ScenarioMarketOutcome, ScenarioPayoutState,
-    ScenarioWeight, StructuralExclusivityGroup, StructuralOutcomeRef,
+    DiscountCurvePoint, PortfolioScenario, PortfolioScenarioArtifact,
+    PortfolioScenarioEvidenceRegime, PortfolioScenarioFitEvidence, PortfolioScenarioKind,
+    PortfolioScenarioModelArtifact, PortfolioScenarioModelState, PortfolioScenarioResamplingMethod,
+    PortfolioScenarioRouteFactor, PortfolioScenarioRouteFitLineage,
+    PortfolioScenarioRouteModelLineage, PortfolioScenarioVisibility, ScenarioDistribution,
+    ScenarioMarketOutcome, ScenarioPayoutState, ScenarioWeight, StructuralExclusivityGroup,
+    StructuralOutcomeRef,
 };
 pub use position::{NewPosition, PositionExit, PositionFill, PositionInfo};
 pub use promotion_permit::{

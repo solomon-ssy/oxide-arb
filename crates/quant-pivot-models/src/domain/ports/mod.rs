@@ -4,6 +4,7 @@ pub mod account_read;
 pub mod backtest;
 pub mod backtest_path_set;
 pub mod calibration_artifact;
+pub mod exchange_history_progress;
 pub mod execution_read;
 pub mod execution_recovery;
 pub mod feature_integrity;
@@ -38,6 +39,7 @@ pub use calibration_artifact::{
     BiasTableFitJobParams, BiasTableFitOutcome, CalibrationArtifactFitPort,
     ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
 };
+pub use exchange_history_progress::ExchangeHistoryProgressPort;
 pub use execution_read::ExecutionReadPort;
 pub use execution_recovery::ExecutionRecoveryPort;
 pub use feature_integrity::{FeatureIntegrityActionContext, FeatureIntegrityPort};

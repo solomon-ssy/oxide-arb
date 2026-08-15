@@ -9,4 +9,3 @@ pub mod market_registry;
 pub mod order_book;
 pub mod session_directory;
 pub mod staleness_classifier;
-pub mod trade_tape_health;

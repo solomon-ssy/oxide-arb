@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    clickhouse::{BookMicrostructureRow, TradeTapeRow},
+    clickhouse::{BookMicrostructureRow, MarketExecutionRow},
     domain::{
         market::{BookLevel, MarketInfo, book::BookSnapshot},
         pagination::{NormalizePageQuery, PageRequest},
@@ -364,12 +364,12 @@ pub struct MarketTradeTick {
 }
 
 impl MarketTradeTick {
-    /// Project a canonical Market-WS trade-tape row.
+    /// Project a canonical finalized market execution.
     #[must_use]
-    pub fn from_row(row: TradeTapeRow) -> Self {
+    pub fn from_row(row: MarketExecutionRow) -> Self {
         Self {
             token_id: row.token_id,
-            ts_ms: row.event_time,
+            ts_ms: row.effective_at,
             price: Price::from(row.price),
         }
     }

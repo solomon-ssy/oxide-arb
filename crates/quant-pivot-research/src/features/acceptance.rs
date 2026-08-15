@@ -34,9 +34,9 @@ use quant_pivot_models::{
     types::{
         BookSnapshotRef, BookSnapshotSource, Bps, CatalogDecisionRef, CatalogEventChangeId,
         CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, DecisionCaptureEvidence,
-        DecisionPolicySnapshotId, DecisionSnapshotEvidence, EventId, MarketContext, MarketId,
-        Price, Probability, RecommendationIdentity, SchemaVersion, SelectionMemberEvidence, Shares,
-        TokenId, TradeTapeSourceEvidence, Usd,
+        DecisionPolicySnapshotId, DecisionSnapshotEvidence, EventId, FinalizedExecutionEvidence,
+        MarketContext, MarketId, Price, Probability, RecommendationIdentity,
+        ResearchFeatureContract, SchemaVersion, SelectionMemberEvidence, Shares, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -45,8 +45,8 @@ use uuid::Uuid;
 
 use crate::{
     features::{
-        FeatureBuildInput, FeatureBuilder, MarketWindowSnapshot, MicrostructureBucket,
-        ResolvedBook, TradeTapeWindowSnapshot,
+        FeatureBuildInput, FeatureBuilder, FinalizedExecutionWindowSnapshot, MarketWindowSnapshot,
+        MicrostructureBucket, ResolvedBook,
         availability::FeatureAvailabilityOracle,
         builder::ConfiguredFeatureBuilder,
         names::{
@@ -59,7 +59,7 @@ use crate::{
             structural::{NEGRISK_LEG_ASK_SUM, NEGRISK_LEG_COUNT},
         },
         null_policy::{NullDecision, NullPolicyEngine},
-        schema::FeatureSchema,
+        schema::{AuthoringFeatureCatalog, ExecutableFeatureSchema},
         value::{
             EvidenceSourceKind, EvidenceSourceRef, FeatureCell, FeatureCellState, FeatureName,
             FeatureStaleness, FeatureValue, FeatureVector, NullReason,
@@ -256,7 +256,7 @@ fn book_at_times(
 
 #[test]
 fn feature_rejects_required_missing() {
-    let spec = FeatureSchema::build(&FeaturesConfig::default())
+    let spec = AuthoringFeatureCatalog::build(&FeaturesConfig::default())
         .expect("schema")
         .by_name(&BEST_BID)
         .expect("spec")
@@ -273,7 +273,7 @@ fn feature_rejects_required_missing() {
 
 #[test]
 fn feature_null_no_zero() {
-    let spec = FeatureSchema::build(&FeaturesConfig::default())
+    let spec = AuthoringFeatureCatalog::build(&FeaturesConfig::default())
         .expect("schema")
         .by_name(&DEPTH_IMBALANCE)
         .expect("spec")
@@ -474,11 +474,15 @@ async fn primary_secondary_executable_boundary() {
         enabled_feature_families: vec![FeatureFamily::PriceBook],
         ..FeaturesConfig::default()
     };
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("builder");
     let window = MarketWindowSnapshot::empty(primary.clone(), decision_at, cutoff);
-    let trade_tape =
-        TradeTapeWindowSnapshot::empty(selected.market_id.clone(), decision_at, cutoff);
+    let execution_history =
+        FinalizedExecutionWindowSnapshot::empty(selected.market_id.clone(), decision_at, cutoff);
     let vector = builder
         .build(FeatureBuildInput {
             market: &selected,
@@ -486,7 +490,7 @@ async fn primary_secondary_executable_boundary() {
             required_features: &[],
             pit: &engine,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -558,11 +562,18 @@ async fn unquoted_preserves_without_value() {
         enabled_feature_families: vec![FeatureFamily::PriceBook],
         ..FeaturesConfig::default()
     };
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("builder");
     let window = MarketWindowSnapshot::empty(primary.clone(), decision_at, decision_at);
-    let trade_tape =
-        TradeTapeWindowSnapshot::empty(selected.market_id.clone(), decision_at, decision_at);
+    let execution_history = FinalizedExecutionWindowSnapshot::empty(
+        selected.market_id.clone(),
+        decision_at,
+        decision_at,
+    );
     let vector = builder
         .build(FeatureBuildInput {
             market: &selected,
@@ -570,7 +581,7 @@ async fn unquoted_preserves_without_value() {
             required_features: &[],
             pit: &engine,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -703,7 +714,7 @@ fn test_decision_capture(
                 source_refs: Vec::new(),
             },
         },
-        trade_tape_source: TradeTapeSourceEvidence::not_required(),
+        finalized_execution_evidence: FinalizedExecutionEvidence::not_required(),
         identity: RecommendationIdentity {
             category: MarketCategory::Other,
             question: "test question".to_owned(),
@@ -749,11 +760,11 @@ fn feature_schema_changes_hash() {
         ..FeaturesConfig::default()
     };
 
-    let schema_v1 = FeatureSchema::build(&config_v1).expect("schema v1");
-    let schema_v2 = FeatureSchema::build(&config_v2).expect("schema v2");
+    let schema_v1 = AuthoringFeatureCatalog::build(&config_v1).expect("schema v1");
+    let schema_v2 = AuthoringFeatureCatalog::build(&config_v2).expect("schema v2");
     assert_ne!(
-        ResearchHasher::feature_schema(&schema_v1).expect("hash"),
-        ResearchHasher::feature_schema(&schema_v2).expect("hash"),
+        ResearchHasher::authoring_catalog(&schema_v1).expect("hash"),
+        ResearchHasher::authoring_catalog(&schema_v2).expect("hash"),
     );
 }
 
@@ -802,8 +813,12 @@ async fn binary_market_not_applicable() {
         enabled_feature_families: vec![FeatureFamily::Structural],
         ..FeaturesConfig::default()
     };
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("feature builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("feature builder");
     let market = SelectedMarket {
         market_id: MarketId::new("m-binary"),
         event_id: EventId::new("e1"),
@@ -818,7 +833,8 @@ async fn binary_market_not_applicable() {
     let as_of = Utc::now();
     let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
     let window = MarketWindowSnapshot::empty(market.primary_token_id.clone(), as_of, as_of);
-    let trade_tape = TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
+    let execution_history =
+        FinalizedExecutionWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
     let vector = builder
         .build(FeatureBuildInput {
             market: &market,
@@ -826,7 +842,7 @@ async fn binary_market_not_applicable() {
             required_features: &[],
             pit: &pit,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -851,8 +867,12 @@ async fn unresolved_missing_not_not() {
         enabled_feature_families: vec![FeatureFamily::Domain],
         ..FeaturesConfig::default()
     };
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("feature builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("feature builder");
     let market = SelectedMarket {
         market_id: MarketId::new("m-crypto-unresolved"),
         event_id: EventId::new("e1"),
@@ -866,7 +886,8 @@ async fn unresolved_missing_not_not() {
     let as_of = Utc::now();
     let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
     let window = MarketWindowSnapshot::empty(market.primary_token_id.clone(), as_of, as_of);
-    let trade_tape = TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
+    let execution_history =
+        FinalizedExecutionWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
     let vector = builder
         .build(FeatureBuildInput {
             market: &market,
@@ -874,7 +895,7 @@ async fn unresolved_missing_not_not() {
             required_features: &[],
             pit: &HealthyPit,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -944,8 +965,12 @@ async fn builder_resolves_capture_book() {
         enabled_feature_families: vec![FeatureFamily::TimeSeries, FeatureFamily::Microstructure],
         ..FeaturesConfig::default()
     };
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("feature builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("feature builder");
     let market = SelectedMarket {
         market_id: MarketId::new("m-gate"),
         event_id: EventId::new("e1"),
@@ -963,7 +988,8 @@ async fn builder_resolves_capture_book() {
     let as_of = Utc::now();
     let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
     let window = MarketWindowSnapshot::empty(market.primary_token_id.clone(), as_of, as_of);
-    let trade_tape = TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
+    let execution_history =
+        FinalizedExecutionWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
     builder
         .build(FeatureBuildInput {
             market: &market,
@@ -971,7 +997,7 @@ async fn builder_resolves_capture_book() {
             required_features: &[],
             pit: &source,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -995,7 +1021,9 @@ async fn builder_resolves_capture_book() {
 
 #[test]
 fn feature_event_emits_context() {
-    let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
+    let schema =
+        ExecutableFeatureSchema::build(&FeaturesConfig::default(), ResearchFeatureContract::FullL2)
+            .expect("schema");
     let mut vector = FeatureVector::hash_fixture();
     vector.generic_schema_version = schema.version();
     vector.generic.insert(
@@ -1102,7 +1130,9 @@ fn feature_event_emits_context() {
 
 #[test]
 fn feature_event_rejects_mismatch() {
-    let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
+    let schema =
+        ExecutableFeatureSchema::build(&FeaturesConfig::default(), ResearchFeatureContract::FullL2)
+            .expect("schema");
     let mut vector = FeatureVector::hash_fixture();
     vector.generic_schema_version = schema.version();
     let mut persisted = vector.persisted_feature();
@@ -1150,7 +1180,7 @@ fn candidate_with_book() -> MarketCandidate {
 
 #[test]
 fn model_eligibility_uses_oracle() {
-    let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
+    let schema = AuthoringFeatureCatalog::build(&FeaturesConfig::default()).expect("schema");
     let oracle = FeatureAvailabilityOracle::new(&schema);
     let candidate = candidate_with_book();
 
@@ -1179,7 +1209,7 @@ fn model_eligibility_uses_oracle() {
         thresholds: &thresholds,
         decision_at: Utc::now(),
         model_requirements: &ModelFeatureRequirements::generic_only(book_required),
-        feature_schema: &schema,
+        feature_catalog: &schema,
     };
     assert!(matches!(
         FilterChain::standard().evaluate(&ctx),
@@ -1338,8 +1368,12 @@ async fn online_offline_feature_parity() {
         enabled_feature_families: vec![FeatureFamily::MarketMetadata, FeatureFamily::PriceBook],
         ..FeaturesConfig::default()
     };
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("feature builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("feature builder");
     let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
     let selected = SelectedMarket {
         market_id: market_id.clone(),
@@ -1352,7 +1386,8 @@ async fn online_offline_feature_parity() {
         source_refs: Vec::new(),
     };
     let window = MarketWindowSnapshot::empty(token.clone(), as_of, as_of);
-    let trade_tape = TradeTapeWindowSnapshot::empty(selected.market_id.clone(), as_of, as_of);
+    let execution_history =
+        FinalizedExecutionWindowSnapshot::empty(selected.market_id.clone(), as_of, as_of);
     let data_quality = DataQualityConfig {
         feature_staleness_policy: FeatureStalenessPolicy::AllowDegraded,
         ..DataQualityConfig::default()
@@ -1368,7 +1403,7 @@ async fn online_offline_feature_parity() {
             required_features: &[],
             pit: &live_source,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &data_quality,
@@ -1386,7 +1421,7 @@ async fn online_offline_feature_parity() {
             required_features: &[],
             pit: &hist_engine,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &data_quality,
@@ -1469,13 +1504,18 @@ async fn feature_window_not_stale() {
         buckets,
     };
     let market = windowed_market(&token);
-    let trade_tape = TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
+    let execution_history =
+        FinalizedExecutionWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
     let config = FeaturesConfig {
         enabled_feature_families: vec![FeatureFamily::TimeSeries],
         ..FeaturesConfig::default()
     };
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("feature builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("feature builder");
     let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
     let vector = builder
         .build(FeatureBuildInput {
@@ -1484,7 +1524,7 @@ async fn feature_window_not_stale() {
             required_features: &[],
             pit: &HealthyPit,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -1531,12 +1571,17 @@ async fn feature_stale_rejects_market() {
         enabled_feature_families: vec![FeatureFamily::PriceBook],
         ..FeaturesConfig::default()
     };
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("feature builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("feature builder");
     let market = windowed_market(&token);
     let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
     let window = MarketWindowSnapshot::empty(token.clone(), as_of, as_of);
-    let trade_tape = TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
+    let execution_history =
+        FinalizedExecutionWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
     let data_quality = DataQualityConfig {
         max_book_age_ms: 5_000,
         ..DataQualityConfig::default()
@@ -1548,7 +1593,7 @@ async fn feature_stale_rejects_market() {
             required_features: &[],
             pit: &engine,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &data_quality,
@@ -1603,13 +1648,18 @@ async fn allow_keeps_stale_required() {
         buckets,
     };
     let market = windowed_market(&token);
-    let trade_tape = TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
+    let execution_history =
+        FinalizedExecutionWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
     let config = FeaturesConfig {
         enabled_feature_families: vec![FeatureFamily::TimeSeries],
         ..FeaturesConfig::default()
     };
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("feature builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("feature builder");
     let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
     let required = vec![FeatureName::ts_return(60)];
 
@@ -1621,7 +1671,7 @@ async fn allow_keeps_stale_required() {
             required_features: &required,
             pit: &HealthyPit,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -1644,7 +1694,7 @@ async fn allow_keeps_stale_required() {
             required_features: &required,
             pit: &HealthyPit,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &lenient,
@@ -1684,12 +1734,17 @@ async fn feature_out_valid_rejects() {
         enabled_feature_families: vec![FeatureFamily::PriceBook],
         ..FeaturesConfig::default()
     };
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("feature builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("feature builder");
     let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
     let market = windowed_market(&token);
     let window = MarketWindowSnapshot::empty(token.clone(), as_of, as_of);
-    let trade_tape = TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
+    let execution_history =
+        FinalizedExecutionWindowSnapshot::empty(market.market_id.clone(), as_of, as_of);
     let vector = builder
         .build(FeatureBuildInput {
             market: &market,
@@ -1697,7 +1752,7 @@ async fn feature_out_valid_rejects() {
             required_features: &[],
             pit: &engine,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -1718,7 +1773,9 @@ async fn feature_out_valid_rejects() {
 
 #[test]
 fn category_feature_projects_index() {
-    let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
+    let schema =
+        ExecutableFeatureSchema::build(&FeaturesConfig::default(), ResearchFeatureContract::FullL2)
+            .expect("schema");
     let as_of = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
     let mut values = BTreeMap::new();
     values.insert(
@@ -1772,7 +1829,7 @@ fn persistence_roundtrip_rejects_tamper() {
         .single()
         .expect("as-of");
     let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
-    let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
+    let schema = AuthoringFeatureCatalog::build(&FeaturesConfig::default()).expect("schema");
     let mut values = BTreeMap::new();
     values.insert(
         CATEGORY,
@@ -1871,10 +1928,15 @@ async fn online_offline_parity_window() {
         knowledge_cutoff: as_of,
         buckets,
     };
-    let trade_tape = TradeTapeWindowSnapshot::empty(market_id.clone(), as_of, as_of);
+    let execution_history =
+        FinalizedExecutionWindowSnapshot::empty(market_id.clone(), as_of, as_of);
     let config = FeaturesConfig::default();
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("feature builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("feature builder");
     let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
     let selected = parity_selected_market(&market_id, &token);
     let dq = DataQualityConfig::default();
@@ -1889,7 +1951,7 @@ async fn online_offline_parity_window() {
             required_features: &[],
             pit: &live_source,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &dq,
@@ -1907,7 +1969,7 @@ async fn online_offline_parity_window() {
             required_features: &[],
             pit: &hist_engine,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &dq,
@@ -2123,8 +2185,12 @@ async fn build_sibling_parity_vectors(
         ],
         ..FeaturesConfig::default()
     };
-    let builder =
-        ConfiguredFeatureBuilder::new(&config, &DomainConfig::default()).expect("feature builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &config,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("feature builder");
     let boundary = DecisionClock::new(0)
         .boundary(fixture.as_of)
         .expect("boundary");
@@ -2133,8 +2199,11 @@ async fn build_sibling_parity_vectors(
         fixture.as_of,
         fixture.as_of,
     );
-    let trade_tape =
-        TradeTapeWindowSnapshot::empty(selected.market_id.clone(), fixture.as_of, fixture.as_of);
+    let execution_history = FinalizedExecutionWindowSnapshot::empty(
+        selected.market_id.clone(),
+        fixture.as_of,
+        fixture.as_of,
+    );
     let data_quality = DataQualityConfig {
         feature_staleness_policy: FeatureStalenessPolicy::AllowDegraded,
         ..DataQualityConfig::default()
@@ -2147,7 +2216,7 @@ async fn build_sibling_parity_vectors(
             required_features: &[],
             pit: &live_source,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &data_quality,
@@ -2162,7 +2231,7 @@ async fn build_sibling_parity_vectors(
             required_features: &[],
             pit: &hist_engine,
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain: None,
             config: &config,
             data_quality: &data_quality,

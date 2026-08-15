@@ -1,6 +1,6 @@
 //! Governed feature-catalog HTTP contracts.
 //!
-//! This is a read projection of the canonical research `FeatureSchema`, not a
+//! This is a read projection of the canonical research `ExecutableFeatureSchema`, not a
 //! second feature contract. The core service rebuilds it from the active runtime
 //! configuration on every request, so model-spec authoring cannot drift onto a
 //! hard-coded UI catalog.

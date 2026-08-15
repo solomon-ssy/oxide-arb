@@ -183,7 +183,7 @@ pub async fn semantic_text_revalidates_checks() {
     );
     assert!(
         db.execute_unprepared(
-            "INSERT INTO quant_trade_tape_block_cursor (source, contract_address, last_finalized_block, last_log_index, head_lag_blocks, status, created_at, updated_at) VALUES ('on_chain', '0xBAD', 0, 0, 0, 'bootstrap', now(), now())",
+            "INSERT INTO quant_execution_history_block_cursor (source, contract_address, last_finalized_block, last_log_index, head_lag_blocks, status, created_at, updated_at) VALUES ('on_chain', '0xBAD', 0, 0, 0, 'bootstrap', now(), now())",
         )
         .await
         .is_err(),

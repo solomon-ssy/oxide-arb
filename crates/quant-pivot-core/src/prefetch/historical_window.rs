@@ -26,12 +26,12 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
         BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS, BookL2LedgerRow, BookMicrostructureRow,
-        MarketResolutionRow, TradeTapeRow,
+        ExecutionParticipantFactRow, MarketResolutionRow,
     },
     domain::{
         data_plane::{
             CryptoPriceReport, DecisionBoundary, DecisionClock, DecisionSource, DomainObservation,
-            TradeTapePrint, WeatherForecastPoint, WeatherObservationFact,
+            ExecutionParticipantPrint, WeatherForecastPoint, WeatherObservationFact,
         },
         market::{CatalogWindowInfo, MarketRegistryInfo},
         quant::{MarketLinkage, MarketSubject, WeatherSubject},
@@ -39,8 +39,8 @@ use quant_pivot_models::{
     enums::domain::DomainFamily,
     runtime_config::DomainConfig,
     types::{
-        Bps, ClobMarketInfoVersion, DomainInstrumentKey, MarketId, PayoutRatio, Price, TokenId,
-        Usd, calibration::PublishedWeatherStationLeadBias,
+        Bps, ClobMarketInfoVersion, DomainInstrumentKey, MarketId, PayoutRatio, Price,
+        ResearchFeatureContract, TokenId, Usd, calibration::PublishedWeatherStationLeadBias,
     },
 };
 use quant_pivot_repository::traits::{
@@ -49,7 +49,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     domain::{crypto_lookback_secs, oracle_instrument, weather_history_start},
-    features::{MarketWindowSnapshot, MicrostructureBucket, TradeTapeWindowSnapshot},
+    features::{FinalizedExecutionWindowSnapshot, MarketWindowSnapshot, MicrostructureBucket},
     pit::{BookSnapshotAt, MaterializedPitEngine},
     selection::SelectedMarket,
     training::{ForwardSample, ForwardWindow, MarketResolution as ResearchMarketResolution},
@@ -88,6 +88,9 @@ pub struct WindowSpec {
     pub max_horizon_secs: u64,
     /// Frozen domain-plane configuration (drives linkage + observation prefetch).
     pub domain: DomainConfig,
+    /// Exact profile feature contract controlling which physical fact families
+    /// may be read. Bootstrap contracts structurally prohibit L2 reads.
+    pub feature_contract: ResearchFeatureContract,
 }
 
 /// Batch-prefetched historical facts for an offline replay window.
@@ -97,7 +100,7 @@ pub struct Prefetched {
     /// Microstructure buckets per token (trailing + forward).
     pub micro: HashMap<TokenId, Vec<BookMicrostructureRow>>,
     /// Trade-tape participant rows per market.
-    pub trade_tape: HashMap<MarketId, Vec<TradeTapeRow>>,
+    pub finalized_executions: HashMap<MarketId, Vec<ExecutionParticipantFactRow>>,
     /// Settlement resolutions per market.
     pub resolutions: HashMap<MarketId, Vec<MarketResolutionRow>>,
     /// Every immutable market/event revision required by the replay window.
@@ -209,21 +212,24 @@ impl HistoricalWindowLoader {
             .await
             .map_err(QuantError::from)?;
         let catalog_markets = decode_catalog_markets(&catalog)?;
-        let market_info_from = checked_sub_duration(
-            spec.window_start,
-            spec.knowledge_lag,
-            "historical CLOB market-info knowledge lag",
-        )?;
-        let clob_market_info = self
-            .clob_market_info_repo
-            .window(
-                &markets,
-                market_info_from,
-                end_boundary.knowledge_cutoff(),
-                spec.available_by,
-            )
-            .await
-            .map_err(QuantError::from)?;
+        let clob_market_info = if spec.feature_contract.requires_l2() {
+            let market_info_from = checked_sub_duration(
+                spec.window_start,
+                spec.knowledge_lag,
+                "historical CLOB market-info knowledge lag",
+            )?;
+            self.clob_market_info_repo
+                .window(
+                    &markets,
+                    market_info_from,
+                    end_boundary.knowledge_cutoff(),
+                    spec.available_by,
+                )
+                .await
+                .map_err(QuantError::from)?
+        } else {
+            Vec::new()
+        };
 
         // Expand books to both binary outcome tokens named by every catalog
         // revision. The model context uses the exact PIT best ask for whichever
@@ -266,19 +272,24 @@ impl HistoricalWindowLoader {
         let resolution_to = micro_to;
 
         let available_by_ms = spec.available_by.timestamp_millis();
-        let book_rows = self
-            .fact_read
-            .book_ledger_snapshots_between(book_tokens, book_from, book_to, available_by_ms)
-            .await
-            .map_err(QuantError::from)?;
-        let micro_rows = self
-            .fact_read
-            .microstructure_window(tokens.clone(), micro_from, micro_to, available_by_ms)
-            .await
-            .map_err(QuantError::from)?;
+        let (book_rows, micro_rows) = if spec.feature_contract.requires_l2() {
+            let books = self
+                .fact_read
+                .book_ledger_snapshots_between(book_tokens, book_from, book_to, available_by_ms)
+                .await
+                .map_err(QuantError::from)?;
+            let micro = self
+                .fact_read
+                .microstructure_window(tokens.clone(), micro_from, micro_to, available_by_ms)
+                .await
+                .map_err(QuantError::from)?;
+            (books, micro)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let trade_rows = self
             .fact_read
-            .market_tape_window(markets.clone(), micro_from, micro_to, available_by_ms)
+            .market_execution_window(markets.clone(), micro_from, micro_to, available_by_ms)
             .await
             .map_err(QuantError::from)?;
         let resolution_rows = self
@@ -289,7 +300,7 @@ impl HistoricalWindowLoader {
 
         let (books, resolutions) = group_book_resolution_rows(book_rows, resolution_rows);
         let micro = group_micro_rows(micro_rows);
-        let trade_tape = group_trade_tape_rows(trade_rows);
+        let finalized_executions = group_execution_rows(trade_rows);
 
         let (
             linkages,
@@ -308,7 +319,7 @@ impl HistoricalWindowLoader {
         Ok(Prefetched {
             books,
             micro,
-            trade_tape,
+            finalized_executions,
             resolutions,
             catalog,
             clob_market_info,
@@ -760,8 +771,10 @@ fn group_micro_rows(
     grouped
 }
 
-fn group_trade_tape_rows(rows: Vec<TradeTapeRow>) -> HashMap<MarketId, Vec<TradeTapeRow>> {
-    let mut grouped: HashMap<MarketId, Vec<TradeTapeRow>> = HashMap::new();
+fn group_execution_rows(
+    rows: Vec<ExecutionParticipantFactRow>,
+) -> HashMap<MarketId, Vec<ExecutionParticipantFactRow>> {
+    let mut grouped: HashMap<MarketId, Vec<ExecutionParticipantFactRow>> = HashMap::new();
     for row in rows {
         grouped.entry(row.market_id.clone()).or_default().push(row);
     }
@@ -973,28 +986,28 @@ pub fn feature_window(
     })
 }
 
-/// Build the trailing PIT trade-tape window for one `(market, as_of)`.
-pub fn trade_tape_window(
+/// Build the trailing PIT finalized-execution window for one market.
+pub fn finalized_execution_window(
     market_id: MarketId,
     boundary: &DecisionBoundary,
     lookback: Duration,
-    rows: &[TradeTapeRow],
-) -> QuantResult<TradeTapeWindowSnapshot> {
-    let cutoff = boundary.cutoff_for(DecisionSource::TradeTape);
-    let start = checked_sub_duration(cutoff, lookback, "trade-tape window lookback")?;
+    rows: &[ExecutionParticipantFactRow],
+) -> QuantResult<FinalizedExecutionWindowSnapshot> {
+    let cutoff = boundary.cutoff_for(DecisionSource::FinalizedExecution);
+    let start = checked_sub_duration(cutoff, lookback, "finalized execution window lookback")?;
     let mut prints = Vec::new();
     for row in rows {
-        let at = timestamp_millis(row.event_time, "trade-tape event_time")?;
-        let available_at = timestamp_millis(row.ingestion_time, "trade-tape ingestion_time")?;
+        let at = timestamp_millis(row.effective_at, "execution effective_at")?;
+        let available_at =
+            timestamp_millis(row.model_available_at, "execution model_available_at")?;
         if at >= start && at < cutoff && available_at <= boundary.decision_at() {
-            prints.push(TradeTapePrint::from_clickhouse_row_at(
-                row,
-                at,
-                available_at,
-            ));
+            prints.push(
+                ExecutionParticipantPrint::try_from(row.clone())
+                    .map_err(|detail| ResearchError::PitResolution { detail })?,
+            );
         }
     }
-    Ok(TradeTapeWindowSnapshot::available(
+    Ok(FinalizedExecutionWindowSnapshot::available(
         market_id,
         boundary.decision_at(),
         cutoff,

@@ -30,8 +30,8 @@ use serde::{
 use super::{LabelName, TrainingExample, TrainingLabel};
 use crate::{
     features::{
-        FeatureCell, FeatureCellState, FeatureName, FeatureSchema, FeatureUnit, FeatureValue,
-        FeatureValueKind, feature_scalar,
+        ExecutableFeatureSchema, FeatureCell, FeatureCellState, FeatureName, FeatureUnit,
+        FeatureValue, FeatureValueKind, feature_scalar,
     },
     hashing::ResearchHasher,
     model::artifact::{
@@ -1187,7 +1187,7 @@ impl FittedInputTransform {
 /// Build the governed numeric input spec from the active feature schema.
 #[must_use]
 pub fn matrix_spec_from_schema(
-    schema: &FeatureSchema,
+    schema: &ExecutableFeatureSchema,
     label_name: LabelName,
     label_horizon_secs: u64,
 ) -> FeatureMatrixSpec {
@@ -1210,7 +1210,7 @@ pub fn matrix_spec_from_schema(
 /// Resolve a model-owned ordered raw-input contract against the governed
 /// feature catalog. Unknown or synthetic names fail before any row is read.
 pub fn matrix_spec_from_contract(
-    schema: &FeatureSchema,
+    schema: &ExecutableFeatureSchema,
     contract: &ModelInputContract,
     label_name: LabelName,
     label_horizon_secs: u64,
@@ -1259,7 +1259,7 @@ pub fn matrix_spec_from_contract(
 /// optional input with no observed training-partition value.
 pub fn probe_matrix_coverage(
     examples: &[TrainingExample],
-    schema: &FeatureSchema,
+    schema: &ExecutableFeatureSchema,
     contract: &ModelInputContract,
     label_name: &LabelName,
     label_horizon_secs: u64,

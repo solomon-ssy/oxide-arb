@@ -145,6 +145,7 @@ impl CoreCpcvBacktestPort {
                         .max_single_recommendation_usd
                         .value,
                 ),
+                feature_contract: source.profile().spec.feature_contract,
                 bias_table,
             },
         )

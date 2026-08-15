@@ -5,9 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use quant_pivot_models::domain::data_plane::{
-    TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind,
-};
+use quant_pivot_models::domain::data_plane::{ExecutionParticipantPrint, ExecutionParticipantRole};
 use rust_decimal::Decimal;
 
 /// Gate thresholds before concentration metrics are scored.
@@ -18,7 +16,7 @@ pub struct ParticipantConcentrationGate {
     pub min_coverage_ratio: Decimal,
 }
 
-/// Scored concentration snapshot over a trade-tape window.
+/// Scored concentration snapshot over a finalized execution-history window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParticipantConcentrationSnapshot {
     pub observed_print_count: u64,
@@ -40,8 +38,8 @@ pub struct ParticipantRoleMetrics {
 /// Why concentration metrics are unavailable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConcentrationMissing {
-    TradeTapeUnavailable,
-    InsufficientTradeTape,
+    FinalizedExecutionUnavailable,
+    InsufficientExecutionHistory,
     InsufficientRoleCoverage,
 }
 
@@ -49,8 +47,8 @@ impl ConcentrationMissing {
     #[must_use]
     pub const fn monitor_wire(self) -> &'static str {
         match self {
-            Self::TradeTapeUnavailable => "trade_tape_unavailable",
-            Self::InsufficientTradeTape => "insufficient_trade_tape",
+            Self::FinalizedExecutionUnavailable => "execution_history_unavailable",
+            Self::InsufficientExecutionHistory => "insufficient_execution_history",
             Self::InsufficientRoleCoverage => "insufficient_role_coverage",
         }
     }
@@ -86,16 +84,15 @@ pub fn composite_concentration(
     .map(|value| value.round_dp(12))
 }
 
-/// On-chain maker rows with a non-empty address and positive notional.
+/// Canonical maker and taker rows with a non-empty address and positive notional.
 #[must_use]
-pub fn eligible_maker_prints<'a>(prints: &[&'a TradeTapePrint]) -> Vec<&'a TradeTapePrint> {
+pub fn eligible_participants<'a>(
+    prints: &[&'a ExecutionParticipantPrint],
+) -> Vec<&'a ExecutionParticipantPrint> {
     prints
         .iter()
         .filter(|&&print| {
-            print.source == TradeTapeSourceKind::OnChain
-                && print.participant_role == TradeParticipantRole::Maker
-                && !print.participant_address.is_empty()
-                && print.participant_notional() > Decimal::ZERO
+            !print.participant_address.is_empty() && print.participant_notional() > Decimal::ZERO
         })
         .copied()
         .collect()
@@ -168,7 +165,7 @@ pub fn cr1_share(values: impl IntoIterator<Item = Decimal>) -> Option<Decimal> {
     Some((values[0] / total).round_dp(12))
 }
 
-fn participant_notionals(prints: &[&TradeTapePrint]) -> BTreeMap<String, Decimal> {
+fn participant_notionals(prints: &[&ExecutionParticipantPrint]) -> BTreeMap<String, Decimal> {
     let mut by_participant = BTreeMap::new();
     for print in prints {
         *by_participant
@@ -176,16 +173,6 @@ fn participant_notionals(prints: &[&TradeTapePrint]) -> BTreeMap<String, Decimal
             .or_insert(Decimal::ZERO) += print.participant_notional();
     }
     by_participant
-}
-
-fn on_chain_primary_count(prints: &[TradeTapePrint]) -> usize {
-    prints
-        .iter()
-        .filter(|print| {
-            print.source == TradeTapeSourceKind::OnChain
-                && print.participant_role == TradeParticipantRole::Maker
-        })
-        .count()
 }
 
 fn coverage_ratio(eligible_count: usize, observed_primary: usize) -> Decimal {
@@ -198,22 +185,22 @@ fn coverage_ratio(eligible_count: usize, observed_primary: usize) -> Decimal {
 
 /// Compute concentration metrics or return a structured missing reason.
 pub fn compute_concentration(
-    prints: &[TradeTapePrint],
+    prints: &[ExecutionParticipantPrint],
     source_available: bool,
     gate: &ParticipantConcentrationGate,
 ) -> Result<ParticipantConcentrationSnapshot, ConcentrationMissing> {
     if !source_available {
-        return Err(ConcentrationMissing::TradeTapeUnavailable);
+        return Err(ConcentrationMissing::FinalizedExecutionUnavailable);
     }
     if prints.is_empty() {
-        return Err(ConcentrationMissing::InsufficientTradeTape);
+        return Err(ConcentrationMissing::InsufficientExecutionHistory);
     }
-    let observed_primary = on_chain_primary_count(prints);
+    let observed_primary = prints.len();
     if observed_primary == 0 {
-        return Err(ConcentrationMissing::InsufficientTradeTape);
+        return Err(ConcentrationMissing::InsufficientExecutionHistory);
     }
-    let refs: Vec<&TradeTapePrint> = prints.iter().collect();
-    let eligible = eligible_maker_prints(&refs);
+    let refs: Vec<&ExecutionParticipantPrint> = prints.iter().collect();
+    let eligible = eligible_participants(&refs);
     let coverage = coverage_ratio(eligible.len(), observed_primary);
     let by_participant = participant_notionals(&eligible);
     let unique_participants = u64::try_from(by_participant.len()).unwrap_or(u64::MAX);
@@ -222,7 +209,7 @@ pub fn compute_concentration(
         || total_notional < gate.min_notional_usd
         || coverage < gate.min_coverage_ratio
     {
-        return Err(ConcentrationMissing::InsufficientTradeTape);
+        return Err(ConcentrationMissing::InsufficientExecutionHistory);
     }
     let weights: Vec<Decimal> = by_participant.values().copied().collect();
     let (Some(gini), Some(hhi), Some(cr1)) = (
@@ -230,7 +217,7 @@ pub fn compute_concentration(
         hhi(weights.clone()),
         cr1_share(weights),
     ) else {
-        return Err(ConcentrationMissing::InsufficientTradeTape);
+        return Err(ConcentrationMissing::InsufficientExecutionHistory);
     };
     Ok(ParticipantConcentrationSnapshot {
         observed_print_count: u64::try_from(observed_primary).unwrap_or(u64::MAX),
@@ -246,17 +233,15 @@ pub fn compute_concentration(
 
 /// Role-specific Gini when enough unique addresses trade in that role.
 pub fn compute_role_gini(
-    prints: &[TradeTapePrint],
-    role: TradeParticipantRole,
+    prints: &[ExecutionParticipantPrint],
+    role: ExecutionParticipantRole,
     gate: &ParticipantConcentrationGate,
 ) -> Result<ParticipantRoleMetrics, ConcentrationMissing> {
-    let refs: Vec<&TradeTapePrint> = prints.iter().collect();
-    let role_prints: Vec<&TradeTapePrint> = refs
+    let refs: Vec<&ExecutionParticipantPrint> = prints.iter().collect();
+    let role_prints: Vec<&ExecutionParticipantPrint> = refs
         .iter()
         .copied()
-        .filter(|print| {
-            print.source == TradeTapeSourceKind::OnChain && print.participant_role == role
-        })
+        .filter(|print| print.participant_role == role)
         .filter(|print| {
             !print.participant_address.is_empty() && print.participant_notional() > Decimal::ZERO
         })
@@ -277,8 +262,9 @@ pub fn compute_role_gini(
 mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::data_plane::{TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind},
-        types::{MarketId, Price, Shares, TokenId, Usd},
+        domain::data_plane::{ExecutionParticipantPrint, ExecutionParticipantRole},
+        enums::common::Side,
+        types::{ContentHash, MarketId, Price, Shares, TokenId, Usd},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -298,23 +284,29 @@ mod tests {
         }
     }
 
-    fn print(address: &str, role: TradeParticipantRole, notional: Decimal) -> TradeTapePrint {
-        TradeTapePrint {
+    fn print(
+        address: &str,
+        role: ExecutionParticipantRole,
+        notional: Decimal,
+    ) -> ExecutionParticipantPrint {
+        let now = Utc::now();
+        let hash = ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
+            .expect("valid test content hash");
+        ExecutionParticipantPrint {
+            execution_id: hash,
             market_id: MarketId::new("m1"),
             token_id: TokenId::new("t1"),
-            event_time: Utc::now(),
-            available_at: None,
+            effective_at: now,
+            observed_at: now,
+            model_available_at: now,
             participant_address: address.to_owned(),
             participant_role: role,
-            side: None,
+            side: Side::Buy,
             price: Price::new(dec!(0.5)),
             size_shares: Shares::new(notional * dec!(2)),
             notional_usd: Usd::new(notional),
-            tx_hash: None,
-            trade_id: format!("{address}:{notional}:{role:?}"),
-            source: TradeTapeSourceKind::OnChain,
-            coverage_flags: 0,
-            raw_payload_json: None,
+            transaction_hash: format!("{address}:{notional}:{role:?}"),
+            availability_policy_hash: hash,
         }
     }
 
@@ -349,14 +341,14 @@ mod tests {
     #[test]
     fn compute_concentration_scores_window() {
         let prints = vec![
-            print("a", TradeParticipantRole::Maker, dec!(90)),
-            print("b", TradeParticipantRole::Maker, dec!(10)),
-            print("c", TradeParticipantRole::Taker, dec!(50)),
+            print("a", ExecutionParticipantRole::Maker, dec!(90)),
+            print("b", ExecutionParticipantRole::Maker, dec!(10)),
+            print("c", ExecutionParticipantRole::Taker, dec!(50)),
         ];
         let snapshot =
             compute_concentration(&prints, true, &ParticipantConcentrationGate::test_fixture())
                 .expect("scored");
-        assert_eq!(snapshot.unique_participants, 2);
-        assert_metric(Some(snapshot.cr1_share), dec!(0.900000000000));
+        assert_eq!(snapshot.unique_participants, 3);
+        assert_metric(Some(snapshot.cr1_share), dec!(0.600000000000));
     }
 }

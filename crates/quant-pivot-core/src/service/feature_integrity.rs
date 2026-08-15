@@ -38,7 +38,7 @@ use quant_pivot_repository::traits::{
     CatalogLedgerRepository, EnqueueFrozenFeatureParityOutcome, FeatureParityEventRepository,
     FeatureParityLatchActor, FeatureParityRepository, PolicyRepository,
 };
-use quant_pivot_research::{features::FeatureSchema, hashing::ResearchHasher};
+use quant_pivot_research::{features::AuthoringFeatureCatalog, hashing::ResearchHasher};
 
 use crate::observability::metrics_hub::MetricsHub;
 const DEFAULT_FULL_WINDOW_HOURS: i64 = 24;
@@ -753,7 +753,7 @@ impl FeatureIntegrityPort for FeatureIntegrityService {
 }
 
 fn feature_contract(config: &DecisionPolicySnapshot) -> QuantResult<ContentHash> {
-    ResearchHasher::feature_schema(&FeatureSchema::build(
+    ResearchHasher::authoring_catalog(&AuthoringFeatureCatalog::build(
         &config.profile_artifacts.features.definition,
     )?)
 }

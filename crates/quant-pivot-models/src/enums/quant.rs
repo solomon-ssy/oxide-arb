@@ -799,6 +799,128 @@ pg_enum! {
 }
 
 pg_enum! {
+    type_name = "qp_fresh_boot_stage",
+    /// Persisted, strictly ordered work stages for one fresh-boot profile run.
+    ///
+    /// Data extraction and model governance remain owned by their existing
+    /// subsystems; this enum records only completed hand-offs between them.
+    pub enum FreshBootStage {
+        AwaitingSourceCoverage => "awaiting_source_coverage",
+        DatasetQueued => "dataset_queued",
+        DatasetRunning => "dataset_running",
+        DatasetReady => "dataset_ready",
+        TrainingQueued => "training_queued",
+        TrainingRunning => "training_running",
+        TrainingReady => "training_ready",
+        CalibrationDatasetQueued => "calibration_dataset_queued",
+        CalibrationDatasetRunning => "calibration_dataset_running",
+        CalibrationDatasetReady => "calibration_dataset_ready",
+        CalibrationQueued => "calibration_queued",
+        CalibrationRunning => "calibration_running",
+        CalibrationReady => "calibration_ready",
+        CpcvQueued => "cpcv_queued",
+        CpcvRunning => "cpcv_running",
+        CpcvReady => "cpcv_ready",
+        ParityReady => "parity_ready",
+        ScenarioReady => "scenario_ready",
+        BootstrapPreflight => "bootstrap_preflight",
+        BootstrapCommitted => "bootstrap_committed",
+        ReportEligible => "report_eligible",
+        FirstReportPublished => "first_report_published",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_fresh_boot_status",
+    /// Durable orchestration disposition. Terminal rows remain immutable.
+    pub enum FreshBootStatus {
+        WaitingEvidence => "waiting_evidence",
+        RetryScheduled => "retry_scheduled",
+        Running => "running",
+        BlockedTerminal => "blocked_terminal",
+        Superseded => "superseded",
+        Succeeded => "succeeded",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_fresh_boot_event_kind",
+    /// Immutable event vocabulary for one fresh-boot run timeline.
+    pub enum FreshBootEventKind {
+        RunCreated => "run_created",
+        SourceCoverageSatisfied => "source_coverage_satisfied",
+        DatasetStarted => "dataset_started",
+        DatasetCompleted => "dataset_completed",
+        TrainingEnqueued => "training_enqueued",
+        TrainingStarted => "training_started",
+        TrainingCompleted => "training_completed",
+        CalibrationDatasetEnqueued => "calibration_dataset_enqueued",
+        CalibrationDatasetStarted => "calibration_dataset_started",
+        CalibrationDatasetCompleted => "calibration_dataset_completed",
+        CalibrationEnqueued => "calibration_enqueued",
+        CalibrationStarted => "calibration_started",
+        CalibrationCompleted => "calibration_completed",
+        CpcvEnqueued => "cpcv_enqueued",
+        CpcvStarted => "cpcv_started",
+        CpcvCompleted => "cpcv_completed",
+        ParityVerified => "parity_verified",
+        ScenarioBound => "scenario_bound",
+        BootstrapPrepared => "bootstrap_prepared",
+        PreflightRefreshed => "preflight_refreshed",
+        BootstrapCommitted => "bootstrap_committed",
+        ReportEnabled => "report_enabled",
+        ReportRetried => "report_retried",
+        ReportPublished => "report_published",
+        EvidenceWaitScheduled => "evidence_wait_scheduled",
+        RetryScheduled => "retry_scheduled",
+        RetryStarted => "retry_started",
+        TerminalBlocked => "terminal_blocked",
+        RetryAccelerated => "retry_accelerated",
+        Superseded => "superseded",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_fresh_boot_retry_reason",
+    /// Machine-actionable reason for a non-terminal delayed retry.
+    pub enum FreshBootRetryReason {
+        SourceCoverageIncomplete => "source_coverage_incomplete",
+        DependencyUnavailable => "dependency_unavailable",
+        StorageTransient => "storage_transient",
+        ProviderUnavailable => "provider_unavailable",
+        JobRetryScheduled => "job_retry_scheduled",
+        PreflightStale => "preflight_stale",
+        ReportPending => "report_pending",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_fresh_boot_blocked_reason",
+    /// Machine-actionable reason why a fresh-boot run cannot advance.
+    pub enum FreshBootBlockedReason {
+        ProviderMismatch => "provider_mismatch",
+        UnknownToken => "unknown_token",
+        DecodeFailure => "decode_failure",
+        HistoryQuarantined => "history_quarantined",
+        InsufficientMatureLabels => "insufficient_mature_labels",
+        DatasetBuildFailed => "dataset_build_failed",
+        ModelTrainingFailed => "model_training_failed",
+        CalibrationFailed => "calibration_failed",
+        CpcvFailed => "cpcv_failed",
+        QualityGateFailed => "quality_gate_failed",
+        ParityFailed => "parity_failed",
+        ScenarioBindingFailed => "scenario_binding_failed",
+        BootstrapConflict => "bootstrap_conflict",
+        ReportEnqueueFailed => "report_enqueue_failed",
+        ReportPublicationFailed => "report_publication_failed",
+        PolicyUnavailable => "policy_unavailable",
+        SourceSliceMismatch => "source_slice_mismatch",
+        RetryBudgetExhausted => "retry_budget_exhausted",
+        SourceCoverageInvalid => "source_coverage_invalid",
+    }
+}
+
+pg_enum! {
     type_name = "qp_research_job_result_kind",
     /// Concrete artifact namespace referenced by a terminal research job.
     pub enum ResearchJobResultKind {

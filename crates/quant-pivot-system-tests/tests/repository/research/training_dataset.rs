@@ -11,7 +11,7 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, ContentHash, DecisionPolicySnapshotId, ModelInputContract, ModelSpecId,
         ModelTrainingContract, ModelVersionId, SchemaVersion, TrainingDatasetId,
-        TrainingSampleSources, factor::FactorServingPlane,
+        TrainingSampleSources, builtin_research_profiles, factor::FactorServingPlane,
     },
 };
 use quant_pivot_repository::{
@@ -19,7 +19,7 @@ use quant_pivot_repository::{
     traits::{ModelRegistryRepository, PolicyRepository, TrainingDatasetRepository},
 };
 use quant_pivot_research::{
-    factors::FactorEngine, features::FeatureSchema, hashing::ResearchHasher,
+    factors::FactorEngine, features::ExecutableFeatureSchema, hashing::ResearchHasher,
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
@@ -73,6 +73,12 @@ async fn new_fixture(
 ) -> DatasetLedgerFixture {
     let window_start = Utc::now() - ChronoDuration::hours(2);
     let window_end = window_start + ChronoDuration::hours(1);
+    let profile_ref = model_spec_fixtures::pooled_profile_ref();
+    let profile = builtin_research_profiles()
+        .expect("valid built-in research profiles")
+        .into_iter()
+        .find(|profile| profile.profile_ref == profile_ref)
+        .expect("pooled research profile");
     let model_spec_definition_hash = model_spec_fixtures::new_model_spec_fixture(
         model_spec_id,
         "pg-dataset-it",
@@ -86,7 +92,7 @@ async fn new_fixture(
         db,
         DatasetSourceSeed {
             scope: format!("pg-dataset-it:{dataset_id}"),
-            profile_ref: model_spec_fixtures::pooled_profile_ref(),
+            profile_ref: profile.profile_ref.clone(),
             decision_policy_snapshot_id,
             window_start,
             window_end,
@@ -103,13 +109,21 @@ async fn new_fixture(
     let features = &policy.snapshot.profile_artifacts.features.definition;
     let scoring = &policy.snapshot.profile_artifacts.scoring.definition;
     let domain = &policy.snapshot.profile_artifacts.domain.definition;
+    let feature_schema = ExecutableFeatureSchema::build(features, profile.spec.feature_contract)
+        .expect("executable feature schema");
     let feature_schema_hash =
-        ResearchHasher::feature_schema(&FeatureSchema::build(features).expect("feature schema"))
-            .expect("feature schema hash");
-    let factor_serving_plane = FactorEngine::new(scoring, features, domain, None)
-        .serving_plane()
-        .expect("factor serving plane")
-        .clone();
+        ResearchHasher::feature_schema(&feature_schema).expect("feature schema hash");
+    let factor_serving_plane = FactorEngine::for_model_scope(
+        scoring,
+        features,
+        domain,
+        profile.spec.feature_contract,
+        profile.spec.category,
+        None,
+    )
+    .serving_plane()
+    .expect("factor serving plane")
+    .clone();
     let hash = dataset_hash(&dataset_id);
     DatasetLedgerFixture::try_new(DatasetLedgerSeed {
         training_dataset_id: dataset_id,

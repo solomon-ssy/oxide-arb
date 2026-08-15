@@ -19,17 +19,18 @@ use quant_pivot_repository::{
     traits::{
         AccountSnapshotRepository, BasisAlertRepository, CalibrationArtifactRepository,
         CatalogLedgerRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
-        EntryConditionRepository, EquitySnapshotRepository, ExecutionAttemptOutcomeRepository,
-        ExecutionOrderRepository, FeatureParityEventRepository, FeatureRepository,
-        FeedbackCycleRepository, FeedbackOutboxRepository, FeedbackSchedulerRepository,
-        MenuRepository, ModelRouteShadowBindingRepository, OperationLogRepository,
-        OrderIntentRepository, PolicyRepository, PortfolioPlanRepository, PositionRepository,
-        PromotionPermitRepository, RecommendationExecutionRollupRepository,
-        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-        ReportRunRepository, ResolutionObservationRepository, RoleMenuRepository,
-        RolePermissionRepository, RoleRepository, RuntimeActivityRepository,
-        ServingEvidenceRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
-        UserRepository, UserRoleRepository, quant::settlement_redeem::SettlementRedeemRepository,
+        EntryConditionRepository, EquitySnapshotRepository, ExchangeHistoryRepository,
+        ExecutionAttemptOutcomeRepository, ExecutionOrderRepository, FeatureParityEventRepository,
+        FeatureRepository, FeedbackCycleRepository, FeedbackOutboxRepository,
+        FeedbackSchedulerRepository, FreshBootRepository, MenuRepository,
+        ModelRouteShadowBindingRepository, OperationLogRepository, OrderIntentRepository,
+        PolicyRepository, PortfolioPlanRepository, PositionRepository, PromotionPermitRepository,
+        RecommendationExecutionRollupRepository, RecommendationReportRepository,
+        RecommendationRepository, ReconciliationRepository, ReportRunRepository,
+        ResolutionObservationRepository, RoleMenuRepository, RolePermissionRepository,
+        RoleRepository, RuntimeActivityRepository, ServingEvidenceRepository,
+        TradePolicyRepository, TrainingDatasetRepository, UserRepository, UserRoleRepository,
+        quant::settlement_redeem::SettlementRedeemRepository,
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -203,6 +204,11 @@ async fn build_app_state(
         operation_log,
         control: Arc::clone(&ctx.governance.runtime_control),
         capabilities: Arc::clone(&ctx.governance.capabilities),
+        exchange_history_progress: Arc::new(ctx.data.exchange_history_progress.clone()),
+        exchange_history: Arc::clone(&repos.exchange_history) as Arc<dyn ExchangeHistoryRepository>,
+        fresh_boot_runs: Arc::clone(&repos.fresh_boot) as Arc<dyn FreshBootRepository>,
+        fresh_boot_datasets: Arc::clone(&repos.training_dataset)
+            as Arc<dyn TrainingDatasetRepository>,
         kill_switch: Arc::clone(&ctx.governance.kill_switch),
         market_data: Arc::new(CoreMarketData::new(
             Arc::clone(&ctx.data.book_store),
@@ -276,9 +282,9 @@ async fn build_app_state(
             Arc::new(FeatureWindowProvider::new(Arc::clone(
                 &ctx.infra.quant_fact_read,
             ))),
-            Arc::clone(&repos.trade_tape_block_cursor) as Arc<dyn TradeTapeBlockCursorRepository>,
+            Arc::clone(&repos.exchange_history) as Arc<dyn ExchangeHistoryRepository>,
             Arc::clone(&ctx.governance.applicator) as Arc<dyn PolicySnapshotPort>,
-            ctx.config.market_data.trade_tape_on_chain.clone(),
+            ctx.config.market_data.finalized_exchange_history.clone(),
         )),
         quant_reports: Arc::new(CoreQuantReportPort::new(CoreQuantReportPortDeps {
             report_repo: Arc::clone(&repos.recommendation_report)

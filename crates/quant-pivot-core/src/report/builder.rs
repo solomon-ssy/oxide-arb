@@ -13,21 +13,21 @@ use quant_pivot_models::{
         data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
         governance::DecisionPolicySnapshotInfo,
         quant::{
-            ExecutableEconomicTier, ExistingPortfolioState, MarketCandidate, NewPortfolioPlan,
-            NewReportDataQualitySnapshot, NewReportRouteRun, PortfolioDecisionResult,
-            PortfolioScenarioVisibility, RepresentedRouteSet, RouteCandidateFunnel,
-            RouteModelLineage, RouteRunOutcome, TradePolicyArtifactInfo,
+            ExecutableEconomicTier, ExistingPortfolioState, FeatureVectorInfo, MarketCandidate,
+            NewPortfolioPlan, NewReportDataQualitySnapshot, NewReportRouteRun,
+            PortfolioDecisionResult, PortfolioScenarioVisibility, RepresentedRouteSet,
+            RouteCandidateFunnel, RouteModelLineage, RouteRunOutcome, TradePolicyArtifactInfo,
         },
     },
-    enums::quant::{EmptyReportReason, OutcomeSide, TradePolicyStatus},
+    enums::quant::{EmptyReportReason, FillRequirement, OutcomeSide, TradePolicyStatus},
     hashing::CanonicalDigest,
     runtime_config::{BuyModelRoute, DecisionPolicySnapshot},
     types::{
-        ContentHash, DecisionPolicySnapshotId, EconomicTierId, EntryOrderTemplate, FeatureVectorId,
-        MarketId, ModelRunId, ModelVersionId, PortfolioPlanId, Price, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportRouteRunId, ReportRunId, Shares, SignalCandidateId, TokenId,
-        TradePolicyCohort, TradePolicyCohortProvenance, Usd,
-        calibration::CalibratedPayoutDistribution,
+        Bps, ContentHash, DecisionPolicySnapshotId, EconomicTierId, EntryOrderTemplate,
+        FeatureVectorId, MarketId, ModelRunId, ModelVersionId, PortfolioPlanId, Price,
+        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportRouteRunId, ReportRunId,
+        ServingAuthority, Shares, SignalCandidateId, TokenId, TradePolicyCohort,
+        TradePolicyCohortProvenance, Usd, calibration::CalibratedPayoutDistribution,
     },
 };
 use quant_pivot_repository::traits::{
@@ -36,7 +36,7 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     execution_semantics::{PitFeeSchedule, aggressive_buy_limit},
-    features::{FeatureVector, MarketDecisionCapture},
+    features::{FeatureVector, MarketDecisionCapture, ResolvedBook},
     hashing::ResearchHasher,
     model::{CalibrationArtifactLoader, ModelArtifact, SignalCandidate},
     portfolio::{
@@ -58,8 +58,8 @@ use super::{
     composer::{ComposeReportInput, RecommendationComposer},
     readiness::ReportReadinessGate,
     types::{
-        BuildReportRequest, ComposedReport, EmptyReportContext, PlannedReportRecommendation,
-        ReportTierRejection, ReportTrigger,
+        BuildReportRequest, ComposedReport, EmptyReportContext, PlannedRecommendationContract,
+        PlannedReportRecommendation, ReportTierRejection, ReportTrigger,
     },
 };
 use crate::{
@@ -70,7 +70,7 @@ use crate::{
     service::{
         account::AccountProviderFactory,
         equity::{DrawdownProvider, ReportEquitySnapshot},
-        feature_pipeline::{FeaturePipelineRequest, FeaturePipelineResult, FeaturePipelineService},
+        feature_pipeline::{FeaturePipelineRequest, FeaturePipelineService, RejectedMarket},
         market_selection::map_snapshot_to_model,
         model_runner::{
             ActiveModelRequirements, ActiveRouteRequirementsRequest, ModelMarketDecision,
@@ -125,7 +125,7 @@ struct BuildContext {
 struct ReadyRoute {
     active: ActiveModelRequirements,
     contract: PromotedRouteContract,
-    trade_policy: TradePolicyArtifactInfo,
+    trade_policy: Option<TradePolicyArtifactInfo>,
     report_route_run_id: ReportRouteRunId,
     model_run_id: Option<ModelRunId>,
     eligible_markets: u32,
@@ -150,8 +150,7 @@ struct TierSource {
     model_version_id: ModelVersionId,
     model_run_id: ModelRunId,
     candidate: SignalCandidate,
-    trade_policy: TradePolicyCohortProvenance,
-    trade_policy_cohort: TradePolicyCohort,
+    contract: PlannedRecommendationContract,
     entry_limit_price: Price,
 }
 
@@ -164,6 +163,20 @@ struct PortfolioBuild {
     row: NewPortfolioPlan,
     selected: Vec<PlannedEconomicTier>,
     rejections: Vec<TierAdmissionRejection>,
+}
+
+struct RouteFeatureRound {
+    route: BuyModelRoute,
+    accepted: Vec<FeatureVector>,
+    persisted: Vec<FeatureVectorInfo>,
+    feature_evidence: Option<FeatureEvidenceCommitment>,
+}
+
+struct ReportFeatureResults {
+    routes: Vec<RouteFeatureRound>,
+    rejected: Vec<RejectedMarket>,
+    captures: HashMap<MarketId, MarketDecisionCapture>,
+    data_quality_snapshot: NewReportDataQualitySnapshot,
 }
 
 impl DefaultReportBuilder {
@@ -243,7 +256,7 @@ impl DefaultReportBuilder {
                 &context,
                 &selection,
                 batch.snapshot_source.as_ref(),
-                &requirements,
+                &routes,
             )
             .await?;
         let (routed_candidates, model_decisions) = self
@@ -503,7 +516,7 @@ impl DefaultReportBuilder {
     ) -> QuantResult<(
         ActiveModelRequirements,
         PromotedRouteContract,
-        TradePolicyArtifactInfo,
+        Option<TradePolicyArtifactInfo>,
     )> {
         let artifact =
             ModelArtifact::load_verified(self.deps.artifact_store.as_ref(), &active.version)
@@ -523,14 +536,22 @@ impl DefaultReportBuilder {
             }
             .into());
         }
-        let policy = load_trade_policy(
-            self.deps.trade_policy_repo.as_ref(),
-            &artifact,
-            &active,
-            &contract,
-        )
-        .await?;
-        if context.boundary.decision_at() < policy.created_at {
+        let policy = match contract.serving_authority {
+            ServingAuthority::ExecutionEligible => Some(
+                load_trade_policy(
+                    self.deps.trade_policy_repo.as_ref(),
+                    &artifact,
+                    &active,
+                    &contract,
+                )
+                .await?,
+            ),
+            ServingAuthority::ReportOnlyWithLiveL2 => None,
+        };
+        if policy
+            .as_ref()
+            .is_some_and(|policy| context.boundary.decision_at() < policy.created_at)
+        {
             return Err(ReportError::RouteReadiness {
                 route: active.route.as_str().to_owned(),
                 detail: "Trade Policy is newer than the frozen decision boundary".to_owned(),
@@ -570,58 +591,114 @@ impl DefaultReportBuilder {
         context: &BuildContext,
         selection: &MarketSelectionSnapshot,
         decision_snapshot: &DecisionSnapshotSource,
-        requirements: &ModelFeatureRequirements,
-    ) -> QuantResult<FeaturePipelineResult> {
+        routes: &[ReadyRoute],
+    ) -> QuantResult<ReportFeatureResults> {
+        let mut report = ReportFeatureResults {
+            routes: Vec::with_capacity(routes.len()),
+            rejected: Vec::new(),
+            captures: HashMap::new(),
+            data_quality_snapshot: context.empty_data_quality_snapshot(),
+        };
         if selection.included.is_empty() {
-            return Ok(FeaturePipelineResult {
-                accepted: Vec::new(),
-                rejected: Vec::new(),
-                persisted: Vec::new(),
-                feature_evidence: None,
-                captures: HashMap::new(),
-                data_quality_snapshot: context.empty_data_quality_snapshot(),
+            return Ok(report);
+        }
+        let mut quality_rows = Vec::with_capacity(selection.included.len());
+        for route in routes {
+            let markets = selection
+                .included
+                .iter()
+                .filter(|market| BuyModelRoute::from(market.category) == route.active.route)
+                .cloned()
+                .collect::<Vec<_>>();
+            if markets.is_empty() {
+                continue;
+            }
+            let result = self
+                .deps
+                .feature_pipeline
+                .run(FeaturePipelineRequest {
+                    included: &markets,
+                    feature_contract: route.contract.feature_contract,
+                    boundary: context.boundary.clone(),
+                    features: &context.config.profile_artifacts.features.definition,
+                    domain: &context.config.profile_artifacts.domain.definition,
+                    data_quality: &context.config.recommendation.data_quality,
+                    model_requirements: &route.active.model_requirements,
+                    pit: decision_snapshot,
+                    decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
+                    liquidity_cap_usd: Usd::new(
+                        context
+                            .config
+                            .execution_risk
+                            .portfolio
+                            .exposure_limits
+                            .max_single_recommendation_usd
+                            .value,
+                    ),
+                })
+                .await?;
+            if result.data_quality_snapshot.decision_at != context.boundary.decision_at()
+                || result.data_quality_snapshot.decision_policy_snapshot_id
+                    != context.version.decision_policy_snapshot_id
+            {
+                return Err(ReportError::InvariantViolation {
+                    stage: "route_features",
+                    detail: format!(
+                        "Route {:?} returned a data-quality snapshot for a different boundary",
+                        route.active.route
+                    ),
+                }
+                .into());
+            }
+            for (market_id, capture) in result.captures {
+                if report.captures.insert(market_id.clone(), capture).is_some() {
+                    return Err(ReportError::InvariantViolation {
+                        stage: "route_features",
+                        detail: format!(
+                            "market {market_id} was materialized by more than one Route contract"
+                        ),
+                    }
+                    .into());
+                }
+            }
+            quality_rows.extend(result.data_quality_snapshot.tokens_json.0);
+            report.rejected.extend(result.rejected);
+            report.routes.push(RouteFeatureRound {
+                route: route.active.route,
+                accepted: result.accepted,
+                persisted: result.persisted,
+                feature_evidence: result.feature_evidence,
             });
         }
-        self.deps
-            .feature_pipeline
-            .run(FeaturePipelineRequest {
-                included: &selection.included,
-                boundary: context.boundary.clone(),
-                features: &context.config.profile_artifacts.features.definition,
-                domain: &context.config.profile_artifacts.domain.definition,
-                data_quality: &context.config.recommendation.data_quality,
-                model_requirements: requirements,
-                pit: decision_snapshot,
-                decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
-                liquidity_cap_usd: Usd::new(
-                    context
-                        .config
-                        .execution_risk
-                        .portfolio
-                        .exposure_limits
-                        .max_single_recommendation_usd
-                        .value,
-                ),
-            })
-            .await
+        quality_rows.sort_by(|left, right| {
+            left.market_id
+                .cmp(&right.market_id)
+                .then_with(|| left.token_id.cmp(&right.token_id))
+        });
+        report
+            .rejected
+            .sort_by(|left, right| left.market_id.cmp(&right.market_id));
+        report.data_quality_snapshot.tokens_json = ReportDataQualityTokens(quality_rows);
+        Ok(report)
     }
 
     async fn run_route_models(
         &self,
         context: &BuildContext,
         selection: &MarketSelectionSnapshot,
-        features: &FeaturePipelineResult,
+        features: &ReportFeatureResults,
         routes: &mut [ReadyRoute],
     ) -> QuantResult<(Vec<RoutedCandidate>, Vec<ModelMarketDecision>)> {
-        let persisted = features.vector_ids_by_market()?;
-        let accepted = features
-            .accepted
-            .iter()
-            .map(|vector| (vector.market_id.clone(), vector))
-            .collect::<HashMap<_, _>>();
         let mut routed_candidates = Vec::new();
         let mut decisions = Vec::new();
         for route in routes {
+            let round = features.for_route(route.active.route)?;
+            let persisted = round.vector_ids_by_market()?;
+            let accepted = round
+                .accepted
+                .iter()
+                .map(|vector| (vector.market_id.clone(), vector))
+                .collect::<HashMap<_, _>>();
             let markets = selection
                 .included
                 .iter()
@@ -637,7 +714,7 @@ impl DefaultReportBuilder {
                 continue;
             }
             let (vectors, ids) = route_vectors(&markets, &accepted, &persisted)?;
-            let evidence = features.route_evidence()?;
+            let evidence = round.evidence()?;
             let outcome = self
                 .deps
                 .model_runner
@@ -721,7 +798,7 @@ async fn load_trade_policy(
             detail: format!("prediction horizon is invalid: {error}"),
         }
     })?;
-    if artifact_id != contract.trade_policy_artifact_id
+    if Some(artifact_id) != contract.trade_policy_artifact_id
         || policy.status != TradePolicyStatus::Published
         || !policy.payload_json.is_publishable()
         || policy.content_hash != expected_hash
@@ -857,8 +934,75 @@ fn candidate_tiers(
                 market.market_id
             ),
         })?;
+    if route.contract.serving_authority == ServingAuthority::ReportOnlyWithLiveL2 {
+        return bootstrap_candidate_tiers(BootstrapTierInput {
+            context,
+            market,
+            capture,
+            routed,
+            route,
+            portfolio,
+            book,
+            fee_schedule: &fee_schedule,
+            best_ask,
+            horizon,
+        });
+    }
+    let policy = route
+        .trade_policy
+        .as_ref()
+        .ok_or_else(|| ReportError::RouteReadiness {
+            route: routed.route.as_str().to_owned(),
+            detail: "execution-eligible Route lost its Trade Policy".to_owned(),
+        })?;
+    full_l2_candidate_tiers(FullL2TierInput {
+        context,
+        market,
+        capture,
+        routed,
+        route,
+        portfolio,
+        policy,
+        book,
+        fee_schedule: &fee_schedule,
+        best_ask,
+        horizon,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct FullL2TierInput<'a> {
+    context: &'a BuildContext,
+    market: &'a SelectedMarket,
+    capture: &'a MarketDecisionCapture,
+    routed: &'a RoutedCandidate,
+    route: &'a ReadyRoute,
+    portfolio: &'a PromotedPortfolioContext,
+    policy: &'a TradePolicyArtifactInfo,
+    book: &'a ResolvedBook,
+    fee_schedule: &'a PitFeeSchedule,
+    best_ask: Price,
+    horizon: u64,
+}
+
+fn full_l2_candidate_tiers(
+    input: FullL2TierInput<'_>,
+) -> QuantResult<Vec<(ExecutableTierSeed, TierSource)>> {
+    let FullL2TierInput {
+        context,
+        market,
+        capture,
+        routed,
+        route,
+        portfolio,
+        policy,
+        book,
+        fee_schedule,
+        best_ask,
+        horizon,
+    } = input;
     let mut by_budget = BTreeMap::<Usd, Vec<(ExecutableTierSeed, TierSource)>>::new();
-    for (index, cohort) in route.trade_policy.payload_json.cohorts.iter().enumerate() {
+    for (index, cohort) in policy.payload_json.cohorts.iter().enumerate() {
         if cohort.key.category != market.category
             || cohort.key.horizon_secs != horizon
             || cohort.key.profile_ref != route.contract.research_profile_ref
@@ -904,7 +1048,7 @@ fn candidate_tiers(
             route,
             cohort,
             cohort_index,
-            fee_schedule: &fee_schedule,
+            fee_schedule,
             portfolio,
         })?;
         let Some(seed) = ExecutableCashTierSeedFactory::build(ExecutableCashTierSeedInput {
@@ -919,7 +1063,7 @@ fn candidate_tiers(
             outcome_side: routed.candidate.outcome_side,
             bids: &book.bids,
             asks: &book.asks,
-            fee_schedule: &fee_schedule,
+            fee_schedule,
             fill_at: context.boundary.decision_at(),
             limit_price,
             cash_budget: cohort.key.cash_budget_tier,
@@ -943,8 +1087,8 @@ fn candidate_tiers(
                 detail: "candidate Route has no model run".to_owned(),
             })?;
         let provenance = TradePolicyCohortProvenance {
-            artifact_id: route.trade_policy.artifact_id,
-            artifact_hash: route.trade_policy.content_hash,
+            artifact_id: policy.artifact_id,
+            artifact_hash: policy.content_hash,
             cohort_index,
             cohort_key: cohort.key.clone(),
         };
@@ -959,13 +1103,158 @@ fn candidate_tiers(
                     model_version_id: routed.model_version_id,
                     model_run_id,
                     candidate: routed.candidate.clone(),
-                    trade_policy: provenance,
-                    trade_policy_cohort: cohort.clone(),
+                    contract: PlannedRecommendationContract::FullL2 {
+                        provenance,
+                        cohort: Box::new(cohort.clone()),
+                    },
                     entry_limit_price: limit_price,
                 },
             ));
     }
     unique_budget_tiers(by_budget, routed)
+}
+
+#[derive(Clone, Copy)]
+struct BootstrapTierInput<'a> {
+    context: &'a BuildContext,
+    market: &'a SelectedMarket,
+    capture: &'a MarketDecisionCapture,
+    routed: &'a RoutedCandidate,
+    route: &'a ReadyRoute,
+    portfolio: &'a PromotedPortfolioContext,
+    book: &'a ResolvedBook,
+    fee_schedule: &'a PitFeeSchedule,
+    best_ask: Price,
+    horizon: u64,
+}
+
+fn bootstrap_candidate_tiers(
+    input: BootstrapTierInput<'_>,
+) -> QuantResult<Vec<(ExecutableTierSeed, TierSource)>> {
+    let BootstrapTierInput {
+        context,
+        market,
+        capture,
+        routed,
+        route,
+        portfolio,
+        book,
+        fee_schedule,
+        best_ask,
+        horizon,
+    } = input;
+    let max_slippage_bps = Bps::new(Decimal::from(
+        context
+            .config
+            .execution_risk
+            .entry_order_policy
+            .max_slippage_bps,
+    ));
+    let min_depth_usd = Usd::new(
+        context
+            .config
+            .execution_risk
+            .entry_order_policy
+            .min_entry_book_depth_usd
+            .value,
+    );
+    let limit_price = aggressive_buy_limit(best_ask, max_slippage_bps);
+    let visible_depth = book
+        .asks
+        .iter()
+        .take_while(|level| level.price_decimal() <= limit_price)
+        .try_fold(Decimal::ZERO, |total, level| {
+            level
+                .price_decimal()
+                .inner()
+                .checked_mul(level.size_decimal().inner())
+                .and_then(|notional| total.checked_add(notional))
+                .ok_or_else(|| ReportError::NumericOverflow {
+                    field: "bootstrap.visible_depth_usd",
+                    detail: "live ask depth overflowed Decimal".to_owned(),
+                })
+        })?;
+    if visible_depth < min_depth_usd.inner() {
+        return Ok(Vec::new());
+    }
+    let model_run_id = route
+        .model_run_id
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "economic_tier",
+            detail: "bootstrap candidate Route has no model run".to_owned(),
+        })?;
+    let mut tiers = Vec::new();
+    for (index, cash_budget) in route
+        .contract
+        .profile
+        .spec
+        .allowed_cash_budget_tiers
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        let tier_ordinal = u32::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| ReportError::NumericOverflow {
+                field: "bootstrap.tier_ordinal",
+                detail: "bootstrap cash-tier index overflowed u32".to_owned(),
+            })?;
+        let lineage_hash = bootstrap_tier_lineage_hash(&BootstrapLineageInput {
+            context,
+            capture,
+            routed,
+            route,
+            fee_schedule,
+            portfolio,
+            tier_ordinal,
+            cash_budget,
+        })?;
+        let Some(seed) = ExecutableCashTierSeedFactory::build(ExecutableCashTierSeedInput {
+            report_route_run_id: routed.report_route_run_id,
+            candidate_id: routed.candidate.signal_candidate_id,
+            tier_ordinal,
+            route: routed.route,
+            market_id: market.market_id.clone(),
+            event_id: market.event_id.clone(),
+            category: market.category,
+            token_id: routed.candidate.token_id.clone(),
+            outcome_side: routed.candidate.outcome_side,
+            bids: &book.bids,
+            asks: &book.asks,
+            fee_schedule,
+            fill_at: context.boundary.decision_at(),
+            limit_price,
+            cash_budget,
+            fill_requirement: FillRequirement::AllowPartial,
+            source_lineage_hash: lineage_hash,
+        })?
+        else {
+            continue;
+        };
+        tiers.push((
+            seed,
+            TierSource {
+                route: routed.route,
+                report_route_run_id: routed.report_route_run_id,
+                model_version_id: routed.model_version_id,
+                model_run_id,
+                candidate: routed.candidate.clone(),
+                contract: PlannedRecommendationContract::Bootstrap {
+                    profile_ref: route.contract.research_profile_ref.clone(),
+                    feature_contract: route.contract.feature_contract,
+                    recommendation_contract_hash: route.contract.recommendation_contract_hash,
+                    cash_budget_tier: cash_budget,
+                    reference_horizon_secs: horizon,
+                    max_slippage_bps,
+                    min_depth_usd,
+                    max_book_age_ms: context.config.recommendation.data_quality.max_book_age_ms,
+                },
+                entry_limit_price: limit_price,
+            },
+        ));
+    }
+    Ok(tiers)
 }
 
 fn validate_candidate_route(
@@ -1087,11 +1376,67 @@ fn tier_lineage_hash(input: &TierLineageInput<'_>) -> QuantResult<ContentHash> {
             signal_candidate_id: input.routed.candidate.signal_candidate_id,
             book_snapshot_hash,
             fee_schedule_hash: input.fee_schedule.schedule_hash,
-            trade_policy_hash: input.route.trade_policy.content_hash,
+            trade_policy_hash: input
+                .route
+                .trade_policy
+                .as_ref()
+                .ok_or_else(|| ReportError::RouteReadiness {
+                    route: input.routed.route.as_str().to_owned(),
+                    detail: "full-L2 tier lineage has no Trade Policy".to_owned(),
+                })?
+                .content_hash,
             cohort_index: input.cohort_index,
             cohort: input.cohort,
             scenario_model_hash: input.portfolio.scenario_model.content_hash,
         },
+    )?)
+}
+
+struct BootstrapLineageInput<'a> {
+    context: &'a BuildContext,
+    capture: &'a MarketDecisionCapture,
+    routed: &'a RoutedCandidate,
+    route: &'a ReadyRoute,
+    fee_schedule: &'a PitFeeSchedule,
+    portfolio: &'a PromotedPortfolioContext,
+    tier_ordinal: u32,
+    cash_budget: Usd,
+}
+
+fn bootstrap_tier_lineage_hash(input: &BootstrapLineageInput<'_>) -> QuantResult<ContentHash> {
+    let model_run_id = input
+        .route
+        .model_run_id
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "economic_tier",
+            detail: "bootstrap candidate Route has no model run lineage".to_owned(),
+        })?;
+    let book_snapshot_hash = input
+        .capture
+        .book_snapshot_ref_for(&input.routed.candidate.token_id)
+        .map(|reference| reference.content_hash)
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "economic_tier",
+            detail: "bootstrap candidate-side book reference is missing".to_owned(),
+        })?;
+    Ok(CanonicalDigest::content_hash_typed(
+        "quant-pivot/bootstrap-economic-tier-source",
+        1,
+        &(
+            input.context.version.decision_policy_snapshot_id,
+            input.context.boundary.decision_at(),
+            input.routed.route,
+            input.routed.report_route_run_id,
+            input.routed.model_version_id,
+            model_run_id,
+            input.routed.candidate.signal_candidate_id,
+            book_snapshot_hash,
+            input.fee_schedule.schedule_hash,
+            input.route.contract.recommendation_contract_hash,
+            input.portfolio.scenario_model.content_hash,
+            input.tier_ordinal,
+            input.cash_budget,
+        ),
     )?)
 }
 
@@ -1205,7 +1550,7 @@ fn scenario_accumulators(
                 ),
             }
         })?;
-        let release_secs = seeded.source.trade_policy_cohort.vertical_barrier_secs;
+        let release_secs = seeded.source.contract.release_secs();
         let key = (
             seeded.seed.route,
             seeded.seed.market_id.clone(),
@@ -1222,7 +1567,7 @@ fn scenario_accumulators(
                 {
                     return Err(ReportError::ScenarioArtifact {
                         detail: format!(
-                            "market {} has inconsistent payout, exit-capacity, or Trade Policy release inputs",
+                            "market {} has inconsistent payout, exit-capacity, or recommendation-contract release inputs",
                             seeded.seed.market_id
                         ),
                     }
@@ -1532,8 +1877,7 @@ fn planned_recommendations(
                 model_run_id: source.model_run_id,
                 candidate: source.candidate.clone(),
                 tier: planned.tier.clone(),
-                trade_policy: source.trade_policy.clone(),
-                trade_policy_cohort: source.trade_policy_cohort.clone(),
+                contract: source.contract.clone(),
                 entry_limit_price: source.entry_limit_price,
             })
         })
@@ -1559,6 +1903,8 @@ fn route_rows(
                 feature_contract_digest: route.contract.feature_contract_digest,
                 pit_lineage_digest: route.contract.pit_lineage_digest,
                 serving_contract_digest: route.contract.serving_contract_hash,
+                recommendation_contract_hash: route.contract.recommendation_contract_hash,
+                serving_authority: route.contract.serving_authority,
             };
             NewReportRouteRun {
                 report_route_run_id: route.report_route_run_id,
@@ -1572,7 +1918,7 @@ fn route_rows(
                 model_version_id: Some(route.active.model_version_id),
                 model_run_id: route.model_run_id,
                 calibration_artifact_id: Some(route.contract.calibration_artifact_id),
-                trade_policy_artifact_id: Some(route.contract.trade_policy_artifact_id),
+                trade_policy_artifact_id: route.contract.trade_policy_artifact_id,
                 research_profile_artifact_id: Some(
                     route.contract.research_profile_artifact_id.clone(),
                 ),
@@ -1594,7 +1940,7 @@ fn route_rows(
 struct EmptyContextInput<'a> {
     initial: &'a MarketSelectionSnapshot,
     selection: &'a MarketSelectionSnapshot,
-    features: &'a FeaturePipelineResult,
+    features: &'a ReportFeatureResults,
     candidates: &'a [RoutedCandidate],
     tiers: &'a [ExecutableEconomicTier],
     planned: &'a [PlannedReportRecommendation],
@@ -1618,7 +1964,7 @@ fn empty_context(input: &EmptyContextInput<'_>) -> QuantResult<Option<EmptyRepor
     }
     let reason = if initial.included.is_empty() && account.positions.is_empty() {
         EmptyReportReason::EmptySelection
-    } else if selection.included.is_empty() || features.accepted.is_empty() {
+    } else if selection.included.is_empty() || features.accepted_count() == 0 {
         EmptyReportReason::InsufficientDataQuality
     } else if candidates.is_empty() || tiers.is_empty() {
         EmptyReportReason::NoPositiveSignal
@@ -1703,8 +2049,8 @@ fn route_vectors(
     Ok((selected_vectors, selected_ids))
 }
 
-impl FeaturePipelineResult {
-    fn route_evidence(&self) -> QuantResult<FeatureEvidenceCommitment> {
+impl RouteFeatureRound {
+    fn evidence(&self) -> QuantResult<FeatureEvidenceCommitment> {
         Ok(self
             .feature_evidence
             .clone()
@@ -1728,6 +2074,43 @@ impl FeaturePipelineResult {
             .zip(&self.accepted)
             .map(|(info, vector)| (vector.market_id.clone(), info.feature_vector_id))
             .collect())
+    }
+}
+
+impl ReportFeatureResults {
+    fn for_route(&self, route: BuyModelRoute) -> QuantResult<&RouteFeatureRound> {
+        self.routes
+            .iter()
+            .find(|round| round.route == route)
+            .ok_or_else(|| {
+                ReportError::InvariantViolation {
+                    stage: "route_features",
+                    detail: format!("Route {route:?} has no feature-contract round"),
+                }
+                .into()
+            })
+    }
+
+    fn accepted_count(&self) -> usize {
+        self.routes.iter().map(|round| round.accepted.len()).sum()
+    }
+
+    fn vector_ids_by_market(&self) -> QuantResult<HashMap<MarketId, FeatureVectorId>> {
+        let mut by_market = HashMap::new();
+        for round in &self.routes {
+            for (market_id, vector_id) in round.vector_ids_by_market()? {
+                if by_market.insert(market_id.clone(), vector_id).is_some() {
+                    return Err(ReportError::InvariantViolation {
+                        stage: "feature_lineage",
+                        detail: format!(
+                            "market {market_id} has feature vectors from more than one Route contract"
+                        ),
+                    }
+                    .into());
+                }
+            }
+        }
+        Ok(by_market)
     }
 }
 

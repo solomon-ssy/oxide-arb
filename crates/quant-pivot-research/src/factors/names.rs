@@ -37,6 +37,17 @@ pub const TIME_TO_RESOLUTION: FactorName = FactorName::from_static("time_to_reso
 /// Aggregate data-quality factor.
 pub const DATA_QUALITY: FactorName = FactorName::from_static("data_quality");
 
+/// L2-free finalized-execution factor plane.
+pub const TRADE_MOMENTUM: FactorName = FactorName::from_static("trade.momentum");
+pub const TRADE_MACD: FactorName = FactorName::from_static("trade.macd");
+pub const TRADE_EXECUTION_IMBALANCE: FactorName =
+    FactorName::from_static("trade.execution_imbalance");
+pub const TRADE_VOLATILITY_REGIME: FactorName = FactorName::from_static("trade.volatility_regime");
+pub const TRADE_EXECUTION_ACTIVITY: FactorName =
+    FactorName::from_static("trade.execution_activity");
+pub const TRADE_PARTICIPANT_CONCENTRATION: FactorName =
+    FactorName::from_static("trade.participant_concentration");
+
 /// Structural (prediction-market-aware) factors.
 ///
 /// Shock-gated reversal (conditional; orthogonal to the linear `mean_reversion`).
@@ -50,7 +61,7 @@ pub const STRUCT_RESOLUTION_PROXIMITY_REGIME: FactorName =
 ///
 /// This is a **book-derived** liquidity-turnover proxy, not maker participant
 /// concentration. The separate `struct.participant_concentration` factor
-/// computes Gini, CR1, and HHI from trade-tape participant facts.
+/// computes Gini, CR1, and HHI from finalized execution-participant facts.
 pub const STRUCT_BOOK_CHURN_INTENSITY: FactorName =
     FactorName::from_static("struct.book_churn_intensity");
 /// Trade-tape participant concentration (neutral structural regime signal).

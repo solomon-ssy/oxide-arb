@@ -145,7 +145,7 @@ const fn migrations() -> [MigrationSpec; 1] {
         name: "bootstrap",
         safety: ClickHouseMigrationSafety::OnlineMetadata,
         sources: BOOTSTRAP_SOURCES,
-        expected_checksum: "blake3:906e216ad3af1e08c594530e248bf70f45c8f8ec0cdfd59dcc4a946afa50f548",
+        expected_checksum: "blake3:25449ff7773466f8e8af46daf7ab904939f3f12bee386165176af650d8ad3c3f",
         destructive_empty_tables: &[],
     }]
 }
@@ -826,7 +826,8 @@ async fn verify_structure(
             missing.join(", ")
         )));
     }
-    for name in ["book_microstructure_1m_mv", "quant_book_l2_trade_tape_mv"] {
+    {
+        let name = "book_microstructure_1m_mv";
         let materialized_view = by_name.get(name).ok_or_else(|| {
             StorageError::Migration(format!("ClickHouse materialized view `{name}` is absent"))
         })?;

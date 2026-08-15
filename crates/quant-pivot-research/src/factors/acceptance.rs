@@ -18,8 +18,8 @@ use quant_pivot_models::{
         DecimalValue, DomainConfig, FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy,
     },
     types::{
-        CalibrationArtifactId, FactorDefinitionId, MarketId, Price, Probability, SchemaVersion,
-        TokenId, Usd,
+        CalibrationArtifactId, FactorDefinitionId, MarketId, Price, Probability,
+        ResearchFeatureContract, SchemaVersion, TokenId, Usd,
         calibration::{CategoryBiasCurve, PriceBiasBin, TtrBucketCurve},
     },
 };
@@ -35,8 +35,8 @@ use crate::{
         structural::structural_factors,
     },
     features::{
-        FeatureCell, FeatureName, FeatureStaleness, FeatureValue, FeatureVector, NullReason,
-        generic::stats,
+        ExecutableFeatureSchema, FeatureCell, FeatureName, FeatureStaleness, FeatureValue,
+        FeatureVector, NullReason, generic::stats,
     },
     hashing::ResearchHasher,
     model::favorite_longshot::{BiasFitConfig, BiasSample, FavoriteLongshotBiasTable},
@@ -517,11 +517,19 @@ fn factor_plane_routes_domain() {
     let features = FeaturesConfig::default();
     let factors = FactorsConfig::default();
     let domain = DomainConfig::default();
-    let pooled = FactorEngine::for_model_scope(&factors, &features, &domain, None, None);
+    let pooled = FactorEngine::for_model_scope(
+        &factors,
+        &features,
+        &domain,
+        ResearchFeatureContract::FullL2,
+        None,
+        None,
+    );
     let crypto = FactorEngine::for_model_scope(
         &factors,
         &features,
         &domain,
+        ResearchFeatureContract::FullL2Crypto,
         Some(MarketCategory::Crypto),
         None,
     );
@@ -529,6 +537,7 @@ fn factor_plane_routes_domain() {
         &factors,
         &features,
         &domain,
+        ResearchFeatureContract::FullL2Weather,
         Some(MarketCategory::Weather),
         None,
     );
@@ -551,6 +560,53 @@ fn factor_plane_routes_domain() {
     assert!(!crypto_families.contains(&FactorFamily::DomainWeather));
     assert!(!weather_families.contains(&FactorFamily::DomainCrypto));
     assert!(weather_families.contains(&FactorFamily::DomainWeather));
+}
+
+#[test]
+fn bootstrap_plane_excludes_l2() {
+    let features = FeaturesConfig::default();
+    let factors = FactorsConfig::default();
+    let domain = DomainConfig::default();
+    let contract = ResearchFeatureContract::TradeBootstrapCrypto;
+    let engine = FactorEngine::for_model_scope(
+        &factors,
+        &features,
+        &domain,
+        contract,
+        Some(MarketCategory::Crypto),
+        None,
+    );
+    let schema =
+        ExecutableFeatureSchema::build(&features, contract).expect("bootstrap feature schema");
+    let expected_hash = ResearchHasher::feature_schema(&schema).expect("bootstrap feature hash");
+    assert_eq!(
+        engine
+            .feature_contract_hash()
+            .expect("factor feature contract"),
+        expected_hash
+    );
+
+    let plane = engine.serving_plane().expect("bootstrap factor plane");
+    assert!(
+        plane
+            .definitions()
+            .iter()
+            .any(|revision| revision.definition().is_outcome_alpha()),
+        "the bootstrap weighted-factor plane must contain predictive alpha"
+    );
+    for revision in plane.definitions() {
+        let definition = revision.definition();
+        for input in &definition.input_features {
+            assert!(
+                input.as_str().starts_with("trade.")
+                    || input.as_str().starts_with("domain.crypto.")
+                    || input.as_str().starts_with("data_quality.")
+                    || input.as_str() == "market.category",
+                "bootstrap factor {} retains forbidden input {input}",
+                definition.name,
+            );
+        }
+    }
 }
 
 // ── Generic factors: basic compute ────────────────────────────────────────────

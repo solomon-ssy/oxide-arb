@@ -2533,7 +2533,7 @@ mod tests {
                 route_set_digest: route_set.digest,
                 serving_contract_digest: hash(content_byte.wrapping_add(1)),
                 calibration_contract_digest: hash(content_byte.wrapping_add(2)),
-                trade_policy_contract_digest: hash(content_byte.wrapping_add(3)),
+                recommendation_contract_digest: hash(content_byte.wrapping_add(3)),
                 scenario_model_schema_version: SchemaVersion::try_new(1)
                     .expect("scenario-model schema version"),
                 capital_time_bucket_contract_digest: hash(content_byte.wrapping_add(4)),

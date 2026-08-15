@@ -10,20 +10,20 @@
 use quant_pivot_models::domain::quant::{DomainAvailability, MarketCandidate};
 
 use crate::features::{
-    schema::{FeatureSchema, SourceRequirement},
+    schema::{AuthoringFeatureCatalog, SourceRequirement},
     value::FeatureName,
 };
 
 /// Decides whether a market can supply the features a model requires.
 pub struct FeatureAvailabilityOracle<'a> {
-    schema: &'a FeatureSchema,
+    catalog: &'a AuthoringFeatureCatalog,
 }
 
 impl<'a> FeatureAvailabilityOracle<'a> {
     /// Build an oracle over a governed schema.
     #[must_use]
-    pub const fn new(schema: &'a FeatureSchema) -> Self {
-        Self { schema }
+    pub const fn new(catalog: &'a AuthoringFeatureCatalog) -> Self {
+        Self { catalog }
     }
 
     /// The subset of `required` features this market cannot supply.
@@ -45,7 +45,7 @@ impl<'a> FeatureAvailabilityOracle<'a> {
 
     /// Whether a single required feature is computable for this market.
     fn is_available(&self, candidate: &MarketCandidate, name: &FeatureName) -> bool {
-        self.schema
+        self.catalog
             .by_name(name)
             .is_some_and(|spec| source_available(candidate, spec.source_requirement))
     }
@@ -57,7 +57,7 @@ fn source_available(candidate: &MarketCandidate, requirement: SourceRequirement)
         // Gamma metadata is always present for a catalog-backed candidate.
         // Trade-tape availability is PIT/window-level; the selection candidate
         // intentionally does not carry cursor/fact state.
-        SourceRequirement::GammaMetadata | SourceRequirement::TradeTapeWindow => true,
+        SourceRequirement::GammaMetadata | SourceRequirement::FinalizedExecutionWindow => true,
         // Book-derived and windowed fact features need a live, two-sided book;
         // facts only flow while a book is published. Neg-risk sibling-leg
         // aggregates are platform-computable from the same book plane (a binary

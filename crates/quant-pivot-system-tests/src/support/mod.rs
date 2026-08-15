@@ -10,6 +10,7 @@ use quant_pivot_models::{
 
 pub mod artifact_store;
 pub mod catalog_fixtures;
+pub mod execution_history_fixtures;
 pub mod execution_pg_seed;
 pub mod fact_sink;
 pub mod factor_definitions;
@@ -27,7 +28,6 @@ pub mod research_browser_seed;
 pub mod research_fixtures;
 pub mod storage;
 pub mod trade_policy_fixtures;
-pub mod trade_tape_fixtures;
 pub mod ws;
 
 use uuid::Uuid;

@@ -77,9 +77,9 @@ pub struct DataQualityConfig {
     /// bucket at decision time. Governs offline/online feature staleness
     /// (`StalenessRule::MaxFeatureBucketAge`) — independent of live ingest lag.
     pub max_feature_bucket_age_secs: u64,
-    /// Maximum acceptable age (seconds) of the freshest trade-tape print at
-    /// decision time (`StalenessRule::MaxTradeTapeAge`).
-    pub max_trade_tape_age_secs: u64,
+    /// Maximum acceptable age (seconds) of the freshest finalized execution at
+    /// decision time (`StalenessRule::MaxExecutionAge`).
+    pub max_execution_age_secs: u64,
     /// Maximum acceptable age (seconds) of the freshest domain observation for
     /// a linked instrument at decision time
     /// (`StalenessRule::MaxDomainObservationAge`).
@@ -108,7 +108,7 @@ impl Default for DataQualityConfig {
             max_book_age_ms: 15_000,
             max_ingest_lag_ms: 10_000,
             max_feature_bucket_age_secs: 30,
-            max_trade_tape_age_secs: 300,
+            max_execution_age_secs: 300,
             max_domain_observation_age_secs: 300,
             reject_crossed_books: true,
             reject_empty_books: true,
@@ -160,7 +160,7 @@ impl Default for MomentumFeaturesConfig {
 /// Structural feature-family windows.
 ///
 /// These windows drive the shock/realized-vol, book-churn proxy, and persisted
-/// trade-tape participant-concentration estimators.
+/// finalized execution-participant concentration estimators.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StructuralFeaturesConfig {
@@ -169,14 +169,14 @@ pub struct StructuralFeaturesConfig {
     pub shock_window_secs: u64,
     /// Lookback (seconds) for the book-churn intensity proxy window.
     pub book_churn_window_secs: u64,
-    /// Lookback (seconds) for trade-tape participant concentration.
-    pub trade_tape_window_secs: u64,
+    /// Lookback (seconds) for finalized execution-participant concentration.
+    pub execution_window_secs: u64,
     /// Minimum distinct fill-participant addresses before concentration features are scored.
-    pub trade_tape_min_unique_participants: u64,
+    pub execution_min_unique_participants: u64,
     /// Minimum notional USD required before concentration features are scored.
-    pub trade_tape_min_notional_usd: DecimalValue,
+    pub execution_min_notional_usd: DecimalValue,
     /// Minimum participant-address coverage ratio in `[0, 1]`.
-    pub trade_tape_min_coverage_ratio: DecimalValue,
+    pub execution_min_coverage_ratio: DecimalValue,
 }
 
 impl Default for StructuralFeaturesConfig {
@@ -184,10 +184,10 @@ impl Default for StructuralFeaturesConfig {
         Self {
             shock_window_secs: 900,
             book_churn_window_secs: 900,
-            trade_tape_window_secs: 86_400,
-            trade_tape_min_unique_participants: 20,
-            trade_tape_min_notional_usd: DecimalValue::new(rust_decimal_macros::dec!(100.00)),
-            trade_tape_min_coverage_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.95)),
+            execution_window_secs: 86_400,
+            execution_min_unique_participants: 20,
+            execution_min_notional_usd: DecimalValue::new(rust_decimal_macros::dec!(100.00)),
+            execution_min_coverage_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.95)),
         }
     }
 }
@@ -235,7 +235,7 @@ impl FeaturesConfig {
     #[must_use]
     pub fn max_lookback_secs(&self) -> u64 {
         self.max_microstructure_lookback_secs()
-            .max(self.structural.trade_tape_window_secs)
+            .max(self.structural.execution_window_secs)
     }
 }
 
@@ -247,6 +247,7 @@ impl Default for FeaturesConfig {
                 FeatureFamily::MarketMetadata,
                 FeatureFamily::PriceBook,
                 FeatureFamily::TimeSeries,
+                FeatureFamily::Trade,
                 FeatureFamily::Microstructure,
                 FeatureFamily::Structural,
                 FeatureFamily::Domain,
@@ -863,7 +864,7 @@ pub struct PortfolioScenarioModelArtifactBinding {
     pub route_set_digest: ContentHash,
     pub serving_contract_digest: ContentHash,
     pub calibration_contract_digest: ContentHash,
-    pub trade_policy_contract_digest: ContentHash,
+    pub recommendation_contract_digest: ContentHash,
     pub scenario_model_schema_version: SchemaVersion,
     /// Digest of the strictly ordered capital-time boundaries. Per-bucket USD
     /// caps remain in the frozen `ExecutionRiskPolicy` and do not require a
@@ -1059,7 +1060,7 @@ impl Default for ReportsConfig {
             ad_hoc_default_top_n: 20,
             ad_hoc_default_knowledge_lag_secs: 10,
             entry_window_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
-            ad_hoc_report_enabled: false,
+            ad_hoc_report_enabled: true,
             delivery_policy: ReportDeliveryPolicy::StoreAndNotify,
         }
     }

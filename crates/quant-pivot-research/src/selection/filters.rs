@@ -25,7 +25,7 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 
 use crate::{
-    features::{FeatureAvailabilityOracle, FeatureSchema},
+    features::{AuthoringFeatureCatalog, FeatureAvailabilityOracle},
     selection::{ExclusionReason, ModelFeatureRequirements},
 };
 
@@ -109,7 +109,7 @@ pub struct MarketCandidateCtx<'a> {
     /// Feature availability the active model requires.
     pub model_requirements: &'a ModelFeatureRequirements,
     /// Governed feature schema backing the availability oracle.
-    pub feature_schema: &'a FeatureSchema,
+    pub feature_catalog: &'a AuthoringFeatureCatalog,
 }
 
 /// The verdict of a single filter for a single candidate.
@@ -318,7 +318,7 @@ impl SelectionFilter for ModelEligibilityFilter {
         if required.is_empty() {
             return FilterOutcome::Keep;
         }
-        let oracle = FeatureAvailabilityOracle::new(ctx.feature_schema);
+        let oracle = FeatureAvailabilityOracle::new(ctx.feature_catalog);
         let missing = oracle.missing_required(ctx.candidate, &required);
         if missing.is_empty() {
             FilterOutcome::Keep

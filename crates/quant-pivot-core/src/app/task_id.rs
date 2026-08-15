@@ -32,10 +32,8 @@ pub enum TaskId {
 
     // ── Ingress ───────────────────────────────────────────────────────
     DataPipeline,
-    /// Periodically ingests Polygon `OrderFilled` logs into `quant_trade_tape`.
-    TradeTapeWorker,
-    /// Reconciles Market WS prints with finalized on-chain fills one-to-one.
-    TradeTapeReconciliationWorker,
+    /// Reconstructs dual-provider-attested finalized exchange executions.
+    ExchangeHistoryWorker,
     /// Reconciles the capability registry into the expected-source ledger.
     DomainSourceSupervisor,
     /// Ingests Binance kline archives and incremental close observations.
@@ -155,6 +153,8 @@ pub enum TaskId {
     ResearchReadinessEvidenceWorker,
     /// Idempotently enqueues the frozen daily 24-hour full parity replay.
     FeatureParityScheduler,
+    /// Advances the durable pooled L2-free cold-start state machine.
+    FreshBootOrchestrator,
 }
 
 impl TaskId {
@@ -169,7 +169,7 @@ impl TaskId {
             | Self::BookUpdateCoalescer
             | Self::SystemStatusBroadcaster => TaskKind::ApiIngress,
             Self::DataPipeline
-            | Self::TradeTapeWorker
+            | Self::ExchangeHistoryWorker
             | Self::DomainSourceSupervisor
             | Self::CryptoKlineIngestWorker
             | Self::CryptoLiveIngestWorker
@@ -182,7 +182,6 @@ impl TaskId {
             | Self::ClobMarketInfoSync
             | Self::CalibrationUpdater => TaskKind::CatalogSync,
             Self::Coalescer => TaskKind::CacheWorker,
-            Self::TradeTapeReconciliationWorker => TaskKind::BookReconciliation,
             Self::PotentialLossEscalation | Self::LedgerReconciliation => {
                 TaskKind::LedgerReconciliation
             }
@@ -230,7 +229,8 @@ impl TaskId {
             | Self::FeedbackCoordinator
             | Self::FeedbackScheduler
             | Self::ResearchReadinessEvidenceWorker
-            | Self::FeatureParityScheduler => TaskKind::ResearchJob,
+            | Self::FeatureParityScheduler
+            | Self::FreshBootOrchestrator => TaskKind::ResearchJob,
         }
     }
 

@@ -8,11 +8,11 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::quant::{
         BacktestPathSetInfo, CalibrationArtifactInfo, DiscountCurvePoint,
-        PortfolioScenarioFitEvidence, PortfolioScenarioKind, PortfolioScenarioModelArtifact,
-        PortfolioScenarioModelState, PortfolioScenarioResamplingMethod,
-        PortfolioScenarioRouteFactor, PortfolioScenarioRouteFitLineage,
-        PortfolioScenarioRouteModelLineage, RepresentedRouteSet, RouteCompatibilityDigests,
-        RouteContractHash, ScenarioDistribution,
+        PortfolioScenarioEvidenceRegime, PortfolioScenarioFitEvidence, PortfolioScenarioKind,
+        PortfolioScenarioModelArtifact, PortfolioScenarioModelState,
+        PortfolioScenarioResamplingMethod, PortfolioScenarioRouteFactor,
+        PortfolioScenarioRouteFitLineage, PortfolioScenarioRouteModelLineage, RepresentedRouteSet,
+        RouteCompatibilityDigests, RouteContractHash, ScenarioDistribution, ScenarioWeight,
     },
     hashing::CanonicalDigest,
     runtime_config::{BuyModelRoute, PortfolioScenarioModelArtifactBinding},
@@ -37,7 +37,7 @@ pub struct PortfolioScenarioRouteFitInput<'a> {
     pub model_lineage: PortfolioScenarioRouteModelLineage,
     pub calibration_artifact_id: CalibrationArtifactId,
     pub calibration_artifact_hash: ContentHash,
-    pub trade_policy_contract_hash: ContentHash,
+    pub recommendation_contract_hash: ContentHash,
     pub prediction_horizon_secs: u64,
     pub path_set: &'a BacktestPathSetInfo,
     pub calibration: &'a CalibrationArtifactInfo,
@@ -48,6 +48,7 @@ pub struct PortfolioScenarioModelFitInput<'a> {
     pub methodology: &'a PortfolioScenarioMethodology,
     pub represented_routes: &'a RepresentedRouteSet,
     pub compatibility: RouteCompatibilityDigests,
+    pub evidence_regime: PortfolioScenarioEvidenceRegime,
     pub routes: Vec<PortfolioScenarioRouteFitInput<'a>>,
     pub bound_at: DateTime<Utc>,
 }
@@ -83,6 +84,7 @@ pub struct PortfolioScenarioMethodology {
     schema_version: SchemaVersion,
     ordered_routes: Vec<BuyModelRoute>,
     route_set_digest: ContentHash,
+    evidence_regime: PortfolioScenarioEvidenceRegime,
     resampling_method: PortfolioScenarioResamplingMethod,
     states: Vec<ScenarioStateMethodology>,
     distributions: Vec<ScenarioDistribution>,
@@ -92,6 +94,121 @@ pub struct PortfolioScenarioMethodology {
 }
 
 impl PortfolioScenarioMethodology {
+    /// Construct the versioned data-free methodology used by the first
+    /// L2-free Route. Execution haircuts are neutral by construction; live L2
+    /// admission remains the sole execution-feasibility authority at report
+    /// time. Learned probabilities and Route dependence still come only from
+    /// finalized CPCV residual evidence during [`PortfolioScenarioModelFitter::fit`].
+    pub fn bootstrap_reference(
+        represented_routes: &RepresentedRouteSet,
+        prediction_horizon_secs: u64,
+    ) -> QuantResult<Self> {
+        if prediction_horizon_secs == 0 {
+            return Err(methodology(
+                "bootstrap reference scenario requires a positive prediction horizon",
+            ));
+        }
+        let state_specs = [
+            (0, PortfolioScenarioKind::PitBootstrap, "reference", 5_000),
+            (
+                1,
+                PortfolioScenarioKind::CalibrationUncertainty,
+                "calibration_uncertainty",
+                0,
+            ),
+            (
+                2,
+                PortfolioScenarioKind::StructuralStress,
+                "structural_stress",
+                10_000,
+            ),
+        ];
+        let states = state_specs
+            .into_iter()
+            .map(
+                |(scenario_index, kind, label, split_probability_quantile_bps)| {
+                    ScenarioStateMethodology {
+                        scenario_index,
+                        kind,
+                        label: label.to_owned(),
+                        route_factors: represented_routes
+                            .routes
+                            .iter()
+                            .copied()
+                            .map(|route| ScenarioRouteFactorMethodology {
+                                route,
+                                systematic_weight_bps: 6_000,
+                                split_probability_quantile_bps,
+                                win_cash_recovery_bps: 10_000,
+                                split_cash_recovery_bps: 5_000,
+                                loss_cash_recovery_bps: 0,
+                                executable_share_bps: 10_000,
+                                capital_release_multiplier_bps: 10_000,
+                            })
+                            .collect(),
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
+        let scenario_weights = |weights: [u32; 3]| {
+            weights
+                .into_iter()
+                .enumerate()
+                .map(|(index, probability_bps)| {
+                    let scenario_index = u32::try_from(index).map_err(|error| {
+                        methodology_error(format!(
+                            "bootstrap scenario index does not fit u32: {error}"
+                        ))
+                    })?;
+                    Ok(ScenarioWeight {
+                        scenario_index,
+                        probability_bps,
+                    })
+                })
+                .collect::<QuantResult<Vec<_>>>()
+        };
+        let distributions = vec![
+            ScenarioDistribution {
+                distribution_id: "reference_nominal".to_owned(),
+                nominal: true,
+                weights: scenario_weights([6_000, 3_000, 1_000])?,
+            },
+            ScenarioDistribution {
+                distribution_id: "reference_robust".to_owned(),
+                nominal: false,
+                weights: scenario_weights([3_000, 3_000, 4_000])?,
+            },
+        ];
+        let discount_curve = vec![DiscountCurvePoint {
+            end_secs: prediction_horizon_secs,
+            annualized_cost_bps: 0,
+        }];
+        let capital_time_bucket_contract_digest =
+            CapitalTimeBucketContract::try_from(discount_curve.as_slice())
+                .map_err(|error| {
+                    methodology_error(format!("bootstrap capital-time grid is invalid: {error}"))
+                })?
+                .content_hash()?;
+        let mut methodology = Self {
+            schema_version: SchemaVersion::FIRST,
+            ordered_routes: represented_routes.routes.clone(),
+            route_set_digest: represented_routes.digest,
+            evidence_regime: PortfolioScenarioEvidenceRegime::FinalizedReferenceReturns,
+            resampling_method: PortfolioScenarioResamplingMethod::StationaryBootstrap {
+                expected_block_length: 2,
+                scenario_horizon_buckets: 4,
+            },
+            states,
+            distributions,
+            discount_curve,
+            capital_time_bucket_contract_digest,
+            methodology_hash: ContentHash::from_bytes([0_u8; 32]),
+        };
+        methodology.methodology_hash = methodology.recomputed_hash()?;
+        methodology.verify()?;
+        Ok(methodology)
+    }
+
     /// Project only governed, data-free scenario semantics from a verified
     /// promoted artifact.
     pub fn from_promoted(model: &PortfolioScenarioModelArtifact) -> QuantResult<Self> {
@@ -144,6 +261,7 @@ impl PortfolioScenarioMethodology {
             schema_version: model.schema_version,
             ordered_routes: model.ordered_routes.clone(),
             route_set_digest: model.route_set_digest,
+            evidence_regime: model.evidence_regime,
             resampling_method: model.resampling_method,
             states,
             distributions: model.distributions.clone(),
@@ -164,6 +282,7 @@ impl PortfolioScenarioMethodology {
                 self.schema_version,
                 &self.ordered_routes,
                 self.route_set_digest,
+                self.evidence_regime,
                 self.resampling_method,
                 &self.states,
                 &self.distributions,
@@ -228,13 +347,14 @@ pub struct PortfolioScenarioFoldFitInput<'a> {
     pub methodology: &'a PortfolioScenarioMethodology,
     pub represented_routes: &'a RepresentedRouteSet,
     pub compatibility: RouteCompatibilityDigests,
+    pub evidence_regime: PortfolioScenarioEvidenceRegime,
     pub route: BuyModelRoute,
     pub model_version_id: ModelVersionId,
     pub model_artifact_hash: ContentHash,
     pub serving_contract_hash: ContentHash,
     pub calibration_artifact_hash: ContentHash,
     pub calibration: &'a ResolvedCalibration,
-    pub trade_policy_contract_hash: ContentHash,
+    pub recommendation_contract_hash: ContentHash,
     pub prediction_horizon_secs: u64,
     pub observations: &'a [PortfolioScenarioResidualObservation],
     pub estimator_identity_hash: ContentHash,
@@ -300,7 +420,8 @@ pub fn scenario_economic_function_hash(
         time_bucket_secs: u64,
         ordered_routes: &'a [BuyModelRoute],
         route_set_digest: ContentHash,
-        trade_policy_contract_digest: ContentHash,
+        recommendation_contract_digest: ContentHash,
+        evidence_regime: PortfolioScenarioEvidenceRegime,
         capital_time_bucket_contract_digest: ContentHash,
         scenario_random_stream_hash: ContentHash,
         resampling_method: PortfolioScenarioResamplingMethod,
@@ -344,7 +465,8 @@ pub fn scenario_economic_function_hash(
             time_bucket_secs: artifact.time_bucket_secs,
             ordered_routes: &artifact.ordered_routes,
             route_set_digest: artifact.route_set_digest,
-            trade_policy_contract_digest: artifact.trade_policy_contract_digest,
+            recommendation_contract_digest: artifact.recommendation_contract_digest,
+            evidence_regime: artifact.evidence_regime,
             capital_time_bucket_contract_digest: artifact.capital_time_bucket_contract_digest,
             scenario_random_stream_hash: artifact.scenario_random_stream_hash,
             resampling_method: artifact.resampling_method,
@@ -502,6 +624,7 @@ impl<'input, 'evidence> VerifiedFoldScenarioFit<'input, 'evidence> {
         input.methodology.verify()?;
         if input.methodology.ordered_routes != input.represented_routes.routes
             || input.methodology.route_set_digest != input.represented_routes.digest
+            || input.methodology.evidence_regime != input.evidence_regime
         {
             return Err(methodology(
                 "fold scenario methodology Route identity differs from the replay Route set",
@@ -531,7 +654,7 @@ impl<'input, 'evidence> VerifiedFoldScenarioFit<'input, 'evidence> {
             }],
             &[RouteContractHash {
                 route: input.route,
-                content_hash: input.trade_policy_contract_hash,
+                content_hash: input.recommendation_contract_hash,
             }],
         )
         .map_err(|error| methodology_error(format!("fold compatibility failed: {error}")))?;
@@ -646,7 +769,7 @@ impl<'input, 'evidence> VerifiedFoldScenarioFit<'input, 'evidence> {
                     template_state.scenario_index,
                     self.input.route,
                     self.input.calibration_artifact_hash,
-                    self.input.trade_policy_contract_hash,
+                    self.input.recommendation_contract_hash,
                     systematic_quantile_bps,
                     calibration_shift,
                     template_factor.split_probability_quantile_bps,
@@ -685,7 +808,7 @@ impl<'input, 'evidence> VerifiedFoldScenarioFit<'input, 'evidence> {
             1,
             &(
                 self.input.methodology.methodology_hash,
-                self.input.trade_policy_contract_hash,
+                self.input.recommendation_contract_hash,
                 self.panel_hash,
                 &states,
             ),
@@ -708,7 +831,7 @@ impl<'input, 'evidence> VerifiedFoldScenarioFit<'input, 'evidence> {
             },
             calibration_artifact_id: self.input.calibration.artifact_id,
             calibration_artifact_hash: self.input.calibration_artifact_hash,
-            trade_policy_contract_hash: self.input.trade_policy_contract_hash,
+            recommendation_contract_hash: self.input.recommendation_contract_hash,
             fit_window_start: self.fit_window_start,
             fit_window_end: self.fit_window_end,
         }];
@@ -723,7 +846,8 @@ impl<'input, 'evidence> VerifiedFoldScenarioFit<'input, 'evidence> {
             route_set_digest: self.input.represented_routes.digest,
             serving_contract_digest: self.input.compatibility.serving_contract_digest,
             calibration_contract_digest: self.input.compatibility.calibration_contract_digest,
-            trade_policy_contract_digest: self.input.compatibility.trade_policy_contract_digest,
+            recommendation_contract_digest: self.input.compatibility.recommendation_contract_digest,
+            evidence_regime: self.input.evidence_regime,
             capital_time_bucket_contract_digest: self.capital_time_bucket_contract_digest,
             scenario_random_stream_hash: self.resampling_seed_hash,
             pit_residual_panel_hash: self.panel_hash,
@@ -859,7 +983,7 @@ impl PortfolioScenarioModelFitter {
             1,
             &(
                 input.methodology.methodology_hash,
-                input.compatibility.trade_policy_contract_digest,
+                input.compatibility.recommendation_contract_digest,
                 panel_hash,
                 &states,
             ),
@@ -876,7 +1000,7 @@ impl PortfolioScenarioModelFitter {
                 },
                 calibration_artifact_id: route.input.calibration_artifact_id,
                 calibration_artifact_hash: route.input.calibration_artifact_hash,
-                trade_policy_contract_hash: route.input.trade_policy_contract_hash,
+                recommendation_contract_hash: route.input.recommendation_contract_hash,
                 fit_window_start,
                 fit_window_end,
             })
@@ -892,7 +1016,8 @@ impl PortfolioScenarioModelFitter {
             route_set_digest: input.represented_routes.digest,
             serving_contract_digest: input.compatibility.serving_contract_digest,
             calibration_contract_digest: input.compatibility.calibration_contract_digest,
-            trade_policy_contract_digest: input.compatibility.trade_policy_contract_digest,
+            recommendation_contract_digest: input.compatibility.recommendation_contract_digest,
+            evidence_regime: input.evidence_regime,
             capital_time_bucket_contract_digest,
             scenario_random_stream_hash,
             pit_residual_panel_hash: panel_hash,
@@ -993,7 +1118,7 @@ fn validate_fit_input(
             .iter()
             .map(|route| RouteContractHash {
                 route: route.route,
-                content_hash: route.trade_policy_contract_hash,
+                content_hash: route.recommendation_contract_hash,
             })
             .collect::<Vec<_>>(),
     )
@@ -1002,6 +1127,7 @@ fn validate_fit_input(
     if input.routes.len() != input.represented_routes.routes.len()
         || input.methodology.ordered_routes != input.represented_routes.routes
         || input.methodology.route_set_digest != input.represented_routes.digest
+        || input.methodology.evidence_regime != input.evidence_regime
         || input.compatibility != expected_compatibility
         || input
             .routes
@@ -1026,7 +1152,7 @@ fn binding_for(
         route_set_digest: artifact.route_set_digest,
         serving_contract_digest: artifact.serving_contract_digest,
         calibration_contract_digest: artifact.calibration_contract_digest,
-        trade_policy_contract_digest: artifact.trade_policy_contract_digest,
+        recommendation_contract_digest: artifact.recommendation_contract_digest,
         scenario_model_schema_version: artifact.schema_version,
         capital_time_bucket_contract_digest: artifact.capital_time_bucket_contract_digest,
         model_content_hash: artifact.content_hash,
@@ -1287,7 +1413,7 @@ fn fit_states(
                     route,
                     evidence[route_index].input.path_set.path_set_hash,
                     evidence[route_index].input.calibration_artifact_hash,
-                    evidence[route_index].input.trade_policy_contract_hash,
+                    evidence[route_index].input.recommendation_contract_hash,
                     systematic_quantile_bps,
                     calibration_shift,
                     template_factor.split_probability_quantile_bps,
@@ -1535,8 +1661,8 @@ mod tests {
     use quant_pivot_models::{
         domain::quant::{
             BacktestPathSetInfo, CalibrationArtifactInfo, CalibrationArtifactPayload,
-            DiscountCurvePoint, PortfolioScenarioFitEvidence, PortfolioScenarioKind,
-            PortfolioScenarioModelArtifact, PortfolioScenarioModelState,
+            DiscountCurvePoint, PortfolioScenarioEvidenceRegime, PortfolioScenarioFitEvidence,
+            PortfolioScenarioKind, PortfolioScenarioModelArtifact, PortfolioScenarioModelState,
             PortfolioScenarioResamplingMethod, PortfolioScenarioRouteFactor,
             PortfolioScenarioRouteFitLineage, PortfolioScenarioRouteModelLineage,
             RepresentedRouteSet, RouteCompatibilityDigests, RouteContractHash,
@@ -1551,9 +1677,10 @@ mod tests {
             SchemaVersion, TokenId, TrainingDatasetId,
             backtest::{
                 BacktestPath, BacktestPaths, CpcvEstimatorIdentity, CpcvFoldArtifact,
-                CpcvFoldArtifacts, CpcvFoldCalibrationPolicy, CpcvMethodologyBinding,
-                CpcvPathSetSubject, CpcvTrialPathBinding, CscvSelectionEvidence,
-                CscvTrialDescriptor, CscvTrialGridBinding, SharpeDistribution,
+                CpcvFoldArtifacts, CpcvFoldCalibrationPolicy, CpcvFoldValidationRegime,
+                CpcvMethodologyBinding, CpcvPathSetSubject, CpcvTrialPathBinding,
+                CscvSelectionEvidence, CscvTrialDescriptor, CscvTrialGridBinding,
+                SharpeDistribution,
             },
             calibration::{
                 IsotonicKnot, MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
@@ -1587,7 +1714,7 @@ mod tests {
         calibration_source_model_version_id: ModelVersionId,
         calibration_source_model_artifact_hash: ContentHash,
         calibration_source_serving_contract_hash: ContentHash,
-        trade_policy_contract_hash: ContentHash,
+        recommendation_contract_hash: ContentHash,
         prediction_horizon_secs: u64,
         path_set: BacktestPathSetInfo,
         calibration: CalibrationArtifactInfo,
@@ -1627,7 +1754,7 @@ mod tests {
                 model_lineage: self.model_lineage(),
                 calibration_artifact_id: self.calibration.artifact_id,
                 calibration_artifact_hash: self.calibration.content_hash,
-                trade_policy_contract_hash: self.trade_policy_contract_hash,
+                recommendation_contract_hash: self.recommendation_contract_hash,
                 prediction_horizon_secs: self.prediction_horizon_secs,
                 path_set: &self.path_set,
                 calibration: &self.calibration,
@@ -1662,7 +1789,7 @@ mod tests {
             let promoted = scenario_template(
                 bound_at,
                 &represented_routes,
-                compatibility.trade_policy_contract_digest,
+                compatibility.recommendation_contract_digest,
                 &routes,
             );
             let methodology = PortfolioScenarioMethodology::from_promoted(&promoted)
@@ -1681,6 +1808,7 @@ mod tests {
                 methodology: &self.methodology,
                 represented_routes: &self.represented_routes,
                 compatibility: self.compatibility,
+                evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
                 routes: self.routes.iter().map(RouteEvidence::fit_input).collect(),
                 bound_at: self.bound_at,
             })
@@ -2029,19 +2157,19 @@ mod tests {
             .iter_mut()
             .find(|route| route.route == BuyModelRoute::Weather)
             .expect("weather evidence");
-        weather.trade_policy_contract_hash = hash(242);
+        weather.recommendation_contract_hash = hash(242);
         changed.refresh_compatibility();
 
         let refitted = changed
             .fit()
             .expect("prospective Trade Policy requires a fresh scenario fit");
         assert_eq!(
-            refitted.artifact.trade_policy_contract_digest,
-            changed.compatibility.trade_policy_contract_digest
+            refitted.artifact.recommendation_contract_digest,
+            changed.compatibility.recommendation_contract_digest
         );
         assert_ne!(
-            baseline.artifact.trade_policy_contract_digest,
-            refitted.artifact.trade_policy_contract_digest
+            baseline.artifact.recommendation_contract_digest,
+            refitted.artifact.recommendation_contract_digest
         );
         assert_ne!(
             baseline.artifact.content_hash,
@@ -2062,12 +2190,12 @@ mod tests {
             .iter_mut()
             .find(|route| route.route == BuyModelRoute::Weather)
             .expect("weather evidence")
-            .trade_policy_contract_hash = hash(243);
+            .recommendation_contract_hash = hash(243);
         let changed_compatibility = compatibility(&baseline.represented_routes, &changed_routes);
         let changed_promoted = scenario_template(
             baseline.bound_at,
             &baseline.represented_routes,
-            changed_compatibility.trade_policy_contract_digest,
+            changed_compatibility.recommendation_contract_digest,
             &changed_routes,
         );
         let changed = PortfolioScenarioMethodology::from_promoted(&changed_promoted)
@@ -2259,7 +2387,7 @@ mod tests {
                 .iter()
                 .map(|route| RouteContractHash {
                     route: route.route,
-                    content_hash: route.trade_policy_contract_hash,
+                    content_hash: route.recommendation_contract_hash,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -2274,7 +2402,7 @@ mod tests {
         };
         let model_version_id = ModelVersionId::new(Uuid::from_u128(seed + 1));
         let serving_contract_hash = hash(u8::try_from(seed / 100).expect("route hash seed"));
-        let trade_policy_contract_hash =
+        let recommendation_contract_hash =
             hash(u8::try_from(seed / 100 + 1).expect("trade-policy hash seed"));
         let model_artifact_hash =
             hash(u8::try_from(seed / 100 + 2).expect("model-artifact hash seed"));
@@ -2311,7 +2439,7 @@ mod tests {
             calibration_source_model_version_id,
             calibration_source_model_artifact_hash,
             calibration_source_serving_contract_hash,
-            trade_policy_contract_hash,
+            recommendation_contract_hash,
             prediction_horizon_secs,
             path_set,
             calibration,
@@ -2545,6 +2673,7 @@ mod tests {
         let base = u8::try_from(seed / 100).expect("fold hash seed");
         CpcvFoldArtifacts::try_new(vec![
             CpcvFoldArtifact {
+                validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                 identity: CpcvEstimatorIdentity::Validation {
                     combination_index: 0,
                     test_partitions_hash: hash(base + 30),
@@ -2567,6 +2696,7 @@ mod tests {
                 scenario_model_hash: hash(base + 42),
             },
             CpcvFoldArtifact {
+                validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                 identity: CpcvEstimatorIdentity::TrialPathValidation {
                     trial_id: 0,
                     path_index: 0,
@@ -2591,6 +2721,7 @@ mod tests {
                 scenario_model_hash: hash(base + 45),
             },
             CpcvFoldArtifact {
+                validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                 identity: CpcvEstimatorIdentity::TrialPathValidation {
                     trial_id: 1,
                     path_index: 0,
@@ -2658,7 +2789,7 @@ mod tests {
     fn scenario_template(
         bound_at: DateTime<Utc>,
         routes: &RepresentedRouteSet,
-        trade_policy_contract_digest: ContentHash,
+        recommendation_contract_digest: ContentHash,
         evidence: &[RouteEvidence],
     ) -> PortfolioScenarioModelArtifact {
         let as_of = bound_at - Duration::days(20);
@@ -2703,7 +2834,8 @@ mod tests {
             route_set_digest: routes.digest,
             serving_contract_digest: hash(3),
             calibration_contract_digest: hash(4),
-            trade_policy_contract_digest,
+            recommendation_contract_digest,
+            evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
             capital_time_bucket_contract_digest,
             scenario_random_stream_hash: hash(5),
             pit_residual_panel_hash: hash(6),
@@ -2725,7 +2857,7 @@ mod tests {
                     },
                     calibration_artifact_id: route.calibration.artifact_id,
                     calibration_artifact_hash: route.calibration.content_hash,
-                    trade_policy_contract_hash: route.trade_policy_contract_hash,
+                    recommendation_contract_hash: route.recommendation_contract_hash,
                     fit_window_start,
                     fit_window_end: as_of,
                 })

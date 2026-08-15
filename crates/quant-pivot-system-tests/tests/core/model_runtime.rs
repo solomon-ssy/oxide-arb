@@ -3,7 +3,7 @@
 //! model-run repository finalize transitions.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     env, iter,
     sync::{
         Arc,
@@ -37,10 +37,10 @@ use quant_pivot_core::{
 use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
-        MidPriceBucketRow, TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, ExecutionParticipantFactRow,
+        ExecutionParticipantRow, MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow,
     },
-    config::{ArtifactStoreDeployConfig, ClickHouseConfig, TradeTapeOnChainConfig},
+    config::{ArtifactStoreDeployConfig, ClickHouseConfig},
     domain::{
         data_plane::{DecisionBoundary, DecisionClock},
         governance::DecisionPolicySnapshotInfo,
@@ -71,9 +71,9 @@ use quant_pivot_models::{
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FeatureVectorId,
         FeedbackCycleId, MarketId, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, PolicyBundleGeneration, Price, SchemaVersion,
-        SelectionExclusionSummary, Shares, TokenId, Usd, model_metrics::ModelVersionMetrics,
-        model_training::ModelTrainingObjective,
+        ModelTrainingContract, ModelVersionId, PolicyBundleGeneration, Price,
+        ResearchFeatureContract, SchemaVersion, SelectionExclusionSummary, Shares, TokenId, Usd,
+        model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -92,7 +92,14 @@ use quant_pivot_repository::{
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
     factors::FactorEngine,
-    features::{FeatureSchema, FeatureVector},
+    features::{
+        ExecutableFeatureSchema, FeatureVector,
+        names::trade::{
+            EMA_SLOPE, EXECUTION_COVERAGE_RATIO, EXECUTION_INTENSITY, EXECUTION_STALENESS_SECS,
+            LAGGED_MOMENTUM, LAST_FILL_RETURN, MACD_NORM, PARTICIPANT_GINI, PARTICIPANT_HHI,
+            REALIZED_VOLATILITY, SIGNED_NOTIONAL_IMBALANCE,
+        },
+    },
     hashing::ResearchHasher,
     model::ReturnModelSpec,
     selection::{ModelFeatureRequirements, SelectedMarket},
@@ -103,6 +110,10 @@ use quant_pivot_system_tests::{
     support::{
         SelectorFixture,
         catalog_fixtures::{make_event, make_market},
+        execution_history_fixtures::{
+            ConfigurableFactRead, live_history_config, live_history_repo,
+            whale_concentration_by_market,
+        },
         fact_sink::DiscardFactWriter,
         factor_definitions::register_all_factor_definitions,
         model_serving_fixtures::{
@@ -115,7 +126,6 @@ use quant_pivot_system_tests::{
         policy_fixtures::{activate_policy_bundle, bootstrap_policy_bundle},
         publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
-        trade_tape_fixtures::live_tape_cursor_repo,
     },
 };
 use rust_decimal::Decimal;
@@ -165,23 +175,43 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn market_tape_window(
+    async fn market_execution_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<ExecutionParticipantFactRow>, StorageError> {
         Ok(Vec::new())
     }
 
-    async fn last_trades(
+    async fn last_executions(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _limit: u64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn market_executions_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn execution_participants_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<ExecutionParticipantRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -645,35 +675,62 @@ async fn build_cross_section_features(
     }
     let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
-    let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
-    let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
-        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
-        window_provider: FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
-        feature_repo,
-        event_writer: noop_feature_writer(),
-        block_cursor_repo: live_tape_cursor_repo(),
-        linkage_repo: Arc::new(EmptyLinkageRepo),
-        basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
-        calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
-        trade_tape_on_chain: TradeTapeOnChainConfig::default(),
-    });
-
     let features = FeaturesConfig::default();
     let domain = DomainConfig::default();
     let included: Vec<SelectedMarket> = iter::once(selected_market())
         .chain((0..PEER_COUNT).map(peer_selected_market))
         .collect();
+    let decision_at = Utc::now();
+    let event_time_ms = (decision_at - ChronoDuration::seconds(60)).timestamp_millis();
+    let mut execution_history = HashMap::new();
+    for market in &included {
+        execution_history.extend(whale_concentration_by_market(
+            &market.market_id,
+            &market.primary_token_id,
+            event_time_ms,
+        ));
+    }
+    let fact_read = Arc::new(ConfigurableFactRead::new(
+        Arc::new(EmptyFactRead),
+        execution_history,
+    ));
+    let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
+    let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
+        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
+        window_provider: FeatureWindowProvider::new(fact_read),
+        feature_repo,
+        event_writer: noop_feature_writer(),
+        exchange_history_repo: live_history_repo(),
+        linkage_repo: Arc::new(EmptyLinkageRepo),
+        basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
+        calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
+        finalized_exchange_history: live_history_config(),
+    });
     let boundary = DecisionClock::new(0)
-        .boundary(Utc::now())
+        .boundary(decision_at)
         .expect("decision boundary");
+    let model_requirements = ModelFeatureRequirements::generic_only(vec![
+        LAST_FILL_RETURN,
+        REALIZED_VOLATILITY,
+        LAGGED_MOMENTUM,
+        EMA_SLOPE,
+        MACD_NORM,
+        SIGNED_NOTIONAL_IMBALANCE,
+        EXECUTION_INTENSITY,
+        PARTICIPANT_GINI,
+        PARTICIPANT_HHI,
+        EXECUTION_STALENESS_SECS,
+        EXECUTION_COVERAGE_RATIO,
+    ]);
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
+            feature_contract: ResearchFeatureContract::FullL2,
             boundary: boundary.clone(),
             features: &features,
             domain: &domain,
             data_quality: &DataQualityConfig::default(),
-            model_requirements: &ModelFeatureRequirements::default(),
+            model_requirements: &model_requirements,
             pit: &live_pit,
             decision_policy_snapshot_id,
             liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
@@ -681,10 +738,20 @@ async fn build_cross_section_features(
         .await
         .expect("feature pipeline");
 
+    let rejection_diagnostics = result
+        .rejected
+        .iter()
+        .flat_map(|market| {
+            market
+                .missing_required
+                .iter()
+                .map(move |(name, reason)| (market.market_id.clone(), name.clone(), *reason))
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         result.accepted.len(),
         1 + PEER_COUNT,
-        "every cross-section market must produce a vector"
+        "every cross-section market must produce a vector: {rejection_diagnostics:?}"
     );
     let ids = result
         .persisted
@@ -761,14 +828,22 @@ async fn publish_weighted_model(
     features: &FeaturesConfig,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
 ) -> ModelVersionId {
-    let engine =
-        FactorEngine::for_model_scope(factors, features, &DomainConfig::default(), None, None);
+    let engine = FactorEngine::for_model_scope(
+        factors,
+        features,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+        None,
+        None,
+    );
     let factor_plane = engine.serving_plane().expect("factor plane");
 
     let model_version_id = ModelVersionId::from_v7();
-    let feature_schema_hash =
-        ResearchHasher::feature_schema(&FeatureSchema::build(features).expect("feature schema"))
-            .expect("feature hash");
+    let feature_schema_hash = ResearchHasher::feature_schema(
+        &ExecutableFeatureSchema::build(features, ResearchFeatureContract::FullL2)
+            .expect("feature schema"),
+    )
+    .expect("feature hash");
     let input_contract = ModelInputContract::single_required("book.mid");
     let model_spec_id = ModelSpecId::from_v7();
     let spec = model_spec_fixtures::new_model_spec_fixture(
@@ -985,8 +1060,14 @@ fn factors_with_head_skew(
     features: &FeaturesConfig,
     variant_index: usize,
 ) -> FactorsConfig {
-    let engine =
-        FactorEngine::for_model_scope(base, features, &DomainConfig::default(), None, None);
+    let engine = FactorEngine::for_model_scope(
+        base,
+        features,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+        None,
+        None,
+    );
     let plane = engine.serving_plane().expect("factor plane");
     let alpha = plane
         .definitions()
@@ -1139,9 +1220,16 @@ async fn register_enabled_factors(
     features: &FeaturesConfig,
 ) {
     let repo = PgFactorRepository::new(db.clone());
-    register_all_factor_definitions(&repo, factors, features, &DomainConfig::default())
-        .await
-        .expect("register immutable factor definitions");
+    register_all_factor_definitions(
+        &repo,
+        factors,
+        features,
+        &DomainConfig::default(),
+        ResearchFeatureContract::FullL2,
+        None,
+    )
+    .await
+    .expect("register immutable factor definitions");
 }
 
 fn artifact_store() -> Arc<dyn ArtifactStore> {

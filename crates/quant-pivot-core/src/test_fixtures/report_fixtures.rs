@@ -156,10 +156,10 @@ pub fn recommendation(
         identity: recommendation_identity(),
         market_context: market_context(),
         trade_plan: RecommendationTradePlan {
-            policy: Box::new(trade_policy_provenance()),
+            policy: Box::new(trade_policy_provenance().into()),
             entry: entry_plan(),
             sizing: Box::new(sizing_plan(suggested_usd)),
-            exit: Box::new(exit_plan()),
+            exit: Box::new(exit_plan().into()),
             risk_envelope: Box::new(risk_envelope()),
         },
         factor_breakdown: factor_breakdown(),

@@ -14,7 +14,7 @@ pub enum DecisionSource {
     Catalog,
     Book,
     Microstructure,
-    TradeTape,
+    FinalizedExecution,
     Linkage,
     DomainCrypto,
     DomainWeather,
@@ -28,7 +28,7 @@ impl DecisionSource {
             Self::Catalog => "catalog",
             Self::Book => "book",
             Self::Microstructure => "microstructure",
-            Self::TradeTape => "trade_tape",
+            Self::FinalizedExecution => "finalized_execution",
             Self::Linkage => "linkage",
             Self::DomainCrypto => "domain_crypto",
             Self::DomainWeather => "domain_weather",
@@ -214,7 +214,7 @@ impl DecisionClock {
             .with_source_cutoff(DecisionSource::Catalog, 0)?
             .with_source_cutoff(DecisionSource::Book, 0)?
             .with_source_cutoff(DecisionSource::Microstructure, 0)?
-            .with_source_cutoff(DecisionSource::TradeTape, 0)?
+            .with_source_cutoff(DecisionSource::FinalizedExecution, 0)?
             .with_source_cutoff(DecisionSource::Linkage, 0)?
             .with_source_cutoff(DecisionSource::DomainCrypto, domain_crypto_lag_secs)?
             .with_source_cutoff(DecisionSource::DomainWeather, domain_weather_lag_secs)
@@ -313,7 +313,7 @@ mod tests {
             decision_at - Duration::seconds(120)
         );
         assert_eq!(
-            boundary.cutoff_for(DecisionSource::TradeTape),
+            boundary.cutoff_for(DecisionSource::FinalizedExecution),
             decision_at - Duration::seconds(120)
         );
         assert_eq!(
@@ -359,7 +359,7 @@ mod tests {
             DecisionSource::Catalog,
             DecisionSource::Book,
             DecisionSource::Microstructure,
-            DecisionSource::TradeTape,
+            DecisionSource::FinalizedExecution,
             DecisionSource::Linkage,
             DecisionSource::DomainCrypto,
             DecisionSource::DomainWeather,
@@ -400,7 +400,7 @@ mod tests {
                 (DecisionSource::Catalog, 0_u32),
                 (DecisionSource::Book, 0_u32),
                 (DecisionSource::Microstructure, 0_u32),
-                (DecisionSource::TradeTape, 0_u32),
+                (DecisionSource::FinalizedExecution, 0_u32),
                 (DecisionSource::Linkage, 0_u32),
                 (DecisionSource::DomainCrypto, crypto_lag_secs),
                 (DecisionSource::DomainWeather, weather_lag_secs),

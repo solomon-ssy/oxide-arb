@@ -16,15 +16,15 @@ use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::data_plane::DecisionBoundary,
+    domain::data_plane::{DecisionBoundary, DecisionSource},
     enums::{
         common::MarketCategory,
         quant::{DataQualityStatus, OutcomeSide},
     },
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
     types::{
-        MarketId, OutcomeTokenBinding, Price, TokenId, TradeTapeSourceEvidence, Usd,
-        stable_name::FeatureName,
+        FinalizedExecutionEvidence, MarketId, OutcomeTokenBinding, Price, ResearchFeatureContract,
+        TokenId, Usd, stable_name::FeatureName,
     },
 };
 use quant_pivot_research::{
@@ -32,30 +32,27 @@ use quant_pivot_research::{
     factors::{FactorEngine, MarketFactorOutcome},
     features::{
         ConfiguredFeatureBuilder, DomainSliceInputs, FeatureSourceWindows, FeatureVector,
-        MarketDecisionCapture, MarketWindowSnapshot, ResolvedBook, ResolvedMarketBundle,
-        TradeTapeWindowSnapshot,
+        FinalizedExecutionWindowSnapshot, MarketDecisionCapture, MarketWindowSnapshot,
+        ResolvedBook, ResolvedMarketBundle,
     },
     model::FavoriteLongshotBiasTable,
     pit::PointInTimeSnapshotSource,
     selection::SelectedMarket,
 };
 
-use crate::{
-    ingest::trade_tape_health::runtime_market_tape_available,
-    prefetch::historical_window::{
-        Prefetched, ReplaySample, feature_window, replay_boundary, selected_market,
-        trade_tape_window,
-    },
+use crate::prefetch::historical_window::{
+    Prefetched, ReplaySample, feature_window, finalized_execution_window, replay_boundary,
+    selected_market,
 };
 
-/// Provenance used to decide whether PIT trade-tape facts were complete enough
+/// Provenance used to decide whether PIT finalized-execution facts were complete enough
 /// to consume for one replay.
 #[derive(Clone, Copy)]
-pub enum ReplayTradeTapeSource<'a> {
+pub enum ReplayExecutionSource<'a> {
     /// A sealed historical source slice owns fact completeness.
     Materialized { available_by: DateTime<Utc> },
     /// Runtime parity recomputes availability from serving's raw source state.
-    FrozenRuntime(&'a HashMap<MarketId, TradeTapeSourceEvidence>),
+    FrozenRuntime(&'a HashMap<MarketId, FinalizedExecutionEvidence>),
 }
 
 /// Frozen feature/factor/data-quality config governing a replay.
@@ -74,6 +71,8 @@ pub struct ReplayConfig {
     /// denominator; catalog liquidity is an observed market attribute, not a
     /// transform parameter.
     pub liquidity_cap_usd: Usd,
+    /// Research-profile feature contract for this exact replay.
+    pub feature_contract: ResearchFeatureContract,
     /// Factor-native bias calibration. Classical feature-only replay carries
     /// `None` and never resolves or consumes this dependency.
     pub bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
@@ -85,8 +84,8 @@ pub struct CrossSectionRequest<'a> {
     pub pit: &'a dyn PointInTimeSnapshotSource,
     /// Prefetched facts backing the trailing feature windows.
     pub prefetched: &'a Prefetched,
-    /// Explicit trade-tape source provenance; never inferred from row presence.
-    pub trade_tape_source: ReplayTradeTapeSource<'a>,
+    /// Explicit finalized-execution provenance; never inferred from row presence.
+    pub finalized_execution_evidence: ReplayExecutionSource<'a>,
     /// Frozen decision time for the replayed cross-section.
     pub decision_at: DateTime<Utc>,
     /// `(market, token)` samples in this decision-time group.
@@ -235,19 +234,24 @@ pub async fn materialize_cross_section(
         .map(|(((market, snapshot), trade_snapshot), domain)| {
             let boundary = boundary.clone();
             async move {
-                builder
-                    .resolve_inputs(
-                        market,
-                        &boundary,
-                        request.pit,
-                        FeatureSourceWindows {
-                            microstructure: snapshot,
-                            trade_tape: trade_snapshot,
-                            domain: domain.as_ref(),
-                        },
-                        config.liquidity_cap_usd,
-                    )
-                    .await
+                let windows = FeatureSourceWindows {
+                    microstructure: snapshot,
+                    execution_history: trade_snapshot,
+                    domain: domain.as_ref(),
+                };
+                if config.feature_contract.requires_l2() {
+                    builder
+                        .resolve_inputs(
+                            market,
+                            &boundary,
+                            request.pit,
+                            windows,
+                            config.liquidity_cap_usd,
+                        )
+                        .await
+                } else {
+                    builder.resolve_predictive_inputs(market, &boundary, windows)
+                }
             }
         });
     let bundles = try_join_all(resolve_futures).await?;
@@ -353,17 +357,18 @@ fn partition_feature_vectors(
             }
             .into());
         }
-        let mut capture = bundle.capture.clone();
-        capture.data_quality = vector.data_quality;
-        let capture_key = ReplayCaptureKey::new(&vector.market_id, &market.primary_token_id);
-        if output.captures.insert(capture_key, capture).is_some() {
-            return Err(ResearchError::Determinism {
-                detail: format!(
-                    "replay cross-section contains duplicate market/token {}/{}",
-                    vector.market_id, market.primary_token_id
-                ),
+        if let Some(mut capture) = bundle.capture.clone() {
+            capture.data_quality = vector.data_quality;
+            let capture_key = ReplayCaptureKey::new(&vector.market_id, &market.primary_token_id);
+            if output.captures.insert(capture_key, capture).is_some() {
+                return Err(ResearchError::Determinism {
+                    detail: format!(
+                        "replay cross-section contains duplicate market/token {}/{}",
+                        vector.market_id, market.primary_token_id
+                    ),
+                }
+                .into());
             }
-            .into());
         }
         if vector.data_quality == DataQualityStatus::Insufficient {
             output.dropped_insufficient += 1;
@@ -384,7 +389,7 @@ struct ReplayInputs {
     selected: Vec<SelectedMarket>,
     outcome_bindings: Vec<OutcomeTokenBinding>,
     windows: Vec<MarketWindowSnapshot>,
-    trade_windows: Vec<TradeTapeWindowSnapshot>,
+    trade_windows: Vec<FinalizedExecutionWindowSnapshot>,
 }
 
 async fn resolve_replay_inputs(
@@ -395,7 +400,7 @@ async fn resolve_replay_inputs(
 ) -> QuantResult<ReplayInputs> {
     // `WindowSpec.lookback` owns the widest prefetch horizon across source
     // families. Materialization must instead apply the exact per-source
-    // horizon used online; otherwise a long trade-tape window silently widens
+    // horizon used online; otherwise a long execution-history window silently widens
     // the microstructure window and creates training/serving skew.
     let microstructure_lookback =
         Duration::from_secs(config.features.max_microstructure_lookback_secs());
@@ -455,24 +460,25 @@ async fn resolve_replay_inputs(
                 .get(&sample.token_id)
                 .map_or(&[][..], Vec::as_slice),
         )?);
-        let (trade_tape_source, trade_tape_available) = replay_trade_tape_source(
-            builder.needs_trade_tape(),
-            &request.trade_tape_source,
-            &sample.market_id,
-            snapshot.market.neg_risk,
-        )?;
+        let (finalized_execution_evidence, execution_history_available) =
+            replay_finalized_execution_evidence(
+                builder.needs_execution_history(),
+                &request.finalized_execution_evidence,
+                &sample.market_id,
+                boundary.cutoff_for(DecisionSource::FinalizedExecution),
+            )?;
         trade_windows.push(
-            trade_tape_window(
+            finalized_execution_window(
                 sample.market_id.clone(),
                 boundary,
-                Duration::from_secs(config.features.structural.trade_tape_window_secs),
+                Duration::from_secs(config.features.structural.execution_window_secs),
                 request
                     .prefetched
-                    .trade_tape
+                    .finalized_executions
                     .get(&sample.market_id)
                     .map_or(&[][..], Vec::as_slice),
             )?
-            .with_source_evidence(trade_tape_source, trade_tape_available),
+            .with_source_evidence(finalized_execution_evidence, execution_history_available),
         );
     }
     Ok(ReplayInputs {
@@ -483,34 +489,38 @@ async fn resolve_replay_inputs(
     })
 }
 
-fn replay_trade_tape_source(
+fn replay_finalized_execution_evidence(
     required: bool,
-    source: &ReplayTradeTapeSource<'_>,
+    source: &ReplayExecutionSource<'_>,
     market_id: &MarketId,
-    neg_risk: bool,
-) -> QuantResult<(TradeTapeSourceEvidence, bool)> {
+    required_through: DateTime<Utc>,
+) -> QuantResult<(FinalizedExecutionEvidence, bool)> {
     if !required {
-        return Ok((TradeTapeSourceEvidence::not_required(), false));
+        return Ok((FinalizedExecutionEvidence::not_required(), false));
     }
     match source {
-        ReplayTradeTapeSource::Materialized { available_by } => {
-            Ok((TradeTapeSourceEvidence::materialized(*available_by), true))
-        }
-        ReplayTradeTapeSource::FrozenRuntime(by_market) => {
+        ReplayExecutionSource::Materialized { available_by } => Ok((
+            FinalizedExecutionEvidence::materialized(*available_by),
+            true,
+        )),
+        ReplayExecutionSource::FrozenRuntime(by_market) => {
             let evidence = by_market.get(market_id).ok_or_else(|| {
                 ResearchError::Determinism {
                     detail: format!(
-                        "runtime parity has no frozen trade-tape source evidence for market {market_id}"
+                        "runtime parity has no frozen finalized-execution evidence for market {market_id}"
                     ),
                 }
             })?;
-            let available = runtime_market_tape_available(evidence, neg_risk).map_err(|detail| {
-                ResearchError::Determinism {
+            let (enabled, accepted_block, accepted_through_at) = evidence
+                .runtime_parts()
+                .ok_or_else(|| ResearchError::Determinism {
                     detail: format!(
-                        "runtime parity trade-tape evidence for market {market_id} is invalid: {detail}"
+                        "runtime parity finalized-execution evidence for market {market_id} is not runtime evidence"
                     ),
-                }
-            })?;
+                })?;
+            let available = enabled
+                && accepted_block.is_some()
+                && accepted_through_at.is_some_and(|through| through >= required_through);
             Ok((evidence.clone(), available))
         }
     }

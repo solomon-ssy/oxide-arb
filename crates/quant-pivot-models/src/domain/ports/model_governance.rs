@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::{
         api::{GatePreviewIntent, QualityGateReportView},
-        quant::ModelVersionInfo,
+        quant::{ModelBootstrapValidationEvidence, ModelVersionInfo},
     },
     enums::quant::DownsideSource,
     types::{
@@ -71,16 +71,14 @@ pub enum CandidateQualityGateEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootstrapQualityGateInput {
     pub candidate: CandidateQualityGateEvidence,
-    pub backtest_report_id: BacktestReportId,
-    pub backtest_report_hash: ContentHash,
+    pub validation_evidence: ModelBootstrapValidationEvidence,
 }
 
 /// Exact quality and backtest evidence returned for first-route bootstrap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapQualityGateEvidence {
     pub quality_gate_report: QualityGateReport,
-    pub backtest_report_id: BacktestReportId,
-    pub backtest_report_hash: ContentHash,
+    pub validation_evidence: ModelBootstrapValidationEvidence,
 }
 
 /// Inputs that seal a new calibrated model artifact from an immutable source.

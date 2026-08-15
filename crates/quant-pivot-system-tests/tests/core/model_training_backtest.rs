@@ -102,7 +102,6 @@ use quant_pivot_models::{
         ResearchJobId, ResearchJobProgress, ResearchProfileRef, SchemaVersion, Shares,
         SourceSliceManifest, TokenId, TradePolicyEvidenceBundleManifest, TrainingDatasetId,
         TrainingExampleId, TrainingSampleSource, TrainingSampleSources, Usd,
-        builtin_research_profiles,
         calibration::ModelScoreCalibrationPayload,
         factor::{
             FactorContextEffect, FactorDefinitionRef, FactorExplanation, FactorOutputSemantics,
@@ -135,7 +134,7 @@ use quant_pivot_research::{
     execution_semantics::BookFidelity,
     factors::{FactorEngine, FactorValue, NormalizedFactor, names::MOMENTUM_ROC},
     features::{
-        FeatureSchema, FeatureVector,
+        ExecutableFeatureSchema, FeatureVector,
         names::{
             book::{BEST_ASK, MID, SPREAD_BPS, VISIBLE_LIQUIDITY_USD},
             market::CATEGORY,
@@ -780,7 +779,7 @@ impl E2eReplaySlice {
                 structural: StructuralFeaturesConfig {
                     shock_window_secs: 60,
                     book_churn_window_secs: 60,
-                    trade_tape_window_secs: 60,
+                    execution_window_secs: 60,
                     ..StructuralFeaturesConfig::default()
                 },
                 ..FeaturesConfig::default()
@@ -1228,8 +1227,11 @@ impl<'a> DatasetBuildContext<'a> {
         let profile = profile_ref
             .resolve_builtin_research_profile()
             .expect("Dataset ResearchProfile");
-        let feature_schema = FeatureSchema::build(&runtime.profile_artifacts.features.definition)
-            .expect("feature schema");
+        let feature_schema = ExecutableFeatureSchema::build(
+            &runtime.profile_artifacts.features.definition,
+            profile.spec.feature_contract,
+        )
+        .expect("feature schema");
         let feature_schema_hash =
             ResearchHasher::feature_schema(&feature_schema).expect("feature hash");
         let canonical_plane = if model_family.is_classical() {
@@ -1239,6 +1241,7 @@ impl<'a> DatasetBuildContext<'a> {
                 &runtime.profile_artifacts.scoring.definition,
                 &runtime.profile_artifacts.features.definition,
                 &runtime.profile_artifacts.domain.definition,
+                profile.spec.feature_contract,
                 profile.spec.category,
                 None,
             )
@@ -2109,10 +2112,8 @@ impl TrainerContractMatrix {
             .single()
             .expect("millisecond-aligned policy training window");
         let window_start = window_end - ChronoDuration::days(180);
-        let profile = builtin_research_profiles()
-            .expect("built-in ResearchProfiles")
-            .into_iter()
-            .find(|profile| profile.spec.category == Some(MarketCategory::Weather))
+        let profile = model_spec_fixtures::weather_profile_ref()
+            .resolve_builtin_research_profile()
             .expect("Weather ResearchProfile");
         let policy = PublishedTradePolicyFixture::persist(
             &self.db,
@@ -2131,12 +2132,13 @@ impl TrainerContractMatrix {
             .await
             .expect("load Weather policy snapshot")
             .expect("Weather policy snapshot");
-        let feature_schema = FeatureSchema::build(
+        let feature_schema = ExecutableFeatureSchema::build(
             &policy_snapshot
                 .snapshot
                 .profile_artifacts
                 .features
                 .definition,
+            profile.spec.feature_contract,
         )
         .expect("Weather feature schema");
         let factor_plane = FactorEngine::for_model_scope(
@@ -2151,6 +2153,7 @@ impl TrainerContractMatrix {
                 .features
                 .definition,
             &policy_snapshot.snapshot.profile_artifacts.domain.definition,
+            profile.spec.feature_contract,
             profile.spec.category,
             None,
         )
@@ -2333,12 +2336,13 @@ impl TrainerContractMatrix {
             .profile_ref
             .resolve_builtin_research_profile()
             .expect("resolve rebound ResearchProfile");
-        let feature_schema = FeatureSchema::build(
+        let feature_schema = ExecutableFeatureSchema::build(
             &rebound_policy
                 .snapshot
                 .profile_artifacts
                 .features
                 .definition,
+            profile.spec.feature_contract,
         )
         .expect("rebound feature schema");
         let factor_plane = FactorEngine::for_model_scope(
@@ -2349,6 +2353,7 @@ impl TrainerContractMatrix {
                 .features
                 .definition,
             &rebound_policy.snapshot.profile_artifacts.domain.definition,
+            profile.spec.feature_contract,
             profile.spec.category,
             None,
         )

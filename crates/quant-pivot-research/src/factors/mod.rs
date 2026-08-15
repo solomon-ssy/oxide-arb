@@ -38,7 +38,7 @@ pub use collinearity::{
 };
 pub use computer::{FactorComputer, FactorEngine};
 pub use domain::{DomainFactorRegistry, crypto_domain_factors, weather_domain_factors};
-pub use generic::generic_factors;
+pub use generic::{bootstrap_trade_factors, generic_factors};
 pub use normalize::{
     CrossSectionalNormalizer, MinMaxNormalizer, NormalizationClampAudit, NormalizationStats,
     NormalizedFactor, RankNormalizer, RawFactorColumn, WinsorizedZScoreNormalizer,

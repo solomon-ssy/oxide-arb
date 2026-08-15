@@ -23,6 +23,7 @@ use quant_pivot_models::{
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::{
+    execution_history::{ConcentrationCompositeWeights, composite_concentration},
     factors::{
         computer::FactorComputer,
         generic::{data_quality_confidence, extract_decimal},
@@ -57,7 +58,6 @@ use crate::{
         },
     },
     model::FavoriteLongshotBiasTable,
-    trade_tape::{ConcentrationCompositeWeights, composite_concentration},
 };
 
 /// Every structural `(spec, computer)` pair, resolved against the factor +
@@ -484,7 +484,7 @@ impl FactorComputer for ParticipantConcentrationFactor {
                 definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
-                "trade-tape participant concentration unavailable".to_owned(),
+                "finalized execution-participant concentration unavailable".to_owned(),
             ));
         };
         let weights = ConcentrationCompositeWeights {

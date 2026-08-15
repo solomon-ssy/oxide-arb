@@ -20,7 +20,7 @@ use quant_pivot_models::{
     },
     enums::{common::MarketCategory, domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, DomainConfig, FeatureFamily, FeaturesConfig},
-    types::{BookSnapshotRef, MarketId, SchemaVersion, TokenId, Usd},
+    types::{BookSnapshotRef, MarketId, ResearchFeatureContract, SchemaVersion, TokenId, Usd},
 };
 use rayon::prelude::*;
 
@@ -36,13 +36,14 @@ use crate::{
         generic::{
             book::PriceBookFeatureBuilder, market::MarketMetadataFeatureBuilder,
             microstructure::MicrostructureFeatureBuilder, structural::StructuralFeatureBuilder,
-            timeseries::TimeSeriesFeatureBuilder,
+            timeseries::TimeSeriesFeatureBuilder, trade::TradeFeatureBuilder,
         },
         null_policy::{NullDecision, NullPolicyEngine},
         resolved::{
-            MarketWindowSnapshot, ResolvedBook, ResolvedMarketContext, TradeTapeWindowSnapshot,
+            FinalizedExecutionWindowSnapshot, MarketWindowSnapshot, ResolvedBook,
+            ResolvedMarketContext,
         },
-        schema::{FeatureSchema, FeatureSpec, StalenessRule},
+        schema::{ExecutableFeatureSchema, FeatureSpec, StalenessRule},
         value::{
             DomainFeatureSlice, EvidenceSourceRef, FeatureCell, FeatureName, FeatureStaleness,
             FeatureValue, NullReason,
@@ -133,8 +134,8 @@ pub struct FeatureComputeCtx<'a> {
     pub market: Option<&'a ResolvedMarketContext>,
     /// Pre-fetched windowed microstructure history for the primary token.
     pub window: &'a MarketWindowSnapshot,
-    /// Pre-fetched trade-tape participant history for the primary token.
-    pub trade_tape: &'a TradeTapeWindowSnapshot,
+    /// Pre-fetched finalized execution-participant history for the primary token.
+    pub execution_history: &'a FinalizedExecutionWindowSnapshot,
     /// Same-`as_of` neg-risk sibling YES legs whose book resolved (empty for
     /// binary markets or when the schema declares no structural neg-risk aggregate).
     pub sibling_legs: &'a [ResolvedLeg],
@@ -180,8 +181,8 @@ pub struct ResolvedInputs<'a> {
     pub market_ctx: Option<ResolvedMarketContext>,
     /// Pre-fetched, PIT-bounded microstructure window for the primary token.
     pub window: &'a MarketWindowSnapshot,
-    /// Pre-fetched, PIT-bounded trade-tape window for the primary token.
-    pub trade_tape: &'a TradeTapeWindowSnapshot,
+    /// Pre-fetched, PIT-bounded finalized-execution window for the primary token.
+    pub execution_history: &'a FinalizedExecutionWindowSnapshot,
     /// Pre-fetched domain-slice inputs (present only for category-mapped
     /// markets with a resolved linkage).
     pub domain: Option<&'a DomainSliceInputs>,
@@ -196,14 +197,14 @@ pub struct ResolvedInputs<'a> {
 #[derive(Clone, Copy)]
 pub struct FeatureSourceWindows<'a> {
     pub microstructure: &'a MarketWindowSnapshot,
-    pub trade_tape: &'a TradeTapeWindowSnapshot,
+    pub execution_history: &'a FinalizedExecutionWindowSnapshot,
     /// Domain-slice inputs; `None` for markets outside every vertical.
     pub domain: Option<&'a DomainSliceInputs>,
 }
 
 /// The configured, composable feature builder.
 pub struct ConfiguredFeatureBuilder {
-    schema: FeatureSchema,
+    schema: ExecutableFeatureSchema,
     groups: Vec<Box<dyn FeatureGroupBuilder>>,
     domain_builders: Vec<Box<dyn DomainFeatureBuilder>>,
     /// Frozen domain-plane parameters (windows, cross-check policy).
@@ -220,11 +221,11 @@ struct FeatureSourceNeeds {
 const NEED_BOOK: u8 = 1 << 0;
 const NEED_MARKET: u8 = 1 << 1;
 const NEED_SIBLING_LEGS: u8 = 1 << 2;
-const NEED_TRADE_TAPE: u8 = 1 << 3;
+const NEED_EXECUTION_HISTORY: u8 = 1 << 3;
 const NEED_DOMAIN: u8 = 1 << 4;
 
 impl FeatureSourceNeeds {
-    fn from_schema(schema: &FeatureSchema) -> Self {
+    fn from_schema(schema: &ExecutableFeatureSchema) -> Self {
         let mut bits = 0_u8;
         if schema.needs_book() {
             bits |= NEED_BOOK;
@@ -235,8 +236,8 @@ impl FeatureSourceNeeds {
         if schema.needs_sibling_legs() {
             bits |= NEED_SIBLING_LEGS;
         }
-        if schema.needs_trade_tape() {
-            bits |= NEED_TRADE_TAPE;
+        if schema.needs_execution_history() {
+            bits |= NEED_EXECUTION_HISTORY;
         }
         if schema.needs_domain() {
             bits |= NEED_DOMAIN;
@@ -256,8 +257,8 @@ impl FeatureSourceNeeds {
         self.bits & NEED_SIBLING_LEGS != 0
     }
 
-    const fn trade_tape(self) -> bool {
-        self.bits & NEED_TRADE_TAPE != 0
+    const fn execution_history(self) -> bool {
+        self.bits & NEED_EXECUTION_HISTORY != 0
     }
 
     const fn domain(self) -> bool {
@@ -326,26 +327,54 @@ impl ConfiguredFeatureBuilder {
     /// PIT gating flags are resolved once here from the schema's source
     /// requirements, so the build loop never issues a book/metadata lookup no
     /// enabled feature consumes.
-    pub fn new(config: &FeaturesConfig, domain_config: &DomainConfig) -> QuantResult<Self> {
-        let schema = FeatureSchema::build(config)?;
+    /// Build the exact feature pipeline owned by one profile contract.
+    pub fn new_for_contract(
+        config: &FeaturesConfig,
+        domain_config: &DomainConfig,
+        contract: ResearchFeatureContract,
+    ) -> QuantResult<Self> {
+        let schema = ExecutableFeatureSchema::build(config, contract)?;
         let mut groups: Vec<Box<dyn FeatureGroupBuilder>> = Vec::new();
         let mut domain_builders: Vec<Box<dyn DomainFeatureBuilder>> = Vec::new();
-        for family in &config.enabled_feature_families {
+        let families = match contract {
+            ResearchFeatureContract::TradeBootstrap => vec![FeatureFamily::Trade],
+            ResearchFeatureContract::TradeBootstrapCrypto
+            | ResearchFeatureContract::TradeBootstrapWeather => {
+                vec![FeatureFamily::Trade, FeatureFamily::Domain]
+            }
+            ResearchFeatureContract::FullL2
+            | ResearchFeatureContract::FullL2Crypto
+            | ResearchFeatureContract::FullL2Weather => config.enabled_feature_families.clone(),
+        };
+        for family in &families {
             match family {
                 FeatureFamily::MarketMetadata => {
                     groups.push(Box::new(MarketMetadataFeatureBuilder));
                 }
                 FeatureFamily::PriceBook => groups.push(Box::new(PriceBookFeatureBuilder)),
                 FeatureFamily::TimeSeries => groups.push(Box::new(TimeSeriesFeatureBuilder)),
+                FeatureFamily::Trade => groups.push(Box::new(TradeFeatureBuilder)),
                 FeatureFamily::Microstructure => {
                     groups.push(Box::new(MicrostructureFeatureBuilder));
                 }
                 FeatureFamily::Structural => groups.push(Box::new(StructuralFeatureBuilder)),
                 FeatureFamily::Domain => {
-                    if domain_config.family_enabled(DomainFamily::Crypto) {
+                    if matches!(
+                        contract,
+                        ResearchFeatureContract::FullL2
+                            | ResearchFeatureContract::FullL2Crypto
+                            | ResearchFeatureContract::TradeBootstrapCrypto
+                    ) && domain_config.family_enabled(DomainFamily::Crypto)
+                    {
                         domain_builders.push(Box::new(CryptoDomainFeatureBuilder));
                     }
-                    if domain_config.family_enabled(DomainFamily::Weather) {
+                    if matches!(
+                        contract,
+                        ResearchFeatureContract::FullL2
+                            | ResearchFeatureContract::FullL2Weather
+                            | ResearchFeatureContract::TradeBootstrapWeather
+                    ) && domain_config.family_enabled(DomainFamily::Weather)
+                    {
                         domain_builders.push(Box::new(WeatherDomainFeatureBuilder));
                     }
                 }
@@ -363,14 +392,14 @@ impl ConfiguredFeatureBuilder {
 
     /// The governed schema this builder produces.
     #[must_use]
-    pub const fn schema(&self) -> &FeatureSchema {
+    pub const fn schema(&self) -> &ExecutableFeatureSchema {
         &self.schema
     }
 
-    /// Whether the active schema declares any trade-tape feature.
+    /// Whether the active schema declares any finalized-execution feature.
     #[must_use]
-    pub const fn needs_trade_tape(&self) -> bool {
-        self.source_needs.trade_tape()
+    pub const fn needs_execution_history(&self) -> bool {
+        self.source_needs.execution_history()
     }
 
     /// Whether the active schema declares any domain-slice feature.
@@ -425,7 +454,7 @@ impl ConfiguredFeatureBuilder {
             registry: Some(registry.as_ref()),
             catalog,
             domain: windows.domain,
-            trade_tape_source: &windows.trade_tape.source_evidence,
+            finalized_execution_evidence: &windows.execution_history.source_evidence,
             liquidity_cap_usd,
         })?;
         let book = if self.source_needs.book() {
@@ -455,7 +484,7 @@ impl ConfiguredFeatureBuilder {
                 secondary_book_snapshot_ref,
                 market_ctx,
                 window: windows.microstructure,
-                trade_tape: windows.trade_tape,
+                execution_history: windows.execution_history,
                 domain: if self.source_needs.domain() {
                     windows.domain
                 } else {
@@ -464,7 +493,48 @@ impl ConfiguredFeatureBuilder {
                 sibling_legs,
                 sibling_leg_total,
             },
-            capture,
+            capture: Some(capture),
+        })
+    }
+
+    /// Resolve predictive inputs without consulting historical L2. This is the
+    /// only admissible offline path for bootstrap contracts; report serving
+    /// still calls [`Self::resolve_inputs`] to obtain a live execution capture.
+    pub fn resolve_predictive_inputs<'a>(
+        &self,
+        market: &'a SelectedMarket,
+        boundary: &DecisionBoundary,
+        windows: FeatureSourceWindows<'a>,
+    ) -> QuantResult<ResolvedMarketBundle<'a>> {
+        if self.source_needs.book()
+            || self.source_needs.market()
+            || self.source_needs.sibling_legs()
+        {
+            return Err(ResearchError::PitResolution {
+                detail: "L2-dependent feature contract cannot use predictive-only capture"
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok(ResolvedMarketBundle {
+            inputs: ResolvedInputs {
+                market,
+                decision_at: boundary.decision_at(),
+                book: None,
+                secondary_book: None,
+                secondary_book_snapshot_ref: None,
+                market_ctx: None,
+                window: windows.microstructure,
+                execution_history: windows.execution_history,
+                domain: if self.source_needs.domain() {
+                    windows.domain
+                } else {
+                    None
+                },
+                sibling_legs: Vec::new(),
+                sibling_leg_total: 0,
+            },
+            capture: None,
         })
     }
 
@@ -517,12 +587,15 @@ impl ConfiguredFeatureBuilder {
             secondary_book: resolved.secondary_book.as_ref(),
             market: resolved.market_ctx.as_ref(),
             window: resolved.window,
-            trade_tape: resolved.trade_tape,
+            execution_history: resolved.execution_history,
             sibling_legs: &resolved.sibling_legs,
             sibling_leg_total: resolved.sibling_leg_total,
             config,
             data_quality,
-            book_snapshot_ref: Some(&bundle.capture.book_snapshot_ref),
+            book_snapshot_ref: bundle
+                .capture
+                .as_ref()
+                .map(|capture| &capture.book_snapshot_ref),
             secondary_book_snapshot_ref: resolved.secondary_book_snapshot_ref.as_ref(),
         };
 
@@ -554,7 +627,8 @@ impl ConfiguredFeatureBuilder {
 
         let book_age_ms = book_age_ms(resolved.decision_at, resolved.book.as_ref())?;
         let feature_bucket_age_ms = feature_bucket_age_ms(resolved.decision_at, resolved.window)?;
-        let trade_tape_age_ms = trade_tape_age_ms(resolved.decision_at, resolved.trade_tape)?;
+        let execution_history_age_ms =
+            execution_history_age_ms(resolved.decision_at, resolved.execution_history)?;
         let domain_age_ms = domain_age_ms(resolved.decision_at, resolved.domain)?;
         let data_quality_status = classify(
             assembly.rejected,
@@ -562,7 +636,7 @@ impl ConfiguredFeatureBuilder {
             FreshnessAges {
                 book: book_age_ms,
                 feature_bucket: feature_bucket_age_ms,
-                trade_tape: trade_tape_age_ms,
+                execution_history: execution_history_age_ms,
                 domain: domain_age_ms,
             },
             data_quality,
@@ -767,7 +841,7 @@ impl FeatureBuilder for ConfiguredFeatureBuilder {
                 input.pit,
                 FeatureSourceWindows {
                     microstructure: input.window,
-                    trade_tape: input.trade_tape,
+                    execution_history: input.execution_history,
                     domain: input.domain,
                 },
                 Usd::ZERO,
@@ -979,7 +1053,7 @@ fn staleness_bound_ms(
         StalenessRule::None => return Ok(None),
         StalenessRule::MaxBookAge => return Ok(Some(data_quality.max_book_age_ms)),
         StalenessRule::MaxFeatureBucketAge => data_quality.max_feature_bucket_age_secs,
-        StalenessRule::MaxTradeTapeAge => data_quality.max_trade_tape_age_secs,
+        StalenessRule::MaxExecutionAge => data_quality.max_execution_age_secs,
         StalenessRule::MaxDomainObservationAge => data_quality.max_domain_observation_age_secs,
     };
     seconds.checked_mul(1_000).map(Some).ok_or_else(|| {
@@ -1011,13 +1085,13 @@ fn feature_bucket_age_ms(
         .transpose()
 }
 
-/// Freshest trade-tape print age in milliseconds at `as_of`.
-fn trade_tape_age_ms(
+/// Freshest finalized-execution age in milliseconds at `as_of`.
+fn execution_history_age_ms(
     as_of: DateTime<Utc>,
-    trade_tape: &TradeTapeWindowSnapshot,
+    execution_history: &FinalizedExecutionWindowSnapshot,
 ) -> QuantResult<Option<u64>> {
-    trade_tape
-        .freshest_trade_time()
+    execution_history
+        .freshest_execution_time()
         .map(|trade_time| known_age_ms(as_of, trade_time))
         .transpose()
 }
@@ -1050,12 +1124,12 @@ fn known_age_ms(as_of: DateTime<Utc>, observed_at: DateTime<Utc>) -> QuantResult
 struct FreshnessAges {
     book: Option<u64>,
     feature_bucket: Option<u64>,
-    trade_tape: Option<u64>,
+    execution_history: Option<u64>,
     domain: Option<u64>,
 }
 
 /// Classify the vector's aggregate data quality across freshness dimensions:
-/// book age, feature-bucket age, trade-tape age, and domain-observation age.
+/// book age, feature-bucket age, execution age, and domain-observation age.
 fn classify(
     rejected: bool,
     degraded: bool,
@@ -1071,9 +1145,9 @@ fn classify(
             detail: "feature-bucket staleness policy has no bound".to_owned(),
         })?;
     let tape_bound =
-        staleness_bound_ms(StalenessRule::MaxTradeTapeAge, data_quality)?.ok_or_else(|| {
+        staleness_bound_ms(StalenessRule::MaxExecutionAge, data_quality)?.ok_or_else(|| {
             ResearchError::SchemaHashMismatch {
-                detail: "trade-tape staleness policy has no bound".to_owned(),
+                detail: "finalized-execution staleness policy has no bound".to_owned(),
             }
         })?;
     let domain_bound = staleness_bound_ms(StalenessRule::MaxDomainObservationAge, data_quality)?
@@ -1082,7 +1156,7 @@ fn classify(
         })?;
     if exceeds(ages.book, book_bound)
         || exceeds(ages.feature_bucket, bucket_bound)
-        || exceeds(ages.trade_tape, tape_bound)
+        || exceeds(ages.execution_history, tape_bound)
         || exceeds(ages.domain, domain_bound)
     {
         return Ok(DataQualityStatus::Stale);
@@ -1092,7 +1166,7 @@ fn classify(
     }
     if within_half(ages.book, book_bound)
         && within_half(ages.feature_bucket, bucket_bound)
-        && within_half(ages.trade_tape, tape_bound)
+        && within_half(ages.execution_history, tape_bound)
         && within_half(ages.domain, domain_bound)
     {
         Ok(DataQualityStatus::Fresh)

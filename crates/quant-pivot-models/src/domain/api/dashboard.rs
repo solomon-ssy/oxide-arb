@@ -118,14 +118,6 @@ pub struct DashboardExposureView {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DashboardResearchReadinessView {
-    pub required_history_days: u32,
-    pub observed_history_days: Option<u32>,
-    pub factor_gate_ready: bool,
-    pub model_gate_ready: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct DashboardSubsystemHealthView {
     pub ready: bool,
     pub checks: Vec<DependencyCheck>,
@@ -214,7 +206,6 @@ pub struct DashboardOverviewView {
     pub report_lifecycle: DashboardSection<DashboardLifecycleView>,
     pub exposures: DashboardSection<DashboardExposureView>,
     pub data_quality: DashboardSection<DataQualitySnapshot>,
-    pub research_readiness: DashboardSection<DashboardResearchReadinessView>,
     pub subsystem_health: DashboardSection<DashboardSubsystemHealthView>,
     pub action_inbox: DashboardSection<Vec<DashboardActionItemView>>,
     pub runtime_activity: DashboardSection<DashboardRuntimeActivityView>,

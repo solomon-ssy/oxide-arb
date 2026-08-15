@@ -138,8 +138,8 @@ use quant_pivot_models::{
         ShadowBindingArtifactId, TrainingDatasetId, WorkerId,
         backtest::{
             BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
-            CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
-            CpcvTrialPathBinding, SharpeDistribution,
+            CpcvFoldCalibrationPolicy, CpcvFoldValidationRegime, CpcvMethodologyBinding,
+            CpcvPathSetSubject, CpcvTrialPathBinding, SharpeDistribution,
         },
         model_lineage::ModelVersionDerivation,
         model_quality::{
@@ -160,8 +160,8 @@ use quant_pivot_repository::{
         PgShadowComparisonRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        BacktestPathSetRepository, BacktestReportRepository, CpcvPathSetCommit,
-        FeatureParityLatchActor, FeatureParityRepository, FeedbackCycleClaim,
+        BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
+        CpcvPathSetCommit, FeatureParityLatchActor, FeatureParityRepository, FeedbackCycleClaim,
         FeedbackCycleGeneration, FeedbackCycleLeaseGuard, FeedbackCycleRepository,
         ModelCandidateManifestRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
         ModelRouteBootstrapRepository, ModelRoutePromotionCommit, ModelRoutePromotionOutcome,
@@ -1350,6 +1350,7 @@ impl ValidationGateRecorder<'_> {
     fn fold_artifacts() -> CpcvFoldArtifacts {
         CpcvFoldArtifacts::try_new(vec![
             CpcvFoldArtifact {
+                validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                 identity: CpcvEstimatorIdentity::Validation {
                     combination_index: 0,
                     test_partitions_hash: content_hash('b'),
@@ -1372,6 +1373,7 @@ impl ValidationGateRecorder<'_> {
                 scenario_model_hash: content_hash('6'),
             },
             CpcvFoldArtifact {
+                validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                 identity: CpcvEstimatorIdentity::TrialPathValidation {
                     trial_id: 0,
                     path_index: 0,
@@ -1396,6 +1398,7 @@ impl ValidationGateRecorder<'_> {
                 scenario_model_hash: content_hash('6'),
             },
             CpcvFoldArtifact {
+                validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                 identity: CpcvEstimatorIdentity::TrialPathValidation {
                     trial_id: 1,
                     path_index: 0,
@@ -3955,6 +3958,11 @@ impl PromotionHarness {
                 cycles: Arc::clone(&case.cycles) as Arc<dyn FeedbackCycleRepository>,
                 model_governance: Arc::new(PromotionOnlyModelGovernance)
                     as Arc<dyn ModelGovernancePort>,
+                calibrations: Arc::new(PgCalibrationArtifactRepository::new(case.db.clone()))
+                    as Arc<dyn CalibrationArtifactRepository>,
+                datasets: Arc::new(PgTrainingDatasetRepository::new(case.db.clone()))
+                    as Arc<dyn TrainingDatasetRepository>,
+                artifacts: Arc::clone(&case.store),
             },
         ));
         let service = Arc::new(ModelRouteGovernanceService::new(

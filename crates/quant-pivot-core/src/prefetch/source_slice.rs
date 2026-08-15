@@ -8,33 +8,37 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, MarketResolutionRow,
-        TradeTapeRow,
+        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ExecutionParticipantFactRow,
+        ExecutionParticipantRow, MarketExecutionRow, MarketResolutionRow,
     },
     domain::{
         data_plane::{
             CryptoPriceReport, DecisionBoundary, DecisionClock, DomainObservation,
             WeatherForecastPoint, WeatherObservationFact,
         },
-        market::{CatalogMarketChangeInfo, CatalogWindowInfo, MarketRegistryInfo},
+        market::{
+            CatalogEventChangeInfo, CatalogMarketChangeInfo, CatalogWindowInfo, MarketRegistryInfo,
+        },
         quant::{
             CompleteSourceSlice, MarketLinkage, NewSourceSlice, SourceSliceIdentity,
             SourceSliceInfo,
         },
     },
-    enums::{clickhouse::ChCanonicalBookEventType, quant::SourceSliceStatus},
+    enums::{
+        clickhouse::{ChCanonicalBookEventType, ChExecutionParticipantRole},
+        quant::SourceSliceStatus,
+    },
     hashing::CanonicalDigest,
     runtime_config::DomainConfig,
     types::{
         ArtifactUri, CapabilityRegistryHashes, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        MarketId, ResearchProfileArtifact, ResearchProfileDataSource,
-        SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SourceSliceCatalogProof, SourceSliceId,
-        SourceSliceInvalidSession, SourceSliceManifest, SourceSliceManifestRef,
-        SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs,
-        SourceSliceSessionInvalidationReason,
+        MarketId, ResearchProfileArtifact, SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
+        SourceSliceCatalogProof, SourceSliceId, SourceSliceInvalidSession, SourceSliceManifest,
+        SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoff,
+        SourceSliceSessionInvalidationReason, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -45,7 +49,8 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     source_slice::{SourceSliceParquetCodec, SourceSliceRecord},
 };
-use serde::{Serialize, de::DeserializeOwned};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -88,6 +93,31 @@ struct SourceSliceInputs {
     sessions: Vec<BookStreamSessionRow>,
     gap_records: Vec<SourceSliceRecord>,
     invalid_sessions: Vec<SourceSliceInvalidSession>,
+    executions: Vec<MarketExecutionRow>,
+    participants: Vec<ExecutionParticipantRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "identity_kind", rename_all = "snake_case")]
+enum GammaIdentityRecord {
+    Market(CatalogMarketChangeInfo),
+    Event(CatalogEventChangeInfo),
+}
+
+impl GammaIdentityRecord {
+    const fn event_at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Market(row) => row.source_effective_at,
+            Self::Event(row) => row.source_effective_at,
+        }
+    }
+
+    const fn available_at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Market(row) => row.available_at,
+            Self::Event(row) => row.available_at,
+        }
+    }
 }
 
 impl SourceSliceInputs {
@@ -327,10 +357,20 @@ fn decode_frozen_source_slice(
     manifest: &SourceSliceManifest,
     mut by_kind: SourceRecordsByKind,
 ) -> QuantResult<FrozenSourceSlice> {
-    let catalog = CatalogWindowInfo {
+    let identities = decode_records::<GammaIdentityRecord>(take(
+        &mut by_kind,
+        SourceSliceObjectKind::GammaMarketIdentity,
+    ))?;
+    let mut catalog = CatalogWindowInfo {
         market_changes: decode_records(take(&mut by_kind, SourceSliceObjectKind::CatalogMarket))?,
         event_changes: decode_records(take(&mut by_kind, SourceSliceObjectKind::CatalogEvent))?,
     };
+    for identity in identities {
+        match identity {
+            GammaIdentityRecord::Market(row) => catalog.market_changes.push(row),
+            GammaIdentityRecord::Event(row) => catalog.event_changes.push(row),
+        }
+    }
     let l2_ledger =
         decode_records::<BookL2LedgerRow>(take(&mut by_kind, SourceSliceObjectKind::L2Ledger))?;
     let books = group_by(
@@ -348,10 +388,17 @@ fn decode_frozen_source_slice(
         ))?,
         |row| row.token_id.clone(),
     );
-    let trade_tape = group_by(
-        decode_records::<TradeTapeRow>(take(&mut by_kind, SourceSliceObjectKind::TradeTape))?,
-        |row| row.market_id.clone(),
-    );
+    let executions = decode_records::<MarketExecutionRow>(take(
+        &mut by_kind,
+        SourceSliceObjectKind::MarketExecution,
+    ))?;
+    let participants = decode_records::<ExecutionParticipantRow>(take(
+        &mut by_kind,
+        SourceSliceObjectKind::ExecutionParticipant,
+    ))?;
+    let finalized_executions = group_by(join_execution_facts(&executions, &participants)?, |row| {
+        row.market_id.clone()
+    });
     let resolutions = group_by(
         decode_records::<MarketResolutionRow>(take(
             &mut by_kind,
@@ -408,7 +455,7 @@ fn decode_frozen_source_slice(
         prefetched: Prefetched {
             books,
             micro,
-            trade_tape,
+            finalized_executions,
             resolutions,
             catalog,
             clob_market_info,
@@ -508,8 +555,8 @@ impl SourceSliceMaterializer {
             }
             .into());
         }
-        let inputs = self.load_inputs(identity, cancel).await?;
-        let mut objects = self.write_platform_objects(&inputs).await?;
+        let inputs = self.load_inputs(identity, profile, cancel).await?;
+        let mut objects = self.write_platform_objects(&inputs, profile).await?;
         objects.extend(self.write_domain_objects(&inputs, profile).await?);
         objects.sort_by(|left, right| {
             (left.kind, left.uri.as_str()).cmp(&(right.kind, right.uri.as_str()))
@@ -521,6 +568,7 @@ impl SourceSliceMaterializer {
     async fn load_inputs(
         &self,
         identity: &SourceSliceIdentity,
+        profile: &ResearchProfileArtifact,
         cancel: &CancellationToken,
     ) -> QuantResult<SourceSliceInputs> {
         let boundary = source_boundary(identity)?;
@@ -562,144 +610,249 @@ impl SourceSliceMaterializer {
                 window_end: identity.window_end,
                 available_by: identity.pit_cutoff,
                 samples,
-                lookback: Duration::ZERO,
+                lookback: Duration::from_secs(profile.spec.max_feature_lookback_secs),
                 knowledge_lag: Duration::ZERO,
-                max_horizon_secs: 0,
+                max_horizon_secs: profile.spec.target_horizon_secs,
                 domain: self.domain.clone(),
+                feature_contract: profile.spec.feature_contract,
             })
             .await?;
         ensure_not_cancelled(cancel, "after Source Slice prefetch")?;
 
-        let tokens = prefetched.books.keys().cloned().collect::<Vec<_>>();
-        let ledger_window = self
+        let (l2_ledger, sessions, gap_records, invalid_sessions) =
+            if profile.spec.feature_contract.requires_l2() {
+                let tokens = prefetched.books.keys().cloned().collect::<Vec<_>>();
+                let ledger_window = self
+                    .deps
+                    .facts
+                    .book_l2_ledger_between(
+                        tokens,
+                        identity.window_start.timestamp_millis(),
+                        identity.window_end.timestamp_millis(),
+                        identity.pit_cutoff.timestamp_millis(),
+                    )
+                    .await?;
+                let l2_ledger = merge_l2_ledger(&prefetched, ledger_window)?;
+                let session_ids = stream_session_ids(&l2_ledger);
+                let sessions = self
+                    .deps
+                    .facts
+                    .book_stream_sessions(session_ids, identity.pit_cutoff.timestamp_millis())
+                    .await?;
+                let (gap_records, invalid_sessions) = prefetched.gap_evidence()?;
+                (l2_ledger, sessions, gap_records, invalid_sessions)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            };
+        let lookback = ChronoDuration::seconds(
+            i64::try_from(profile.spec.max_feature_lookback_secs).map_err(|error| {
+                QuantError::config(format!("profile lookback does not fit i64: {error}"))
+            })?,
+        );
+        let execution_from = identity
+            .window_start
+            .checked_sub_signed(lookback)
+            .ok_or_else(|| QuantError::config("source-slice execution lookback overflow"))?;
+        let executions = self
             .deps
             .facts
-            .book_l2_ledger_between(
-                tokens,
-                identity.window_start.timestamp_millis(),
+            .market_executions_between(
+                market_ids.clone(),
+                execution_from.timestamp_millis(),
                 identity.window_end.timestamp_millis(),
                 identity.pit_cutoff.timestamp_millis(),
             )
             .await?;
-        let l2_ledger = merge_l2_ledger(&prefetched, ledger_window)?;
-        let session_ids = stream_session_ids(&l2_ledger);
-        let sessions = self
+        let participants = self
             .deps
             .facts
-            .book_stream_sessions(session_ids, identity.pit_cutoff.timestamp_millis())
+            .execution_participants_between(
+                market_ids,
+                execution_from.timestamp_millis(),
+                identity.window_end.timestamp_millis(),
+                identity.pit_cutoff.timestamp_millis(),
+            )
             .await?;
-        let (gap_records, invalid_sessions) = prefetched.gap_evidence()?;
         Ok(SourceSliceInputs {
             prefetched,
             l2_ledger,
             sessions,
             gap_records,
             invalid_sessions,
+            executions,
+            participants,
         })
     }
 
     async fn write_platform_objects(
         &self,
         inputs: &SourceSliceInputs,
+        profile: &ResearchProfileArtifact,
     ) -> QuantResult<Vec<SourceSliceObjectRef>> {
         let prefetched = &inputs.prefetched;
+        let required = SourceSliceManifest::required_object_kinds(profile);
         let mut objects = Vec::new();
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::CatalogMarket,
-                records(
-                    &prefetched.catalog.market_changes,
-                    |row| Some(row.source_effective_at),
-                    |row| Some(row.available_at),
-                )?,
-            )
-            .await?,
-        );
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::CatalogEvent,
-                records(
-                    &prefetched.catalog.event_changes,
-                    |row| Some(row.source_effective_at),
-                    |row| Some(row.available_at),
-                )?,
-            )
-            .await?,
-        );
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::ClobMarketInfo,
-                records(
-                    &prefetched.clob_market_info,
-                    |row| Some(row.effective_at),
-                    |row| Some(row.available_at),
-                )?,
-            )
-            .await?,
-        );
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::L2Ledger,
-                records(
-                    &inputs.l2_ledger,
-                    |row| DateTime::from_timestamp_millis(row.venue_event_time),
-                    |row| DateTime::from_timestamp_millis(row.persisted_time),
-                )?,
-            )
-            .await?,
-        );
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::L2Session,
-                records(
-                    &inputs.sessions,
-                    |row| DateTime::from_timestamp_millis(row.opened_at),
-                    |row| DateTime::from_timestamp_millis(row.recorded_at),
-                )?,
-            )
-            .await?,
-        );
-        objects.push(
-            self.write_object(SourceSliceObjectKind::L2Gap, inputs.gap_records.clone())
+        if required.contains(&SourceSliceObjectKind::GammaMarketIdentity) {
+            objects.push(self.write_gamma_identity(inputs).await?);
+        }
+        if required.contains(&SourceSliceObjectKind::CatalogMarket) {
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::CatalogMarket,
+                    records(
+                        &prefetched.catalog.market_changes,
+                        |row| Some(row.source_effective_at),
+                        |row| Some(row.available_at),
+                    )?,
+                )
                 .await?,
-        );
-        let micro = flatten(&prefetched.micro);
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::BookMicrostructure,
-                records(
-                    &micro,
-                    |row| DateTime::from_timestamp_millis(row.bucket_time),
-                    |row| DateTime::from_timestamp_millis(row.available_at),
-                )?,
-            )
-            .await?,
-        );
-        let trades = flatten(&prefetched.trade_tape);
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::TradeTape,
-                records(
-                    &trades,
-                    |row| DateTime::from_timestamp_millis(row.event_time),
-                    |row| DateTime::from_timestamp_millis(row.ingestion_time),
-                )?,
-            )
-            .await?,
-        );
-        let resolutions = flatten(&prefetched.resolutions);
-        objects.push(
-            self.write_object(
-                SourceSliceObjectKind::Resolution,
-                records(
-                    &resolutions,
-                    |row| DateTime::from_timestamp_millis(row.resolved_at),
-                    |row| DateTime::from_timestamp_millis(row.observed_at),
-                )?,
-            )
-            .await?,
-        );
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::CatalogEvent) {
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::CatalogEvent,
+                    records(
+                        &prefetched.catalog.event_changes,
+                        |row| Some(row.source_effective_at),
+                        |row| Some(row.available_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::ClobMarketInfo) {
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::ClobMarketInfo,
+                    records(
+                        &prefetched.clob_market_info,
+                        |row| Some(row.effective_at),
+                        |row| Some(row.available_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::L2Ledger) {
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::L2Ledger,
+                    records(
+                        &inputs.l2_ledger,
+                        |row| DateTime::from_timestamp_millis(row.venue_event_time),
+                        |row| DateTime::from_timestamp_millis(row.persisted_time),
+                    )?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::L2Session) {
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::L2Session,
+                    records(
+                        &inputs.sessions,
+                        |row| DateTime::from_timestamp_millis(row.opened_at),
+                        |row| DateTime::from_timestamp_millis(row.recorded_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::L2Gap) {
+            objects.push(
+                self.write_object(SourceSliceObjectKind::L2Gap, inputs.gap_records.clone())
+                    .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::BookMicrostructure) {
+            let micro = flatten(&prefetched.micro);
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::BookMicrostructure,
+                    records(
+                        &micro,
+                        |row| DateTime::from_timestamp_millis(row.bucket_time),
+                        |row| DateTime::from_timestamp_millis(row.available_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::MarketExecution) {
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::MarketExecution,
+                    records(
+                        &inputs.executions,
+                        |row| DateTime::from_timestamp_millis(row.effective_at),
+                        |row| DateTime::from_timestamp_millis(row.model_available_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::ExecutionParticipant) {
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::ExecutionParticipant,
+                    records(
+                        &inputs.participants,
+                        |row| DateTime::from_timestamp_millis(row.effective_at),
+                        |row| DateTime::from_timestamp_millis(row.model_available_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
+        if required.contains(&SourceSliceObjectKind::Resolution) {
+            let resolutions = flatten(&prefetched.resolutions);
+            objects.push(
+                self.write_object(
+                    SourceSliceObjectKind::Resolution,
+                    records(
+                        &resolutions,
+                        |row| DateTime::from_timestamp_millis(row.resolved_at),
+                        |row| DateTime::from_timestamp_millis(row.observed_at),
+                    )?,
+                )
+                .await?,
+            );
+        }
         Ok(objects)
+    }
+
+    async fn write_gamma_identity(
+        &self,
+        inputs: &SourceSliceInputs,
+    ) -> QuantResult<SourceSliceObjectRef> {
+        let identities = inputs
+            .prefetched
+            .catalog
+            .market_changes
+            .iter()
+            .cloned()
+            .map(GammaIdentityRecord::Market)
+            .chain(
+                inputs
+                    .prefetched
+                    .catalog
+                    .event_changes
+                    .iter()
+                    .cloned()
+                    .map(GammaIdentityRecord::Event),
+            )
+            .collect::<Vec<_>>();
+        self.write_object(
+            SourceSliceObjectKind::GammaMarketIdentity,
+            records(
+                &identities,
+                |row| Some(row.event_at()),
+                |row| Some(row.available_at()),
+            )?,
+        )
+        .await
     }
 
     async fn write_domain_objects(
@@ -809,11 +962,6 @@ impl SourceSliceMaterializer {
             }
             .into());
         }
-        let weather_required = profile
-            .required_sources_contains(ResearchProfileDataSource::AviationWeather)
-            || profile.required_sources_contains(ResearchProfileDataSource::GefsEnsemble);
-        let calibration_required =
-            profile.required_sources_contains(ResearchProfileDataSource::GhcnhCalibration);
         let manifest = SourceSliceManifest {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
             profile_ref: identity.profile_ref.clone(),
@@ -830,15 +978,15 @@ impl SourceSliceMaterializer {
             runtime_config_hash: identity.runtime_config_hash,
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             capability_registry_hashes: inputs.capability_hashes()?,
-            pit_cutoffs: SourceSlicePitCutoffs {
-                catalog_available_at: identity.pit_cutoff,
-                clob_market_info_available_at: identity.pit_cutoff,
-                l2_available_at: identity.pit_cutoff,
-                trade_tape_available_at: identity.pit_cutoff,
-                weather_available_at: weather_required.then_some(identity.pit_cutoff),
-                calibration_available_at: calibration_required.then_some(identity.pit_cutoff),
-                resolution_available_at: identity.pit_cutoff,
-            },
+            pit_cutoffs: profile
+                .spec
+                .required_sources()
+                .into_iter()
+                .map(|source| SourceSlicePitCutoff {
+                    source,
+                    available_at: identity.pit_cutoff,
+                })
+                .collect(),
             invalid_sessions: inputs.invalid_sessions.clone(),
             objects,
         };
@@ -1282,6 +1430,96 @@ where
     grouped
 }
 
+fn join_execution_facts(
+    executions: &[MarketExecutionRow],
+    participants: &[ExecutionParticipantRow],
+) -> QuantResult<Vec<ExecutionParticipantFactRow>> {
+    let executions_by_id = executions
+        .iter()
+        .map(|execution| (execution.execution_id, execution))
+        .collect::<BTreeMap<_, _>>();
+    let mut participants_by_id = BTreeMap::new();
+    for participant in participants {
+        participants_by_id
+            .entry(participant.execution_id)
+            .or_insert_with(Vec::new)
+            .push(participant);
+    }
+    if executions_by_id.len() != executions.len()
+        || executions_by_id.len() != participants_by_id.len()
+    {
+        return Err(ResearchError::DatasetBuild {
+            detail: "execution source slice has duplicate or orphan identities".to_owned(),
+        }
+        .into());
+    }
+    let mut rows = Vec::with_capacity(participants.len());
+    for (execution_id, execution) in executions_by_id {
+        let execution_participants =
+            participants_by_id
+                .get(&execution_id)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "execution source slice is missing participant facts".to_owned(),
+                })?;
+        let maker_count = execution_participants
+            .iter()
+            .filter(|row| row.participant_role == ChExecutionParticipantRole::Maker)
+            .count();
+        let taker_count = execution_participants
+            .iter()
+            .filter(|row| row.participant_role == ChExecutionParticipantRole::Taker)
+            .count();
+        let participant_notional = execution_participants
+            .iter()
+            .map(|row| Usd::from(row.participant_notional).inner())
+            .sum::<Decimal>();
+        let expected_notional = Usd::from(execution.notional_usd).inner() * Decimal::TWO;
+        if execution_participants.len() != 2
+            || maker_count != 1
+            || taker_count != 1
+            || participant_notional != expected_notional
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "execution {} violates the two-sided participant conservation contract",
+                    ContentHash::from(execution_id)
+                ),
+            }
+            .into());
+        }
+        for participant in execution_participants {
+            if participant.market_id != execution.market_id
+                || participant.token_id != execution.token_id
+                || participant.effective_at != execution.effective_at
+                || participant.model_available_at != execution.model_available_at
+                || participant.availability_policy_hash != execution.availability_policy_hash
+            {
+                return Err(ResearchError::DatasetBuild {
+                    detail: "execution and participant source facts disagree".to_owned(),
+                }
+                .into());
+            }
+            rows.push(ExecutionParticipantFactRow {
+                execution_id,
+                market_id: execution.market_id.clone(),
+                token_id: execution.token_id.clone(),
+                participant_address: participant.participant_address.clone(),
+                participant_role: participant.participant_role,
+                side: execution.side,
+                price: execution.price,
+                size_shares: execution.size_shares,
+                notional_usd: execution.notional_usd,
+                transaction_hash: execution.transaction_hash.clone(),
+                effective_at: execution.effective_at,
+                observed_at: execution.observed_at,
+                model_available_at: execution.model_available_at,
+                availability_policy_hash: execution.availability_policy_hash,
+            });
+        }
+    }
+    Ok(rows)
+}
+
 fn group_weather_observations(
     values: Vec<WeatherObservationFact>,
 ) -> HashMap<String, Vec<WeatherObservationFact>> {
@@ -1334,7 +1572,7 @@ mod tests {
             ReaderContractVersion, ResearchEvaluationTrack, SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
             SchemaContractVersion, SourceSliceCatalogProof, SourceSliceManifest,
             SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef,
-            SourceSlicePitCutoffs, TokenId, builtin_research_profiles,
+            SourceSlicePitCutoff, TokenId, builtin_research_profiles,
         },
     };
     use quant_pivot_research::{
@@ -1364,15 +1602,24 @@ mod tests {
         let pit_cutoff = Utc.timestamp_opt(130, 0).single().expect("source cutoff");
         let materialized_at = Utc.timestamp_opt(140, 0).single().expect("materialized at");
         let kind = SourceSliceObjectKind::CatalogMarket;
+        let profile = builtin_research_profiles()
+            .expect("built-in profiles")
+            .remove(0);
+        let pit_cutoffs = profile
+            .spec
+            .required_sources()
+            .into_iter()
+            .map(|source| SourceSlicePitCutoff {
+                source,
+                available_at: pit_cutoff,
+            })
+            .collect();
         let schema_hash =
             CanonicalDigest::content_hash_json(&("source_slice_parquet_envelope_v2", kind))
                 .expect("source schema hash");
         SourceSliceManifest {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
-            profile_ref: builtin_research_profiles()
-                .expect("built-in profiles")
-                .remove(0)
-                .profile_ref,
+            profile_ref: profile.profile_ref,
             evaluation_track: ResearchEvaluationTrack::ResearchOnly,
             research_program_hash: hash('1'),
             window_start,
@@ -1395,15 +1642,7 @@ mod tests {
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![hash('5')])
                 .expect("capabilities"),
-            pit_cutoffs: SourceSlicePitCutoffs {
-                catalog_available_at: pit_cutoff,
-                clob_market_info_available_at: pit_cutoff,
-                l2_available_at: pit_cutoff,
-                trade_tape_available_at: pit_cutoff,
-                weather_available_at: None,
-                calibration_available_at: None,
-                resolution_available_at: pit_cutoff,
-            },
+            pit_cutoffs,
             invalid_sessions: Vec::new(),
             objects: vec![SourceSliceObjectRef {
                 kind,

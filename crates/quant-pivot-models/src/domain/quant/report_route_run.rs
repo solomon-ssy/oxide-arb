@@ -10,7 +10,8 @@ use crate::{
     runtime_config::BuyModelRoute,
     types::{
         CalibrationArtifactId, ContentHash, ModelRunId, ModelVersionId, ReportRouteRunId,
-        ReportRunId, ResearchProfileArtifactId, ResearchProfileRef, TradePolicyArtifactId,
+        ReportRunId, ResearchProfileArtifactId, ResearchProfileRef, ServingAuthority,
+        TradePolicyArtifactId,
     },
 };
 
@@ -32,13 +33,15 @@ pub struct RouteModelLineage {
     pub model_version_id: ModelVersionId,
     pub model_run_id: Option<ModelRunId>,
     pub calibration_artifact_id: CalibrationArtifactId,
-    pub trade_policy_artifact_id: TradePolicyArtifactId,
+    pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub research_profile_ref: ResearchProfileRef,
     pub prediction_horizon_secs: i64,
     pub feature_contract_digest: ContentHash,
     pub pit_lineage_digest: ContentHash,
     pub serving_contract_digest: ContentHash,
+    pub recommendation_contract_hash: ContentHash,
+    pub serving_authority: ServingAuthority,
 }
 
 /// Complete Route-local funnel counts. Zero is evidence, never an omitted stage.

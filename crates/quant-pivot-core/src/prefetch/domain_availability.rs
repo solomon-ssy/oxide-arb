@@ -481,7 +481,8 @@ mod tests {
     use quant_pivot_models::{
         clickhouse::{
             BookL2LedgerRow, BookMicrostructureRow, ChSchemaVersion, DomainObservationRow,
-            MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
+            ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
+            MarketResolutionRow, MidPriceBucketRow,
         },
         domain::{
             api::MarketLinkageListQuery,
@@ -640,7 +641,7 @@ mod tests {
             Self {
                 books: HashMap::new(),
                 micro: HashMap::new(),
-                trade_tape: HashMap::new(),
+                finalized_executions: HashMap::new(),
                 resolutions: HashMap::new(),
                 catalog: CatalogWindowInfo {
                     market_changes: Vec::new(),
@@ -840,23 +841,43 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn last_trades(
+        async fn last_executions(
             &self,
             _token_ids: Vec<TokenId>,
             _from_ms: i64,
             _to_ms: i64,
             _limit: u64,
-        ) -> Result<Vec<TradeTapeRow>, StorageError> {
+        ) -> Result<Vec<MarketExecutionRow>, StorageError> {
             Ok(Vec::new())
         }
 
-        async fn market_tape_window(
+        async fn market_execution_window(
             &self,
             _market_ids: Vec<MarketId>,
             _from_ms: i64,
             _to_ms: i64,
             _decision_at_ms: i64,
-        ) -> Result<Vec<TradeTapeRow>, StorageError> {
+        ) -> Result<Vec<ExecutionParticipantFactRow>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn market_executions_between(
+            &self,
+            _market_ids: Vec<MarketId>,
+            _from_ms: i64,
+            _to_ms: i64,
+            _decision_at_ms: i64,
+        ) -> Result<Vec<MarketExecutionRow>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn execution_participants_between(
+            &self,
+            _market_ids: Vec<MarketId>,
+            _from_ms: i64,
+            _to_ms: i64,
+            _decision_at_ms: i64,
+        ) -> Result<Vec<ExecutionParticipantRow>, StorageError> {
             Ok(Vec::new())
         }
 

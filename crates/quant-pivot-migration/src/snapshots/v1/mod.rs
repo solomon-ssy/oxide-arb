@@ -38,6 +38,10 @@ pub mod quant_entry_condition_audit;
 pub mod quant_entry_condition_evaluation_outbox;
 pub mod quant_entry_condition_instance;
 pub mod quant_equity_snapshot;
+pub mod quant_exchange_history_chunk;
+pub mod quant_exchange_history_plan;
+pub mod quant_exchange_history_quarantine;
+pub mod quant_exchange_history_quarantine_resolution;
 pub mod quant_execution_account;
 pub mod quant_execution_attempt_outcome;
 pub mod quant_execution_attempt_reconciliation_task;
@@ -61,6 +65,8 @@ pub mod quant_feedback_recipe_template;
 pub mod quant_feedback_scheduler_state;
 pub mod quant_feedback_stage_event;
 pub mod quant_feedback_trigger_event;
+pub mod quant_fresh_boot_run;
+pub mod quant_fresh_boot_run_event;
 pub mod quant_market_linkage;
 pub mod quant_market_linkage_source;
 pub mod quant_market_selection;
@@ -107,7 +113,6 @@ pub mod quant_trade_policy_governance_audit;
 pub mod quant_trade_policy_trial_attempt;
 pub mod quant_trade_policy_validation;
 pub mod quant_trade_policy_validation_row;
-pub mod quant_trade_tape_block_cursor;
 pub mod quant_training_dataset;
 pub mod quant_weather_daily_temperature_projection;
 pub mod quant_weather_observation_current;
@@ -167,6 +172,10 @@ pub const TABLES: &[&str] = &[
     "quant_execution_order",
     "quant_execution_trade_ref",
     "quant_execution_transaction_ref",
+    "quant_exchange_history_chunk",
+    "quant_exchange_history_plan",
+    "quant_exchange_history_quarantine",
+    "quant_exchange_history_quarantine_resolution",
     "quant_factor_definition",
     "quant_factor_value",
     "quant_feedback_cycle",
@@ -183,6 +192,8 @@ pub const TABLES: &[&str] = &[
     "quant_feature_parity_state",
     "quant_feature_parity_subject",
     "quant_feature_vector",
+    "quant_fresh_boot_run",
+    "quant_fresh_boot_run_event",
     "quant_market_linkage",
     "quant_market_linkage_source",
     "quant_market_selection",
@@ -231,7 +242,6 @@ pub const TABLES: &[&str] = &[
     "quant_trade_policy_trial_attempt",
     "quant_trade_policy_validation",
     "quant_trade_policy_validation_row",
-    "quant_trade_tape_block_cursor",
     "quant_training_dataset",
     "quant_weather_daily_temperature_projection",
     "quant_weather_observation_current",
@@ -294,6 +304,11 @@ pub const ENUMS: &[&str] = &[
     "qp_feedback_stage",
     "qp_feedback_stage_event_kind",
     "qp_feedback_trigger_family",
+    "qp_fresh_boot_blocked_reason",
+    "qp_fresh_boot_event_kind",
+    "qp_fresh_boot_retry_reason",
+    "qp_fresh_boot_stage",
+    "qp_fresh_boot_status",
     "qp_feature_parity_latch_state",
     "qp_feature_parity_run_kind",
     "qp_feature_parity_run_status",
@@ -370,8 +385,11 @@ pub const ENUMS: &[&str] = &[
     "qp_shadow_binding_status",
     "qp_source_slice_status",
     "qp_tick_size",
-    "qp_trade_tape_block_cursor_status",
-    "qp_trade_tape_source_kind",
+    "qp_exchange_history_chunk_status",
+    "qp_exchange_history_continuity_basis",
+    "qp_exchange_history_frontier",
+    "qp_exchange_history_quarantine_disposition",
+    "qp_exchange_history_quarantine_reason",
     "qp_trade_policy_governance_action",
     "qp_trade_policy_status",
     "qp_trade_policy_trial_scope",
@@ -429,6 +447,10 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_execution_order.rs"),
     include_bytes!("quant_execution_trade_ref.rs"),
     include_bytes!("quant_execution_transaction_ref.rs"),
+    include_bytes!("quant_exchange_history_chunk.rs"),
+    include_bytes!("quant_exchange_history_plan.rs"),
+    include_bytes!("quant_exchange_history_quarantine.rs"),
+    include_bytes!("quant_exchange_history_quarantine_resolution.rs"),
     include_bytes!("quant_factor_definition.rs"),
     include_bytes!("quant_factor_value.rs"),
     include_bytes!("quant_feedback_cycle.rs"),
@@ -445,6 +467,8 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_feature_parity_state.rs"),
     include_bytes!("quant_feature_parity_subject.rs"),
     include_bytes!("quant_feature_vector.rs"),
+    include_bytes!("quant_fresh_boot_run.rs"),
+    include_bytes!("quant_fresh_boot_run_event.rs"),
     include_bytes!("quant_market_linkage.rs"),
     include_bytes!("quant_market_linkage_source.rs"),
     include_bytes!("quant_market_selection.rs"),
@@ -493,7 +517,6 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_trade_policy_trial_attempt.rs"),
     include_bytes!("quant_trade_policy_validation.rs"),
     include_bytes!("quant_trade_policy_validation_row.rs"),
-    include_bytes!("quant_trade_tape_block_cursor.rs"),
     include_bytes!("quant_training_dataset.rs"),
     include_bytes!("quant_weather_daily_temperature_projection.rs"),
     include_bytes!("quant_weather_observation_current.rs"),

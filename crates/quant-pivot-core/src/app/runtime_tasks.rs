@@ -5,7 +5,6 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use quant_pivot_api::{
     binance::{BinanceAggTradeSource, BinanceKlineSource, BinanceRequestBudget},
     domain::DomainDataSource,
-    exchange::ExchangeLogClient,
     rtds::PolymarketRtdsSource,
     weather::{
         AviationWeatherSource, GefsSource, GhcnhSource, airnow::AirNowSource, ghcnd::GhcndSource,
@@ -13,21 +12,23 @@ use quant_pivot_api::{
         nsidc::NsidcSeaIceSource, nws::NwsObservationSource, tornado::TornadoSource,
     },
 };
+use quant_pivot_error::QuantResult;
 #[cfg(feature = "domain-chainlink")]
 use quant_pivot_models::types::DomainSourceId;
 use quant_pivot_models::{
     clickhouse::{
-        CryptoPriceReportRow, DomainEventRow, DomainObservationRow, TradeTapeRow,
-        WeatherForecastFactRow, WeatherObservationFactRow,
+        CryptoPriceReportRow, DomainEventRow, DomainObservationRow, ExchangeEventRow,
+        ExchangeHistoryAcceptanceRow, ExchangeLogRawRow, ExchangeMatchRow, ExecutionParticipantRow,
+        MarketExecutionRow, WeatherForecastFactRow, WeatherObservationFactRow,
     },
     config::BinanceSourceConfig,
 };
 use quant_pivot_repository::{
-    clickhouse::{ChFactWriter, ChNativeReadRepository},
+    clickhouse::ChFactWriter,
     traits::{
         CalibrationArtifactRepository, ClobMarketInfoRepository, DomainProjectionRepository,
-        DomainSourceCursorRepository, DomainSourceExpectationRepository, FactWriter,
-        MarketLinkageRepository, MarketRepository, TradeTapeBlockCursorRepository,
+        DomainSourceCursorRepository, DomainSourceExpectationRepository, ExchangeHistoryRepository,
+        FactWriter, MarketLinkageRepository, MarketRepository,
     },
 };
 
@@ -42,10 +43,9 @@ use crate::{
         crypto_rtds_ingest_worker::{CryptoRtdsIngestDeps, CryptoRtdsIngestWorker},
         domain_event_outbox_worker::DomainEventOutboxWorker,
         domain_source_supervisor::DomainSourceSupervisor,
+        exchange_history_worker::{ExchangeHistoryWorker, ExchangeHistoryWriters},
         task_id::TaskId,
         task_registry::AppRunner,
-        trade_tape_reconciliation_worker::TradeTapeReconciliationWorker,
-        trade_tape_worker::TradeTapeWorker,
         weather_backfill_worker::WeatherBackfillWorker,
         weather_ingest_worker::{WeatherIngestDeps, WeatherIngestWorker},
         weather_public_ingest_worker::{WeatherPublicIngestDeps, WeatherPublicIngestWorker},
@@ -93,7 +93,7 @@ struct ConnectedPublicWeatherSources {
 }
 
 impl AppContext {
-    pub fn register_runtime_tasks(&self, runner: &mut AppRunner) {
+    pub async fn register_runtime_tasks(&self, runner: &mut AppRunner) -> QuantResult<()> {
         let binance_budgets = BinanceBudgets {
             spot: build_binance_budget(&self.config.domain_sources.binance, "Spot"),
             usdm_futures: build_binance_budget(
@@ -107,22 +107,11 @@ impl AppContext {
             // ingress/worker drain before the Analytics stage closes sinks.
             pipeline.run().await
         });
-        if let Some(worker) = self.build_trade_tape_worker() {
-            runner.spawn(TaskId::TradeTapeWorker, move |token| async move {
-                if let Err(error) = worker.run(token).await {
-                    tracing::error!(%error, "TradeTapeWorker exited with error");
-                }
+        if let Some(worker) = self.build_history_worker()? {
+            worker.probe().await?;
+            runner.spawn_critical(TaskId::ExchangeHistoryWorker, move |token| async move {
+                worker.run(token).await
             });
-        }
-        if let Some(worker) = self.build_tape_reconciler() {
-            runner.spawn(
-                TaskId::TradeTapeReconciliationWorker,
-                move |token| async move {
-                    if let Err(error) = worker.run(token).await {
-                        tracing::error!(%error, "TradeTapeReconciliationWorker exited with error");
-                    }
-                },
-            );
         }
         self.register_domain_ingest_workers(runner, binance_budgets);
         let projections =
@@ -155,6 +144,7 @@ impl AppContext {
         runner.spawn(TaskId::ClobMarketInfoSync, move |token| async move {
             clob_market_info.run(token).await;
         });
+        Ok(())
     }
 
     fn connect_domain_sources(&self, binance_budgets: BinanceBudgets) -> ConnectedDomainSources {
@@ -568,45 +558,52 @@ impl AppContext {
         });
     }
 
-    fn build_trade_tape_worker(&self) -> Option<Arc<TradeTapeWorker>> {
-        let config = &self.config.market_data.trade_tape_on_chain;
+    fn build_history_worker(&self) -> QuantResult<Option<Arc<ExchangeHistoryWorker>>> {
+        let config = &self.config.market_data.finalized_exchange_history;
         if !config.enabled {
-            return None;
+            return Ok(None);
         }
-        let log_client = match ExchangeLogClient::connect(&self.config.polymarket.onchain) {
-            Ok(client) => Arc::new(client),
-            Err(error) => {
-                tracing::error!(%error, "trade-tape worker disabled: RPC connect failed");
-                return None;
-            }
-        };
-        Some(Arc::new(TradeTapeWorker::new(
-            log_client,
-            Arc::clone(&self.data.market_registry),
-            Arc::clone(&self.infra.repos.trade_tape_block_cursor)
-                as Arc<dyn TradeTapeBlockCursorRepository>,
-            Arc::new(ChFactWriter::<TradeTapeRow>::new(
+        let writers = ExchangeHistoryWriters {
+            raw_logs: Arc::new(ChFactWriter::<ExchangeLogRawRow>::new(
                 Arc::clone(&self.infra.ch),
                 Arc::clone(&self.infra.ch_write_manager),
-                "quant_trade_tape",
+                "quant_exchange_log_raw",
             )),
+            events: Arc::new(ChFactWriter::<ExchangeEventRow>::new(
+                Arc::clone(&self.infra.ch),
+                Arc::clone(&self.infra.ch_write_manager),
+                "quant_exchange_event",
+            )),
+            matches: Arc::new(ChFactWriter::<ExchangeMatchRow>::new(
+                Arc::clone(&self.infra.ch),
+                Arc::clone(&self.infra.ch_write_manager),
+                "quant_exchange_match",
+            )),
+            executions: Arc::new(ChFactWriter::<MarketExecutionRow>::new(
+                Arc::clone(&self.infra.ch),
+                Arc::clone(&self.infra.ch_write_manager),
+                "quant_market_execution",
+            )),
+            participants: Arc::new(ChFactWriter::<ExecutionParticipantRow>::new(
+                Arc::clone(&self.infra.ch),
+                Arc::clone(&self.infra.ch_write_manager),
+                "quant_execution_participant",
+            )),
+            acceptance: Arc::new(ChFactWriter::<ExchangeHistoryAcceptanceRow>::new(
+                Arc::clone(&self.infra.ch),
+                Arc::clone(&self.infra.ch_write_manager),
+                "quant_exchange_history_acceptance",
+            )),
+        };
+        ExchangeHistoryWorker::connect(
+            Arc::clone(&self.infra.repos.exchange_history) as Arc<dyn ExchangeHistoryRepository>,
+            Arc::clone(&self.infra.repos.market) as Arc<dyn MarketRepository>,
+            writers,
             config.clone(),
-        )))
-    }
-
-    fn build_tape_reconciler(&self) -> Option<Arc<TradeTapeReconciliationWorker>> {
-        let config = &self.config.market_data.trade_tape_on_chain;
-        config.enabled.then(|| {
-            Arc::new(TradeTapeReconciliationWorker::new(
-                Arc::new(ChNativeReadRepository::new(Arc::clone(&self.infra.ch))),
-                Arc::new(ChFactWriter::<TradeTapeRow>::new(
-                    Arc::clone(&self.infra.ch),
-                    Arc::clone(&self.infra.ch_write_manager),
-                    "quant_trade_tape",
-                )),
-                config.clone(),
-            ))
-        })
+            self.data.exchange_history_progress.clone(),
+        )
+        .map(Arc::new)
+        .map(Some)
     }
 
     fn build_kline_worker(

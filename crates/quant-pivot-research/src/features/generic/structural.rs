@@ -7,7 +7,7 @@
 //! - `struct.price_extremity` — signed `mid − 0.5` (interacts with
 //!   time-to-resolution in the resolution-proximity factor).
 //! - `struct.book_churn_intensity` — a book-churn (delta/update) proxy over the
-//!   maker window. It is distinct from trade-tape participant concentration.
+//!   maker window. It is distinct from finalized execution-participant concentration.
 //! - `struct.negrisk_leg_ask_sum` / `struct.negrisk_leg_bid_sum` /
 //!   `struct.negrisk_leg_count` / `struct.negrisk_convert_edge` — same-`as_of`
 //!   full-leg aggregates over a neg-risk event's YES legs.
@@ -20,32 +20,32 @@ use std::time::Duration;
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::data_plane::{TradeParticipantRole, TradeTapePrint},
+    domain::data_plane::{ExecutionParticipantPrint, ExecutionParticipantRole},
     runtime_config::{DecimalValue, FeatureFamily},
     types::{Price, Usd},
 };
 use rust_decimal::Decimal;
 
 use crate::{
+    execution_history::{
+        ConcentrationMissing, ParticipantConcentrationGate, compute_concentration,
+        compute_role_gini,
+    },
     features::{
         builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature, ResolvedLeg},
         generic::stats::{realized_volatility, simple_return},
         names::{
             structural as names,
             structural::{
-                BOOK_CHURN_INTENSITY, MAKER_GINI, NEGRISK_CONVERT_EDGE, NEGRISK_LEG_ASK_SUM,
-                NEGRISK_LEG_BID_SUM, NEGRISK_LEG_COUNT, PARTICIPANT_COUNT,
-                PARTICIPANT_COVERAGE_RATIO, PARTICIPANT_CR1_SHARE, PARTICIPANT_GINI,
-                PARTICIPANT_HHI, PRICE_EXTREMITY, TAKER_GINI, TRADE_TAPE_COUNT,
-                TRADE_TAPE_NOTIONAL_USD,
+                BOOK_CHURN_INTENSITY, EXECUTION_HISTORY_COUNT, EXECUTION_HISTORY_NOTIONAL_USD,
+                MAKER_GINI, NEGRISK_CONVERT_EDGE, NEGRISK_LEG_ASK_SUM, NEGRISK_LEG_BID_SUM,
+                NEGRISK_LEG_COUNT, PARTICIPANT_COUNT, PARTICIPANT_COVERAGE_RATIO,
+                PARTICIPANT_CR1_SHARE, PARTICIPANT_GINI, PARTICIPANT_HHI, PRICE_EXTREMITY,
+                TAKER_GINI,
             },
         },
         resolved::{MicrostructureBucket, ResolvedBook},
         value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
-    },
-    trade_tape::{
-        ConcentrationMissing, ParticipantConcentrationGate, compute_concentration,
-        compute_role_gini,
     },
 };
 
@@ -67,7 +67,7 @@ impl FeatureGroupBuilder for StructuralFeatureBuilder {
         out.extend(shock_features(ctx));
         out.push(price_extremity_feature(ctx));
         out.push(book_churn_intensity_feature(ctx));
-        out.extend(trade_tape_features(ctx));
+        out.extend(execution_history_features(ctx));
         out.extend(negrisk_features(ctx));
         Ok(out)
     }
@@ -143,7 +143,7 @@ fn price_extremity_feature(ctx: &FeatureComputeCtx<'_>) -> RawFeature {
 
 /// Book-churn intensity: delta-to-update ratio over the maker window — a
 /// book-derived liquidity-turnover proxy. This is not maker participant
-/// concentration (Gini / CR1 / HHI), which is computed from the trade tape.
+/// concentration (Gini / CR1 / HHI), computed from finalized executions.
 fn book_churn_intensity_feature(ctx: &FeatureComputeCtx<'_>) -> RawFeature {
     let window = ctx.window;
     let lookback = Duration::from_secs(ctx.config.structural.book_churn_window_secs);
@@ -178,36 +178,36 @@ fn book_churn(buckets: &[&MicrostructureBucket]) -> Option<Decimal> {
 }
 
 /// Trade-tape participant concentration features over the configured PIT window.
-fn trade_tape_features(ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
-    if !ctx.trade_tape.source_available {
-        return trade_tape_feature_names()
+fn execution_history_features(ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
+    if !ctx.execution_history.source_available {
+        return execution_history_feature_names()
             .into_iter()
-            .map(|name| RawFeature::missing(name, NullReason::TradeTapeUnavailable))
+            .map(|name| RawFeature::missing(name, NullReason::FinalizedExecutionUnavailable))
             .collect();
     }
 
-    let lookback = Duration::from_secs(ctx.config.structural.trade_tape_window_secs);
-    let prints: Vec<TradeTapePrint> = ctx
-        .trade_tape
+    let lookback = Duration::from_secs(ctx.config.structural.execution_window_secs);
+    let prints: Vec<ExecutionParticipantPrint> = ctx
+        .execution_history
         .prints_in(lookback)
         .into_iter()
         .cloned()
         .collect();
     if prints.is_empty() {
-        return trade_tape_feature_names()
+        return execution_history_feature_names()
             .into_iter()
-            .map(|name| RawFeature::missing(name, NullReason::InsufficientTradeTape))
+            .map(|name| RawFeature::missing(name, NullReason::InsufficientExecutionHistory))
             .collect();
     }
 
-    let evidence = trade_tape_evidence(ctx);
+    let evidence = execution_history_evidence(ctx);
     let gate = concentration_gate(ctx);
     let concentration = compute_concentration(&prints, true, &gate);
     let mut out = Vec::with_capacity(9);
     match concentration {
         Ok(snapshot) => {
             out.push(RawFeature::present(
-                TRADE_TAPE_COUNT,
+                EXECUTION_HISTORY_COUNT,
                 FeatureValue::Count(snapshot.observed_print_count),
                 evidence.clone(),
             ));
@@ -217,7 +217,7 @@ fn trade_tape_features(ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
                 evidence.clone(),
             ));
             out.push(RawFeature::present(
-                TRADE_TAPE_NOTIONAL_USD,
+                EXECUTION_HISTORY_NOTIONAL_USD,
                 FeatureValue::Usd(Usd::new(snapshot.total_notional_usd)),
                 evidence.clone(),
             ));
@@ -244,16 +244,16 @@ fn trade_tape_features(ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
                 ),
             ]);
         }
-        Err(ConcentrationMissing::InsufficientTradeTape) => {
-            return trade_tape_feature_names()
+        Err(ConcentrationMissing::InsufficientExecutionHistory) => {
+            return execution_history_feature_names()
                 .into_iter()
-                .map(|name| RawFeature::missing(name, NullReason::InsufficientTradeTape))
+                .map(|name| RawFeature::missing(name, NullReason::InsufficientExecutionHistory))
                 .collect();
         }
-        Err(ConcentrationMissing::TradeTapeUnavailable) => {
-            return trade_tape_feature_names()
+        Err(ConcentrationMissing::FinalizedExecutionUnavailable) => {
+            return execution_history_feature_names()
                 .into_iter()
-                .map(|name| RawFeature::missing(name, NullReason::TradeTapeUnavailable))
+                .map(|name| RawFeature::missing(name, NullReason::FinalizedExecutionUnavailable))
                 .collect();
         }
         Err(ConcentrationMissing::InsufficientRoleCoverage) => {
@@ -264,11 +264,11 @@ fn trade_tape_features(ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
     out
 }
 
-const fn trade_tape_feature_names() -> [FeatureName; 9] {
+const fn execution_history_feature_names() -> [FeatureName; 9] {
     [
-        TRADE_TAPE_COUNT,
+        EXECUTION_HISTORY_COUNT,
         PARTICIPANT_COUNT,
-        TRADE_TAPE_NOTIONAL_USD,
+        EXECUTION_HISTORY_NOTIONAL_USD,
         PARTICIPANT_COVERAGE_RATIO,
         PARTICIPANT_GINI,
         PARTICIPANT_HHI,
@@ -278,34 +278,34 @@ const fn trade_tape_feature_names() -> [FeatureName; 9] {
     ]
 }
 
-fn trade_tape_evidence(ctx: &FeatureComputeCtx<'_>) -> EvidenceSourceRef {
+fn execution_history_evidence(ctx: &FeatureComputeCtx<'_>) -> EvidenceSourceRef {
     EvidenceSourceRef {
-        source_kind: EvidenceSourceKind::TradeTape,
-        reference: ctx.trade_tape.market_id.to_string(),
+        source_kind: EvidenceSourceKind::FinalizedExecution,
+        reference: ctx.execution_history.market_id.to_string(),
         effective_at: ctx
-            .trade_tape
-            .freshest_trade_time()
-            .unwrap_or_else(|| ctx.trade_tape.cutoff()),
-        available_at: ctx.trade_tape.latest_available_at(),
+            .execution_history
+            .freshest_execution_time()
+            .unwrap_or_else(|| ctx.execution_history.cutoff()),
+        available_at: ctx.execution_history.latest_available_at(),
     }
 }
 
 const fn concentration_gate(ctx: &FeatureComputeCtx<'_>) -> ParticipantConcentrationGate {
     ParticipantConcentrationGate {
-        min_unique_participants: ctx.config.structural.trade_tape_min_unique_participants,
+        min_unique_participants: ctx.config.structural.execution_min_unique_participants,
         min_notional_usd: config_decimal(
-            &ctx.config.structural.trade_tape_min_notional_usd,
-            "features.structural.trade_tape_min_notional_usd",
+            &ctx.config.structural.execution_min_notional_usd,
+            "features.structural.execution_min_notional_usd",
         ),
         min_coverage_ratio: config_decimal(
-            &ctx.config.structural.trade_tape_min_coverage_ratio,
-            "features.structural.trade_tape_min_coverage_ratio",
+            &ctx.config.structural.execution_min_coverage_ratio,
+            "features.structural.execution_min_coverage_ratio",
         ),
     }
 }
 
 fn role_metric_features(
-    prints: &[TradeTapePrint],
+    prints: &[ExecutionParticipantPrint],
     gate: &ParticipantConcentrationGate,
     evidence: &EvidenceSourceRef,
 ) -> [RawFeature; 2] {
@@ -313,14 +313,14 @@ fn role_metric_features(
         role_gini_feature(
             MAKER_GINI,
             prints,
-            TradeParticipantRole::Maker,
+            ExecutionParticipantRole::Maker,
             gate,
             evidence,
         ),
         role_gini_feature(
             TAKER_GINI,
             prints,
-            TradeParticipantRole::Taker,
+            ExecutionParticipantRole::Taker,
             gate,
             evidence,
         ),
@@ -333,8 +333,8 @@ const fn config_decimal(raw: &DecimalValue, _field: &'static str) -> Decimal {
 
 fn role_gini_feature(
     name: FeatureName,
-    prints: &[TradeTapePrint],
-    role: TradeParticipantRole,
+    prints: &[ExecutionParticipantPrint],
+    role: ExecutionParticipantRole,
     gate: &ParticipantConcentrationGate,
     evidence: &EvidenceSourceRef,
 ) -> RawFeature {
@@ -345,7 +345,7 @@ fn role_gini_feature(
         Err(ConcentrationMissing::InsufficientRoleCoverage) => {
             RawFeature::missing(name, NullReason::InsufficientRoleCoverage)
         }
-        Err(_) => RawFeature::missing(name, NullReason::InsufficientTradeTape),
+        Err(_) => RawFeature::missing(name, NullReason::InsufficientExecutionHistory),
     }
 }
 
@@ -485,13 +485,13 @@ fn decimal_window(
 }
 
 #[cfg(test)]
-mod trade_tape_null_reason_tests {
+mod execution_history_null_reason_tests {
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::data_plane::{TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind},
-        enums::common::MarketCategory,
+        domain::data_plane::{ExecutionParticipantPrint, ExecutionParticipantRole},
+        enums::common::{MarketCategory, Side},
         runtime_config::{DataQualityConfig, FeaturesConfig},
-        types::{MarketId, Price, Shares, TokenId, TradeTapeSourceEvidence, Usd},
+        types::{ContentHash, FinalizedExecutionEvidence, MarketId, Price, Shares, TokenId, Usd},
     };
     use rust_decimal::Decimal;
 
@@ -499,34 +499,33 @@ mod trade_tape_null_reason_tests {
     use crate::features::{
         builder::{FeatureComputeCtx, FeatureGroupBuilder},
         names::structural::{
-            MAKER_GINI, PARTICIPANT_COUNT, PARTICIPANT_COVERAGE_RATIO, PARTICIPANT_CR1_SHARE,
-            PARTICIPANT_GINI, PARTICIPANT_HHI, TAKER_GINI, TRADE_TAPE_COUNT,
-            TRADE_TAPE_NOTIONAL_USD,
+            EXECUTION_HISTORY_COUNT, EXECUTION_HISTORY_NOTIONAL_USD, MAKER_GINI, PARTICIPANT_COUNT,
+            PARTICIPANT_COVERAGE_RATIO, PARTICIPANT_CR1_SHARE, PARTICIPANT_GINI, PARTICIPANT_HHI,
+            TAKER_GINI,
         },
-        resolved::{MarketWindowSnapshot, TradeTapeWindowSnapshot},
+        resolved::{FinalizedExecutionWindowSnapshot, MarketWindowSnapshot},
     };
 
-    fn trade_tape_snapshot(
+    fn execution_history_snapshot(
         source_available: bool,
-        prints: Vec<TradeTapePrint>,
-    ) -> TradeTapeWindowSnapshot {
+        prints: Vec<ExecutionParticipantPrint>,
+    ) -> FinalizedExecutionWindowSnapshot {
         let market_id = MarketId::new("m-null");
         let as_of = Utc::now();
         if source_available {
-            TradeTapeWindowSnapshot::available(market_id, as_of, as_of, prints)
+            FinalizedExecutionWindowSnapshot::available(market_id, as_of, as_of, prints)
         } else {
-            TradeTapeWindowSnapshot::available(market_id, as_of, as_of, prints)
+            FinalizedExecutionWindowSnapshot::available(market_id, as_of, as_of, prints)
                 .with_source_evidence(
-                    TradeTapeSourceEvidence::runtime(false, Vec::new())
-                        .expect("valid disabled runtime evidence"),
+                    FinalizedExecutionEvidence::runtime(false, None, None),
                     false,
                 )
         }
     }
 
-    fn is_trade_tape_feature(name: &FeatureName) -> bool {
-        name == &TRADE_TAPE_COUNT
-            || name == &TRADE_TAPE_NOTIONAL_USD
+    fn is_execution_history_feature(name: &FeatureName) -> bool {
+        name == &EXECUTION_HISTORY_COUNT
+            || name == &EXECUTION_HISTORY_NOTIONAL_USD
             || name == &PARTICIPANT_GINI
             || name == &PARTICIPANT_HHI
             || name == &PARTICIPANT_CR1_SHARE
@@ -536,11 +535,11 @@ mod trade_tape_null_reason_tests {
             || name == &PARTICIPANT_COUNT
     }
 
-    fn trade_tape_only(
-        trade_tape: &TradeTapeWindowSnapshot,
+    fn execution_history_only(
+        execution_history: &FinalizedExecutionWindowSnapshot,
         config: &FeaturesConfig,
     ) -> Vec<RawFeature> {
-        let as_of = trade_tape.decision_at;
+        let as_of = execution_history.decision_at;
         let window = MarketWindowSnapshot::empty(TokenId::new("tok-yes"), as_of, as_of);
         let ctx = FeatureComputeCtx {
             decision_at: as_of,
@@ -549,7 +548,7 @@ mod trade_tape_null_reason_tests {
             secondary_book: None,
             market: None,
             window: &window,
-            trade_tape,
+            execution_history,
             sibling_legs: &[],
             sibling_leg_total: 0,
             config,
@@ -561,66 +560,72 @@ mod trade_tape_null_reason_tests {
             .compute(&ctx)
             .expect("valid structural fixture")
             .into_iter()
-            .filter(|feature| is_trade_tape_feature(&feature.name))
+            .filter(|feature| is_execution_history_feature(&feature.name))
             .collect()
     }
 
-    fn fill_print(address: &str, notional: Decimal) -> TradeTapePrint {
-        TradeTapePrint {
+    fn fill_print(address: &str, notional: Decimal) -> ExecutionParticipantPrint {
+        let now = Utc::now();
+        let hash = ContentHash::parse(&format!("blake3:{}", "a".repeat(64)))
+            .expect("valid test content hash");
+        ExecutionParticipantPrint {
+            execution_id: hash,
             market_id: MarketId::new("m-null"),
             token_id: TokenId::new("tok-yes"),
-            event_time: Utc::now(),
-            available_at: None,
+            effective_at: now,
+            observed_at: now,
+            model_available_at: now,
             participant_address: address.to_owned(),
-            participant_role: TradeParticipantRole::Maker,
-            side: None,
+            participant_role: ExecutionParticipantRole::Maker,
+            side: Side::Buy,
             price: Price::new(Decimal::new(50, 2)),
             size_shares: Shares::new(notional * Decimal::from(2)),
             notional_usd: Usd::new(notional),
-            tx_hash: None,
-            trade_id: format!("trade-{address}"),
-            source: TradeTapeSourceKind::OnChain,
-            coverage_flags: 0,
-            raw_payload_json: None,
+            transaction_hash: format!("tx-{address}"),
+            availability_policy_hash: hash,
         }
     }
 
     #[test]
     fn unavailable_source_marks_unavailable() {
         let config = FeaturesConfig::default();
-        let trade_tape = trade_tape_snapshot(false, vec![fill_print("0x1", Decimal::from(100))]);
-        let features = trade_tape_only(&trade_tape, &config);
+        let execution_history =
+            execution_history_snapshot(false, vec![fill_print("0x1", Decimal::from(100))]);
+        let features = execution_history_only(&execution_history, &config);
         assert_eq!(features.len(), 9);
         for feature in features {
-            assert_eq!(feature.value, Err(NullReason::TradeTapeUnavailable));
+            assert_eq!(
+                feature.value,
+                Err(NullReason::FinalizedExecutionUnavailable)
+            );
         }
     }
 
     #[test]
     fn empty_window_marks_insufficient() {
         let config = FeaturesConfig::default();
-        let trade_tape = trade_tape_snapshot(true, Vec::new());
-        let features = trade_tape_only(&trade_tape, &config);
+        let execution_history = execution_history_snapshot(true, Vec::new());
+        let features = execution_history_only(&execution_history, &config);
         assert_eq!(features.len(), 9);
         for feature in features {
-            assert_eq!(feature.value, Err(NullReason::InsufficientTradeTape));
+            assert_eq!(feature.value, Err(NullReason::InsufficientExecutionHistory));
         }
     }
 
     #[test]
     fn below_min_unique_insufficient() {
         let mut config = FeaturesConfig::default();
-        config.structural.trade_tape_min_unique_participants = 3;
+        config.structural.execution_min_unique_participants = 3;
         let prints = vec![
             fill_print("0x1", Decimal::from(100)),
             fill_print("0x2", Decimal::from(100)),
         ];
-        let trade_tape = trade_tape_snapshot(true, prints);
-        let features = trade_tape_only(&trade_tape, &config);
+        let execution_history = execution_history_snapshot(true, prints);
+        let features = execution_history_only(&execution_history, &config);
         let gini = features
             .iter()
             .find(|feature| feature.name == PARTICIPANT_GINI)
             .expect("gini");
-        assert_eq!(gini.value, Err(NullReason::InsufficientTradeTape));
+        assert_eq!(gini.value, Err(NullReason::InsufficientExecutionHistory));
     }
 }

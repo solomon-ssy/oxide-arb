@@ -57,6 +57,8 @@
 
 ## 1. S1 — 200 天冷启动建立在错误前提上（最高优先级）
 
+> **后续（2026-08-15）**：落地复验与优化设计见 [`2026-08-15-s1-fresh-boot-closed-loop-audit-and-design.md`](2026-08-15-s1-fresh-boot-closed-loop-audit-and-design.md)。结论：数据面接近机构级，但 serving 合同、自动编排与 Admin UX 未闭环，不能按 S1 已落地验收。
+
 ### 1.1 现状
 
 系统设计要求 200 天 raw retention 才能训练首个模型：

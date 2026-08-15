@@ -11,12 +11,16 @@ use std::{collections::HashSet, sync::Arc};
 use quant_pivot_models::{
     enums::{common::MarketCategory, factor::FactorFamily},
     runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
+    types::ResearchFeatureContract,
 };
 
 use crate::{
     factors::{
-        computer::FactorComputer, domain::DomainFactorRegistry, generic::generic_factors,
-        structural::structural_factors, value::FactorDefinitionDocument,
+        computer::FactorComputer,
+        domain::DomainFactorRegistry,
+        generic::{bootstrap_trade_factors, generic_factors},
+        structural::structural_factors,
+        value::FactorDefinitionDocument,
     },
     model::FavoriteLongshotBiasTable,
 };
@@ -71,16 +75,29 @@ impl FactorRegistry {
         factors: &FactorsConfig,
         features: &FeaturesConfig,
         domain: &DomainConfig,
+        feature_contract: ResearchFeatureContract,
         category_scope: Option<MarketCategory>,
         bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
     ) -> Self {
         let enabled: HashSet<FactorFamily> =
             factors.enabled_factor_families.iter().copied().collect();
-        let mut selected: Vec<_> = generic_factors(features)
-            .into_iter()
-            .chain(structural_factors(factors, features, bias_table))
-            .filter(|(spec, _)| enabled.contains(&spec.family))
-            .collect();
+        let mut selected: Vec<_> = match feature_contract {
+            ResearchFeatureContract::FullL2
+            | ResearchFeatureContract::FullL2Crypto
+            | ResearchFeatureContract::FullL2Weather => generic_factors(features)
+                .into_iter()
+                .chain(structural_factors(factors, features, bias_table))
+                .filter(|(spec, _)| enabled.contains(&spec.family))
+                .collect(),
+            ResearchFeatureContract::TradeBootstrap
+            | ResearchFeatureContract::TradeBootstrapCrypto
+            | ResearchFeatureContract::TradeBootstrapWeather => {
+                bootstrap_trade_factors(features, feature_contract)
+                    .into_iter()
+                    .filter(|(spec, _)| enabled.contains(&spec.family))
+                    .collect()
+            }
+        };
         if let Some(category) = category_scope {
             selected.extend(
                 DomainFactorRegistry::build(domain)

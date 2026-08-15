@@ -23,6 +23,7 @@ use quant_pivot_models::{
     enums::model::ModelFamily,
     types::{
         Probability,
+        backtest::CpcvFoldValidationRegime,
         model_quality::{
             GateClass, GateId, GateIntent, GateOutcome, GateStatus, GateSubject, QualityGateReport,
             QualityGateReportInput,
@@ -186,6 +187,9 @@ impl Default for ValidationGateThresholds {
 /// Frozen CPCV path-set metrics consumed by the alpha-significance gates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpcvPathSetGateInput {
+    /// Whether path returns represent allocation-independent predictive
+    /// utility or full historical portfolio economics.
+    pub validation_regime: CpcvFoldValidationRegime,
     /// `phi(N, k) = C(N - 1, k - 1)` complete full-timeline paths.
     pub path_count: u64,
     /// `C(N, k)` purge/train/evaluate folds, retained for audit context.
@@ -323,12 +327,20 @@ impl ModelQualityGate for DefaultModelQualityGate {
             evaluate_shadow_stability_gate(&input, &mut ledger);
         } else {
             if let Some(path_set) = &input.path_set {
-                evaluate_cpcv_risk_gates(
-                    path_set,
-                    &input.thresholds,
-                    &input.validation_thresholds,
-                    &mut ledger,
-                );
+                if path_set.validation_regime == CpcvFoldValidationRegime::PredictiveUtility {
+                    evaluate_predictive_risk_gates(
+                        &input.thresholds,
+                        &input.validation_thresholds,
+                        &mut ledger,
+                    );
+                } else {
+                    evaluate_cpcv_risk_gates(
+                        path_set,
+                        &input.thresholds,
+                        &input.validation_thresholds,
+                        &mut ledger,
+                    );
+                }
                 evaluate_backtest_diagnostics(
                     input.backtest.as_ref(),
                     &input.thresholds,
@@ -688,6 +700,31 @@ fn evaluate_missing_risk_gates(
         "requires frozen OOS validation evidence",
     );
     evaluate_backtest_diagnostics(None, thresholds, ledger);
+}
+
+fn evaluate_predictive_risk_gates(
+    thresholds: &QualityGateThresholds,
+    validation: &ValidationGateThresholds,
+    ledger: &mut GateLedger,
+) {
+    ledger.not_applicable(
+        GateId::MaxDrawdown,
+        GateClass::Hard,
+        thresholds.max_drawdown.to_string(),
+        "predictive CPCV does not claim historical portfolio drawdown",
+    );
+    ledger.not_applicable(
+        GateId::TurnoverBudget,
+        GateClass::Hard,
+        validation.max_turnover.to_string(),
+        "predictive CPCV does not claim historical portfolio turnover",
+    );
+    ledger.not_applicable(
+        GateId::TailLossBudget,
+        GateClass::Hard,
+        validation.min_tail_loss_bps.to_string(),
+        "predictive CPCV does not claim historical execution tail loss",
+    );
 }
 
 /// Single-path risk/execution realism gates plus soft alpha diagnostics.
@@ -1089,7 +1126,10 @@ mod tests {
         types::{
             BacktestReportId, ContentHash, DecisionPolicySnapshotId, MarketId, ModelVersionId,
             Probability, TokenId, TrainingDatasetId,
-            backtest::{BacktestPortfolioFunnel, ExpectedVsRealized, PnlSimulation},
+            backtest::{
+                BacktestPortfolioFunnel, CpcvFoldValidationRegime, ExpectedVsRealized,
+                PnlSimulation,
+            },
         },
     };
     use rust_decimal_macros::dec;
@@ -1167,6 +1207,7 @@ mod tests {
     impl CpcvPathSetGateInput {
         fn passing_fixture() -> Self {
             Self {
+                validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                 path_count: 21,
                 combination_count: 56,
                 median_rank_ic: dec!(0.15),

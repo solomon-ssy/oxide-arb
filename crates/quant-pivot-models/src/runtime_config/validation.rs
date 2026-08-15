@@ -132,9 +132,9 @@ fn validate_data_quality(config: &DecisionPolicySnapshot, report: &mut ConfigVal
             detail: "must be greater than zero".to_owned(),
         });
     }
-    if data_quality.max_trade_tape_age_secs == 0 {
+    if data_quality.max_execution_age_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "data_quality.max_trade_tape_age_secs",
+            field: "data_quality.max_execution_age_secs",
             detail: "must be greater than zero".to_owned(),
         });
     }
@@ -168,8 +168,8 @@ fn validate_data_quality(config: &DecisionPolicySnapshot, report: &mut ConfigVal
             data_quality.max_feature_bucket_age_secs,
         ),
         (
-            "data_quality.max_trade_tape_age_secs",
-            data_quality.max_trade_tape_age_secs,
+            "data_quality.max_execution_age_secs",
+            data_quality.max_execution_age_secs,
         ),
     ] {
         if ceiling < knowledge_lag_secs {
@@ -259,11 +259,11 @@ fn validate_features(config: &DecisionPolicySnapshot, report: &mut ConfigValidat
         .features
         .definition
         .structural
-        .trade_tape_window_secs
+        .execution_window_secs
         == 0
     {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "features.structural.trade_tape_window_secs",
+            field: "features.structural.execution_window_secs",
             detail: "must be > 0".to_owned(),
         });
     }
@@ -272,32 +272,32 @@ fn validate_features(config: &DecisionPolicySnapshot, report: &mut ConfigValidat
         .features
         .definition
         .structural
-        .trade_tape_min_unique_participants
+        .execution_min_unique_participants
         == 0
     {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "features.structural.trade_tape_min_unique_participants",
+            field: "features.structural.execution_min_unique_participants",
             detail: "must be > 0".to_owned(),
         });
     }
     non_negative_decimal(
-        "features.structural.trade_tape_min_notional_usd",
+        "features.structural.execution_min_notional_usd",
         &config
             .profile_artifacts
             .features
             .definition
             .structural
-            .trade_tape_min_notional_usd,
+            .execution_min_notional_usd,
         report,
     );
     unit_ratio(
-        "features.structural.trade_tape_min_coverage_ratio",
+        "features.structural.execution_min_coverage_ratio",
         &config
             .profile_artifacts
             .features
             .definition
             .structural
-            .trade_tape_min_coverage_ratio,
+            .execution_min_coverage_ratio,
         report,
     );
     for validator in FEATURES_CONFIG_VALIDATORS {
@@ -1849,7 +1849,7 @@ mod tests {
             .recommendation
             .data_quality
             .max_feature_bucket_age_secs = 9;
-        config.recommendation.data_quality.max_trade_tape_age_secs = 9;
+        config.recommendation.data_quality.max_execution_age_secs = 9;
         config
             .recommendation
             .data_quality
@@ -1859,7 +1859,7 @@ mod tests {
         for field in [
             "data_quality.max_book_age_ms",
             "data_quality.max_feature_bucket_age_secs",
-            "data_quality.max_trade_tape_age_secs",
+            "data_quality.max_execution_age_secs",
             "data_quality.max_domain_observation_age_secs",
         ] {
             assert!(report.errors.iter().any(|error| matches!(

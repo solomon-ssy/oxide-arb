@@ -4,7 +4,10 @@ use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     domain::quant::{ModelVersionInfo, RecommendationInfo},
     enums::quant::TradePolicyStatus,
-    types::{ResearchProfileRef, TradePolicyArtifactId},
+    types::{
+        RecommendationPolicyProvenance, ResearchProfileRef, TradePolicyArtifactId,
+        TradePolicyCohortProvenance,
+    },
 };
 use quant_pivot_repository::traits::TradePolicyRepository;
 use quant_pivot_research::hashing::ResearchHasher;
@@ -16,7 +19,25 @@ pub async fn require_frozen_trade_policy(
     model_version: &ModelVersionInfo,
     recommendation: &RecommendationInfo,
 ) -> QuantResult<ResearchProfileRef> {
-    let policy = &recommendation.trade_plan.policy;
+    let policy = match recommendation.trade_plan.policy.as_ref() {
+        RecommendationPolicyProvenance::TradePolicy {
+            artifact_id,
+            artifact_hash,
+            cohort_index,
+            cohort_key,
+        } => TradePolicyCohortProvenance {
+            artifact_id: *artifact_id,
+            artifact_hash: *artifact_hash,
+            cohort_index: *cohort_index,
+            cohort_key: cohort_key.as_ref().clone(),
+        },
+        RecommendationPolicyProvenance::BootstrapProfile { .. } => {
+            return Err(denied(
+                "bootstrap recommendation provenance cannot authorize an order intent",
+            )
+            .into());
+        }
+    };
     let sizing = &recommendation.trade_plan.sizing;
     if model_version.profile_ref != policy.cohort_key.profile_ref {
         return Err(

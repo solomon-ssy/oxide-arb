@@ -45,14 +45,15 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, FactorDefinitionId, FeatureParityRunId, ModelRunId, ModelSpecId,
-        ModelVersionId, model_lineage::ModelVersionDerivation, model_spec::ModelSpecDefinition,
+        ModelVersionId, ResearchProfileArtifact, model_lineage::ModelVersionDerivation,
+        model_spec::ModelSpecDefinition,
     },
 };
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
     IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Select,
     TransactionTrait,
-    sea_query::{Expr, ExprTrait, extension::postgres::PgBinOper},
+    sea_query::{Expr, ExprTrait, OnConflict, extension::postgres::PgBinOper},
 };
 
 use crate::{
@@ -75,6 +76,50 @@ impl PgModelRegistryRepository {
     /// Seed or verify the complete immutable built-in research-profile registry.
     pub async fn ensure_builtin_research_profiles(&self) -> Result<(), StorageError> {
         Self::ensure_builtins(&self.db).await.map(drop)
+    }
+
+    /// Seed or verify the immutable system-owned fresh-boot model spec.
+    pub async fn ensure_bootstrap_spec(
+        &self,
+        profile: &ResearchProfileArtifact,
+    ) -> Result<ModelSpecInfo, StorageError> {
+        let spec = NewModelSpec::bootstrap_trade(profile)
+            .map_err(|detail| StorageError::invariant_violation(Some(QUANT_MODEL_SPEC), detail))?;
+        let requested = spec.clone();
+        QuantModelSpecEntity::insert(spec.into_active_model())
+            .on_conflict(
+                OnConflict::column(Column::ModelSpecId)
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .exec_without_returning(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        let stored = self
+            .find_model_spec(&requested.model_spec_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found(QUANT_MODEL_SPEC, requested.model_spec_id))?;
+        if stored.name != requested.name
+            || stored.model_family != requested.model_family
+            || stored.prediction_horizon_secs != requested.prediction_horizon_secs
+            || stored.feature_schema_version != requested.feature_schema_version
+            || stored.label_schema_version != requested.label_schema_version
+            || stored.thesis != requested.thesis
+            || stored.input_contract != requested.input_contract
+            || stored.training_contract != requested.training_contract
+            || stored.definition_hash != requested.definition_hash
+            || stored.created_by_user_id != requested.created_by_user_id
+            || stored.created_by_label != requested.created_by_label
+            || stored.created_by_role != requested.created_by_role
+            || stored.reason != requested.reason
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_MODEL_SPEC,
+                Some(requested.model_spec_id),
+                "fresh-boot model spec differs from its sealed built-in definition",
+            ));
+        }
+        Ok(stored)
     }
 }
 

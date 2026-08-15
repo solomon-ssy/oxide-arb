@@ -2,6 +2,7 @@ mod account_read_smoke;
 mod architecture;
 mod config_contract;
 mod enum_catalog;
+mod exchange_history_smoke;
 mod function_design;
 mod performance;
 mod public_read_smoke;
@@ -196,6 +197,9 @@ enum SmokeCommand {
     /// Verify configured account identity and venue reads without submitting.
     #[command(name = "account-read")]
     AccountRead(DeployConfigArgs),
+    /// Prove `HyperSync` and an independent archive RPC agree on finalized history.
+    #[command(name = "exchange-history")]
+    ExchangeHistory(DeployConfigArgs),
     /// Probe public endpoints without credentials or money-moving operations.
     #[command(name = "public-read")]
     PublicRead(PublicReadSmokeArgs),
@@ -391,6 +395,9 @@ async fn run() -> Result<()> {
         },
         Commands::Smoke { command } => match command {
             SmokeCommand::AccountRead(args) => account_read_smoke::run(&args.request()).await,
+            SmokeCommand::ExchangeHistory(args) => {
+                exchange_history_smoke::run(&args.request()).await
+            }
             SmokeCommand::PublicRead(args) => {
                 if args.stream_timeout_secs == 0 {
                     bail!("public-read smoke requires --stream-timeout-secs greater than zero");

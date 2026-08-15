@@ -8,21 +8,19 @@ use clickhouse::Client;
 use prometheus::IntCounter;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, ChBps, ChDecimal64, ChDigest, ChPrice, ChSchemaVersion, ChShares, ChUsd,
-        CryptoPriceReportRow, DomainEventRow, QuantReportRecommendationFactRow, TradeTapeRow,
+        BookL2LedgerRow, ChAssetAmount, ChBps, ChDecimal64, ChDigest, ChPrice, ChSchemaVersion,
+        ChShares, ChUsd, CryptoPriceReportRow, DomainEventRow, MarketExecutionRow,
+        QuantReportRecommendationFactRow,
     },
     config::ClickHouseConfig,
-    domain::data_plane::trade_tape_coverage::{
-        FEE_RATE, MARKET_ID, PRICE, SIDE, SIZE, TOKEN_ID, TRADE_ID,
-    },
     enums::clickhouse::{
-        ChCanonicalBookEventType, ChLedgerTradeSide, ChOutcomeSide, ChTradeParticipantRole,
-        ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
+        ChAvailabilityBasis, ChCanonicalBookEventType, ChExchangeSide, ChExchangeVersion,
+        ChLedgerTradeSide, ChOutcomeSide,
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, DomainInstrumentKey, DomainSourceId, EconomicTierId, MarketId, Price,
-        RecommendationId, RecommendationReportId, ReportRouteRunId, Shares, TokenId, Usd,
+        DomainInstrumentKey, DomainSourceId, EconomicTierId, MarketId, Price, RecommendationId,
+        RecommendationReportId, ReportRouteRunId, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_storage::{
@@ -325,7 +323,7 @@ pub async fn canonical_evidence_no_ttl() {
     for table in [
         "quant_book_l2_ledger",
         "quant_book_stream_session",
-        "quant_trade_tape",
+        "quant_market_execution",
     ] {
         let ddl: TableDdl = client
             .query(&format!("SHOW CREATE TABLE {table}"))
@@ -378,7 +376,7 @@ pub async fn runtime_verification_rejects_drift() {
     let (_pool, client, config, _stack) = setup_clickhouse().await;
     client
         .query(
-            "ALTER TABLE quant_trade_tape \
+            "ALTER TABLE quant_market_execution \
              ADD COLUMN IF NOT EXISTS unmanaged_probe Nullable(String)",
         )
         .execute()
@@ -389,7 +387,7 @@ pub async fn runtime_verification_rejects_drift() {
         .await
         .expect_err("runtime contract must reject unmanaged columns");
     assert!(error.to_string().contains("semantic schema drift"));
-    assert!(error.to_string().contains("quant_trade_tape"));
+    assert!(error.to_string().contains("quant_market_execution"));
 }
 
 pub async fn clickhouse_fact_uses_columns() {
@@ -438,8 +436,8 @@ pub async fn clickhouse_fact_uses_columns() {
             ],
         ),
         (
-            "quant_trade_tape",
-            &["ENGINE = MergeTree", "ingestion_time"],
+            "quant_market_execution",
+            &["ENGINE = MergeTree", "model_available_at"],
         ),
         (
             "quant_domain_observation",
@@ -460,7 +458,7 @@ pub async fn clickhouse_fact_uses_columns() {
                 ddl.statement
             );
         }
-        if matches!(table, "quant_trade_tape" | "quant_domain_observation") {
+        if matches!(table, "quant_market_execution" | "quant_domain_observation") {
             assert!(
                 !ddl.statement.contains("ReplacingMergeTree"),
                 "PIT source table {table} must retain every ingested revision"
@@ -632,53 +630,57 @@ pub async fn report_fact_accepts_snapshot() {
     );
 }
 
-fn sample_trade(token_id: &str, received_at: i64) -> TradeTapeRow {
-    TradeTapeRow {
+fn sample_execution(token_id: &str, received_at: i64) -> MarketExecutionRow {
+    let digest = ChDigest::new(*blake3::hash(token_id.as_bytes()).as_bytes());
+    MarketExecutionRow {
+        execution_id: digest,
+        match_id: None,
+        maker_order_filled_event_id: digest,
         market_id: MarketId::new("market-integration"),
         token_id: TokenId::new(token_id),
-        event_time: received_at,
-        ingestion_time: received_at,
-        stream_session_id: None,
-        token_sequence: Some(1),
-        participant_address: String::new(),
-        participant_role: ChTradeParticipantRole::Unknown,
-        side: ChTradeSide::Buy,
+        contract_key: "ctf_exchange_v2".to_owned(),
+        exchange_version: ChExchangeVersion::V2,
+        transaction_hash: format!("0x{}", "a".repeat(64)),
+        block_number: u64::try_from(received_at).unwrap_or_default(),
+        transaction_index: 0,
+        log_index: 0,
+        maker_address: format!("0x{}", "1".repeat(40)),
+        taker_address: format!("0x{}", "2".repeat(40)),
+        side: ChExchangeSide::Buy,
         price: ChPrice::from(Price::new(dec!(0.95))),
         size_shares: ChShares::from(Shares::new(dec!(10))),
         notional_usd: ChUsd::from(Usd::new(dec!(9.5))),
-        tx_hash: None,
-        source_event_id: format!("ws:{token_id}:{received_at}"),
-        source: ChTradeTapeSource::MarketWs,
-        observed_field_flags: u16::MAX,
-        fee_rate_bps: None,
-        reconciliation_status: ChTradeReconciliationStatus::Pending,
-        matched_source_event_id: None,
-        revision: 1,
-        reconciled_at: None,
-        raw_payload_json: Some(r#"{"test":true}"#.into()),
-        schema_version: ChSchemaVersion(2),
+        fee_amount: ChAssetAmount::from(dec!(0)),
+        fee_asset_id: "0".to_owned(),
+        effective_at: received_at,
+        observed_at: received_at,
+        model_available_at: received_at,
+        availability_basis: ChAvailabilityBasis::BlockConfirmation,
+        availability_policy_hash: digest,
+        chunk_id: Uuid::from_u128(1),
+        schema_version: MarketExecutionRow::SCHEMA_VERSION,
     }
 }
 
-pub async fn trade_tape_direct_roundtrip() {
+pub async fn execution_history_direct_roundtrip() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
-    let row = sample_trade("tok-direct", Utc::now().timestamp_millis());
+    let row = sample_execution("tok-direct", Utc::now().timestamp_millis());
     let mut insert = client
-        .insert::<TradeTapeRow>("quant_trade_tape")
+        .insert::<MarketExecutionRow>("quant_market_execution")
         .await
         .expect("insert start");
     insert.write(&row).await.expect("write row");
     insert.end().await.expect("end insert");
 
     let count: u64 = client
-        .query("SELECT count() FROM quant_trade_tape WHERE token_id = 'tok-direct'")
+        .query("SELECT count() FROM quant_market_execution WHERE token_id = 'tok-direct'")
         .fetch_one()
         .await
         .expect("count");
     assert_eq!(count, 1);
 }
 
-pub async fn last_trade_projects_once() {
+pub async fn last_trade_is_signal() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let now = Utc::now().timestamp_millis();
     let stream_session_id = Uuid::now_v7();
@@ -707,7 +709,6 @@ pub async fn last_trade_projects_once() {
     }
     .seal()
     .expect("seal LastTrade ledger row");
-    let expected_source_event_id = ContentHash::from(row.event_hash).to_string();
     let write_manager = ChWriteManager::new(1);
 
     for _ in 0..2 {
@@ -727,7 +728,7 @@ pub async fn last_trade_projects_once() {
         .expect("count deduplicated LastTrade ledger rows");
     let trade_count: u64 = client
         .query(
-            "SELECT count() FROM quant_trade_tape \
+            "SELECT count() FROM quant_market_execution \
              WHERE token_id = 'tok-ledger-last-trade'",
         )
         .fetch_one()
@@ -735,66 +736,30 @@ pub async fn last_trade_projects_once() {
         .expect("count materialized LastTrade rows");
     assert_eq!(ledger_count, 1, "retried ledger block must deduplicate");
     assert_eq!(
-        trade_count, 1,
-        "dependent materialized view must deduplicate"
+        trade_count, 0,
+        "CLOB LastTrade is reconciliation-only and must not become an authoritative execution"
     );
-
-    let projected = client
-        .query(
-            "SELECT ?fields FROM quant_trade_tape \
-             WHERE token_id = 'tok-ledger-last-trade' LIMIT 1",
-        )
-        .fetch_one::<TradeTapeRow>()
-        .await
-        .expect("read materialized trade tape row");
-    let expected_coverage = TRADE_ID | MARKET_ID | TOKEN_ID | PRICE | SIDE | SIZE | FEE_RATE;
-    assert_eq!(
-        projected.market_id,
-        MarketId::new("market-ledger-last-trade")
-    );
-    assert_eq!(projected.token_id, TokenId::new("tok-ledger-last-trade"));
-    assert_eq!(projected.event_time, now);
-    assert_eq!(projected.ingestion_time, now + 2);
-    assert_eq!(projected.stream_session_id, Some(stream_session_id));
-    assert_eq!(projected.token_sequence, Some(41));
-    assert_eq!(projected.participant_address, "");
-    assert_eq!(projected.participant_role, ChTradeParticipantRole::Unknown);
-    assert_eq!(projected.side, ChTradeSide::Sell);
-    assert_eq!(projected.price, ChPrice::from(Price::new(dec!(0.4115))));
-    assert_eq!(projected.size_shares, ChShares::from(Shares::new(dec!(9))));
-    assert_eq!(projected.notional_usd, ChUsd::from(Usd::new(dec!(3.7035))));
-    assert_eq!(projected.tx_hash, None);
-    assert_eq!(projected.source_event_id, expected_source_event_id);
-    assert_eq!(projected.source, ChTradeTapeSource::MarketWs);
-    assert_eq!(projected.observed_field_flags, expected_coverage);
-    assert_eq!(projected.fee_rate_bps, Some(ChBps::from(dec!(2.5))));
-    assert_eq!(
-        projected.reconciliation_status,
-        ChTradeReconciliationStatus::Pending
-    );
-    assert_eq!(projected.matched_source_event_id, None);
-    assert_eq!(projected.revision, 1);
-    assert_eq!(projected.reconciled_at, None);
-    assert_eq!(projected.raw_payload_json, None);
-    assert_eq!(projected.schema_version, ChSchemaVersion::FIRST);
 }
 
 /// Build a tick-event `AsyncWriter` whose flush sink is `ChWriteManager::write_batch`.
-fn trade_writer(
+fn execution_writer(
     client: Client,
     write_manager: Arc<ChWriteManager>,
-) -> (AsyncWriter<TradeTapeRow>, AsyncWriterWorker<TradeTapeRow>) {
+) -> (
+    AsyncWriter<MarketExecutionRow>,
+    AsyncWriterWorker<MarketExecutionRow>,
+) {
     AsyncWriter::new(
-        AsyncWriterConfig::new("quant_trade_tape")
+        AsyncWriterConfig::new("quant_market_execution")
             .capacity(10_000)
             .batch_size(10_000)
             .flush_interval(Duration::from_hours(1)),
-        move |rows: Vec<TradeTapeRow>| {
+        move |rows: Vec<MarketExecutionRow>| {
             let write_manager = Arc::clone(&write_manager);
             let client = client.clone();
             Box::pin(async move {
                 write_manager
-                    .write_batch(&client, "quant_trade_tape", rows)
+                    .write_batch(&client, "quant_market_execution", rows)
                     .await
             })
         },
@@ -808,19 +773,19 @@ pub async fn async_writer_shutdown_buffer() {
     let shutdown = CancellationToken::new();
     let write_manager = Arc::new(ChWriteManager::new(4));
 
-    let (writer, worker) = trade_writer(client.clone(), write_manager);
+    let (writer, worker) = execution_writer(client.clone(), write_manager);
     let handle = tokio::spawn(worker.run(shutdown.clone()));
 
     let now = Utc::now().timestamp_millis();
     for i in 0..3 {
-        assert!(writer.write(sample_trade(&format!("tok-drain-{i}"), now + i * 1000)));
+        assert!(writer.write(sample_execution(&format!("tok-drain-{i}"), now + i * 1000)));
     }
 
     shutdown.cancel();
     let _ = handle.await;
 
     let count: u64 = client
-        .query("SELECT count() FROM quant_trade_tape WHERE token_id LIKE 'tok-drain-%'")
+        .query("SELECT count() FROM quant_market_execution WHERE token_id LIKE 'tok-drain-%'")
         .fetch_one()
         .await
         .expect("count rows");
@@ -831,19 +796,19 @@ pub async fn async_writer_channel_buffer() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let write_manager = Arc::new(ChWriteManager::new(4));
 
-    let (writer, worker) = trade_writer(client.clone(), write_manager);
+    let (writer, worker) = execution_writer(client.clone(), write_manager);
     // Shutdown never fires; dropping the writer must still drain the tail.
     let handle = tokio::spawn(worker.run(CancellationToken::new()));
 
     let now = Utc::now().timestamp_millis();
-    assert!(writer.write(sample_trade("tok-close-1", now)));
-    assert!(writer.write(sample_trade("tok-close-2", now + 1_000)));
+    assert!(writer.write(sample_execution("tok-close-1", now)));
+    assert!(writer.write(sample_execution("tok-close-2", now + 1_000)));
 
     drop(writer);
     let _ = handle.await;
 
     let count: u64 = client
-        .query("SELECT count() FROM quant_trade_tape WHERE token_id LIKE 'tok-close-%'")
+        .query("SELECT count() FROM quant_market_execution WHERE token_id LIKE 'tok-close-%'")
         .fetch_one()
         .await
         .expect("count");

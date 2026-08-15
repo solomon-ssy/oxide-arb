@@ -488,6 +488,12 @@
           "format": "uint64",
           "minimum": 0
         },
+        "max_execution_age_secs": {
+          "description": "Maximum acceptable age (seconds) of the freshest finalized execution at\ndecision time (`StalenessRule::MaxExecutionAge`).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "max_feature_bucket_age_secs": {
           "description": "Maximum acceptable age (seconds) of the freshest materialized feature\nbucket at decision time. Governs offline/online feature staleness\n(`StalenessRule::MaxFeatureBucketAge`) — independent of live ingest lag.",
           "type": "integer",
@@ -506,12 +512,6 @@
           "format": "uint64",
           "minimum": 0
         },
-        "max_trade_tape_age_secs": {
-          "description": "Maximum acceptable age (seconds) of the freshest trade-tape print at\ndecision time (`StalenessRule::MaxTradeTapeAge`).",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
         "reject_crossed_books": {
           "description": "Reject crossed books before feature generation.",
           "type": "boolean"
@@ -526,7 +526,7 @@
         "max_book_age_ms",
         "max_ingest_lag_ms",
         "max_feature_bucket_age_secs",
-        "max_trade_tape_age_secs",
+        "max_execution_age_secs",
         "max_domain_observation_age_secs",
         "reject_crossed_books",
         "reject_empty_books",
@@ -2400,6 +2400,10 @@
           "type": "string",
           "format": "uuid"
         },
+        "recommendation_contract_digest": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
         "route_set_digest": {
           "type": "string",
           "pattern": "^blake3:[0-9a-f]{64}$"
@@ -2408,10 +2412,6 @@
           "$ref": "#/$defs/SchemaVersion"
         },
         "serving_contract_digest": {
-          "type": "string",
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "trade_policy_contract_digest": {
           "type": "string",
           "pattern": "^blake3:[0-9a-f]{64}$"
         }
@@ -2423,7 +2423,7 @@
         "route_set_digest",
         "serving_contract_digest",
         "calibration_contract_digest",
-        "trade_policy_contract_digest",
+        "recommendation_contract_digest",
         "scenario_model_schema_version",
         "capital_time_bucket_contract_digest",
         "model_content_hash",

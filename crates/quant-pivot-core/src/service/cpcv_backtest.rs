@@ -34,8 +34,9 @@ use quant_pivot_models::{
     domain::{
         governance::DecisionPolicySnapshotInfo,
         quant::{
-            JobProgressSink, ModelSpecInfo, ModelVersionInfo, PortfolioScenarioVisibility,
-            RouteCompatibilityDigests, RouteContractHash, TrainingDatasetInfo,
+            JobProgressSink, ModelSpecInfo, ModelVersionInfo, PortfolioScenarioEvidenceRegime,
+            PortfolioScenarioVisibility, RouteCompatibilityDigests, RouteContractHash,
+            TrainingDatasetInfo,
         },
     },
     enums::{
@@ -49,12 +50,12 @@ use quant_pivot_models::{
     },
     types::{
         BacktestPathSetId, BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId,
-        ModelInputContract, ModelRunId, ModelVersionId, ResearchJobProgress,
-        ResearchProfileArtifact, TrainingDatasetId,
+        ModelInputContract, ModelRunId, ModelVersionId, ResearchFeatureContract,
+        ResearchJobProgress, ResearchProfileArtifact, ServingAuthority, TrainingDatasetId,
         backtest::{
             BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
-            CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
-            CpcvTrialPathBinding, CscvSelectionEvidence, CscvTrialGridBinding,
+            CpcvFoldCalibrationPolicy, CpcvFoldValidationRegime, CpcvMethodologyBinding,
+            CpcvPathSetSubject, CpcvTrialPathBinding, CscvSelectionEvidence, CscvTrialGridBinding,
         },
         factor::FactorServingPlane,
         model_lineage::ModelVersionDerivation,
@@ -78,16 +79,16 @@ use quant_pivot_research::{
         PortfolioReplayBacktester, PrecomputedBacktestInputs, PrecomputedBacktestTick,
     },
     factors::FactorEngine,
-    features::FeatureSchema,
+    features::ExecutableFeatureSchema,
     hashing::ResearchHasher,
     model::{
         CancellationProbe, CrossFittedRuntime, HorizonMultipliers, LabelSelector, ModelArtifact,
-        ModelRankScore, ModelRuntimeInput, ModelRuntimeOutput, NestedCalibrationFitInput,
-        NestedCalibrationFitter, NestedCalibrationObservation, NestedCalibrationPolicy,
-        PreparedWeightedFold, QuantModelRuntime, ResolvedCalibration, ReturnModelSpec,
-        SubstitutionConfidenceRules, TrainModelRequest, ValidationSpec, WeightedFactorRuntime,
-        WeightedModelTrainingOutput, artifact::ModelPayload, factor_heads::FactorHeadSpec,
-        objective::runtime_training_objective,
+        ModelRankScore, ModelRankTarget, ModelRuntimeInput, ModelRuntimeOutput,
+        NestedCalibrationFitInput, NestedCalibrationFitter, NestedCalibrationObservation,
+        NestedCalibrationPolicy, PreparedWeightedFold, QuantModelRuntime, ResolvedCalibration,
+        ReturnModelSpec, SubstitutionConfidenceRules, TrainModelRequest, ValidationSpec,
+        WeightedFactorRuntime, WeightedModelTrainingOutput, artifact::ModelPayload,
+        factor_heads::FactorHeadSpec, objective::runtime_training_objective,
     },
     portfolio::{
         PortfolioScenarioFoldFitInput, PortfolioScenarioMethodology, PortfolioScenarioModelFitter,
@@ -120,7 +121,7 @@ use tracing::info;
 use crate::service::model_training;
 use crate::{
     prefetch::source_slice::{FrozenSourceSlice, SourceSliceReader},
-    projection::inference_batch::build_runtime_input,
+    projection::inference_batch::{build_frozen_runtime_input, build_runtime_input},
     service::{
         backtest::{FrozenTickBuild, frozen_ticks},
         historical_replay::ReplayConfig,
@@ -1112,6 +1113,7 @@ impl CpcvBacktestService {
                 &self.replay.factors,
                 &self.replay.features,
                 &self.replay.domain,
+                source.profile().spec.feature_contract,
                 source.profile().spec.category,
                 self.replay.bias_table.clone(),
             )
@@ -1402,7 +1404,11 @@ impl CpcvBacktestService {
         let label = rank_target(model_spec);
         let input_contract = &model_spec.input_contract;
         let materialization = require_dataset_materialization(dataset)?;
-        self.validate_cpcv_input_contract(input_contract, materialization.feature_schema_hash)?;
+        self.validate_cpcv_input_contract(
+            input_contract,
+            materialization.feature_schema_hash,
+            research_profile.spec.feature_contract,
+        )?;
         progress.report(ResearchJobProgress::with_total(
             "load",
             CpcvProgress::LOAD.start,
@@ -1445,60 +1451,70 @@ impl CpcvBacktestService {
             CpcvProgress::MATERIALIZE_TICKS.start,
             CpcvProgress::TOTAL,
         ));
-        let probe_runtime = ProbeRuntime::for_cpcv(
-            bindings,
-            *materialization.feature_schema_hash,
-            input_contract.clone(),
-        );
-        let frozen_source = self.load_cpcv_source(dataset, research_profile).await?;
-        let portfolio = self
-            .portfolio_contexts
-            .load_cpcv_single(
-                &input.source,
-                self.evaluation_frozen_at,
-                self.portfolio_contexts
-                    .policy()
-                    .recommendation
-                    .reports
-                    .ad_hoc_default_top_n,
-            )
-            .await?;
-        let ticks = self
-            .deps
-            .compute
-            .run_offline_scoped(OfflineMemory::try_gib(6)?, cancel, || {
-                frozen_ticks(FrozenTickBuild {
-                    examples: &examples,
-                    frozen_source: &frozen_source,
-                    entry_max_slippage_bps: self.config.entry_max_slippage_bps,
-                    rank_target: &label,
-                    model: &probe_runtime,
-                    model_run_id: &input.model_run_id,
-                    portfolio: &portfolio.portfolio,
-                    cancel,
-                    sink: progress,
+        let predictive_only =
+            research_profile.spec.serving_authority == ServingAuthority::ReportOnlyWithLiveL2;
+        let (ticks, scenario_methodology) = if predictive_only {
+            (Vec::new(), None)
+        } else {
+            let probe_runtime = ProbeRuntime::for_cpcv(
+                bindings,
+                *materialization.feature_schema_hash,
+                input_contract.clone(),
+            );
+            let frozen_source = self.load_cpcv_source(dataset, research_profile).await?;
+            let portfolio = self
+                .portfolio_contexts
+                .load_cpcv_single(
+                    &input.source,
+                    self.evaluation_frozen_at,
+                    self.portfolio_contexts
+                        .policy()
+                        .recommendation
+                        .reports
+                        .ad_hoc_default_top_n,
+                )
+                .await?;
+            let ticks = self
+                .deps
+                .compute
+                .run_offline_scoped(OfflineMemory::try_gib(6)?, cancel, || {
+                    frozen_ticks(FrozenTickBuild {
+                        examples: &examples,
+                        frozen_source: &frozen_source,
+                        entry_max_slippage_bps: self.config.entry_max_slippage_bps,
+                        rank_target: &label,
+                        model: &probe_runtime,
+                        model_run_id: &input.model_run_id,
+                        portfolio: &portfolio.portfolio,
+                        cancel,
+                        sink: progress,
+                    })
                 })
-            })
-            .await?;
-        let Some(ticks) = ticks else {
-            return Err(ResearchError::Cancelled {
-                detail: "cpcv backtest cancelled during tick materialization".to_owned(),
-            }
-            .into());
+                .await?;
+            let Some(ticks) = ticks else {
+                return Err(ResearchError::Cancelled {
+                    detail: "cpcv backtest cancelled during tick materialization".to_owned(),
+                }
+                .into());
+            };
+            (ticks, Some(portfolio.scenario_methodology))
         };
         let handle = Handle::current();
         let replay_template = self.replay_template(PortfolioReplayTemplateBuild {
             dataset_id: dataset.training_dataset_id,
             decision_policy_snapshot_id: bindings.policy_snapshot.decision_policy_snapshot_id,
             model_family,
+            feature_contract: research_profile.spec.feature_contract,
             category_scope: research_profile.spec.category,
             ticks,
             groups: Arc::clone(&groups),
             examples: Arc::clone(&examples),
             group_example_ranges: Arc::clone(&group_example_ranges),
+            label: label.clone(),
             handle,
             model_run_id: input.model_run_id,
-            scenario_methodology: portfolio.scenario_methodology,
+            scenario_methodology,
+            predictive_only,
             evaluation_frozen_at: self.evaluation_frozen_at,
         });
         #[cfg(not(feature = "ml-classical"))]
@@ -1516,6 +1532,8 @@ impl CpcvBacktestService {
             subject_payload: input.source.artifact().payload().clone(),
             label,
             input_contract: Arc::new(input_contract.clone()),
+            #[cfg(feature = "ml-classical")]
+            feature_contract: research_profile.spec.feature_contract,
             groups,
             cancellation: cancellation_probe(cancel),
             fold_ledger,
@@ -1576,12 +1594,13 @@ impl CpcvBacktestService {
                     &self.replay.factors,
                     &self.replay.features,
                     &self.replay.domain,
+                    input.feature_contract,
                     input.category_scope,
                     self.replay.bias_table.clone(),
                 ),
                 factor_config: self.replay.factors.clone(),
-                examples: input.examples,
-                group_example_ranges: input.group_example_ranges,
+                examples: Arc::clone(&input.examples),
+                group_example_ranges: Arc::clone(&input.group_example_ranges),
             });
         Arc::new(PortfolioReplayTemplate::from_input(
             PortfolioReplayTemplateInput {
@@ -1592,7 +1611,11 @@ impl CpcvBacktestService {
                 handle: input.handle,
                 model_run_id: input.model_run_id,
                 weighted,
+                examples: input.examples,
+                group_example_ranges: input.group_example_ranges,
+                label: input.label,
                 scenario_methodology: input.scenario_methodology,
+                predictive_only: input.predictive_only,
                 evaluation_frozen_at: input.evaluation_frozen_at,
             },
         ))
@@ -1602,6 +1625,7 @@ impl CpcvBacktestService {
         &self,
         input_contract: &ModelInputContract,
         frozen_feature_schema_hash: &ContentHash,
+        feature_contract: ResearchFeatureContract,
     ) -> QuantResult<()> {
         input_contract.validate().map_err(|detail| {
             QuantError::from(ResearchError::ValidationMethodology {
@@ -1615,7 +1639,8 @@ impl CpcvBacktestService {
             }
             .into());
         }
-        let feature_schema = FeatureSchema::build(&self.replay.features)?;
+        let feature_schema =
+            ExecutableFeatureSchema::build(&self.replay.features, feature_contract)?;
         let feature_schema_hash = ResearchHasher::feature_schema(&feature_schema)?;
         if &feature_schema_hash != frozen_feature_schema_hash {
             return Err(ResearchError::ValidationMethodology {
@@ -1655,6 +1680,7 @@ impl CpcvBacktestService {
             subject_payload,
             label,
             input_contract,
+            feature_contract,
             groups,
             cancellation,
             fold_ledger,
@@ -1679,7 +1705,10 @@ impl CpcvBacktestService {
                     kind: classical.kind,
                     multipliers: classical.multipliers,
                     substitution_rules: classical.substitution_confidence_rules,
-                    schema: Arc::new(FeatureSchema::build(&self.replay.features)?),
+                    schema: Arc::new(ExecutableFeatureSchema::build(
+                        &self.replay.features,
+                        feature_contract,
+                    )?),
                     groups,
                     purge: self.config.purge,
                     fold_ledger,
@@ -2311,6 +2340,7 @@ impl FoldArtifactLedger {
         let identity = Self::estimator_identity(identity)?;
         let serving_contract_hash = artifact.header().serving_contract().contract_hash();
         let evidence = CpcvFoldArtifact {
+            validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
             identity,
             training_groups_hash,
             training_group_count,
@@ -2325,6 +2355,59 @@ impl FoldArtifactLedger {
             scenario_economic_function_hash: functions.scenario_economic_function,
             calibration_artifact_hash: functions.calibration_artifact,
             scenario_model_hash: functions.scenario_model,
+        };
+        self.artifacts
+            .lock()
+            .map_err(|_| ResearchError::ValidationMethodology {
+                detail: "CPCV fold-artifact ledger mutex was poisoned".to_owned(),
+            })?
+            .push(evidence);
+        Ok(())
+    }
+
+    fn record_predictive(
+        &self,
+        identity: FoldTrainingIdentity<'_>,
+        filter: &GroupRowFilter,
+        artifact: &ModelArtifact,
+    ) -> QuantResult<()> {
+        let training_group_count = u64::try_from(filter.group_indices.len()).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("predictive CPCV fold group count does not fit u64: {error}"),
+            }
+        })?;
+        let training_groups_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/cpcv-fold-training-groups",
+            1,
+            &filter.group_indices,
+        )?;
+        let empty_groups_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/cpcv-fold-not-applicable-groups",
+            1,
+            &Vec::<usize>::new(),
+        )?;
+        let utility_hash = predictive_utility_hash()?;
+        let not_applicable_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/cpcv-fold-not-applicable-artifact",
+            1,
+            &"predictive_utility",
+        )?;
+        let evidence = CpcvFoldArtifact {
+            identity: Self::estimator_identity(identity)?,
+            validation_regime: CpcvFoldValidationRegime::PredictiveUtility,
+            training_groups_hash,
+            training_group_count,
+            calibration_fit_groups_hash: empty_groups_hash,
+            calibration_fit_group_count: 0,
+            scenario_fit_groups_hash: empty_groups_hash,
+            scenario_fit_group_count: 0,
+            model_artifact_hash: artifact.content_hash()?,
+            serving_contract_hash: artifact.header().serving_contract().contract_hash(),
+            model_payload_hash: artifact.payload().model_payload_hash()?,
+            calibration_function_hash: utility_hash,
+            scenario_economic_function_hash: utility_hash,
+            calibration_artifact_hash: not_applicable_hash,
+            scenario_model_hash: not_applicable_hash,
         };
         self.artifacts
             .lock()
@@ -2359,6 +2442,8 @@ struct FoldTemplateBuild {
     subject_payload: ModelPayload,
     label: LabelSelector,
     input_contract: Arc<ModelInputContract>,
+    #[cfg(feature = "ml-classical")]
+    feature_contract: ResearchFeatureContract,
     groups: Arc<[TimelineGroup]>,
     cancellation: CancellationProbe,
     fold_ledger: FoldArtifactLedger,
@@ -2619,14 +2704,17 @@ struct PortfolioReplayTemplateBuild {
     dataset_id: TrainingDatasetId,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     model_family: ModelFamily,
+    feature_contract: ResearchFeatureContract,
     category_scope: Option<MarketCategory>,
     ticks: Vec<BacktestTick>,
     groups: Arc<[TimelineGroup]>,
     examples: Arc<[TrainingExample]>,
     group_example_ranges: Arc<[Range<usize>]>,
+    label: LabelSelector,
     handle: Handle,
     model_run_id: ModelRunId,
-    scenario_methodology: PortfolioScenarioMethodology,
+    scenario_methodology: Option<PortfolioScenarioMethodology>,
+    predictive_only: bool,
     evaluation_frozen_at: DateTime<Utc>,
 }
 
@@ -2638,7 +2726,11 @@ struct PortfolioReplayTemplateInput {
     handle: Handle,
     model_run_id: ModelRunId,
     weighted: Option<WeightedPortfolioReplay>,
-    scenario_methodology: PortfolioScenarioMethodology,
+    examples: Arc<[TrainingExample]>,
+    group_example_ranges: Arc<[Range<usize>]>,
+    label: LabelSelector,
+    scenario_methodology: Option<PortfolioScenarioMethodology>,
+    predictive_only: bool,
     evaluation_frozen_at: DateTime<Utc>,
 }
 
@@ -2650,7 +2742,11 @@ struct PortfolioReplayTemplate {
     handle: Handle,
     model_run_id: ModelRunId,
     weighted: Option<WeightedPortfolioReplay>,
-    scenario_methodology: PortfolioScenarioMethodology,
+    examples: Arc<[TrainingExample]>,
+    group_example_ranges: Arc<[Range<usize>]>,
+    label: LabelSelector,
+    scenario_methodology: Option<PortfolioScenarioMethodology>,
+    predictive_only: bool,
     evaluation_frozen_at: DateTime<Utc>,
 }
 
@@ -2670,7 +2766,11 @@ impl PortfolioReplayTemplate {
             handle: input.handle,
             model_run_id: input.model_run_id,
             weighted: input.weighted,
+            examples: input.examples,
+            group_example_ranges: input.group_example_ranges,
+            label: input.label,
             scenario_methodology: input.scenario_methodology,
+            predictive_only: input.predictive_only,
             evaluation_frozen_at: input.evaluation_frozen_at,
         }
     }
@@ -2700,6 +2800,63 @@ impl PortfolioReplayTemplate {
             tick.model_input = weighted.model_input(model, &self.model_run_id, group_index)?;
         }
         Ok(tick)
+    }
+
+    fn predictive_group(
+        &self,
+        group_index: usize,
+        model: &dyn QuantModelRuntime,
+    ) -> QuantResult<GroupEvaluation> {
+        let range = self.group_example_ranges.get(group_index).ok_or_else(|| {
+            ResearchError::ValidationMethodology {
+                detail: format!("predictive CPCV group {group_index} has no example range"),
+            }
+        })?;
+        let examples = self.examples.get(range.clone()).ok_or_else(|| {
+            ResearchError::ValidationMethodology {
+                detail: format!("predictive CPCV group {group_index} has an invalid range"),
+            }
+        })?;
+        let references = examples.iter().collect::<Vec<_>>();
+        let input = build_frozen_runtime_input(model, &self.model_run_id, &references)?;
+        let output = self.handle.block_on(model.infer_batch(input))?;
+        let rank_targets = examples
+            .iter()
+            .filter_map(|example| {
+                example
+                    .labels
+                    .iter()
+                    .find(|label| {
+                        label.label_name == self.label.name
+                            && label.horizon_secs == self.label.horizon_secs
+                    })
+                    .map(|label| BacktestRankTarget {
+                        market_id: example.market_id.clone(),
+                        token_id: example.token_id.clone(),
+                        target: ModelRankTarget {
+                            label_name: self.label.name.clone(),
+                            label_horizon_secs: self.label.horizon_secs,
+                        },
+                        realized: label.value,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let decision_at = examples
+            .first()
+            .map(TrainingExample::decision_at)
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: format!("predictive CPCV group {group_index} is empty"),
+            })?;
+        let rank_observations = rank_pairs(decision_at, &rank_targets, &output.rank_scores)?;
+        let (return_value, residual) = predictive_utility(examples, &self.label, &output)?;
+        Ok(GroupEvaluation {
+            group_index,
+            return_value,
+            scenario_residual: Some(residual),
+            rank_observations,
+            executed_turnover: None,
+            portfolio_replay: None,
+        })
     }
 
     fn complete_fold(
@@ -2811,16 +2968,21 @@ impl PortfolioReplayTemplate {
         })?;
         let fitted_scenario =
             PortfolioScenarioModelFitter::fit_fold(&PortfolioScenarioFoldFitInput {
-                methodology: &self.scenario_methodology,
+                methodology: self.scenario_methodology.as_ref().ok_or_else(|| {
+                    ResearchError::ValidationMethodology {
+                        detail: "portfolio CPCV replay has no scenario methodology".to_owned(),
+                    }
+                })?,
                 represented_routes,
                 compatibility,
+                evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
                 route,
                 model_version_id: artifact.header().model_version_id(),
                 model_artifact_hash: artifact.content_hash()?,
                 serving_contract_hash: contract.contract_hash(),
                 calibration_artifact_hash: fitted_calibration.content_hash,
                 calibration: &fitted_calibration.resolved,
-                trade_policy_contract_hash: trade_policy.content_hash,
+                recommendation_contract_hash: trade_policy.content_hash,
                 prediction_horizon_secs: bindings.model.prediction_horizon_secs,
                 observations: &residual_observations,
                 estimator_identity_hash: evidence.estimator_identity_hash,
@@ -3208,13 +3370,27 @@ fn nested_fold_split(
 impl FoldModelSource for WeightedFactorFoldSource<'_> {
     fn train_fold(&self, request: FoldTrainingRequest<'_>) -> QuantResult<FoldRuntime> {
         let FoldTrainingRequest { identity, filter } = request;
-        let split = nested_fold_split(
-            filter,
-            &self.template.groups,
-            self.template.purge,
-            self.template.economic_policy.holdout_bps,
-            self.template.economic_policy.minimum_groups,
-        )?;
+        let split = if self.template.replay.predictive_only {
+            NestedFoldSplit {
+                model: GroupRowFilter {
+                    group_indices: filter.group_indices.clone(),
+                },
+                calibration: GroupRowFilter {
+                    group_indices: Vec::new(),
+                },
+                scenario: GroupRowFilter {
+                    group_indices: Vec::new(),
+                },
+            }
+        } else {
+            nested_fold_split(
+                filter,
+                &self.template.groups,
+                self.template.purge,
+                self.template.economic_policy.holdout_bps,
+                self.template.economic_policy.minimum_groups,
+            )?
+        };
         let group_indices =
             validated_group_indices(&split.model, self.template.group_example_ranges.len())?;
         let capacity = group_indices
@@ -3262,6 +3438,12 @@ impl FoldModelSource for WeightedFactorFoldSource<'_> {
         }
         .seal()?;
         let runtime = WeightedFactorRuntime::new(artifact.clone(), None)?;
+        if self.template.replay.predictive_only {
+            self.template
+                .fold_ledger
+                .record_predictive(identity, filter, &artifact)?;
+            return Ok(FoldRuntime::BuyModel(Box::new(runtime)));
+        }
         let complete = self.template.replay.complete_fold(
             identity,
             &split,
@@ -3294,7 +3476,7 @@ struct ClassicalFoldTemplate {
     kind: ClassicalKind,
     multipliers: ScoreMultiplierSpec,
     substitution_rules: SubstitutionConfidenceRules,
-    schema: Arc<FeatureSchema>,
+    schema: Arc<ExecutableFeatureSchema>,
     groups: Arc<[TimelineGroup]>,
     purge: PurgeConfig,
     fold_ledger: FoldArtifactLedger,
@@ -3319,13 +3501,27 @@ struct ClassicalFoldSource<'a> {
 impl FoldModelSource for ClassicalFoldSource<'_> {
     fn train_fold(&self, request: FoldTrainingRequest<'_>) -> QuantResult<FoldRuntime> {
         let FoldTrainingRequest { identity, filter } = request;
-        let split = nested_fold_split(
-            filter,
-            &self.template.groups,
-            self.template.purge,
-            self.template.economic_policy.holdout_bps,
-            self.template.economic_policy.minimum_groups,
-        )?;
+        let split = if self.template.replay.predictive_only {
+            NestedFoldSplit {
+                model: GroupRowFilter {
+                    group_indices: filter.group_indices.clone(),
+                },
+                calibration: GroupRowFilter {
+                    group_indices: Vec::new(),
+                },
+                scenario: GroupRowFilter {
+                    group_indices: Vec::new(),
+                },
+            }
+        } else {
+            nested_fold_split(
+                filter,
+                &self.template.groups,
+                self.template.purge,
+                self.template.economic_policy.holdout_bps,
+                self.template.economic_policy.minimum_groups,
+            )?
+        };
         let group_indices =
             validated_group_indices(&split.model, self.template.group_example_ranges.len())?;
         let matrix = model_training::build_classical_matrix(
@@ -3395,6 +3591,12 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
         }
         .seal()?;
         let runtime = ClassicalRuntime::load(artifact.clone(), &output.model_bytes)?;
+        if self.template.replay.predictive_only {
+            self.template
+                .fold_ledger
+                .record_predictive(identity, filter, &artifact)?;
+            return Ok(FoldRuntime::BuyModel(Box::new(runtime)));
+        }
         let complete = self.template.replay.complete_fold(
             identity,
             &split,
@@ -3564,6 +3766,14 @@ impl ReplayEngine for FoldReplayEngineAdapter<'_> {
         model: &FoldRuntime,
         filter: &GroupRowFilter,
     ) -> QuantResult<Vec<GroupEvaluation>> {
+        if self.template.predictive_only {
+            let estimator = model.as_buy()?;
+            return filter
+                .group_indices
+                .iter()
+                .map(|&group_index| self.template.predictive_group(group_index, estimator))
+                .collect();
+        }
         let estimator = model.as_portfolio_buy()?;
         let visibility = estimator.visibility_for(filter)?;
         evaluate_portfolio_groups(
@@ -3582,6 +3792,9 @@ impl ReplayEngine for FoldReplayEngineAdapter<'_> {
         groups: &[TimelineGroup],
         evaluations: &[&GroupEvaluation],
     ) -> QuantResult<Option<PathEconomicReplay>> {
+        if self.template.predictive_only {
+            return Ok(None);
+        }
         if groups.len() != evaluations.len() || groups.is_empty() {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
@@ -3732,6 +3945,104 @@ fn rank_observations(
     output: &ModelRuntimeOutput,
 ) -> QuantResult<Vec<RankObservation>> {
     rank_pairs(tick.decision_at, &tick.rank_targets, &output.rank_scores)
+}
+
+fn predictive_utility_hash() -> QuantResult<ContentHash> {
+    Ok(CanonicalDigest::content_hash_typed(
+        "quant-pivot/bootstrap-predictive-utility",
+        1,
+        &(
+            "mean_brier_skill_against_half_probability",
+            "allocation_independent",
+            "finalized_token_payout_ratio",
+        ),
+    )?)
+}
+
+fn predictive_utility(
+    examples: &[TrainingExample],
+    label: &LabelSelector,
+    output: &ModelRuntimeOutput,
+) -> QuantResult<(Decimal, Decimal)> {
+    let mut truth = BTreeMap::new();
+    for example in examples {
+        let row = example
+            .labels
+            .iter()
+            .find(|row| {
+                let same_label = row.label_name == label.name;
+                let same_horizon = row.horizon_secs == label.horizon_secs;
+                same_label && same_horizon
+            })
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: format!(
+                    "predictive CPCV market {} has no finalized target",
+                    example.market_id
+                ),
+            })?;
+        if truth
+            .insert(example.market_id.as_str(), row.value)
+            .is_some()
+        {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "predictive CPCV group duplicates market {}",
+                    example.market_id
+                ),
+            }
+            .into());
+        }
+    }
+    let mut skill_sum = Decimal::ZERO;
+    let mut residual_sum = Decimal::ZERO;
+    let mut count = 0_u64;
+    for score in &output.calibration_scores {
+        if score.prediction_horizon_secs != label.horizon_secs {
+            continue;
+        }
+        let Some(yes_payout) = truth.get(score.market_id.as_str()).copied() else {
+            continue;
+        };
+        let realized = match score.outcome_side {
+            OutcomeSide::Yes => yes_payout,
+            OutcomeSide::No => Decimal::ONE - yes_payout,
+        };
+        let predicted = score.composite_score.inner();
+        let error = predicted - realized;
+        let squared =
+            error
+                .checked_mul(error)
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "predictive CPCV Brier score overflowed Decimal".to_owned(),
+                })?;
+        skill_sum = skill_sum
+            .checked_add(Decimal::new(25, 2) - squared)
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "predictive CPCV utility sum overflowed Decimal".to_owned(),
+            })?;
+        residual_sum = residual_sum
+            .checked_add(realized - predicted)
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "predictive CPCV residual sum overflowed Decimal".to_owned(),
+            })?;
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "predictive CPCV observation count overflowed u64".to_owned(),
+            })?;
+    }
+    if count == 0 {
+        return Err(ResearchError::ValidationMethodology {
+            detail: "predictive CPCV group produced no finalized probability observations"
+                .to_owned(),
+        }
+        .into());
+    }
+    let denominator = Decimal::from(count);
+    Ok((
+        (skill_sum / denominator).normalize(),
+        (residual_sum / denominator).normalize(),
+    ))
 }
 
 fn rank_pairs(

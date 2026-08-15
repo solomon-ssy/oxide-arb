@@ -733,7 +733,7 @@ mod tests {
             WeatherVerticalBindingsConfig,
         },
         enums::domain::DomainFamily,
-        types::{DomainSourceId, builtin_research_profiles},
+        types::DomainSourceId,
     };
     use rust_decimal_macros::dec;
 
@@ -852,6 +852,5 @@ mod tests {
             );
         }
         assert!(rows.iter().all(|row| !row.affected_profile_ids.is_empty()));
-        assert_eq!(builtin_research_profiles().expect("profiles").len(), 3);
     }
 }

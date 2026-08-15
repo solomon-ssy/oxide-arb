@@ -590,7 +590,7 @@ fn validated_route_runs(
                             || route_run.calibration_artifact_id
                                 != Some(lineage.calibration_artifact_id)
                             || route_run.trade_policy_artifact_id
-                                != Some(lineage.trade_policy_artifact_id)
+                                != lineage.trade_policy_artifact_id
                             || route_run.research_profile_artifact_id
                                 != Some(lineage.research_profile_artifact_id.clone())
                     })

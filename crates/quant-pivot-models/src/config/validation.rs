@@ -10,8 +10,8 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use super::{
-    DeployConfig, DomainSourcesConfig, MAX_TRADE_TAPE_RECONCILIATION_ROWS, PolygonRpcEndpoint,
-    ResearchJobsConfig, TornadoRegionScopeConfig, WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
+    DeployConfig, DomainSourcesConfig, PolygonRpcEndpoint, ResearchJobsConfig,
+    TornadoRegionScopeConfig, WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
     WeatherHistoricalBindingKind,
 };
 use crate::{
@@ -976,10 +976,11 @@ fn validate_market_data(deploy: &DeployConfig, report: &mut ConfigValidationRepo
         || deploy.market_data.gamma.reconcile_interval_secs == 0
         || deploy.market_data.gamma.max_keyset_pages == 0
         || deploy.market_data.gamma.max_keyset_requests == 0
+        || deploy.market_data.gamma.historical_identity_days == 0
     {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "market_data.gamma",
-            detail: "page_size, reconcile_interval_secs, max_keyset_pages, and max_keyset_requests must be > 0".into(),
+            detail: "page_size, reconcile_interval_secs, max_keyset_pages, max_keyset_requests, and historical_identity_days must be > 0".into(),
         });
     }
     if deploy.market_data.gamma.max_keyset_requests < deploy.market_data.gamma.max_keyset_pages {
@@ -994,31 +995,68 @@ fn validate_market_data(deploy: &DeployConfig, report: &mut ConfigValidationRepo
             detail: "must be <= 500 (Gamma /events/keyset limit)".into(),
         });
     }
-    let trade_tape = &deploy.market_data.trade_tape_on_chain;
-    if trade_tape.max_blocks_per_tick == 0
-        || trade_tape.max_blocks_per_request == 0
-        || trade_tape.batch_size == 0
-        || trade_tape.reconciliation_match_window_ms == 0
-        || trade_tape.reconciliation_terminal_age_secs == 0
-        || trade_tape.reconciliation_max_rows == 0
+    let history = &deploy.market_data.finalized_exchange_history;
+    if deploy.market_data.gamma.historical_identity_days < history.retention_frontier_days {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "market_data.gamma.historical_identity_days",
+            detail: "must cover finalized_exchange_history.retention_frontier_days".into(),
+        });
+    }
+    let extractor_url = Url::parse(&history.hypersync.endpoint).ok();
+    let hypersync_extractor = extractor_url
+        .as_ref()
+        .and_then(Url::host_str)
+        .is_some_and(|host| host == "hypersync.xyz" || host.ends_with(".hypersync.xyz"));
+    let attestor_url = Url::parse(history.attestor.rpc_url()).ok();
+    let attestor_host = attestor_url.as_ref().and_then(Url::host_str);
+    let independent_attestor = attestor_host.is_some_and(|host| {
+        !["envio.dev", "hypersync.xyz", "hyperrpc.xyz"]
+            .iter()
+            .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+    });
+    if history.enabled
+        && (history.hypersync.api_token.is_empty()
+            || !extractor_url.as_ref().is_some_and(|url| {
+                matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+            })
+            || !hypersync_extractor
+            || !attestor_url.as_ref().is_some_and(|url| {
+                matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+            })
+            || !independent_attestor)
     {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "market_data.trade_tape_on_chain",
-            detail: "block, batch, match-window, terminal-age, and row limits must be > 0".into(),
+            field: "market_data.finalized_exchange_history",
+            detail: "enabled history requires a HyperSync token, a hypersync.xyz extractor endpoint, and a valid non-Envio archive RPC attestor".into(),
         });
     }
-    if trade_tape.reconciliation_lookback_secs <= trade_tape.reconciliation_terminal_age_secs {
+    if history.connect_timeout_ms == 0
+        || history.request_timeout_ms < history.connect_timeout_ms
+        || history.attestor.max_blocks_per_log_request == 0
+        || !(1..=32).contains(&history.attestor.max_concurrent_log_requests)
+        || !(1_048_576..=536_870_912).contains(&history.max_response_bytes)
+        || history.min_blocks_per_chunk == 0
+        || history.max_blocks_per_chunk < history.min_blocks_per_chunk
+        || history.retry_initial_ms == 0
+        || history.retry_max_ms < history.retry_initial_ms
+        || !(1..=32).contains(&history.retry_max_attempts)
+        || history.hot_window_blocks_per_tick == 0
+        || history.full_history_blocks_per_tick == 0
+        || history.batch_size == 0
+    {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "market_data.trade_tape_on_chain.reconciliation_lookback_secs",
-            detail: "must exceed reconciliation_terminal_age_secs".into(),
+            field: "market_data.finalized_exchange_history",
+            detail: "timeouts, attestor request span/concurrency, response bytes, adaptive logical chunks, retry bounds, worker budgets, and batches are invalid".into(),
         });
     }
-    if trade_tape.reconciliation_max_rows > MAX_TRADE_TAPE_RECONCILIATION_ROWS {
+    if history.model_confirmation_blocks != 12
+        || history.rollback_buffer_blocks != 200
+        || history.activation_frontier_days != 33
+        || history.retention_frontier_days < 200
+    {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "market_data.trade_tape_on_chain.reconciliation_max_rows",
-            detail: format!(
-                "must be <= {MAX_TRADE_TAPE_RECONCILIATION_ROWS} (native SQL result budget)"
-            ),
+            field: "market_data.finalized_exchange_history",
+            detail: "fresh-boot policy requires 12 model confirmations, a 200-block rollback buffer, a 33-day activation frontier, and at least 200 retention days".into(),
         });
     }
 }
@@ -1400,29 +1438,13 @@ mod tests {
     }
 
     #[test]
-    fn zero_trade_tape_fatal() {
+    fn zero_history_chunk_rejected() {
         let mut deploy = DeployConfig::default();
         deploy
             .market_data
-            .trade_tape_on_chain
-            .max_blocks_per_request = 0;
+            .finalized_exchange_history
+            .max_blocks_per_chunk = 0;
         assert!(deploy.validate_deploy_common().has_errors());
-    }
-
-    #[test]
-    fn trade_tape_reconciliation_budget() {
-        let mut deploy = DeployConfig::default();
-        deploy
-            .market_data
-            .trade_tape_on_chain
-            .reconciliation_max_rows = MAX_TRADE_TAPE_RECONCILIATION_ROWS + 1;
-        let report = deploy.validate_deploy_common();
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|error| { error.to_string().contains("reconciliation_max_rows") })
-        );
     }
 
     #[test]

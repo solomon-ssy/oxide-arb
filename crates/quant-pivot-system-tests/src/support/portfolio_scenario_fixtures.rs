@@ -8,12 +8,12 @@ use quant_pivot_core::app::ports::feedback_mutation::FeedbackCycleFreezePlan;
 use quant_pivot_models::{
     domain::quant::{
         BacktestPathSetInfo, DiscountCurvePoint, ModelVersionInfo, NewBacktestPathSet,
-        NewBacktestPathSetInput, NewModelRun, PortfolioScenarioFitEvidence, PortfolioScenarioKind,
-        PortfolioScenarioModelArtifact, PortfolioScenarioModelState,
-        PortfolioScenarioResamplingMethod, PortfolioScenarioRouteFactor,
-        PortfolioScenarioRouteFitLineage, PortfolioScenarioRouteModelLineage,
-        PortfolioScenarioVisibility, RepresentedRouteSet, RouteCompatibilityDigests,
-        RouteContractHash, ScenarioDistribution, ScenarioWeight,
+        NewBacktestPathSetInput, NewModelRun, PortfolioScenarioEvidenceRegime,
+        PortfolioScenarioFitEvidence, PortfolioScenarioKind, PortfolioScenarioModelArtifact,
+        PortfolioScenarioModelState, PortfolioScenarioResamplingMethod,
+        PortfolioScenarioRouteFactor, PortfolioScenarioRouteFitLineage,
+        PortfolioScenarioRouteModelLineage, PortfolioScenarioVisibility, RepresentedRouteSet,
+        RouteCompatibilityDigests, RouteContractHash, ScenarioDistribution, ScenarioWeight,
     },
     enums::{quant::ModelRunKind, runtime_config::ConfigResourceKind},
     runtime_config::{
@@ -26,8 +26,8 @@ use quant_pivot_models::{
         SchemaVersion, TrainingDatasetId,
         backtest::{
             BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
-            CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
-            CpcvTrialPathBinding, CscvTrialGridBinding, SharpeDistribution,
+            CpcvFoldCalibrationPolicy, CpcvFoldValidationRegime, CpcvMethodologyBinding,
+            CpcvPathSetSubject, CpcvTrialPathBinding, CscvTrialGridBinding, SharpeDistribution,
         },
         model_lineage::ModelVersionDerivation,
     },
@@ -82,7 +82,7 @@ struct FixtureRouteContract {
     calibration_source_serving_contract_hash: ContentHash,
     calibration_artifact_id: CalibrationArtifactId,
     calibration_contract_hash: ContentHash,
-    trade_policy_contract_hash: ContentHash,
+    recommendation_contract_hash: ContentHash,
     prediction_horizon_secs: i64,
 }
 
@@ -134,7 +134,7 @@ impl FixtureRouteContract {
             calibration_source_serving_contract_hash: calibration_source.serving_contract_hash,
             calibration_artifact_id: calibration.artifact_id,
             calibration_contract_hash: calibration.content_hash,
-            trade_policy_contract_hash: trade_policy.content_hash,
+            recommendation_contract_hash: trade_policy.content_hash,
             prediction_horizon_secs: version.model_spec_prediction_horizon_secs,
         })
     }
@@ -501,6 +501,7 @@ impl FixtureFoldEvidence {
     fn artifacts(&self) -> Result<CpcvFoldArtifacts> {
         Ok(CpcvFoldArtifacts::try_new(vec![
             CpcvFoldArtifact {
+                validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                 identity: CpcvEstimatorIdentity::Validation {
                     combination_index: 0,
                     test_partitions_hash: self.hash("test-partitions")?,
@@ -523,6 +524,7 @@ impl FixtureFoldEvidence {
                 scenario_model_hash: self.hash("fold-scenario")?,
             },
             CpcvFoldArtifact {
+                validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                 identity: CpcvEstimatorIdentity::TrialPathValidation {
                     trial_id: 0,
                     path_index: 0,
@@ -547,6 +549,7 @@ impl FixtureFoldEvidence {
                 scenario_model_hash: self.hash("trial-scenario")?,
             },
             CpcvFoldArtifact {
+                validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                 identity: CpcvEstimatorIdentity::TrialPathValidation {
                     trial_id: 1,
                     path_index: 0,
@@ -970,7 +973,7 @@ fn build_model(
         represented,
         &route_hashes(contracts, |contract| contract.serving_contract_hash),
         &route_hashes(contracts, |contract| contract.calibration_contract_hash),
-        &route_hashes(contracts, |contract| contract.trade_policy_contract_hash),
+        &route_hashes(contracts, |contract| contract.recommendation_contract_hash),
     )?;
     let fit_window_start = represented
         .routes
@@ -1059,7 +1062,8 @@ fn build_model(
         route_set_digest: represented.digest,
         serving_contract_digest: compatibility.serving_contract_digest,
         calibration_contract_digest: compatibility.calibration_contract_digest,
-        trade_policy_contract_digest: compatibility.trade_policy_contract_digest,
+        recommendation_contract_digest: compatibility.recommendation_contract_digest,
+        evidence_regime: PortfolioScenarioEvidenceRegime::FullL2ExecutionEconomics,
         capital_time_bucket_contract_digest,
         scenario_random_stream_hash: ResearchHasher::canonical(&(
             "feedback-closure-scenario-random-stream-v1",
@@ -1096,7 +1100,7 @@ fn build_model(
         route_set_digest: artifact.route_set_digest,
         serving_contract_digest: artifact.serving_contract_digest,
         calibration_contract_digest: artifact.calibration_contract_digest,
-        trade_policy_contract_digest: artifact.trade_policy_contract_digest,
+        recommendation_contract_digest: artifact.recommendation_contract_digest,
         scenario_model_schema_version: artifact.schema_version,
         capital_time_bucket_contract_digest: artifact.capital_time_bucket_contract_digest,
         model_content_hash: artifact.content_hash,
@@ -1137,7 +1141,7 @@ fn route_fit_lineage(
                 },
                 calibration_artifact_id: contract.calibration_artifact_id,
                 calibration_artifact_hash: contract.calibration_contract_hash,
-                trade_policy_contract_hash: contract.trade_policy_contract_hash,
+                recommendation_contract_hash: contract.recommendation_contract_hash,
                 fit_window_start,
                 fit_window_end,
             }
@@ -1221,7 +1225,7 @@ fn scenario_states(
                             route,
                             contract.serving_contract_hash,
                             contract.calibration_contract_hash,
-                            contract.trade_policy_contract_hash,
+                            contract.recommendation_contract_hash,
                         ))?,
                     })
                 })

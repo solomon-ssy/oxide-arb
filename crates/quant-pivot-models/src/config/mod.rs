@@ -60,8 +60,8 @@ pub use domain_sources::{
 };
 pub use keys::KeysConfig;
 pub use market_data::{
-    DataApiConfig, GammaConfig, MAX_TRADE_TAPE_RECONCILIATION_ROWS, MarketDataDeployConfig,
-    TradeTapeOnChainConfig, WebSocketConfig,
+    DataApiConfig, ExchangeHistoryAttestorConfig, FinalizedExchangeHistoryConfig, GammaConfig,
+    HyperSyncConfig, MarketDataDeployConfig, WebSocketConfig,
 };
 #[cfg(unix)]
 use nix::{fcntl::OFlag, unistd::Uid};
@@ -249,7 +249,22 @@ impl DeployConfig {
             &self.polymarket.onchain.rpc_endpoint,
             PolygonRpcEndpoint::Protected { url } if !url.is_empty()
         );
+        let protected_attestor = matches!(
+            &self
+                .market_data
+                .finalized_exchange_history
+                .attestor
+                .rpc_endpoint,
+            PolygonRpcEndpoint::Protected { url } if !url.is_empty()
+        );
         protected_rpc
+            || protected_attestor
+            || !self
+                .market_data
+                .finalized_exchange_history
+                .hypersync
+                .api_token
+                .is_empty()
             || self
                 .polymarket
                 .relayer

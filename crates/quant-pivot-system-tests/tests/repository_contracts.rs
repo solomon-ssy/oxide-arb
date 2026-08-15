@@ -86,6 +86,8 @@ mod feedback_scheduler;
 mod feedback_shadow_stage;
 #[path = "repository/research/feedback_signal_stage.rs"]
 mod feedback_signal_stage;
+#[path = "repository/research/fresh_boot.rs"]
+mod fresh_boot;
 #[path = "repository/catalog/market_linkage.rs"]
 mod market_linkage;
 #[path = "repository/catalog/market_page.rs"]
@@ -659,6 +661,19 @@ async fn model_route_bootstrap_contracts() {
     ))
     .await
     .expect("start first-champion model-route bootstrap PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_boot_repository_contracts() {
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            fresh_boot::recovery_and_lineage_hold,
+            fresh_boot::retry_cas_holds,
+            fresh_boot::quarantine_resolution_unlocks,
+        );
+    }))
+    .await
+    .expect("start fresh-boot PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

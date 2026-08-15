@@ -52,12 +52,13 @@ pub(crate) use quant_pivot_models::{
     },
 };
 pub use resolved::{
-    MarketWindowSnapshot, MicrostructureBucket, ResolvedBook, ResolvedMarketContext,
-    TradeTapeWindowSnapshot,
+    FinalizedExecutionWindowSnapshot, MarketWindowSnapshot, MicrostructureBucket, ResolvedBook,
+    ResolvedMarketContext,
 };
 pub use scalar::{feature_scalar, finite_f64};
 pub use schema::{
-    FeatureSchema, FeatureSpec, FeatureUnit, NullPolicy, PitRule, SourceRequirement, StalenessRule,
+    AuthoringFeatureCatalog, ExecutableFeatureSchema, FeatureSpec, FeatureUnit, NullPolicy,
+    PitRule, SourceRequirement, StalenessRule,
 };
 pub use value::FeatureVector;
 pub use writer::feature_events;
@@ -90,8 +91,8 @@ pub struct FeatureBuildInput<'a> {
     pub pit: &'a dyn PointInTimeSnapshotSource,
     /// Pre-fetched windowed microstructure history for the primary token.
     pub window: &'a MarketWindowSnapshot,
-    /// Pre-fetched trade-tape participant history for the primary token.
-    pub trade_tape: &'a TradeTapeWindowSnapshot,
+    /// Pre-fetched finalized execution-participant history for the primary token.
+    pub execution_history: &'a FinalizedExecutionWindowSnapshot,
     /// Pre-fetched domain-slice inputs (present only for markets whose
     /// category maps to an enabled vertical with a resolved linkage).
     pub domain: Option<&'a DomainSliceInputs>,

@@ -9,9 +9,7 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Deserializer, Serialize, de::Error};
 
 use crate::{
-    domain::data_plane::{
-        DecisionBoundary, TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus, TradeTapeSourceKind,
-    },
+    domain::data_plane::DecisionBoundary,
     enums::{
         catalog::CatalogTimestampQuality,
         common::MarketCategory,
@@ -21,22 +19,13 @@ use crate::{
     },
     types::{
         BookSnapshotRef, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId,
-        ContentHash, EventId, EvmAddress, FeatureVectorId, MarketContext, MarketId, Probability,
+        ContentHash, EventId, FeatureVectorId, MarketContext, MarketId, Probability,
         RecommendationIdentity, SchemaVersion, SelectorHashEvidence, TokenId, TrainingExampleId,
         Usd, stable_name::FeatureName,
     },
 };
 
-/// Minimal block-cursor fields actually consumed by runtime availability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TradeTapeCursorEvidence {
-    pub contract_address: EvmAddress,
-    pub last_finalized_block: i64,
-    pub status: TradeTapeBlockCursorStatus,
-}
-
-/// Raw trade-tape source state consumed while one feature vector was built.
+/// Raw finalized-execution source state consumed while one feature vector was built.
 ///
 /// Runtime parity replays availability from the frozen deploy toggle and cursor
 /// rows instead of copying the already-computed `FeatureCell` state. Historical
@@ -44,19 +33,21 @@ pub struct TradeTapeCursorEvidence {
 /// slice rather than a live ingest worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
-pub enum TradeTapeSourceEvidence {
-    /// The active feature schema did not consume trade-tape inputs.
+pub enum FinalizedExecutionEvidence {
+    /// The active feature schema did not consume finalized executions.
     NotRequired,
     /// A sealed historical source slice supplied the PIT-bounded facts.
     Materialized { available_by: DateTime<Utc> },
-    /// Exact runtime input to the trade-tape availability decision.
+    /// Exact runtime accepted-frontier state. A boolean alone is insufficient:
+    /// the evidence binds both the chain frontier and its N+12 availability.
     Runtime {
-        ingest_enabled: bool,
-        cursors: Vec<TradeTapeCursorEvidence>,
+        history_enabled: bool,
+        accepted_through_block: Option<u64>,
+        accepted_through_at: Option<DateTime<Utc>>,
     },
 }
 
-impl TradeTapeSourceEvidence {
+impl FinalizedExecutionEvidence {
     #[must_use]
     pub const fn not_required() -> Self {
         Self::NotRequired
@@ -67,56 +58,31 @@ impl TradeTapeSourceEvidence {
         Self::Materialized { available_by }
     }
 
-    /// Freeze a canonical runtime cursor snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a non-on-chain or duplicate contract cursor. Callers query the
-    /// on-chain repository plane, so either condition is corrupt evidence.
-    pub fn runtime(
-        ingest_enabled: bool,
-        cursors: Vec<TradeTapeBlockCursorInfo>,
-    ) -> Result<Self, String> {
-        if cursors
-            .iter()
-            .any(|cursor| cursor.source != TradeTapeSourceKind::OnChain)
-        {
-            return Err("runtime trade-tape evidence contains a non-on-chain cursor".to_owned());
+    #[must_use]
+    pub const fn runtime(
+        history_enabled: bool,
+        accepted_through_block: Option<u64>,
+        accepted_through_at: Option<DateTime<Utc>>,
+    ) -> Self {
+        Self::Runtime {
+            history_enabled,
+            accepted_through_block,
+            accepted_through_at,
         }
-        let mut cursors = cursors
-            .into_iter()
-            .map(|cursor| TradeTapeCursorEvidence {
-                contract_address: cursor.contract_address,
-                last_finalized_block: cursor.last_finalized_block,
-                status: cursor.status,
-            })
-            .collect::<Vec<_>>();
-        cursors.sort_by(|left, right| {
-            left.contract_address
-                .as_str()
-                .cmp(right.contract_address.as_str())
-        });
-        if cursors
-            .windows(2)
-            .any(|pair| pair[0].contract_address == pair[1].contract_address)
-        {
-            return Err(
-                "runtime trade-tape evidence contains duplicate contract cursors".to_owned(),
-            );
-        }
-        Ok(Self::Runtime {
-            ingest_enabled,
-            cursors,
-        })
     }
 
     #[must_use]
-    pub fn runtime_parts(&self) -> Option<(bool, &[TradeTapeCursorEvidence])> {
+    pub const fn runtime_parts(&self) -> Option<(bool, Option<u64>, Option<DateTime<Utc>>)> {
         match self {
             Self::Runtime {
-                ingest_enabled,
-                cursors,
-            } => Some((*ingest_enabled, cursors)),
+                history_enabled,
+                accepted_through_block,
+                accepted_through_at,
+            } => Some((
+                *history_enabled,
+                *accepted_through_block,
+                *accepted_through_at,
+            )),
             Self::NotRequired | Self::Materialized { .. } => None,
         }
     }
@@ -132,8 +98,8 @@ pub enum NullReason {
     InsufficientHistory,
     NotApplicable,
     LegBookMissing,
-    TradeTapeUnavailable,
-    InsufficientTradeTape,
+    FinalizedExecutionUnavailable,
+    InsufficientExecutionHistory,
     InsufficientRoleCoverage,
     DomainSourceUnavailable,
     LinkageUnresolved,
@@ -416,7 +382,7 @@ pub struct SelectionMemberEvidence {
 #[serde(deny_unknown_fields)]
 pub struct DecisionCaptureEvidence {
     pub snapshot: DecisionSnapshotEvidence,
-    pub trade_tape_source: TradeTapeSourceEvidence,
+    pub finalized_execution_evidence: FinalizedExecutionEvidence,
     pub identity: RecommendationIdentity,
     pub market_context: MarketContext,
     pub data_quality: DataQualityStatus,
@@ -553,32 +519,9 @@ mod tests {
 
     use super::{
         FeatureCell, FeatureCellState, FeatureParityDetail, FeatureParityDetailSource,
-        TradeTapeSourceEvidence,
+        FinalizedExecutionEvidence,
     };
-    use crate::{
-        domain::data_plane::{
-            TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus, TradeTapeSourceKind,
-        },
-        enums::quant::{FeatureParityEventStatus, FeatureParityStage},
-        types::EvmAddress,
-    };
-
-    fn cursor(address_byte: char) -> TradeTapeBlockCursorInfo {
-        TradeTapeBlockCursorInfo {
-            source: TradeTapeSourceKind::OnChain,
-            contract_address: EvmAddress::parse(format!(
-                "0x{}",
-                address_byte.to_string().repeat(40)
-            ))
-            .expect("valid EVM address"),
-            last_finalized_block: 42,
-            last_log_index: 7,
-            head_lag_blocks: 3,
-            status: TradeTapeBlockCursorStatus::Live,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
+    use crate::enums::quant::{FeatureParityEventStatus, FeatureParityStage};
 
     #[test]
     fn feature_cell_rejects_corruption() {
@@ -626,13 +569,11 @@ mod tests {
 
     #[test]
     fn runtime_evidence_is_canonical() {
-        let first = TradeTapeSourceEvidence::runtime(true, vec![cursor('b'), cursor('a')])
-            .expect("valid runtime evidence");
-        let second = TradeTapeSourceEvidence::runtime(true, vec![cursor('a'), cursor('b')])
-            .expect("valid runtime evidence");
-        assert_eq!(first, second);
-
-        let duplicate = TradeTapeSourceEvidence::runtime(true, vec![cursor('a'), cursor('a')]);
-        assert!(duplicate.is_err());
+        let accepted_at = Utc::now();
+        let evidence = FinalizedExecutionEvidence::runtime(true, Some(42), Some(accepted_at));
+        assert_eq!(
+            evidence.runtime_parts(),
+            Some((true, Some(42), Some(accepted_at)))
+        );
     }
 }

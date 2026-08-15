@@ -1,7 +1,7 @@
 //! Structural Alpha monitor HTTP contract.
 //!
 //! Read surface for structural signals: neg-risk leg-sum drift remains live
-//! book-derived, while trade-tape participant concentration is ClickHouse-backed
+//! book-derived, while finalized-execution participant concentration is ClickHouse-backed
 //! with explicit source health and missing-reason accounting.
 
 use chrono::{DateTime, Utc};
@@ -45,30 +45,26 @@ pub struct MissingReasonCountView {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct TradeTapeSourceHealthView {
-    pub source: String,
+pub struct ExchangeHistorySourceView {
+    pub extractor: String,
+    pub attestor: String,
     pub enabled: bool,
-    pub token_cursor_count: u64,
-    pub bootstrap_count: u64,
-    pub catching_up_count: u64,
-    pub live_count: u64,
-    pub empty_count: u64,
-    pub error_count: u64,
-    pub worst_lag_blocks: Option<i64>,
+    pub state: String,
+    pub accepted_through_block: Option<u64>,
+    pub effective_through_at: Option<DateTime<Utc>>,
+    pub quarantine_count: u64,
     pub last_updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct TradeTapeCoverageView {
+pub struct ExecutionHistoryCoverageView {
     pub decision_at: DateTime<Utc>,
     pub knowledge_cutoff: DateTime<Utc>,
     pub window_secs: u64,
     pub knowledge_lag_secs: u64,
     pub active_market_count: u64,
-    pub token_cursor_count: u64,
-    pub market_cursor_count: u64,
     pub covered_market_ratio: Decimal,
-    pub source_health: Vec<TradeTapeSourceHealthView>,
+    pub source_health: Vec<ExchangeHistorySourceView>,
     pub missing_reason_breakdown: Vec<MissingReasonCountView>,
 }
 

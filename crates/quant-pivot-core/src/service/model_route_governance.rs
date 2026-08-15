@@ -8,9 +8,11 @@ use quant_pivot_models::{
         ports::{CommittedPolicyApplyPort, RejectShadowBinding},
         quant::{
             BootstrapModelRoute, CommitModelRouteBootstrap, CommitModelRoutePromotion,
-            ModelGovernanceAuditDetail, PromoteModelRoute,
+            ModelGovernanceAuditDetail, ModelRouteBootstrapActor, ModelRouteBootstrapPreflight,
+            PromoteModelRoute,
         },
     },
+    enums::runtime_config::PolicyActorKind,
     runtime_config::{ActivePolicyBundle, PolicyBundleIdentity},
     types::{FeedbackCycleId, PolicyActivationId},
 };
@@ -115,19 +117,31 @@ impl ModelRouteGovernanceService {
             .into());
         };
         let activation = &commit.activation;
+        let actor_exact = match &request.actor {
+            ModelRouteBootstrapActor::Operator(actor) => {
+                record.actor_kind() == PolicyActorKind::Operator
+                    && record.actor_user_id() == Some(actor.user_id)
+                    && record.actor_role() == Some(&actor.acting_role)
+            }
+            ModelRouteBootstrapActor::FreshBootOrchestrator => {
+                record.actor_kind() == PolicyActorKind::System
+                    && record.actor_user_id().is_none()
+                    && record.actor_username() == "fresh_boot_orchestrator"
+                    && record.actor_role().is_none()
+            }
+        };
         let exact = record.preflight().manifest().model_version_id() == request.model_version_id
             && record.preflight().expected_policy_generation()
                 == request.expected_policy_generation
             && record.preflight().expected_runtime_revision()
                 == request.expected_runtime_control_revision
-            && record.actor_user_id() == request.actor.user_id
-            && record.actor_role() == &request.actor.acting_role
+            && actor_exact
             && record.idempotency_key() == &request.idempotency_key
             && record.reason_code() == request.reason_code
             && record.note() == request.note
             && activation.expected_bundle_generation == request.expected_policy_generation
             && activation.idempotency_key == request.idempotency_key
-            && activation.activated_by_user_id == Some(request.actor.user_id)
+            && activation.activated_by_user_id == record.actor_user_id()
             && commit.bundle.generation == activation.bundle_generation;
         if !exact {
             return Err(FeedbackError::BootstrapTransactionConflict {
@@ -178,8 +192,33 @@ impl ModelRouteGovernanceService {
                     return Err(error);
                 }
             };
-            let command =
-                CommitModelRouteBootstrap::try_new(request.clone(), plan.preflight().clone())?;
+            return self
+                .bootstrap_prepared(request, plan.preflight().clone())
+                .await;
+        };
+        Self::verify_bootstrap(&request, &committed)?;
+        self.converge(&committed.bundle).await?;
+        Ok(committed)
+    }
+
+    /// Commit the exact preflight already evaluated by a durable orchestrator.
+    /// This prevents a second wall-clock evaluation from changing scenario or
+    /// quality evidence between the recorded preflight and the transaction.
+    pub async fn bootstrap_prepared(
+        &self,
+        request: BootstrapModelRoute,
+        preflight: ModelRouteBootstrapPreflight,
+    ) -> QuantResult<ModelRouteBootstrapCommit> {
+        request.validate()?;
+        let committed = if let Some(committed) = self
+            .deps
+            .bootstrap_repository
+            .find_committed(&request.idempotency_key)
+            .await?
+        {
+            committed
+        } else {
+            let command = CommitModelRouteBootstrap::try_new(request.clone(), preflight)?;
             self.deps.bootstrap_repository.commit(command).await?
         };
         Self::verify_bootstrap(&request, &committed)?;

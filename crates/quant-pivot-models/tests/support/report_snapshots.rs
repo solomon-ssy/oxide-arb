@@ -414,7 +414,7 @@ pub fn recommendation_partial_exits() -> QuantRecommendationView {
         OutcomeSide::Yes,
         Usd::new(dec!(250)),
     );
-    *rec.trade_plan.exit = partial_exit_plan();
+    *rec.trade_plan.exit = partial_exit_plan().into();
     view(rec)
 }
 

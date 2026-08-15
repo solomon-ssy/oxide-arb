@@ -13,7 +13,7 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::research::ResearchError;
 use quant_pivot_models::{
     domain::{
-        data_plane::TradeTapePrint,
+        data_plane::ExecutionParticipantPrint,
         market::{
             book::{BookLevel, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
             fee::MarketFeeSchedule,
@@ -21,30 +21,30 @@ use quant_pivot_models::{
         },
     },
     enums::market::MarketStatus,
-    types::{Bps, MarketId, MicroUsd, Price, TokenId, TradeTapeSourceEvidence, Usd},
+    types::{Bps, FinalizedExecutionEvidence, MarketId, MicroUsd, Price, TokenId, Usd},
 };
 use rust_decimal::Decimal;
 
 use crate::pit::{BookSnapshotAt, CanonicalBookEventRef, MarketContextAt};
 
-/// A pre-fetched, point-in-time-bounded trade-tape window for one market.
+/// A pre-fetched, point-in-time-bounded finalized-execution window.
 #[derive(Debug, Clone)]
-pub struct TradeTapeWindowSnapshot {
+pub struct FinalizedExecutionWindowSnapshot {
     /// Market the window describes (YES+NO token fills aggregated).
     pub market_id: MarketId,
     /// Decision time associated with this immutable window.
     pub decision_at: DateTime<Utc>,
     /// Already-derived source knowledge cutoff.
     pub knowledge_cutoff: DateTime<Utc>,
-    /// Whether the trade-tape source was queried and considered available.
+    /// Whether the accepted history frontier covers the requested window.
     pub source_available: bool,
     /// Raw source-state evidence used to derive `source_available`.
-    pub source_evidence: TradeTapeSourceEvidence,
+    pub source_evidence: FinalizedExecutionEvidence,
     /// Participant rows ascending by event time, all before the PIT cutoff.
-    pub prints: Vec<TradeTapePrint>,
+    pub prints: Vec<ExecutionParticipantPrint>,
 }
 
-impl TradeTapeWindowSnapshot {
+impl FinalizedExecutionWindowSnapshot {
     #[must_use]
     pub const fn empty(
         market_id: MarketId,
@@ -56,7 +56,7 @@ impl TradeTapeWindowSnapshot {
             decision_at,
             knowledge_cutoff,
             source_available: false,
-            source_evidence: TradeTapeSourceEvidence::not_required(),
+            source_evidence: FinalizedExecutionEvidence::not_required(),
             prints: Vec::new(),
         }
     }
@@ -66,14 +66,14 @@ impl TradeTapeWindowSnapshot {
         market_id: MarketId,
         decision_at: DateTime<Utc>,
         knowledge_cutoff: DateTime<Utc>,
-        prints: Vec<TradeTapePrint>,
+        prints: Vec<ExecutionParticipantPrint>,
     ) -> Self {
         Self {
             market_id,
             decision_at,
             knowledge_cutoff,
             source_available: true,
-            source_evidence: TradeTapeSourceEvidence::materialized(decision_at),
+            source_evidence: FinalizedExecutionEvidence::materialized(decision_at),
             prints,
         }
     }
@@ -84,15 +84,15 @@ impl TradeTapeWindowSnapshot {
     }
 
     #[must_use]
-    pub fn freshest_trade_time(&self) -> Option<DateTime<Utc>> {
-        self.prints.last().map(|print| print.event_time)
+    pub fn freshest_execution_time(&self) -> Option<DateTime<Utc>> {
+        self.prints.last().map(|print| print.effective_at)
     }
 
     #[must_use]
     pub fn latest_available_at(&self) -> Option<DateTime<Utc>> {
         self.prints
             .iter()
-            .filter_map(|print| print.available_at)
+            .map(|print| print.model_available_at)
             .max()
     }
 
@@ -103,9 +103,9 @@ impl TradeTapeWindowSnapshot {
 
     /// Re-label ingest availability without discarding prefetched prints.
     #[must_use]
-    pub fn with_source_evidence(
+    pub const fn with_source_evidence(
         mut self,
-        source_evidence: TradeTapeSourceEvidence,
+        source_evidence: FinalizedExecutionEvidence,
         source_available: bool,
     ) -> Self {
         self.source_evidence = source_evidence;
@@ -114,14 +114,18 @@ impl TradeTapeWindowSnapshot {
     }
 
     #[must_use]
-    pub fn prints_in(&self, window: Duration) -> Vec<&TradeTapePrint> {
+    pub fn prints_in(&self, window: Duration) -> Vec<&ExecutionParticipantPrint> {
         let cutoff = self.cutoff();
         let Some(start) = window_start(cutoff, window) else {
             return Vec::new();
         };
         self.prints
             .iter()
-            .filter(|print| print.event_time >= start && print.event_time < cutoff)
+            .filter(|print| {
+                print.effective_at >= start
+                    && print.effective_at < cutoff
+                    && print.model_available_at <= self.decision_at
+            })
             .collect()
     }
 }

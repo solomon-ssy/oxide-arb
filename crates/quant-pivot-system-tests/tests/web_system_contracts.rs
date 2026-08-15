@@ -1,7 +1,7 @@
 //! Public HTTP, authentication, authorization, read-model, and WebSocket
 //! contracts exercised through the real production binary.
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::{SinkExt, StreamExt};
@@ -714,6 +714,7 @@ async fn assert_read_models(api: &ApiClient, admin: &str, viewer: &str) -> Resul
         );
     }
     assert_model_gates(api, admin).await?;
+    assert_fresh_boot_models(api, admin).await?;
 
     let feature_contract = ensure_status(
         api.get("/api/research/feature-contract", Some(admin))
@@ -745,13 +746,8 @@ async fn assert_read_models(api: &ApiClient, admin: &str, viewer: &str) -> Resul
     let profiles = feedback["data"]["profiles"]
         .as_array()
         .context("feedback overview profiles are not an array")?;
-    ensure!(
-        profiles.len() == 3
-            && profiles
-                .iter()
-                .all(|profile| profile["minimum_coverage"].is_string()),
-        "feedback overview profile registry or decimal wire is invalid: {feedback}"
-    );
+    validate_feedback_profiles(profiles)
+        .with_context(|| format!("invalid feedback overview profile registry: {feedback}"))?;
     ensure_status(
         api.get(
             "/api/research/feedback-cycles/00000000-0000-7000-8000-000000000001",
@@ -782,7 +778,7 @@ async fn assert_read_models(api: &ApiClient, admin: &str, viewer: &str) -> Resul
 
     for path in [
         "/api/quant/structural/negrisk-events",
-        "/api/quant/structural/trade-tape/coverage",
+        "/api/quant/structural/execution-history/coverage",
         "/api/quant/structural/participant-concentration",
     ] {
         ensure_status(api.get(path, Some(admin)).await?, StatusCode::OK, path).await?;
@@ -816,7 +812,6 @@ async fn assert_read_models(api: &ApiClient, admin: &str, viewer: &str) -> Resul
         "report_lifecycle",
         "exposures",
         "data_quality",
-        "research_readiness",
         "subsystem_health",
         "action_inbox",
     ] {
@@ -825,6 +820,138 @@ async fn assert_read_models(api: &ApiClient, admin: &str, viewer: &str) -> Resul
             "dashboard section {section} is untagged: {dashboard}"
         );
     }
+    Ok(())
+}
+
+async fn assert_fresh_boot_models(api: &ApiClient, admin: &str) -> Result<()> {
+    let exchange_history = ensure_status(
+        api.get("/api/system/exchange-history", Some(admin)).await?,
+        StatusCode::OK,
+        "exchange history progress",
+    )
+    .await?
+    .json::<Value>()
+    .await?;
+    let history = exchange_history["data"]
+        .as_object()
+        .context("exchange history progress is not an object")?;
+    for field in [
+        "stage",
+        "slo_status",
+        "activation_from_block",
+        "accepted_through_block",
+        "target_block",
+        "retention_from_block",
+        "retention_accepted_from_block",
+        "retention_through_block",
+        "crypto_required_from_block",
+        "weather_required_from_block",
+        "unresolved_count",
+        "quarantine_count",
+        "projected_completion_at",
+    ] {
+        ensure!(
+            history.contains_key(field),
+            "exchange history progress omits `{field}`: {exchange_history}"
+        );
+    }
+
+    let fresh_boot = ensure_status(
+        api.get("/api/system/fresh-boot", Some(admin)).await?,
+        StatusCode::OK,
+        "fresh-boot progress",
+    )
+    .await?
+    .json::<Value>()
+    .await?;
+    let data = fresh_boot["data"]
+        .as_object()
+        .context("fresh-boot progress is not an object")?;
+    ensure!(
+        data.get("run").is_none(),
+        "fresh-boot response retained the superseded single-run contract: {fresh_boot}"
+    );
+    ensure!(
+        data.get("observed_at").is_some_and(Value::is_string)
+            && data.get("exchange_history").is_some_and(Value::is_object)
+            && data.get("profiles").is_some_and(Value::is_array),
+        "fresh-boot response does not expose independent profile progress: {fresh_boot}"
+    );
+    if let Some(profiles) = data.get("profiles").and_then(Value::as_array) {
+        for profile in profiles {
+            ensure!(
+                profile["run"]["route"].is_string() && profile["manual_report_ready"].is_boolean(),
+                "fresh-boot profile progress is incomplete: {profile}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_feedback_profiles(profiles: &[Value]) -> Result<()> {
+    let mut actual = BTreeMap::new();
+    for profile in profiles {
+        ensure!(
+            profile["minimum_coverage"].is_string(),
+            "minimum_coverage is not a decimal string"
+        );
+        let profile_ref = &profile["profile_ref"];
+        let id = profile_ref["id"]
+            .as_str()
+            .context("profile_ref.id is not a string")?;
+        let version = profile_ref["version"]
+            .as_u64()
+            .context("profile_ref.version is not an unsigned integer")?;
+        ensure!(
+            profile_ref["content_hash"].is_string(),
+            "profile_ref.content_hash is not a string"
+        );
+        let eligibility = profile["activation_eligibility"]
+            .as_str()
+            .context("activation_eligibility is not a string")?;
+        let category = if profile["category"].is_null() {
+            None
+        } else {
+            Some(
+                profile["category"]
+                    .as_str()
+                    .context("profile category is neither null nor a string")?,
+            )
+        };
+        ensure!(
+            actual
+                .insert(id, (version, eligibility, category))
+                .is_none(),
+            "duplicate profile_ref.id `{id}`"
+        );
+    }
+    let expected = BTreeMap::from([
+        (
+            "crypto_price_15m",
+            (3, "semi_auto_candidate", Some("crypto")),
+        ),
+        (
+            "crypto_price_15m_bootstrap_trade",
+            (1, "research_only", Some("crypto")),
+        ),
+        ("pooled_1h_control", (4, "research_only", None)),
+        (
+            "pooled_binary_1h_bootstrap_trade",
+            (1, "research_only", None),
+        ),
+        (
+            "weather_forecast_24h",
+            (4, "semi_auto_candidate", Some("weather")),
+        ),
+        (
+            "weather_forecast_24h_bootstrap_trade",
+            (1, "research_only", Some("weather")),
+        ),
+    ]);
+    ensure!(
+        actual == expected,
+        "profile registry mismatch: actual={actual:?}, expected={expected:?}"
+    );
     Ok(())
 }
 

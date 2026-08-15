@@ -3,7 +3,7 @@
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
 //! | GET | `/quant/structural/negrisk-events` | `quant_report:read` | Live per-event leg-sum drift |
-//! | GET | `/quant/structural/trade-tape/coverage` | `quant_report:read` | Trade-tape source coverage/lag |
+//! | GET | `/quant/structural/execution-history/coverage` | `quant_report:read` | Finalized execution-history coverage/lag |
 //! | GET | `/quant/structural/participant-concentration` | `quant_report:read` | Top concentration markets |
 //! | GET | `/quant/structural/participant-concentration/{market_id}` | `quant_report:read` | Market participant detail |
 
@@ -13,8 +13,8 @@ use actix_web::{
 };
 use quant_pivot_models::{
     domain::api::{
-        NegRiskEventDriftView, ParticipantConcentrationDetailView,
-        ParticipantConcentrationSummaryView, TradeTapeCoverageView,
+        ExecutionHistoryCoverageView, NegRiskEventDriftView, ParticipantConcentrationDetailView,
+        ParticipantConcentrationSummaryView,
     },
     enums::rbac::{Operation, ResourceType},
     types::MarketId,
@@ -39,9 +39,9 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         ),
         spec(
             Method::GET,
-            "/quant/structural/trade-tape/coverage",
+            "/quant/structural/execution-history/coverage",
             Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
-            trade_tape_coverage,
+            execution_history_coverage,
         ),
         spec(
             Method::GET,
@@ -67,10 +67,13 @@ pub async fn negrisk_events(
     Ok(WebResponse::ok(events))
 }
 
-pub async fn trade_tape_coverage(
+pub async fn execution_history_coverage(
     state: Data<AppState>,
-) -> Result<WebResponse<TradeTapeCoverageView>, WebError> {
-    let coverage = state.structural_monitor.trade_tape_coverage().await?;
+) -> Result<WebResponse<ExecutionHistoryCoverageView>, WebError> {
+    let coverage = state
+        .structural_monitor
+        .execution_history_coverage()
+        .await?;
     Ok(WebResponse::ok(coverage))
 }
 

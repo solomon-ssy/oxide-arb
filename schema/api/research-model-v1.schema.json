@@ -176,6 +176,11 @@
           "const": "time_series"
         },
         {
+          "description": "Finalized execution-derived price, flow, intensity, and participant features.",
+          "type": "string",
+          "const": "trade"
+        },
+        {
           "description": "Order-flow microstructure (quote rate, churn, queue depletion, …).",
           "type": "string",
           "const": "microstructure"

@@ -184,7 +184,7 @@ async fn core_business_scenarios_server() {
 
         scenario!(model_training_backtest::train_cpcv_persists_decomposition);
 
-        scenario!(participant_concentration::whale_trade_tape_monitor);
+        scenario!(participant_concentration::whale_execution_history_monitor);
 
         scenario!(report_pipeline::ad_hoc_publishes_recommendations);
         scenario!(report_pipeline::pinned_route_uses_generation);

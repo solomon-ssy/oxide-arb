@@ -15,8 +15,9 @@ use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookLedgerReplayAnchor, BookMicrostructureRow, BookStreamSessionRow,
         CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
+        ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
         MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
-        TradeTapeRow, WeatherForecastFactRow, WeatherObservationFactRow,
+        WeatherForecastFactRow, WeatherObservationFactRow,
     },
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
@@ -169,27 +170,43 @@ pub trait QuantFactReadRepository: Send + Sync {
         minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError>;
 
-    /// Recent Market-WS trade prints for `token_ids` with `event_time` in
-    /// `[from_ms, to_ms)` (epoch milliseconds), newest first, capped at `limit`.
-    /// Feeds last-trade overlay markers on the price chart.
-    async fn last_trades(
+    /// Recent finalized economic executions for the requested tokens, newest
+    /// first and capped at `limit`.
+    async fn last_executions(
         &self,
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
         limit: u64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError>;
+    ) -> Result<Vec<MarketExecutionRow>, StorageError>;
 
-    /// Trade-tape participant rows for `market_ids` with `event_time` in
-    /// `[from_ms, to_ms)` (epoch milliseconds), ordered by market then event time.
-    /// Used by structural participant-concentration features and the operator UI.
-    async fn market_tape_window(
+    /// Canonical execution-participant rows visible by the model-availability
+    /// cutoff, ordered by market, execution time, execution id, and role.
+    async fn market_execution_window(
         &self,
         market_ids: Vec<MarketId>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError>;
+    ) -> Result<Vec<ExecutionParticipantFactRow>, StorageError>;
+
+    /// Exact economic execution facts for immutable source-slice materialization.
+    async fn market_executions_between(
+        &self,
+        market_ids: Vec<MarketId>,
+        from_ms: i64,
+        to_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<MarketExecutionRow>, StorageError>;
+
+    /// Exact participant facts for immutable source-slice materialization.
+    async fn execution_participants_between(
+        &self,
+        market_ids: Vec<MarketId>,
+        from_ms: i64,
+        to_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<ExecutionParticipantRow>, StorageError>;
 
     /// Coarse mid-price series per token for correlation estimation: the last
     /// `mid_price_close` within each `bucket_secs` interval over

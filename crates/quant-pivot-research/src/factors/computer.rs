@@ -27,7 +27,7 @@ use quant_pivot_models::{
         SmallCrossSectionPolicy,
     },
     types::{
-        ContentHash, FactorDefinitionId, Probability,
+        ContentHash, FactorDefinitionId, Probability, ResearchFeatureContract,
         factor::{FACTOR_VALUE_OUTPUT_SCHEMA_VERSION, FactorDefinitionRef, FactorServingPlane},
     },
 };
@@ -46,7 +46,7 @@ use crate::{
             FactorValue, MarketFactorOutcome, RawFactor, RawFactorEligibility, ScoredFactor,
         },
     },
-    features::{FeatureSchema, FeatureVector},
+    features::{ExecutableFeatureSchema, FeatureVector},
     hashing::ResearchHasher,
     model::FavoriteLongshotBiasTable,
     parallel::{par_map_with_index, par_try_map, par_try_map_index},
@@ -118,6 +118,7 @@ impl FactorEngine {
         Self::from_registry(
             FactorRegistry::build(factors, features, domain, bias_table),
             features,
+            ResearchFeatureContract::FullL2,
         )
     }
 
@@ -130,18 +131,31 @@ impl FactorEngine {
         factors: &FactorsConfig,
         features: &FeaturesConfig,
         domain: &DomainConfig,
+        feature_contract: ResearchFeatureContract,
         category_scope: Option<MarketCategory>,
         bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
     ) -> Self {
         Self::from_registry(
-            FactorRegistry::for_model_scope(factors, features, domain, category_scope, bias_table),
+            FactorRegistry::for_model_scope(
+                factors,
+                features,
+                domain,
+                feature_contract,
+                category_scope,
+                bias_table,
+            ),
             features,
+            feature_contract,
         )
     }
 
-    fn from_registry(registry: FactorRegistry, features: &FeaturesConfig) -> Self {
+    fn from_registry(
+        registry: FactorRegistry,
+        features: &FeaturesConfig,
+        feature_contract: ResearchFeatureContract,
+    ) -> Self {
         let contract = (|| {
-            let feature_schema = FeatureSchema::build(features)?;
+            let feature_schema = ExecutableFeatureSchema::build(features, feature_contract)?;
             let feature_contract_hash = ResearchHasher::feature_schema(&feature_schema)?;
             let definitions = registry
                 .factors()

@@ -40,10 +40,10 @@ use quant_pivot_models::{
         BinanceSymbol, CatalogDecisionRef, CatalogEventChangeId, CatalogMarketChangeId,
         CatalogSyncBatchId, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
         DomainFeatureSlice, DomainInstrumentKey, DomainSourceId, EventId, EvidenceSourceRef,
-        FeatureCell, FeatureStaleness, FeatureValue, MarketId, MarketLinkageId, ModelSpecId, Price,
-        Probability, ResolverVersion, SchemaVersion, Shares, TokenId, TradeTapeSourceEvidence,
-        TrainingExampleId, TrainingSampleSource, Usd, factor::FactorServingPlane,
-        stable_name::FactorName,
+        FeatureCell, FeatureStaleness, FeatureValue, FinalizedExecutionEvidence, MarketId,
+        MarketLinkageId, ModelSpecId, Price, Probability, ResearchFeatureContract, ResolverVersion,
+        SchemaVersion, Shares, TokenId, TrainingExampleId, TrainingSampleSource, Usd,
+        factor::FactorServingPlane, stable_name::FactorName,
     },
 };
 use quant_pivot_research::{
@@ -58,9 +58,9 @@ use quant_pivot_research::{
     features::{
         ConfiguredFeatureBuilder, CryptoDomainFeatureBuilder, DomainComputeCtx,
         DomainFeatureBuilder, DomainSliceData, DomainSliceDataRef, DomainSliceInputs,
-        FeatureVector, MarketDecisionCaptureInput, MarketWindowSnapshot, ResolvedBook,
-        ResolvedInputs, ResolvedMarketBundle, ResolvedMarketContext, TradeTapeWindowSnapshot,
-        capture_market_decision,
+        FeatureVector, FinalizedExecutionWindowSnapshot, MarketDecisionCaptureInput,
+        MarketWindowSnapshot, ResolvedBook, ResolvedInputs, ResolvedMarketBundle,
+        ResolvedMarketContext, capture_market_decision,
         names::{
             domain_crypto::{BASIS_VS_RESOLUTION_SOURCE, DISTANCE_TO_STRIKE},
             market::CATEGORY,
@@ -306,11 +306,12 @@ fn build_domain_test_vector(
             event_timestamp_quality: CatalogTimestampQuality::Source,
         },
         domain,
-        trade_tape_source: &TradeTapeSourceEvidence::not_required(),
+        finalized_execution_evidence: &FinalizedExecutionEvidence::not_required(),
         liquidity_cap_usd: Usd::ZERO,
     })?;
     let window = MarketWindowSnapshot::empty(market.primary_token_id.clone(), as_of, cutoff);
-    let trade_tape = TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, cutoff);
+    let execution_history =
+        FinalizedExecutionWindowSnapshot::empty(market.market_id.clone(), as_of, cutoff);
     let bundle = ResolvedMarketBundle {
         inputs: ResolvedInputs {
             market: &market,
@@ -320,12 +321,12 @@ fn build_domain_test_vector(
             secondary_book_snapshot_ref: None,
             market_ctx: Some(market_ctx),
             window: &window,
-            trade_tape: &trade_tape,
+            execution_history: &execution_history,
             domain,
             sibling_legs: Vec::new(),
             sibling_leg_total: 0,
         },
-        capture,
+        capture: Some(capture),
     };
     builder.compute_vector(&bundle, &[], features, &DataQualityConfig::default())
 }
@@ -399,8 +400,12 @@ fn feature_vector_domain_category() {
     // `FeatureVector` literal.
     let features = FeaturesConfig::default();
     let domain_config = DomainConfig::default();
-    let builder =
-        ConfiguredFeatureBuilder::new(&features, &domain_config).expect("feature builder");
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
+        &features,
+        &domain_config,
+        ResearchFeatureContract::FullL2,
+    )
+    .expect("feature builder");
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
     let knowledge_cutoff = as_of - Duration::seconds(5);
 

@@ -646,13 +646,14 @@ mod tests {
             TrainingDatasetId,
             backtest::{
                 BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
-                CpcvFoldCalibrationPolicy, CpcvMethodologyBinding, CpcvPathSetSubject,
-                CpcvTrialPathBinding, CscvBlockEvidence, CscvCombinationEvidence,
-                CscvDegradationEvidence, CscvDegradationUndefinedReason, CscvDominanceEvidence,
-                CscvDominanceRelation, CscvDsrTrialCountEvidence, CscvSelectionEvidence,
-                CscvTrialBlockStatistic, CscvTrialDependenceEvidence, CscvTrialDescriptor,
-                CscvTrialEquivalenceClass, CscvTrialGridBinding, CscvTrialPairDependence,
-                CscvTrialPairRelationship, CscvTrialPerformance, SharpeDistribution,
+                CpcvFoldCalibrationPolicy, CpcvFoldValidationRegime, CpcvMethodologyBinding,
+                CpcvPathSetSubject, CpcvTrialPathBinding, CscvBlockEvidence,
+                CscvCombinationEvidence, CscvDegradationEvidence, CscvDegradationUndefinedReason,
+                CscvDominanceEvidence, CscvDominanceRelation, CscvDsrTrialCountEvidence,
+                CscvSelectionEvidence, CscvTrialBlockStatistic, CscvTrialDependenceEvidence,
+                CscvTrialDescriptor, CscvTrialEquivalenceClass, CscvTrialGridBinding,
+                CscvTrialPairDependence, CscvTrialPairRelationship, CscvTrialPerformance,
+                SharpeDistribution,
             },
         },
     };
@@ -786,7 +787,6 @@ mod tests {
                 window_start + Duration::minutes(15),
                 window_start + Duration::minutes(20),
             ];
-            let trial_grid = CscvTrialGridBinding::test_fixture();
             Self::try_seal(NewBacktestPathSetInput {
                 path_set_id: BacktestPathSetId::from_v7(),
                 model_version_id: ModelVersionId::from_v7(),
@@ -811,10 +811,11 @@ mod tests {
                         return_model_hash: hash('a'),
                     },
                     CpcvTrialPathBinding::try_new(0, vec![0]).expect("trial path"),
-                    trial_grid,
+                    CscvTrialGridBinding::test_fixture(),
                 ),
                 fold_artifacts: CpcvFoldArtifacts::try_new(vec![
                     CpcvFoldArtifact {
+                        validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                         identity: CpcvEstimatorIdentity::Validation {
                             combination_index: 0,
                             test_partitions_hash: hash('b'),
@@ -837,6 +838,7 @@ mod tests {
                         scenario_model_hash: hash('8'),
                     },
                     CpcvFoldArtifact {
+                        validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                         identity: CpcvEstimatorIdentity::TrialPathValidation {
                             trial_id: 0,
                             path_index: 0,
@@ -861,6 +863,7 @@ mod tests {
                         scenario_model_hash: hash('6'),
                     },
                     CpcvFoldArtifact {
+                        validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                         identity: CpcvEstimatorIdentity::TrialPathValidation {
                             trial_id: 1,
                             path_index: 0,

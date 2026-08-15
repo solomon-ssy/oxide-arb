@@ -12,55 +12,49 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    config::TradeTapeOnChainConfig,
+    config::FinalizedExchangeHistoryConfig,
     domain::{
         api::{
-            MissingReasonCountView, NegRiskEventDriftView, NegRiskLegView,
-            ParticipantConcentrationDetailView, ParticipantConcentrationMarketView,
-            ParticipantConcentrationParticipantView, ParticipantConcentrationSummaryView,
-            TradeTapeCoverageView, TradeTapeSourceHealthView,
+            ExchangeHistorySourceView, ExecutionHistoryCoverageView, MissingReasonCountView,
+            NegRiskEventDriftView, NegRiskLegView, ParticipantConcentrationDetailView,
+            ParticipantConcentrationMarketView, ParticipantConcentrationParticipantView,
+            ParticipantConcentrationSummaryView,
         },
         data_plane::{
-            DecisionBoundary, DecisionClock, DecisionSource, TradeParticipantRole,
-            TradeTapeBlockCursorStatus, TradeTapePrint, TradeTapeSourceKind,
+            DecisionBoundary, DecisionClock, DecisionSource, ExchangeHistoryFrontier,
+            ExecutionParticipantPrint, ExecutionParticipantRole,
         },
         market::{MarketRegistryInfo, registry::NegRiskLeg},
         ports::{PolicySnapshotPort, StructuralMonitorPort},
     },
     types::{EventId, MarketId, Price},
 };
-use quant_pivot_repository::traits::TradeTapeBlockCursorRepository;
+use quant_pivot_repository::traits::ExchangeHistoryRepository;
 use quant_pivot_research::{
-    selection::SelectedMarket,
-    trade_tape::participant_concentration::{
+    execution_history::participant_concentration::{
         ConcentrationCompositeWeights, ConcentrationMissing, ParticipantConcentrationGate,
         composite_concentration, compute_concentration,
     },
+    selection::SelectedMarket,
 };
 use rust_decimal::Decimal;
 
 use crate::{
-    ingest::{
-        book_store::BookStore,
-        market_registry::MarketRegistry,
-        trade_tape_health::{
-            cursors_by_contract_address, market_tape_available, tape_route_lag_blocks,
-        },
-    },
+    ingest::{book_store::BookStore, market_registry::MarketRegistry},
     prefetch::feature_window::FeatureWindowProvider,
 };
 
 const TOP_MARKETS_LIMIT: usize = 50;
 const TOP_PARTICIPANTS_LIMIT: usize = 25;
 
-/// Structural monitor backed by live registry/books and unified PIT trade tape.
+/// Structural monitor backed by live registry/books and attested PIT executions.
 pub struct CoreStructuralMonitor {
     market_registry: Arc<MarketRegistry>,
     book_store: Arc<BookStore>,
     feature_windows: Arc<FeatureWindowProvider>,
-    block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
+    exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
     runtime_config: Arc<dyn PolicySnapshotPort>,
-    trade_tape_on_chain: TradeTapeOnChainConfig,
+    finalized_exchange_history: FinalizedExchangeHistoryConfig,
 }
 
 impl CoreStructuralMonitor {
@@ -69,17 +63,17 @@ impl CoreStructuralMonitor {
         market_registry: Arc<MarketRegistry>,
         book_store: Arc<BookStore>,
         feature_windows: Arc<FeatureWindowProvider>,
-        block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
+        exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
         runtime_config: Arc<dyn PolicySnapshotPort>,
-        trade_tape_on_chain: TradeTapeOnChainConfig,
+        finalized_exchange_history: FinalizedExchangeHistoryConfig,
     ) -> Self {
         Self {
             market_registry,
             book_store,
             feature_windows,
-            block_cursor_repo,
+            exchange_history_repo,
             runtime_config,
-            trade_tape_on_chain,
+            finalized_exchange_history,
         }
     }
 
@@ -125,7 +119,7 @@ impl CoreStructuralMonitor {
         })?;
         let boundary = DecisionClock::new(knowledge_lag_secs)
             .boundary(trigger_time)?
-            .with_source_cutoff(DecisionSource::TradeTape, 0)?;
+            .with_source_cutoff(DecisionSource::FinalizedExecution, 0)?;
         Ok((
             boundary,
             Duration::from_secs(
@@ -134,7 +128,7 @@ impl CoreStructuralMonitor {
                     .features
                     .definition
                     .structural
-                    .trade_tape_window_secs,
+                    .execution_window_secs,
             ),
         ))
     }
@@ -145,7 +139,7 @@ impl CoreStructuralMonitor {
     ) -> QuantResult<(
         DecisionBoundary,
         Vec<ParticipantConcentrationMarketView>,
-        HashMap<MarketId, Vec<TradeTapePrint>>,
+        HashMap<MarketId, Vec<ExecutionParticipantPrint>>,
     )> {
         let runtime = self.runtime_config.current();
         let gate = ParticipantConcentrationGate {
@@ -154,25 +148,25 @@ impl CoreStructuralMonitor {
                 .features
                 .definition
                 .structural
-                .trade_tape_min_unique_participants,
+                .execution_min_unique_participants,
             min_notional_usd: parse_decimal(
-                "features.structural.trade_tape_min_notional_usd",
+                "features.structural.execution_min_notional_usd",
                 &runtime
                     .profile_artifacts
                     .features
                     .definition
                     .structural
-                    .trade_tape_min_notional_usd
+                    .execution_min_notional_usd
                     .value,
             ),
             min_coverage_ratio: parse_decimal(
-                "features.structural.trade_tape_min_coverage_ratio",
+                "features.structural.execution_min_coverage_ratio",
                 &runtime
                     .profile_artifacts
                     .features
                     .definition
                     .structural
-                    .trade_tape_min_coverage_ratio
+                    .execution_min_coverage_ratio
                     .value,
             ),
         };
@@ -213,13 +207,13 @@ impl CoreStructuralMonitor {
             .collect::<Vec<_>>();
         let windows = self
             .feature_windows
-            .load_trade_tape_windows(&selected, &boundary, lookback)
+            .load_execution_windows(&selected, &boundary, lookback)
             .await?;
-        let cursors = self
-            .block_cursor_repo
-            .list_by_source(TradeTapeSourceKind::OnChain)
+        let accepted = self
+            .exchange_history_repo
+            .latest_accepted(ExchangeHistoryFrontier::Activation)
             .await?;
-        let cursors_by_address = cursors_by_contract_address(&cursors);
+        let accepted_through_at = accepted.as_ref().and_then(|row| row.effective_through_at);
 
         let mut prints_by_market = HashMap::new();
         let views = markets
@@ -230,16 +224,14 @@ impl CoreStructuralMonitor {
                     .map(|window| window.prints.clone())
                     .unwrap_or_default();
                 prints_by_market.insert(market.market_id.clone(), prints.clone());
-                let source_available = market_tape_available(
-                    &self.trade_tape_on_chain,
-                    &cursors_by_address,
-                    market.neg_risk,
-                );
-                let lag_blocks = tape_route_lag_blocks(market.neg_risk, &cursors_by_address);
+                let source_available = self.finalized_exchange_history.enabled
+                    && accepted_through_at.is_some_and(|through| {
+                        through >= boundary.cutoff_for(DecisionSource::FinalizedExecution)
+                    });
                 concentration_market_view(
                     market,
                     &prints,
-                    lag_blocks,
+                    None,
                     &boundary,
                     gate,
                     weights,
@@ -292,96 +284,75 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
         Ok(events)
     }
 
-    async fn trade_tape_coverage(&self) -> QuantResult<TradeTapeCoverageView> {
+    async fn execution_history_coverage(&self) -> QuantResult<ExecutionHistoryCoverageView> {
         let trigger_time = Utc::now();
         let (boundary, _) = self.pit_boundary(trigger_time)?;
         let runtime = self.runtime_config.current();
         let active_markets = self.active_markets();
         let active_market_count = u64::try_from(active_markets.len()).unwrap_or(u64::MAX);
-        let cursors = self
-            .block_cursor_repo
-            .list_by_source(TradeTapeSourceKind::OnChain)
+        let accepted = self
+            .exchange_history_repo
+            .latest_accepted(ExchangeHistoryFrontier::Activation)
             .await?;
-        let mut bootstrap_count = 0_u64;
-        let mut catching_up_count = 0_u64;
-        let mut live_count = 0_u64;
-        let mut error_count = 0_u64;
-        let mut worst_lag_blocks: Option<i64> = None;
-        let mut last_updated_at: Option<DateTime<Utc>> = None;
-        for cursor in &cursors {
-            match cursor.status {
-                TradeTapeBlockCursorStatus::Bootstrap => bootstrap_count += 1,
-                TradeTapeBlockCursorStatus::CatchingUp => catching_up_count += 1,
-                TradeTapeBlockCursorStatus::Live => live_count += 1,
-                TradeTapeBlockCursorStatus::Faulted => error_count += 1,
-            }
-            worst_lag_blocks = Some(worst_lag_blocks.map_or(cursor.head_lag_blocks, |lag| {
-                lag.max(cursor.head_lag_blocks)
-            }));
-            last_updated_at = Some(
-                last_updated_at.map_or(cursor.updated_at, |updated| updated.max(cursor.updated_at)),
-            );
-        }
-        let contract_cursor_count = u64::try_from(cursors.len()).unwrap_or(u64::MAX);
-        let live_contract_count = live_count;
-        let ingest_enabled = self.trade_tape_on_chain.enabled;
-        let cursors_by_address = cursors_by_contract_address(&cursors);
+        let quarantine_count = u64::try_from(
+            self.exchange_history_repo
+                .list_quarantine(ExchangeHistoryFrontier::Activation, 10_000)
+                .await?
+                .len(),
+        )
+        .unwrap_or(u64::MAX);
+        let ingest_enabled = self.finalized_exchange_history.enabled;
+        let accepted_through_at = accepted.as_ref().and_then(|row| row.effective_through_at);
+        let covered = ingest_enabled
+            && quarantine_count == 0
+            && accepted_through_at.is_some_and(|through| {
+                through >= boundary.cutoff_for(DecisionSource::FinalizedExecution)
+            });
         let covered_market_ratio = if active_market_count == 0 {
             Decimal::ZERO
+        } else if covered {
+            Decimal::ONE
         } else {
-            let covered = active_markets
-                .iter()
-                .filter(|market| {
-                    market_tape_available(
-                        &self.trade_tape_on_chain,
-                        &cursors_by_address,
-                        market.neg_risk,
-                    )
-                })
-                .count();
-            Decimal::from(u64::try_from(covered).unwrap_or(u64::MAX))
-                / Decimal::from(active_market_count)
+            Decimal::ZERO
         };
-        let missing_markets = active_markets
-            .iter()
-            .filter(|market| {
-                !market_tape_available(
-                    &self.trade_tape_on_chain,
-                    &cursors_by_address,
-                    market.neg_risk,
-                )
-            })
-            .count();
-        let missing_markets = u64::try_from(missing_markets).unwrap_or(u64::MAX);
-        Ok(TradeTapeCoverageView {
+        let missing_markets = if covered { 0 } else { active_market_count };
+        let accepted_block = accepted
+            .as_ref()
+            .and_then(|row| u64::try_from(row.to_block).ok());
+        let state = if !ingest_enabled {
+            "disabled"
+        } else if quarantine_count > 0 {
+            "quarantined"
+        } else if covered {
+            "ready"
+        } else {
+            "backfilling"
+        };
+        Ok(ExecutionHistoryCoverageView {
             decision_at: trigger_time,
-            knowledge_cutoff: boundary.cutoff_for(DecisionSource::TradeTape),
+            knowledge_cutoff: boundary.cutoff_for(DecisionSource::FinalizedExecution),
             window_secs: runtime
                 .profile_artifacts
                 .features
                 .definition
                 .structural
-                .trade_tape_window_secs,
+                .execution_window_secs,
             knowledge_lag_secs: boundary.knowledge_lag_secs(),
             active_market_count,
-            token_cursor_count: contract_cursor_count,
-            market_cursor_count: live_contract_count,
             covered_market_ratio,
-            source_health: vec![TradeTapeSourceHealthView {
-                source: TradeTapeSourceKind::OnChain.to_string(),
+            source_health: vec![ExchangeHistorySourceView {
+                extractor: "hypersync".to_owned(),
+                attestor: "independent_polygon_archive_rpc".to_owned(),
                 enabled: ingest_enabled,
-                token_cursor_count: contract_cursor_count,
-                bootstrap_count,
-                catching_up_count,
-                live_count,
-                empty_count: 0,
-                error_count,
-                worst_lag_blocks,
-                last_updated_at,
+                state: state.to_owned(),
+                accepted_through_block: accepted_block,
+                effective_through_at: accepted_through_at,
+                quarantine_count,
+                last_updated_at: accepted.as_ref().map(|row| row.updated_at),
             }],
             missing_reason_breakdown: reason_counts(
                 iter::once((
-                    ConcentrationMissing::TradeTapeUnavailable
+                    ConcentrationMissing::FinalizedExecutionUnavailable
                         .monitor_wire()
                         .to_owned(),
                     missing_markets,
@@ -404,38 +375,38 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
         markets.truncate(TOP_MARKETS_LIMIT);
         Ok(ParticipantConcentrationSummaryView {
             decision_at: boundary.decision_at(),
-            knowledge_cutoff: boundary.cutoff_for(DecisionSource::TradeTape),
+            knowledge_cutoff: boundary.cutoff_for(DecisionSource::FinalizedExecution),
             window_secs: runtime
                 .profile_artifacts
                 .features
                 .definition
                 .structural
-                .trade_tape_window_secs,
+                .execution_window_secs,
             knowledge_lag_secs: boundary.knowledge_lag_secs(),
             min_unique_participants: runtime
                 .profile_artifacts
                 .features
                 .definition
                 .structural
-                .trade_tape_min_unique_participants,
+                .execution_min_unique_participants,
             min_notional_usd: parse_decimal(
-                "features.structural.trade_tape_min_notional_usd",
+                "features.structural.execution_min_notional_usd",
                 &runtime
                     .profile_artifacts
                     .features
                     .definition
                     .structural
-                    .trade_tape_min_notional_usd
+                    .execution_min_notional_usd
                     .value,
             ),
             min_coverage_ratio: parse_decimal(
-                "features.structural.trade_tape_min_coverage_ratio",
+                "features.structural.execution_min_coverage_ratio",
                 &runtime
                     .profile_artifacts
                     .features
                     .definition
                     .structural
-                    .trade_tape_min_coverage_ratio
+                    .execution_min_coverage_ratio
                     .value,
             ),
             markets,
@@ -463,7 +434,7 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
         );
         Ok(Some(ParticipantConcentrationDetailView {
             decision_at: boundary.decision_at(),
-            knowledge_cutoff: boundary.cutoff_for(DecisionSource::TradeTape),
+            knowledge_cutoff: boundary.cutoff_for(DecisionSource::FinalizedExecution),
             market: view,
             top_participants,
         }))
@@ -491,7 +462,7 @@ fn drift_magnitude(drift: Option<Decimal>) -> Decimal {
 
 fn concentration_market_view(
     market: &MarketRegistryInfo,
-    prints: &[TradeTapePrint],
+    prints: &[ExecutionParticipantPrint],
     lag_blocks: Option<i64>,
     boundary: &DecisionBoundary,
     gate: ParticipantConcentrationGate,
@@ -535,7 +506,7 @@ fn concentration_market_view(
         market_id: market.market_id.clone(),
         token_id: market.token_yes.clone(),
         question: market.question.clone(),
-        knowledge_cutoff: boundary.cutoff_for(DecisionSource::TradeTape),
+        knowledge_cutoff: boundary.cutoff_for(DecisionSource::FinalizedExecution),
         trade_count,
         participant_count,
         notional_usd,
@@ -550,7 +521,7 @@ fn concentration_market_view(
 }
 
 fn participant_breakdown(
-    prints: &[TradeTapePrint],
+    prints: &[ExecutionParticipantPrint],
     limit: usize,
 ) -> Vec<ParticipantConcentrationParticipantView> {
     #[derive(Default)]
@@ -560,10 +531,10 @@ fn participant_breakdown(
     }
 
     let mut participants = BTreeMap::<(String, String), ParticipantAccumulator>::new();
-    for print in prints.iter().filter(|print| {
-        print.source == TradeTapeSourceKind::OnChain
-            && print.participant_role == TradeParticipantRole::Maker
-    }) {
+    for print in prints
+        .iter()
+        .filter(|print| print.participant_role == ExecutionParticipantRole::Maker)
+    {
         let notional = print.participant_notional();
         if print.participant_address.is_empty() || notional <= Decimal::ZERO {
             continue;
@@ -603,11 +574,10 @@ fn participant_breakdown(
     views
 }
 
-const fn participant_role(role: TradeParticipantRole) -> &'static str {
+const fn participant_role(role: ExecutionParticipantRole) -> &'static str {
     match role {
-        TradeParticipantRole::Maker => "maker",
-        TradeParticipantRole::Taker => "taker",
-        TradeParticipantRole::Unknown => "unknown",
+        ExecutionParticipantRole::Maker => "maker",
+        ExecutionParticipantRole::Taker => "taker",
     }
 }
 

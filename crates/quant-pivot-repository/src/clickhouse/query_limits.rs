@@ -56,10 +56,20 @@ pub const MICROSTRUCTURE_SERIES: ClickHouseQueryLimits = ClickHouseQueryLimits::
     ONLINE_ROWS,
     128 * MIB,
 );
-pub const LAST_TRADES: ClickHouseQueryLimits =
-    ClickHouseQueryLimits::new("ch.repository.last_trades.v1", ONLINE_ROWS, 128 * MIB);
-pub const TRADE_TAPE_WINDOW: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
-    "ch.repository.trade_tape_window.v1",
+pub const LAST_EXECUTIONS: ClickHouseQueryLimits =
+    ClickHouseQueryLimits::new("ch.repository.last_executions.v1", ONLINE_ROWS, 128 * MIB);
+pub const MARKET_EXECUTION_WINDOW: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.market_execution_window.v1",
+    RESEARCH_ROWS,
+    512 * MIB,
+);
+pub const MARKET_EXECUTIONS_BETWEEN: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.market_executions_between.v1",
+    RESEARCH_ROWS,
+    512 * MIB,
+);
+pub const EXECUTION_PARTICIPANTS_BETWEEN: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.execution_participants_between.v1",
     RESEARCH_ROWS,
     512 * MIB,
 );
@@ -142,11 +152,6 @@ pub const MODEL_INPUTS_FOR_RUNS: ClickHouseQueryLimits = ClickHouseQueryLimits::
 pub const FEATURE_CELLS_FOR_VECTORS: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
     "ch.repository.feature_cells_for_vectors.v1",
     RESEARCH_ROWS,
-    512 * MIB,
-);
-pub const TRADE_TAPE_RECONCILIATION: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
-    "ch.repository.trade_tape_reconciliation.v1",
-    1_000_001,
     512 * MIB,
 );
 pub const REPORT_RECOMMENDATION_VERIFY: ClickHouseQueryLimits = ClickHouseQueryLimits::new(

@@ -48,10 +48,11 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
         DatasetCohortManifest, DatasetCoverage, DatasetFeatureStateCounts, DatasetManifest,
-        FeatureCellState, MarketId, ModelSpecId, ModelTrainingTarget, Price, ResearchJobProgress,
-        ResearchProfileArtifact, SchemaVersion, Shares, TokenId, TradePolicyArtifactId,
-        TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
-        TrainingSampleSource, Usd, factor::FactorServingPlane, stable_name::FeatureName,
+        FeatureCellState, MarketId, ModelSpecId, ModelTrainingTarget, Price,
+        ResearchFeatureContract, ResearchJobProgress, ResearchProfileArtifact, SchemaVersion,
+        Shares, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId,
+        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, Usd,
+        factor::FactorServingPlane, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -101,7 +102,7 @@ use crate::{
         calibration_shared::assert_dataset_disjoint,
         historical_replay::{
             CrossSectionRequest, ReplayCaptureKey, ReplayConfig, ReplayCrossSection,
-            ReplayFactorMode, ReplayFactorOutput, ReplayTradeTapeSource, materialize_cross_section,
+            ReplayExecutionSource, ReplayFactorMode, ReplayFactorOutput, materialize_cross_section,
         },
         pit_selection::OfflinePitSelector,
     },
@@ -567,16 +568,29 @@ struct DatasetFactorContract {
     factor_serving_plane: FactorServingPlane,
 }
 
+struct DatasetFactorEngineInput<'a> {
+    model_family: ModelFamily,
+    expected_plane: &'a FactorServingPlane,
+    category_scope: Option<MarketCategory>,
+    feature_contract: ResearchFeatureContract,
+    factors: &'a FactorsConfig,
+    features: &'a FeaturesConfig,
+    domain: &'a DomainConfig,
+    bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
+}
+
 impl DatasetFactorEngine {
-    fn try_new(
-        model_family: ModelFamily,
-        expected_plane: &FactorServingPlane,
-        category_scope: Option<MarketCategory>,
-        factors: &FactorsConfig,
-        features: &FeaturesConfig,
-        domain: &DomainConfig,
-        bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
-    ) -> QuantResult<Self> {
+    fn try_new(input: DatasetFactorEngineInput<'_>) -> QuantResult<Self> {
+        let DatasetFactorEngineInput {
+            model_family,
+            expected_plane,
+            category_scope,
+            feature_contract,
+            factors,
+            features,
+            domain,
+            bias_table,
+        } = input;
         if model_family.is_classical() {
             let empty =
                 FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetBuild {
@@ -592,8 +606,14 @@ impl DatasetFactorEngine {
             }
             return Ok(Self::FeatureOnly { category_scope });
         }
-        let engine =
-            FactorEngine::for_model_scope(factors, features, domain, category_scope, bias_table);
+        let engine = FactorEngine::for_model_scope(
+            factors,
+            features,
+            domain,
+            feature_contract,
+            category_scope,
+            bias_table,
+        );
         if engine.registry().is_empty() {
             return Err(QuantError::config(
                 "no factors enabled for a factor-native model family",
@@ -709,6 +729,7 @@ impl TrainingDatasetService {
             model_family,
             request.feature_schema_version,
             profile.spec.category,
+            profile.spec.feature_contract,
         )?;
         if factor_serving_plane != expected_contract.factor_serving_plane {
             return Err(ResearchError::DatasetPlan {
@@ -780,6 +801,7 @@ impl TrainingDatasetService {
             model_family,
             request.feature_schema_version,
             profile.spec.category,
+            profile.spec.feature_contract,
         )?;
         let plan_markets =
             self.frozen_plan_markets(&request, &source.prefetched, profile.spec.category)?;
@@ -1096,8 +1118,13 @@ impl TrainingDatasetService {
         model_family: ModelFamily,
         feature_schema_version: SchemaVersion,
         category_scope: Option<MarketCategory>,
+        feature_contract: ResearchFeatureContract,
     ) -> QuantResult<DatasetFactorContract> {
-        let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
+        let builder = ConfiguredFeatureBuilder::new_for_contract(
+            &self.features,
+            &self.domain,
+            feature_contract,
+        )?;
         if builder.schema().version() != feature_schema_version {
             return Err(ResearchError::DatasetPlan {
                 detail: format!(
@@ -1122,6 +1149,7 @@ impl TrainingDatasetService {
             &self.factors,
             &self.features,
             &self.domain,
+            feature_contract,
             category_scope,
             self.bias_table.as_ref().map(Arc::clone),
         );
@@ -1535,6 +1563,7 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
             model_family,
             request.feature_schema_version,
             profile.spec.category,
+            profile.spec.feature_contract,
         )?;
         // Point-in-time candidate selection: markets observed (had a book) in the
         // window whose fee-dominant category is in the enabled set (mirrors the
@@ -1657,7 +1686,12 @@ impl TrainingDatasetService {
         self.prepare_build_ledger(&plan).await?;
         let training_dataset_id = plan.training_dataset_id;
         let result = async {
-            let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
+            let profile = Self::resolve_research_profile(&plan.request)?;
+            let builder = ConfiguredFeatureBuilder::new_for_contract(
+                &self.features,
+                &self.domain,
+                profile.spec.feature_contract,
+            )?;
             if builder.schema().version() != plan.request.feature_schema_version {
                 return Err(ResearchError::DatasetBuild {
                     detail: format!(
@@ -2205,21 +2239,27 @@ impl TrainingDatasetService {
             context,
             sink,
         } = tail;
-        let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
-        let category_scope = Self::resolve_research_profile(&plan.request)?.spec.category;
-        let factor_engine = DatasetFactorEngine::try_new(
-            plan.model_family,
-            &plan.factor_serving_plane,
-            category_scope,
-            &self.factors,
+        let profile = Self::resolve_research_profile(&plan.request)?;
+        let builder = ConfiguredFeatureBuilder::new_for_contract(
             &self.features,
             &self.domain,
-            if plan.model_family.is_classical() {
+            profile.spec.feature_contract,
+        )?;
+        let category_scope = profile.spec.category;
+        let factor_engine = DatasetFactorEngine::try_new(DatasetFactorEngineInput {
+            model_family: plan.model_family,
+            expected_plane: &plan.factor_serving_plane,
+            category_scope,
+            feature_contract: profile.spec.feature_contract,
+            factors: &self.factors,
+            features: &self.features,
+            domain: &self.domain,
+            bias_table: if plan.model_family.is_classical() {
                 None
             } else {
                 self.bias_table.as_ref().map(Arc::clone)
             },
-        );
+        });
         let factor_engine = factor_engine?;
 
         if plan
@@ -2297,13 +2337,18 @@ impl TrainingDatasetService {
     }
 
     /// The frozen replay config (feature/factor/domain/data-quality) for this build.
-    fn replay_config(&self, model_family: ModelFamily) -> ReplayConfig {
+    fn replay_config(
+        &self,
+        model_family: ModelFamily,
+        feature_contract: ResearchFeatureContract,
+    ) -> ReplayConfig {
         ReplayConfig {
             features: self.features.clone(),
             factors: self.factors.clone(),
             domain: self.domain.clone(),
             data_quality: self.data_quality.clone(),
             liquidity_cap_usd: self.liquidity_cap_usd,
+            feature_contract,
             bias_table: if model_family.is_classical() {
                 None
             } else {
@@ -2325,8 +2370,14 @@ impl TrainingDatasetService {
             .map(|lot| (lot.order_intent_id, lot))
             .collect();
         let exit_labelers = exit_decision_labelers();
-        let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
-        let replay_config = self.replay_config(input.plan.model_family);
+        let profile = Self::resolve_research_profile(&input.plan.request)?;
+        let builder = ConfiguredFeatureBuilder::new_for_contract(
+            &self.features,
+            &self.domain,
+            profile.spec.feature_contract,
+        )?;
+        let replay_config =
+            self.replay_config(input.plan.model_family, profile.spec.feature_contract);
 
         for (as_of, group) in group_lot_samples(&input.plan.lot_samples) {
             let Some(cross_section) = materialize_lot_cross_section(LotCrossSectionMaterialize {
@@ -2336,7 +2387,7 @@ impl TrainingDatasetService {
                 replay_config: &replay_config,
                 pit: input.pit,
                 prefetched: input.prefetched,
-                trade_tape_available_by: input.plan.request.source_lineage.pit_cutoff,
+                execution_history_available_by: input.plan.request.source_lineage.pit_cutoff,
                 as_of,
                 group: &group,
                 context: input.context,
@@ -3032,23 +3083,27 @@ async fn run_historical_spine(
     params: HistoricalSpineParams<'_>,
     mut coverage: DatasetCoverage,
 ) -> QuantResult<HistoricalSpineOutput> {
-    let builder = ConfiguredFeatureBuilder::new(params.features, params.domain)?;
-    let category_scope = TrainingDatasetService::resolve_research_profile(params.request)?
-        .spec
-        .category;
-    let factor_engine = DatasetFactorEngine::try_new(
-        params.model_family,
-        params.factor_serving_plane,
-        category_scope,
-        params.factors,
+    let profile = TrainingDatasetService::resolve_research_profile(params.request)?;
+    let builder = ConfiguredFeatureBuilder::new_for_contract(
         params.features,
         params.domain,
-        if params.model_family.is_classical() {
+        profile.spec.feature_contract,
+    )?;
+    let category_scope = profile.spec.category;
+    let factor_engine = DatasetFactorEngine::try_new(DatasetFactorEngineInput {
+        model_family: params.model_family,
+        expected_plane: params.factor_serving_plane,
+        category_scope,
+        feature_contract: profile.spec.feature_contract,
+        factors: params.factors,
+        features: params.features,
+        domain: params.domain,
+        bias_table: if params.model_family.is_classical() {
             None
         } else {
             params.bias_table.as_ref().map(Arc::clone)
         },
-    );
+    });
     let factor_engine = factor_engine?;
     let replay_config = ReplayConfig {
         features: params.features.clone(),
@@ -3056,6 +3111,7 @@ async fn run_historical_spine(
         domain: params.domain.clone(),
         data_quality: params.data_quality.clone(),
         liquidity_cap_usd: params.liquidity_cap_usd,
+        feature_contract: profile.spec.feature_contract,
         bias_table: if params.model_family.is_classical() {
             None
         } else {
@@ -3114,7 +3170,7 @@ async fn run_historical_spine(
             &CrossSectionRequest {
                 pit: params.pit,
                 prefetched: params.prefetched,
-                trade_tape_source: ReplayTradeTapeSource::Materialized {
+                finalized_execution_evidence: ReplayExecutionSource::Materialized {
                     available_by: params.request.source_lineage.pit_cutoff,
                 },
                 decision_at: as_of,
@@ -3474,7 +3530,7 @@ struct LotCrossSectionMaterialize<'a> {
     replay_config: &'a ReplayConfig,
     pit: &'a dyn PointInTimeSnapshotSource,
     prefetched: &'a Prefetched,
-    trade_tape_available_by: DateTime<Utc>,
+    execution_history_available_by: DateTime<Utc>,
     as_of: DateTime<Utc>,
     group: &'a [&'a LotSamplePlan],
     context: &'a ReplayContext,
@@ -3513,6 +3569,7 @@ struct ReplayContext {
     knowledge_lag: Duration,
     lookback: Duration,
     max_horizon_secs: u64,
+    feature_contract: ResearchFeatureContract,
 }
 
 impl ReplayContext {
@@ -3527,10 +3584,18 @@ impl ReplayContext {
             .ok_or_else(|| ResearchError::DatasetPlan {
                 detail: "at least one label horizon is required".to_owned(),
             })?;
+        let profile = plan
+            .request
+            .source_lineage
+            .research_profile_artifact_id
+            .profile_ref()
+            .resolve_builtin_research_profile()
+            .map_err(|detail| ResearchError::DatasetPlan { detail })?;
         Ok(Self {
             knowledge_lag: Duration::from_secs(plan.request.knowledge_lag_secs),
             lookback: Duration::from_secs(features.max_lookback_secs()),
             max_horizon_secs,
+            feature_contract: profile.spec.feature_contract,
         })
     }
 
@@ -3556,6 +3621,7 @@ impl ReplayContext {
             knowledge_lag: self.knowledge_lag,
             max_horizon_secs: self.max_horizon_secs,
             domain: domain.clone(),
+            feature_contract: self.feature_contract,
         }
     }
 }
@@ -3614,8 +3680,8 @@ async fn materialize_lot_cross_section(
         &CrossSectionRequest {
             pit: input.pit,
             prefetched: input.prefetched,
-            trade_tape_source: ReplayTradeTapeSource::Materialized {
-                available_by: input.trade_tape_available_by,
+            finalized_execution_evidence: ReplayExecutionSource::Materialized {
+                available_by: input.execution_history_available_by,
             },
             decision_at: input.as_of,
             group: &replay_group,

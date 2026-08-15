@@ -72,7 +72,7 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
     factors::{FactorEngine, FactorValue, FrozenReferenceQuantiles, NormalizedFactor},
     features::{
-        FeatureSchema, FeatureVector,
+        ExecutableFeatureSchema, FeatureVector,
         names::{book::MID, market::CATEGORY},
     },
     hashing::ResearchHasher,
@@ -1534,7 +1534,10 @@ impl ModelVersionFixture {
             })?;
         let profile = profiles
             .into_iter()
-            .find(|profile| profile.spec.target_horizon_secs == prediction_horizon_secs)
+            .find(|profile| {
+                profile.spec.target_horizon_secs == prediction_horizon_secs
+                    && profile.spec.feature_contract.requires_l2()
+            })
             .ok_or_else(|| ResearchError::InvalidModelArtifact {
                 detail: format!(
                     "no built-in research profile matches model horizon {prediction_horizon_secs}"
@@ -1543,12 +1546,19 @@ impl ModelVersionFixture {
         let features = &policy.snapshot.profile_artifacts.features.definition;
         let scoring = &policy.snapshot.profile_artifacts.scoring.definition;
         let domain = &policy.snapshot.profile_artifacts.domain.definition;
-        let feature_schema = FeatureSchema::build(features)?;
+        let feature_schema =
+            ExecutableFeatureSchema::build(features, profile.spec.feature_contract)?;
         let feature_schema_hash = ResearchHasher::feature_schema(&feature_schema)?;
-        let factor_serving_plane =
-            FactorEngine::for_model_scope(scoring, features, domain, profile.spec.category, None)
-                .serving_plane()?
-                .clone();
+        let factor_serving_plane = FactorEngine::for_model_scope(
+            scoring,
+            features,
+            domain,
+            profile.spec.feature_contract,
+            profile.spec.category,
+            None,
+        )
+        .serving_plane()?
+        .clone();
         // Leave one full governed embargo interval before any fixture
         // Calibration split so its terminal run can never finish in the
         // future relative to wall-clock time.

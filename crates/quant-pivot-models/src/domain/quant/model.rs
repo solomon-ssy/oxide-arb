@@ -16,9 +16,9 @@ use crate::{
     },
     types::{
         CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, MarketSelectionId,
-        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        ResearchProfileRef, RoleCode, SchemaVersion, TradePolicyArtifactId, TrainingDatasetId,
-        UserId,
+        ModelInputContract, ModelInputSpec, ModelRunId, ModelSpecId, ModelTrainingContract,
+        ModelVersionId, ResearchFeatureContract, ResearchProfileArtifact, ResearchProfileRef,
+        RoleCode, SchemaVersion, TradePolicyArtifactId, TrainingDatasetId, UserId,
         model_lineage::{ModelVersionDerivation, ModelVersionDerivationError},
         model_metrics::ModelVersionMetrics,
         model_serving::{ModelServingContract, ModelServingContractError},
@@ -90,6 +90,115 @@ pub struct NewModelSpec {
     pub created_by_label: String,
     pub created_by_role: Option<RoleCode>,
     pub reason: String,
+}
+
+impl NewModelSpec {
+    /// Build the immutable system-owned L2-free specification for one built-in
+    /// bootstrap profile.
+    pub fn bootstrap_trade(profile: &ResearchProfileArtifact) -> Result<Self, String> {
+        let (name, summary, hypothesis, domain_inputs) = match profile.spec.feature_contract {
+            ResearchFeatureContract::TradeBootstrap => (
+                "pooled_binary_1h_bootstrap_trade_v1",
+                "Pooled outcome model trained only on finalized exchange history",
+                "Finalized trade returns, flow, intensity, concentration, staleness, and coverage contain stable predictive information for binary outcome payout",
+                &[][..],
+            ),
+            ResearchFeatureContract::TradeBootstrapCrypto => (
+                "crypto_price_15m_bootstrap_trade_v1",
+                "Crypto-price outcome model trained on finalized exchange and PIT Binance history",
+                "Finalized market executions combined with PIT underlying-price state contain stable predictive information for crypto-price outcome payout",
+                &[
+                    "domain.crypto.distance_to_strike",
+                    "domain.crypto.underlying_momentum",
+                    "domain.crypto.underlying_realized_vol",
+                    "domain.crypto.time_to_observation",
+                    "domain.crypto.basis_vs_resolution_source",
+                ][..],
+            ),
+            ResearchFeatureContract::TradeBootstrapWeather => (
+                "weather_forecast_24h_bootstrap_trade_v1",
+                "Weather outcome model trained on finalized exchange and PIT forecast history",
+                "Finalized market executions combined with PIT forecast distributions contain stable predictive information for weather outcome payout",
+                &[
+                    "domain.weather.contract_probability",
+                    "domain.weather.forecast_dispersion",
+                    "domain.weather.boundary_distance",
+                    "domain.weather.source_basis_risk",
+                    "domain.weather.truth_maturity_risk",
+                ][..],
+            ),
+            ResearchFeatureContract::FullL2
+            | ResearchFeatureContract::FullL2Crypto
+            | ResearchFeatureContract::FullL2Weather => {
+                return Err("bootstrap model spec requires an L2-free profile contract".to_owned());
+            }
+        };
+        let name = name.to_owned();
+        let thesis = ModelSpecThesis {
+            summary: summary.to_owned(),
+            hypothesis: hypothesis.to_owned(),
+            limitations: vec![
+                "Historical L2 depth is unavailable and is excluded from the predictive contract"
+                    .to_owned(),
+                "Live L2 is required only for report sizing and cannot authorize execution"
+                    .to_owned(),
+            ],
+        };
+        let inputs = [
+            "trade.last_fill_return",
+            "trade.realized_volatility",
+            "trade.lagged_momentum",
+            "trade.ema_slope",
+            "trade.macd_norm",
+            "trade.signed_execution_notional_imbalance",
+            "trade.execution_intensity",
+            "trade.participant_gini",
+            "trade.participant_hhi",
+            "trade.execution_staleness_secs",
+            "trade.execution_coverage_ratio",
+        ]
+        .into_iter()
+        .chain(domain_inputs.iter().copied())
+        .map(ModelInputSpec::required)
+        .collect();
+        let input_contract = ModelInputContract { inputs };
+        let training_contract = ModelTrainingContract::outcome_default();
+        let definition = ModelSpecDefinition {
+            name: &name,
+            model_family: ModelFamily::WeightedFactor,
+            prediction_horizon_secs: i64::try_from(profile.spec.target_horizon_secs)
+                .map_err(|error| format!("bootstrap model horizon is invalid: {error}"))?,
+            feature_schema_version: SchemaVersion::FIRST,
+            label_schema_version: SchemaVersion::FIRST,
+            thesis: &thesis,
+            input_contract: &input_contract,
+            training_contract: &training_contract,
+        };
+        definition.validate()?;
+        let definition_hash = definition
+            .content_hash()
+            .map_err(|error| format!("bootstrap model spec hash failed: {error}"))?;
+        Ok(Self {
+            model_spec_id: ModelSpecId::from_definition_hash(&definition_hash),
+            name,
+            model_family: ModelFamily::WeightedFactor,
+            prediction_horizon_secs: i64::try_from(profile.spec.target_horizon_secs)
+                .map_err(|error| format!("bootstrap model horizon is invalid: {error}"))?,
+            feature_schema_version: SchemaVersion::FIRST,
+            label_schema_version: SchemaVersion::FIRST,
+            thesis,
+            input_contract,
+            training_contract,
+            definition_hash,
+            created_by_user_id: None,
+            created_by_label: "system:fresh_boot_orchestrator".to_owned(),
+            created_by_role: None,
+            reason: format!(
+                "seed immutable finalized-trade bootstrap model spec for {}",
+                profile.profile_ref.id
+            ),
+        })
+    }
 }
 
 /// Immutable model artifact row, enriched with the owning spec's
