@@ -400,6 +400,7 @@ impl TrainingDatasetInfo {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
+    use uuid::Uuid;
 
     use super::CompleteTrainingDatasetBuild;
     use crate::{
@@ -445,6 +446,8 @@ mod tests {
                 CapabilityRegistryHashes::try_new(vec![hash('2')]).expect("valid capability set");
             let source_lineage = DatasetSourceLineage {
                 format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+                fit_seal_id: Uuid::from_u128(20).into(),
+                fit_seal_hash: hash('2'),
                 source_slice_id: SourceSliceId::from_v7(),
                 source_slice_identity_hash: hash('3'),
                 research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile),

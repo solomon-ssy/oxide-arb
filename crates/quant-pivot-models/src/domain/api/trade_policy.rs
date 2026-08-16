@@ -22,14 +22,14 @@ use crate::{
     },
     types::{
         ArtifactUri, ArtifactVersion, AttestationKeyId, ContentHash, DecisionPolicySnapshotId,
-        DiagnosticCode, MarketId, ResearchEvaluationTrack, ResearchJobId, ResearchPolicyFitter,
-        ResearchProfileArtifact, ResearchProfileRef, ResearchReadinessEvidenceId,
-        ShadowLatencyProfileV1, SourceSliceId, SourceSliceManifestRef, SourceSliceObjectKind,
-        SourceSliceObjectRef, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload,
-        TradePolicyCandidateId, TradePolicyCandidateSpec, TradePolicyEvidenceObjectKind,
-        TradePolicyGovernanceAuditId, TradePolicyPublicationBlocker, TradePolicyTrialAttemptId,
-        TradePolicyTrialMetrics, TradePolicyValidationRunId, TrainingDatasetId, TrainingExampleId,
-        UserId,
+        DiagnosticCode, HistoryFitSealId, MarketId, ResearchEvaluationTrack, ResearchJobId,
+        ResearchPolicyFitter, ResearchProfileArtifact, ResearchProfileRef,
+        ResearchReadinessEvidenceId, ShadowLatencyProfileV1, SourceSliceId, SourceSliceManifestRef,
+        SourceSliceObjectKind, SourceSliceObjectRef, TokenId, TradePolicyArtifactId,
+        TradePolicyArtifactPayload, TradePolicyCandidateId, TradePolicyCandidateSpec,
+        TradePolicyEvidenceObjectKind, TradePolicyGovernanceAuditId, TradePolicyPublicationBlocker,
+        TradePolicyTrialAttemptId, TradePolicyTrialMetrics, TradePolicyValidationRunId,
+        TrainingDatasetId, TrainingExampleId, UserId,
     },
 };
 
@@ -40,6 +40,8 @@ use crate::{
 pub struct TradePolicyFitSelection {
     pub profile_ref: ResearchProfileRef,
     pub pit_cutoff: DateTime<Utc>,
+    pub fit_seal_id: HistoryFitSealId,
+    pub fit_seal_hash: ContentHash,
 }
 
 impl TradePolicyFitSelection {

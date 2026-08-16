@@ -878,6 +878,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let reader = AlloyFinalizedResolutionReader::connect(&OnchainConfig {
+                provider_id: "wiremock".to_owned(),
                 rpc_endpoint: PolygonRpcEndpoint::Public { url: server.uri() },
                 rpc_timeout_ms: 5_000,
             })

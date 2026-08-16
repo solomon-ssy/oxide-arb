@@ -46,7 +46,7 @@ use quant_pivot_models::{
     domain::{
         data_plane::{
             DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorCasOutcome,
-            UpsertDomainSourceCursor,
+            HistorySealChunkRef, UpsertDomainSourceCursor,
         },
         quant::{
             ExecutionAttemptBarrier, ExecutionAttemptOutcomeInfo,
@@ -214,6 +214,7 @@ impl QuantFactReadRepository for MemoryResolutionFacts {
     async fn market_executions_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -224,6 +225,7 @@ impl QuantFactReadRepository for MemoryResolutionFacts {
     async fn execution_participants_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -234,6 +236,7 @@ impl QuantFactReadRepository for MemoryResolutionFacts {
     async fn market_execution_window(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,

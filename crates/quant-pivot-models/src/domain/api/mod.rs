@@ -33,7 +33,7 @@ mod runtime_activity;
 mod runtime_config;
 pub mod settlement_redeem;
 mod structural_monitor;
-mod system;
+pub mod system;
 mod trade_policy;
 mod training_dataset;
 mod user;

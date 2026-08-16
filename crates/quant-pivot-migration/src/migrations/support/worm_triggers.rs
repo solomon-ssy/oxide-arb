@@ -537,6 +537,30 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
+        name: "trg_quant_history_fit_seal_append_only",
+        table: "quant_history_fit_seal",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_history_fit_seal_chunk_append_only",
+        table: "quant_history_fit_seal_chunk",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_history_serving_head_seal_append_only",
+        table: "quant_history_serving_head_seal",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_history_serving_head_seal_chunk_append_only",
+        table: "quant_history_serving_head_seal_chunk",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
         name: "trg_quant_exchange_history_quarantine_append_only",
         table: "quant_exchange_history_quarantine",
         events: TriggerEvents::DeleteOrUpdate,

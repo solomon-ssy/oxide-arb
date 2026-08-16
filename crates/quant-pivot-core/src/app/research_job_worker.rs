@@ -1035,6 +1035,7 @@ impl ResearchJobExecutor {
                 clob_market_info: Arc::clone(&context.research.clob_market_info_repo),
                 linkages: Arc::clone(&context.research.market_linkage_repo),
                 calibration_artifacts: Arc::clone(&bias_tables),
+                exchange_history: Arc::clone(&context.research.exchange_history_repo),
                 compute: Arc::clone(&context.compute),
                 compute_budget: config.feature_parity_compute,
             },

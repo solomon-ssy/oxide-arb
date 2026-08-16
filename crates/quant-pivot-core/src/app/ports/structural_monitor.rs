@@ -205,15 +205,26 @@ impl CoreStructuralMonitor {
                 source_refs: Vec::new(),
             })
             .collect::<Vec<_>>();
-        let windows = self
-            .feature_windows
-            .load_execution_windows(&selected, &boundary, lookback)
-            .await?;
-        let accepted = self
+        let serving_head = self
             .exchange_history_repo
-            .latest_accepted(ExchangeHistoryFrontier::Activation)
+            .serving_head_at(ExchangeHistoryFrontier::Activation, boundary.decision_at())
             .await?;
-        let accepted_through_at = accepted.as_ref().and_then(|row| row.effective_through_at);
+        let (windows, accepted_through_at) = match serving_head {
+            Some(serving_head) => {
+                self.exchange_history_repo
+                    .validate_serving_head(
+                        serving_head.seal.serving_head_seal_id,
+                        serving_head.seal.seal_hash,
+                    )
+                    .await?;
+                let windows = self
+                    .feature_windows
+                    .load_execution_windows(&selected, &boundary, lookback, &serving_head.chunks)
+                    .await?;
+                (windows, Some(serving_head.seal.effective_through_at))
+            }
+            None => (HashMap::new(), None),
+        };
 
         let mut prints_by_market = HashMap::new();
         let views = markets

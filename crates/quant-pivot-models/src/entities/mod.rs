@@ -79,6 +79,10 @@ pub mod quant_feedback_stage_event;
 pub mod quant_feedback_trigger_event;
 pub mod quant_fresh_boot_run;
 pub mod quant_fresh_boot_run_event;
+pub mod quant_history_fit_seal;
+pub mod quant_history_fit_seal_chunk;
+pub mod quant_history_serving_head_seal;
+pub mod quant_history_serving_head_seal_chunk;
 pub mod quant_market_linkage;
 #[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_market_linkage_source;

@@ -5,8 +5,8 @@ use quant_pivot_models::{
     domain::{
         data_plane::{
             ExchangeHistoryChunkStatus, ExchangeHistoryContinuityBasis, ExchangeHistoryFrontier,
-            ExchangeHistoryQuarantineReason, NewExchangeHistoryChunk, NewExchangeHistoryQuarantine,
-            ResolveAcceptedHistoryRange,
+            ExchangeHistoryQuarantineEvidence, ExchangeHistoryQuarantineKind,
+            NewExchangeHistoryChunk, NewExchangeHistoryQuarantine, ResolveAcceptedHistoryRange,
         },
         quant::{
             AdvanceFreshBootRun, BlockFreshBootRun, DelayFreshBootRun, FreshBootAdvancePatch,
@@ -70,6 +70,7 @@ fn history_chunk(
         continuity_block: accepted.then_some(from_block - 1),
         continuity_hash: accepted.then(|| block_hash('3')),
         effective_through_at: accepted.then_some(now - Duration::minutes(1)),
+        state_revision: accepted.then_some(now.timestamp_micros()),
         accepted_at: accepted.then_some(now),
         created_at: now,
         updated_at: now,
@@ -371,9 +372,14 @@ pub async fn quarantine_resolution_unlocks() {
         NewExchangeHistoryQuarantine {
             quarantine_id,
             chunk_id: quarantined_chunk_id,
-            reason: ExchangeHistoryQuarantineReason::ProviderMismatch,
+            kind: ExchangeHistoryQuarantineKind::ProviderMismatch,
+            evidence: ExchangeHistoryQuarantineEvidence::ProviderMismatch {
+                extractor_digest: hash('a'),
+                attestor_digest: hash('b'),
+                extractor_count: 1,
+                attestor_count: 2,
+            },
             evidence_hash: hash('c'),
-            detail: "independent providers produced different canonical digests".to_owned(),
             quarantined_at: now,
         },
     )

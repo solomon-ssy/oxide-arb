@@ -40,9 +40,9 @@ use quant_pivot_models::{
         },
     },
     types::{
-        ArtifactUri, DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId, ResearchJobError,
-        ResearchJobId, ResearchJobParams, RoleCode, SchemaVersion, TrainingDatasetId,
-        TrainingSampleSources, WorkerId,
+        ArtifactUri, ContentHash, DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId,
+        ResearchJobError, ResearchJobId, ResearchJobParams, RoleCode, SchemaVersion,
+        TrainingDatasetId, TrainingSampleSources, WorkerId,
     },
 };
 use quant_pivot_repository::{
@@ -66,6 +66,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use super::feedback_boot_schema::{FeedbackSchemaFixture, content_hash, prepare_fixture};
 
@@ -140,6 +141,8 @@ impl CoordinatorStagePort {
                 sample_sources: TrainingSampleSources::default(),
                 reason: format!("feedback-coordinator-{}", identity.feedback_stage()),
                 training_dataset_id: Some(TrainingDatasetId::from_v7()),
+                fit_seal_id: Uuid::now_v7().into(),
+                fit_seal_hash: ContentHash::from_bytes([1; 32]),
             }),
             requested_by: None,
             acting_role: RoleCode::new("system"),

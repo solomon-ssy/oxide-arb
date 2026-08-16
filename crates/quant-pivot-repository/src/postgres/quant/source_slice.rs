@@ -194,6 +194,8 @@ fn ensure_manifest_binding(
         && manifest.research_program_hash == row.research_program_hash
         && manifest.decision_policy_snapshot_id == row.decision_policy_snapshot_id
         && manifest.runtime_config_hash == row.runtime_config_hash
+        && manifest.fit_seal_id == row.fit_seal_id
+        && manifest.fit_seal_hash == row.fit_seal_hash
         && manifest.window_start == row.window_start
         && manifest.window_end == row.window_end
         && manifest.pit_cutoff == row.pit_cutoff

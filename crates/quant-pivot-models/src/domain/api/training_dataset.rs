@@ -32,8 +32,8 @@ use crate::{
     half_open_window_request,
     types::{
         ContentHash, DatasetCohortManifest, DatasetCoverage, DatasetManifest, DatasetSourceLineage,
-        DecisionPolicySnapshotId, ModelSpecId, ResearchProfileArtifactId, ResearchProfileRef,
-        SchemaVersion, SourceSliceId, TrainingDatasetId, TrainingHorizonsSecs,
+        DecisionPolicySnapshotId, HistoryFitSealId, ModelSpecId, ResearchProfileArtifactId,
+        ResearchProfileRef, SchemaVersion, SourceSliceId, TrainingDatasetId, TrainingHorizonsSecs,
         TrainingSampleSources, factor::FactorServingPlane,
     },
 };
@@ -60,6 +60,9 @@ pub struct BuildTrainingDatasetRequest {
     pub purpose: DatasetPurpose,
     /// Frozen runtime-config version governing feature/factor/label schemas.
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    /// Immutable finalized-history window used by Dataset/CPCV/bootstrap.
+    pub fit_seal_id: HistoryFitSealId,
+    pub fit_seal_hash: ContentHash,
     /// Inclusive first sample `as_of`.
     pub window_start: DateTime<Utc>,
     /// Exclusive window end (samples are strictly before this instant).

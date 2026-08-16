@@ -31,7 +31,8 @@ use quant_pivot_models::{
     domain::{
         data_plane::{
             CryptoPriceReport, DecisionBoundary, DecisionClock, DecisionSource, DomainObservation,
-            ExecutionParticipantPrint, WeatherForecastPoint, WeatherObservationFact,
+            ExecutionParticipantPrint, HistorySealChunkRef, WeatherForecastPoint,
+            WeatherObservationFact,
         },
         market::{CatalogWindowInfo, MarketRegistryInfo},
         quant::{MarketLinkage, MarketSubject, WeatherSubject},
@@ -91,6 +92,10 @@ pub struct WindowSpec {
     /// Exact profile feature contract controlling which physical fact families
     /// may be read. Bootstrap contracts structurally prohibit L2 reads.
     pub feature_contract: ResearchFeatureContract,
+    /// Exact immutable exchange-history revisions available to this replay.
+    pub execution_history_chunks: Vec<HistorySealChunkRef>,
+    /// Whether this replay actually consumes finalized-execution features.
+    pub requires_execution_history: bool,
 }
 
 /// Batch-prefetched historical facts for an offline replay window.
@@ -287,11 +292,20 @@ impl HistoricalWindowLoader {
         } else {
             (Vec::new(), Vec::new())
         };
-        let trade_rows = self
-            .fact_read
-            .market_execution_window(markets.clone(), micro_from, micro_to, available_by_ms)
-            .await
-            .map_err(QuantError::from)?;
+        let trade_rows = if spec.requires_execution_history {
+            self.fact_read
+                .market_execution_window(
+                    markets.clone(),
+                    spec.execution_history_chunks.clone(),
+                    micro_from,
+                    micro_to,
+                    available_by_ms,
+                )
+                .await
+                .map_err(QuantError::from)?
+        } else {
+            Vec::new()
+        };
         let resolution_rows = self
             .fact_read
             .resolutions_between(markets.clone(), 0, resolution_to, available_by_ms)

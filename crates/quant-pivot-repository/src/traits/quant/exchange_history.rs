@@ -1,10 +1,15 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::data_plane::{
-    ExchangeHistoryChunkInfo, ExchangeHistoryFrontier, ExchangeHistoryPlanInfo,
-    ExchangeHistoryQuarantineInfo, ExchangeHistoryQuarantineResolutionInfo,
-    NewExchangeHistoryChunk, NewExchangeHistoryPlan, NewExchangeHistoryQuarantine,
-    NewExchangeHistoryQuarantineResolution, ResolveAcceptedHistoryRange,
+use quant_pivot_models::{
+    domain::data_plane::{
+        CreateHistoryFitSeal, CreateHistoryServingHeadSeal, ExchangeHistoryChunkInfo,
+        ExchangeHistoryFrontier, ExchangeHistoryPlanInfo, ExchangeHistoryQuarantineInfo,
+        ExchangeHistoryQuarantineRead, ExchangeHistoryQuarantineRecord,
+        ExchangeHistoryQuarantineResolutionInfo, HistoryFitSeal, HistoryServingHeadSeal,
+        NewExchangeHistoryChunk, NewExchangeHistoryPlan, NewExchangeHistoryQuarantine,
+        NewExchangeHistoryQuarantineResolution, ResolveAcceptedHistoryRange,
+    },
+    types::{ContentHash, HistoryFitSealId, HistoryServingHeadSealId},
 };
 
 #[async_trait::async_trait]
@@ -66,6 +71,11 @@ pub trait ExchangeHistoryRepository: Send + Sync {
         limit: u64,
     ) -> Result<Vec<ExchangeHistoryQuarantineInfo>, StorageError>;
 
+    async fn page_quarantine(
+        &self,
+        query: ExchangeHistoryQuarantineRead,
+    ) -> Result<Vec<ExchangeHistoryQuarantineRecord>, StorageError>;
+
     async fn active_quarantine(
         &self,
         frontier: ExchangeHistoryFrontier,
@@ -73,6 +83,11 @@ pub trait ExchangeHistoryRepository: Send + Sync {
         to_block: i64,
         limit: u64,
     ) -> Result<Vec<ExchangeHistoryQuarantineInfo>, StorageError>;
+
+    async fn count_active_quarantine(
+        &self,
+        frontier: ExchangeHistoryFrontier,
+    ) -> Result<u64, StorageError>;
 
     async fn resolve_quarantine(
         &self,
@@ -83,4 +98,42 @@ pub trait ExchangeHistoryRepository: Send + Sync {
         &self,
         resolution: ResolveAcceptedHistoryRange,
     ) -> Result<Vec<ExchangeHistoryQuarantineResolutionInfo>, StorageError>;
+
+    async fn create_fit_seal(
+        &self,
+        command: CreateHistoryFitSeal,
+    ) -> Result<HistoryFitSeal, StorageError>;
+
+    async fn find_fit_seal(
+        &self,
+        fit_seal_id: HistoryFitSealId,
+    ) -> Result<Option<HistoryFitSeal>, StorageError>;
+
+    async fn create_serving_head(
+        &self,
+        command: CreateHistoryServingHeadSeal,
+    ) -> Result<HistoryServingHeadSeal, StorageError>;
+
+    async fn latest_serving_head(
+        &self,
+        frontier: ExchangeHistoryFrontier,
+    ) -> Result<Option<HistoryServingHeadSeal>, StorageError>;
+
+    async fn serving_head_at(
+        &self,
+        frontier: ExchangeHistoryFrontier,
+        decision_at: DateTime<Utc>,
+    ) -> Result<Option<HistoryServingHeadSeal>, StorageError>;
+
+    async fn validate_fit_seal(
+        &self,
+        fit_seal_id: HistoryFitSealId,
+        seal_hash: ContentHash,
+    ) -> Result<HistoryFitSeal, StorageError>;
+
+    async fn validate_serving_head(
+        &self,
+        serving_head_seal_id: HistoryServingHeadSealId,
+        seal_hash: ContentHash,
+    ) -> Result<HistoryServingHeadSeal, StorageError>;
 }

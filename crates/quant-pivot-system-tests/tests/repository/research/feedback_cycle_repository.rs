@@ -31,7 +31,7 @@ use quant_pivot_models::{
     },
     runtime_config::BuyModelRoute,
     types::{
-        DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId, ModelVersionId,
+        ContentHash, DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId, ModelVersionId,
         PolicyBundleGeneration, PolicyIdempotencyKey, ResearchJobId, ResearchJobParams,
         ResearchProfileId, RoleCode, RoleId, SchemaVersion, TrainingDatasetId,
         TrainingSampleSources, UserId, WorkerId,
@@ -57,6 +57,7 @@ use sea_orm::{
     sea_query::{LockBehavior, LockType},
 };
 use tokio::time::{sleep, timeout};
+use uuid::Uuid;
 
 use super::feedback_boot_schema::{FeedbackSchemaFixture, content_hash, prepare_fixture};
 
@@ -143,6 +144,8 @@ impl FeedbackSchemaFixture {
                 sample_sources: TrainingSampleSources::default(),
                 reason: "feedback-cycle-repository".to_owned(),
                 training_dataset_id: Some(TrainingDatasetId::from_v7()),
+                fit_seal_id: Uuid::now_v7().into(),
+                fit_seal_hash: ContentHash::from_bytes([2; 32]),
             }),
             requested_by: None,
             acting_role: RoleCode::new("system"),

@@ -856,6 +856,35 @@ async fn assert_fresh_boot_models(api: &ApiClient, admin: &str) -> Result<()> {
         );
     }
 
+    let quarantines = ensure_status(
+        api.get(
+            "/api/system/exchange-history/quarantines?status=active&limit=20",
+            Some(admin),
+        )
+        .await?,
+        StatusCode::OK,
+        "exchange-history quarantine page",
+    )
+    .await?
+    .json::<Value>()
+    .await?;
+    ensure!(
+        quarantines["data"]["items"].is_array()
+            && (quarantines["data"]["next_after"].is_null()
+                || quarantines["data"]["next_after"].is_string()),
+        "quarantine page is not keyset-shaped: {quarantines}"
+    );
+    ensure_status(
+        api.get(
+            "/api/system/exchange-history/quarantines?limit=101",
+            Some(admin),
+        )
+        .await?,
+        StatusCode::BAD_REQUEST,
+        "exchange-history quarantine limit",
+    )
+    .await?;
+
     let fresh_boot = ensure_status(
         api.get("/api/system/fresh-boot", Some(admin)).await?,
         StatusCode::OK,
@@ -874,14 +903,30 @@ async fn assert_fresh_boot_models(api: &ApiClient, admin: &str) -> Result<()> {
     ensure!(
         data.get("observed_at").is_some_and(Value::is_string)
             && data.get("exchange_history").is_some_and(Value::is_object)
+            && data.get("capability").is_some_and(Value::is_object)
             && data.get("profiles").is_some_and(Value::is_array),
         "fresh-boot response does not expose independent profile progress: {fresh_boot}"
+    );
+    ensure!(
+        data["capability"]["state"].is_string()
+            && data["capability"]["first_report_ready"].is_boolean()
+            && data["capability"]["all_routes_ready"].is_boolean(),
+        "fresh-boot capability summary is incomplete: {fresh_boot}"
     );
     if let Some(profiles) = data.get("profiles").and_then(Value::as_array) {
         for profile in profiles {
             ensure!(
-                profile["run"]["route"].is_string() && profile["manual_report_ready"].is_boolean(),
+                profile["run"]["route"].is_string()
+                    && (profile["run"]["first_report_run_id"].is_null()
+                        || profile["run"]["first_report_run_id"].is_string())
+                    && (profile["run"]["first_report_id"].is_null()
+                        || profile["run"]["first_report_id"].is_string()),
                 "fresh-boot profile progress is incomplete: {profile}"
+            );
+            ensure!(
+                profile.get("manual_report_ready").is_none()
+                    && profile["run"].get("manual_report_ready_at").is_none(),
+                "fresh-boot response retained removed manual-ready fields: {profile}"
             );
         }
     }
@@ -928,24 +973,24 @@ fn validate_feedback_profiles(profiles: &[Value]) -> Result<()> {
     let expected = BTreeMap::from([
         (
             "crypto_price_15m",
-            (3, "semi_auto_candidate", Some("crypto")),
+            (4, "semi_auto_candidate", Some("crypto")),
         ),
         (
             "crypto_price_15m_bootstrap_trade",
-            (1, "research_only", Some("crypto")),
+            (2, "research_only", Some("crypto")),
         ),
-        ("pooled_1h_control", (4, "research_only", None)),
+        ("pooled_1h_control", (5, "research_only", None)),
         (
             "pooled_binary_1h_bootstrap_trade",
-            (1, "research_only", None),
+            (2, "research_only", None),
         ),
         (
             "weather_forecast_24h",
-            (4, "semi_auto_candidate", Some("weather")),
+            (5, "semi_auto_candidate", Some("weather")),
         ),
         (
             "weather_forecast_24h_bootstrap_trade",
-            (1, "research_only", Some("weather")),
+            (2, "research_only", Some("weather")),
         ),
     ]);
     ensure!(
@@ -1307,10 +1352,7 @@ async fn assert_feedback_live(
             && replay["data"]["cycle"]["feedback_cycle_id"] == cycle_id,
         "exact governed trigger did not replay its frozen cycle: {replay}"
     );
-    ensure!(
-        feedback_revision(api, &admin.access_token).await? == first_trigger_revision,
-        "exact governed trigger replay appended another durable revision"
-    );
+    assert_trigger_evidence(api, &admin.access_token, admin_id, cycle_id, reason).await?;
     let distinct = ensure_status(
         api.post_governed(
             "/api/research/feedback-cycles",
@@ -1347,7 +1389,14 @@ async fn assert_feedback_live(
             .any(|event| feedback_subject(event) == Some(cycle_id)),
         "distinct trigger provenance did not invalidate its canonical cycle: {distinct_live:?}"
     );
-    assert_trigger_evidence(api, &admin.access_token, admin_id, cycle_id, reason).await?;
+    assert_trigger_evidence(
+        api,
+        &admin.access_token,
+        admin_id,
+        cycle_id,
+        "w4_e03_drifted_reason",
+    )
+    .await?;
 
     socket.close().await?;
     let duplicate_ticket = api.ws_ticket(&admin.access_token).await?;

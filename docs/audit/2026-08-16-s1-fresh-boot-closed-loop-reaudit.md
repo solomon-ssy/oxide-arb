@@ -1,5 +1,7 @@
 # S1 Fresh-Boot 闭环复审（2026-08-16）
 
+> **Superseded**：本复审已被 S1 Fresh-Boot 生产级闭环整改取代，仅作为当时缺陷证据保留；不得从本文恢复旧字段、兼容路径或已被否定的实现建议。
+
 > **范围**：S1 落地质量复审。对照 [`2026-08-13-full-system-deep-audit.md`](2026-08-13-full-system-deep-audit.md) §1、[`2026-08-15-s1-fresh-boot-closed-loop-audit-and-design.md`](2026-08-15-s1-fresh-boot-closed-loop-audit-and-design.md)、[`/Users/eason/Downloads/PLAN.md`](/Users/eason/Downloads/PLAN.md) 与**当前工作区实现**。
 > **方法**：缺陷优先。不接受“契约写了但未接线”。已合上的项明确背书，禁止回归。
 > **读者**：下一轮收尾执行（Codex / 实现代理）。本文件是可执行工单，不是综述。

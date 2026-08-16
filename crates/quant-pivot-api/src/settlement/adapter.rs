@@ -987,6 +987,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let reader = AlloySettlementAdapterReader::connect(&OnchainConfig {
+                provider_id: "wiremock".to_owned(),
                 rpc_endpoint: PolygonRpcEndpoint::Public { url: server.uri() },
                 rpc_timeout_ms: 5_000,
             })
@@ -1119,6 +1120,7 @@ mod tests {
             .await
             .expect("resolve disposable Anvil port");
         let reader = AlloySettlementAdapterReader::connect(&OnchainConfig {
+            provider_id: "anvil".to_owned(),
             rpc_endpoint: PolygonRpcEndpoint::Public {
                 url: format!("http://127.0.0.1:{port}"),
             },

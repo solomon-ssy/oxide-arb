@@ -20,6 +20,7 @@ quant-pivot-allocator = { workspace = true }
 thiserror = { workspace = true }
 sea-orm = { workspace = true }
 rust_decimal = { workspace = true }
+uuid = { workspace = true }
 
 # Storage-layer error types (behind feature flag to keep this crate lean)
 clickhouse = { workspace = true, optional = true }

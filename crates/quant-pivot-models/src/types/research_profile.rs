@@ -285,15 +285,6 @@ pub enum ResearchInformationRegime {
     WeatherForecast,
 }
 
-/// Closed market selection supported by the profile implementation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResearchMarketSelector {
-    AllEligible,
-    CryptoPriceContract,
-    WeatherContract,
-}
-
 /// Deterministic decision-clock contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -364,8 +355,8 @@ pub enum ResearchLabelContract {
 #[serde(rename_all = "snake_case")]
 pub enum ResearchCohortContract {
     AllEligible,
-    CryptoPrice,
-    WeatherForecast,
+    CryptoResolved,
+    WeatherResolved,
 }
 
 /// Point-in-time availability basis for predictive facts.
@@ -461,11 +452,32 @@ impl ResearchLabelContract {
 
 impl ResearchCohortContract {
     #[must_use]
-    pub const fn required_source(self) -> ResearchProfileDataSource {
+    pub const fn category(self) -> Option<MarketCategory> {
         match self {
-            Self::AllEligible | Self::CryptoPrice | Self::WeatherForecast => {
-                ResearchProfileDataSource::CatalogLedger
-            }
+            Self::AllEligible => None,
+            Self::CryptoResolved => Some(MarketCategory::Crypto),
+            Self::WeatherResolved => Some(MarketCategory::Weather),
+        }
+    }
+
+    #[must_use]
+    pub fn required_sources(self) -> Vec<ResearchProfileDataSource> {
+        match self {
+            Self::AllEligible => vec![ResearchProfileDataSource::CatalogLedger],
+            Self::CryptoResolved => vec![
+                ResearchProfileDataSource::CatalogLedger,
+                ResearchProfileDataSource::GammaMarketIdentity,
+                ResearchProfileDataSource::BinanceMarketData,
+                ResearchProfileDataSource::PolymarketResolution,
+            ],
+            Self::WeatherResolved => vec![
+                ResearchProfileDataSource::CatalogLedger,
+                ResearchProfileDataSource::GammaMarketIdentity,
+                ResearchProfileDataSource::AviationWeather,
+                ResearchProfileDataSource::GhcnhCalibration,
+                ResearchProfileDataSource::GefsEnsemble,
+                ResearchProfileDataSource::PolymarketResolution,
+            ],
         }
     }
 }
@@ -712,7 +724,6 @@ impl ResearchFeedbackPolicy {
 pub struct ResearchProfileSpec {
     pub information_regime: ResearchInformationRegime,
     pub policy_fitter: Option<ResearchPolicyFitter>,
-    pub market_selector: ResearchMarketSelector,
     pub category: Option<MarketCategory>,
     pub decision_trigger: ResearchDecisionTrigger,
     pub decision_cadence_secs: u64,
@@ -763,6 +774,30 @@ impl ResearchProfileSpec {
                         .to_owned(),
                 );
             }
+        }
+        match self.serving_authority {
+            ServingAuthority::ReportOnlyWithLiveL2 if self.policy_fitter.is_some() => {
+                return Err("bootstrap profiles cannot carry a policy fitter".to_owned());
+            }
+            ServingAuthority::ExecutionEligible
+                if self.information_regime == ResearchInformationRegime::WeatherForecast
+                    && self.policy_fitter != Some(ResearchPolicyFitter::WeatherForecast) =>
+            {
+                return Err(
+                    "execution-eligible Weather profile requires the WeatherForecast fitter"
+                        .to_owned(),
+                );
+            }
+            ServingAuthority::ExecutionEligible
+                if self.information_regime != ResearchInformationRegime::WeatherForecast
+                    && self.policy_fitter.is_some() =>
+            {
+                return Err("non-Weather execution profile cannot carry a policy fitter".to_owned());
+            }
+            ServingAuthority::ReportOnlyWithLiveL2 | ServingAuthority::ExecutionEligible => {}
+        }
+        if self.category != self.cohort_contract.category() {
+            return Err("research profile category does not match its cohort contract".to_owned());
         }
         if let ResearchAvailabilityPolicy::FinalizedBlockConfirmation {
             confirmation_blocks,
@@ -845,7 +880,7 @@ impl ResearchProfileSpec {
         let mut sources = self.feature_contract.required_sources();
         sources.push(ResearchProfileDataSource::GammaMarketIdentity);
         sources.push(self.label_contract.required_source());
-        sources.push(self.cohort_contract.required_source());
+        sources.extend(self.cohort_contract.required_sources());
         sources.sort_unstable();
         sources.dedup();
         sources
@@ -902,11 +937,10 @@ impl ResearchProfileArtifact {
     fn pooled_full_l2(published_at: DateTime<Utc>) -> Result<Self, String> {
         Self::try_new(
             POOLED_1H_CONTROL_PROFILE_ID,
-            4,
+            5,
             ResearchProfileSpec {
                 information_regime: ResearchInformationRegime::PooledBinaryMarket,
                 policy_fitter: None,
-                market_selector: ResearchMarketSelector::AllEligible,
                 category: None,
                 decision_trigger: ResearchDecisionTrigger::Hourly,
                 decision_cadence_secs: 3_600,
@@ -937,11 +971,10 @@ impl ResearchProfileArtifact {
     fn crypto_full_l2(published_at: DateTime<Utc>) -> Result<Self, String> {
         Self::try_new(
             CRYPTO_PRICE_15M_PROFILE_ID,
-            3,
+            4,
             ResearchProfileSpec {
                 information_regime: ResearchInformationRegime::CryptoPrice,
                 policy_fitter: None,
-                market_selector: ResearchMarketSelector::CryptoPriceContract,
                 category: Some(MarketCategory::Crypto),
                 decision_trigger: ResearchDecisionTrigger::EveryFiveMinutes,
                 decision_cadence_secs: 300,
@@ -953,7 +986,7 @@ impl ResearchProfileArtifact {
                 purge_embargo_secs: 3_600,
                 feature_contract: ResearchFeatureContract::FullL2Crypto,
                 label_contract: ResearchLabelContract::FinalTokenPayoutRatio,
-                cohort_contract: ResearchCohortContract::CryptoPrice,
+                cohort_contract: ResearchCohortContract::CryptoResolved,
                 availability_policy: ResearchAvailabilityPolicy::IngestionObserved,
                 serving_authority: ServingAuthority::ExecutionEligible,
                 allowed_cash_budget_tiers: vec![Usd::new(Decimal::new(25, 0))],
@@ -968,11 +1001,10 @@ impl ResearchProfileArtifact {
     fn weather_full_l2(published_at: DateTime<Utc>) -> Result<Self, String> {
         Self::try_new(
             WEATHER_FORECAST_24H_PROFILE_ID,
-            4,
+            5,
             ResearchProfileSpec {
                 information_regime: ResearchInformationRegime::WeatherForecast,
                 policy_fitter: Some(ResearchPolicyFitter::WeatherForecast),
-                market_selector: ResearchMarketSelector::WeatherContract,
                 category: Some(MarketCategory::Weather),
                 decision_trigger: ResearchDecisionTrigger::HourlyLatestCompleteGefsCycle,
                 decision_cadence_secs: 3_600,
@@ -984,7 +1016,7 @@ impl ResearchProfileArtifact {
                 purge_embargo_secs: 172_800,
                 feature_contract: ResearchFeatureContract::FullL2Weather,
                 label_contract: ResearchLabelContract::FinalTokenPayoutRatio,
-                cohort_contract: ResearchCohortContract::WeatherForecast,
+                cohort_contract: ResearchCohortContract::WeatherResolved,
                 availability_policy: ResearchAvailabilityPolicy::IngestionObserved,
                 serving_authority: ServingAuthority::ExecutionEligible,
                 allowed_cash_budget_tiers: vec![Usd::new(Decimal::new(25, 0))],
@@ -1003,11 +1035,10 @@ impl ResearchProfileArtifact {
     fn pooled_trade_bootstrap(published_at: DateTime<Utc>) -> Result<Self, String> {
         Self::try_new(
             POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID,
-            1,
+            2,
             ResearchProfileSpec {
                 information_regime: ResearchInformationRegime::PooledBinaryMarket,
                 policy_fitter: None,
-                market_selector: ResearchMarketSelector::AllEligible,
                 category: None,
                 decision_trigger: ResearchDecisionTrigger::Hourly,
                 decision_cadence_secs: 3_600,
@@ -1040,11 +1071,10 @@ impl ResearchProfileArtifact {
     fn crypto_trade_bootstrap(published_at: DateTime<Utc>) -> Result<Self, String> {
         Self::try_new(
             CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID,
-            1,
+            2,
             ResearchProfileSpec {
                 information_regime: ResearchInformationRegime::CryptoPrice,
                 policy_fitter: None,
-                market_selector: ResearchMarketSelector::CryptoPriceContract,
                 category: Some(MarketCategory::Crypto),
                 decision_trigger: ResearchDecisionTrigger::EveryFiveMinutes,
                 decision_cadence_secs: 300,
@@ -1056,7 +1086,7 @@ impl ResearchProfileArtifact {
                 purge_embargo_secs: 3_600,
                 feature_contract: ResearchFeatureContract::TradeBootstrapCrypto,
                 label_contract: ResearchLabelContract::FinalTokenPayoutRatio,
-                cohort_contract: ResearchCohortContract::CryptoPrice,
+                cohort_contract: ResearchCohortContract::CryptoResolved,
                 availability_policy: ResearchAvailabilityPolicy::FinalizedBlockConfirmation {
                     confirmation_blocks: 12,
                 },
@@ -1073,11 +1103,10 @@ impl ResearchProfileArtifact {
     fn weather_trade_bootstrap(published_at: DateTime<Utc>) -> Result<Self, String> {
         Self::try_new(
             WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID,
-            1,
+            2,
             ResearchProfileSpec {
                 information_regime: ResearchInformationRegime::WeatherForecast,
                 policy_fitter: None,
-                market_selector: ResearchMarketSelector::WeatherContract,
                 category: Some(MarketCategory::Weather),
                 decision_trigger: ResearchDecisionTrigger::HourlyLatestCompleteGefsCycle,
                 decision_cadence_secs: 3_600,
@@ -1089,7 +1118,7 @@ impl ResearchProfileArtifact {
                 purge_embargo_secs: 172_800,
                 feature_contract: ResearchFeatureContract::TradeBootstrapWeather,
                 label_contract: ResearchLabelContract::FinalTokenPayoutRatio,
-                cohort_contract: ResearchCohortContract::WeatherForecast,
+                cohort_contract: ResearchCohortContract::WeatherResolved,
                 availability_policy: ResearchAvailabilityPolicy::FinalizedBlockConfirmation {
                     confirmation_blocks: 12,
                 },
@@ -1228,20 +1257,20 @@ mod tests {
             .iter()
             .find(|profile| profile.profile_ref.id.as_str() == WEATHER_FORECAST_24H_PROFILE_ID)
             .expect("weather profile");
-        assert_eq!(pooled.profile_ref.version, 4);
-        assert_eq!(crypto.profile_ref.version, 3);
-        assert_eq!(weather.profile_ref.version, 4);
+        assert_eq!(pooled.profile_ref.version, 5);
+        assert_eq!(crypto.profile_ref.version, 4);
+        assert_eq!(weather.profile_ref.version, 5);
         assert_eq!(
             pooled.profile_ref.content_hash.to_string(),
-            "blake3:92654501879377a7e6373f52c030112a95dd4ce48539655497ce4ea207f3a953"
+            "blake3:f99b2bb7b6a22ba717cfdb2a850e0b3d2a674e36f74826cb22f31d10d3c1faf0"
         );
         assert_eq!(
             crypto.profile_ref.content_hash.to_string(),
-            "blake3:be26d3cdd33b6241502849c5362f3b9886fa2b881f44441d1374678a33ac90e0"
+            "blake3:2828a9149f0c6250c6a5f8f9ebec1f264144adfb7f8be613876fe9c496047c8b"
         );
         assert_eq!(
             weather.profile_ref.content_hash.to_string(),
-            "blake3:3609b925375da079679a8e5ccb2693e9c83ca16eb0e60620e47603786a578674"
+            "blake3:95b8ffcefbd83d4ab5d899a20e19df3e2cf45e769e73e473ece8fcfadfc663f4"
         );
         assert_eq!(pooled.spec.feedback_policy.feedback_cadence_secs, 86_400);
         assert_eq!(
@@ -1334,13 +1363,13 @@ mod tests {
             );
             let expected_hash = match bootstrap_id {
                 POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:a2f5034862898c06e5f1561ef9d028a06643020fe21d952449c7087d6dc740ea"
+                    "blake3:18f411fd77187bf7ecd4311023e441b097fea27a6f41cd6b6ca129fbfe6b618b"
                 }
                 CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:bd6b5aae21a84e0e498b9ccd5db359793d8eaf0d91fff908dff22c8e4fd3e529"
+                    "blake3:7a811668eae2f13a69dbd9bca737b0859a28c18f15bc51c6d3d81a427b4216b0"
                 }
                 WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:ed8b1f3f8afd4d83251816fc8a6db3aa1de250e64d3760ed08a026fb2fa4225c"
+                    "blake3:01016435b027394b7dc866810596a47cd28f310288c6666e5f6f4ab459c3f610"
                 }
                 _ => unreachable!("closed bootstrap profile registry"),
             };

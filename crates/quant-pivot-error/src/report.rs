@@ -1,6 +1,7 @@
 //! Report generation pipeline errors.
 
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Failures during `TopN` report composition and persistence.
 #[derive(Debug, Error)]
@@ -33,6 +34,25 @@ pub enum ReportError {
     /// One represented Route lacks an atomically compatible serving artifact set.
     #[error("represented Route `{route}` is not ready: {detail}")]
     RouteReadiness { route: String, detail: String },
+
+    /// A real positive account position cannot be represented by the pinned
+    /// serving generation. Reports fail closed until that route is active.
+    #[error(
+        "positive open exposure {token_id} in market {market_id} requires inactive Route `{route}`"
+    )]
+    UnmodeledOpenExposure {
+        route: String,
+        market_id: String,
+        token_id: String,
+    },
+
+    /// A report-bound history head changed revision or gained quarantine evidence.
+    #[error("history window seal {seal_id} was invalidated: {detail}")]
+    HistoryWindowInvalidated { seal_id: Uuid, detail: String },
+
+    /// No immutable serving head existed at the report decision boundary.
+    #[error("finalized execution-history serving head is unavailable: {detail}")]
+    HistoryServingHeadUnavailable { detail: String },
 
     /// The promoted joint-scenario artifact is absent, malformed, or incompatible.
     #[error("portfolio scenario artifact contract failed: {detail}")]

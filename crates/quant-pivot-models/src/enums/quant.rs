@@ -825,7 +825,7 @@ pg_enum! {
         ScenarioReady => "scenario_ready",
         BootstrapPreflight => "bootstrap_preflight",
         BootstrapCommitted => "bootstrap_committed",
-        ReportEligible => "report_eligible",
+        FirstReportQueued => "first_report_queued",
         FirstReportPublished => "first_report_published",
     }
 }

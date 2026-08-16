@@ -93,6 +93,8 @@ impl ReportBundle {
             )),
             microstructure_commit: Arc::clone(&deps.data.data_pipeline)
                 as Arc<dyn MicrostructureCommitBarrier>,
+            exchange_history_repo: Arc::clone(&deps.research.exchange_history_repo),
+            metrics: Arc::clone(&deps.infra.metrics),
         }));
         let publisher = Arc::new(ReportPublisher::new(ReportPublisherDeps {
             events: deps.events,

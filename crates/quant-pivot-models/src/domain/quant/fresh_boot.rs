@@ -19,8 +19,8 @@ use crate::{
     runtime_config::BuyModelRoute,
     types::{
         BacktestPathSetId, CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId,
-        FeatureParityRunId, FreshBootRunEventId, FreshBootRunId, ModelSpecId, ModelVersionId,
-        PolicyActivationId, PolicyIdempotencyKey, PortfolioScenarioModelArtifactId,
+        FeatureParityRunId, FreshBootRunEventId, FreshBootRunId, HistoryFitSealId, ModelSpecId,
+        ModelVersionId, PolicyActivationId, PolicyIdempotencyKey, PortfolioScenarioModelArtifactId,
         RecommendationReportId, ReportRunId, ResearchJobId, ResearchProfileArtifactId,
         ResearchProfileRef, ResearchReadinessEvidenceId, ResearchReadinessSource, SourceSliceId,
         TrainingDatasetId, WorkerId,
@@ -116,7 +116,6 @@ impl FreshBootRunContract {
             active_job_id: None,
             last_job_id: None,
             bootstrap_policy_activation_id: None,
-            manual_report_ready_at: None,
             first_report_run_id: None,
             first_report_id: None,
             next_scheduled_report_at: None,
@@ -164,6 +163,8 @@ pub struct FreshBootSourceCoverageManifest {
     pub pit_cutoff: DateTime<Utc>,
     pub history_from_block: i64,
     pub history_through_block: i64,
+    pub fit_seal_id: HistoryFitSealId,
+    pub fit_seal_hash: ContentHash,
     pub requirements: Vec<FreshBootSourceCoverage>,
     pub sealed_at: DateTime<Utc>,
 }
@@ -238,11 +239,11 @@ impl FreshBootStage {
             (Self::BootstrapPreflight, FreshBootEventKind::BootstrapCommitted) => {
                 Ok(Self::BootstrapCommitted)
             }
-            (Self::BootstrapCommitted, FreshBootEventKind::ReportEnabled) => {
-                Ok(Self::ReportEligible)
+            (Self::BootstrapCommitted, FreshBootEventKind::ReportEnabled)
+            | (Self::FirstReportQueued, FreshBootEventKind::ReportRetried) => {
+                Ok(Self::FirstReportQueued)
             }
-            (Self::ReportEligible, FreshBootEventKind::ReportRetried) => Ok(Self::ReportEligible),
-            (Self::ReportEligible, FreshBootEventKind::ReportPublished) => {
+            (Self::FirstReportQueued, FreshBootEventKind::ReportPublished) => {
                 Ok(Self::FirstReportPublished)
             }
             _ => Err("fresh-boot event is not legal at the current stage"),
@@ -281,7 +282,6 @@ pub struct FreshBootRunInfo {
     pub active_job_id: Option<ResearchJobId>,
     pub last_job_id: Option<ResearchJobId>,
     pub bootstrap_policy_activation_id: Option<PolicyActivationId>,
-    pub manual_report_ready_at: Option<DateTime<Utc>>,
     pub first_report_run_id: Option<ReportRunId>,
     pub first_report_id: Option<RecommendationReportId>,
     pub next_scheduled_report_at: Option<DateTime<Utc>>,
@@ -308,7 +308,7 @@ info_from_model!(FreshBootRunInfo, quant_fresh_boot_run::Model, {
     decision_policy_snapshot_id, model_spec_id, training_dataset_id, calibration_dataset_id,
     source_model_version_id, model_version_id, path_set_id, calibration_id, parity_run_id,
     scenario_artifact_id, scenario_artifact_hash, bootstrap_preflight, bootstrap_preflight_hash,
-    active_job_id, last_job_id, bootstrap_policy_activation_id, manual_report_ready_at,
+    active_job_id, last_job_id, bootstrap_policy_activation_id,
     first_report_run_id, first_report_id, next_scheduled_report_at, retry_reason, retry_detail,
     retry_count, next_attempt_at, blocked_reason, blocked_detail, lease_owner, lease_expires_at,
     idempotency_key, revision, stage_entered_at, started_at, completed_at, created_at, updated_at,
@@ -348,7 +348,6 @@ pub struct NewFreshBootRun {
     pub active_job_id: Option<ResearchJobId>,
     pub last_job_id: Option<ResearchJobId>,
     pub bootstrap_policy_activation_id: Option<PolicyActivationId>,
-    pub manual_report_ready_at: Option<DateTime<Utc>>,
     pub first_report_run_id: Option<ReportRunId>,
     pub first_report_id: Option<RecommendationReportId>,
     pub next_scheduled_report_at: Option<DateTime<Utc>>,
@@ -392,7 +391,6 @@ pub struct FreshBootAdvancePatch {
     pub active_job_id: Option<Option<ResearchJobId>>,
     pub last_job_id: Option<ResearchJobId>,
     pub bootstrap_policy_activation_id: Option<PolicyActivationId>,
-    pub manual_report_ready_at: Option<DateTime<Utc>>,
     pub first_report_run_id: Option<ReportRunId>,
     pub first_report_id: Option<RecommendationReportId>,
     pub next_scheduled_report_at: Option<DateTime<Utc>>,
@@ -628,7 +626,7 @@ mod tests {
         FreshBootStage::ScenarioReady,
         FreshBootStage::BootstrapPreflight,
         FreshBootStage::BootstrapCommitted,
-        FreshBootStage::ReportEligible,
+        FreshBootStage::FirstReportQueued,
         FreshBootStage::FirstReportPublished,
     ];
 
@@ -769,15 +767,15 @@ mod tests {
         (
             FreshBootStage::BootstrapCommitted,
             FreshBootEventKind::ReportEnabled,
-            FreshBootStage::ReportEligible,
+            FreshBootStage::FirstReportQueued,
         ),
         (
-            FreshBootStage::ReportEligible,
+            FreshBootStage::FirstReportQueued,
             FreshBootEventKind::ReportRetried,
-            FreshBootStage::ReportEligible,
+            FreshBootStage::FirstReportQueued,
         ),
         (
-            FreshBootStage::ReportEligible,
+            FreshBootStage::FirstReportQueued,
             FreshBootEventKind::ReportPublished,
             FreshBootStage::FirstReportPublished,
         ),

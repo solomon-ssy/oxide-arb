@@ -66,6 +66,8 @@ pub struct SelectionExclusionSummary {
     pub insufficient_liquidity_count: u32,
     /// Count excluded by an operator block.
     pub excluded_by_operator_count: u32,
+    /// Count excluded because the pinned serving generation has no active route.
+    pub route_not_activated_count: u32,
     /// Count excluded for any other reason.
     pub other_count: u32,
 }
@@ -86,6 +88,7 @@ impl AddAssign for SelectionExclusionSummary {
         self.stale_book_count += rhs.stale_book_count;
         self.insufficient_liquidity_count += rhs.insufficient_liquidity_count;
         self.excluded_by_operator_count += rhs.excluded_by_operator_count;
+        self.route_not_activated_count += rhs.route_not_activated_count;
         self.other_count += rhs.other_count;
     }
 }

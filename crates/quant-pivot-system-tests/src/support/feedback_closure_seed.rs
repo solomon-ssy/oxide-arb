@@ -49,7 +49,10 @@ use quant_pivot_models::{
     },
     config::{ClickHouseConfig, WeatherVerticalBindingsConfig},
     domain::{
-        data_plane::{DecisionBoundary, DecisionClock, DecisionSource, DomainObservation},
+        data_plane::{
+            DecisionBoundary, DecisionClock, DecisionSource, DomainObservation,
+            ExchangeHistoryFrontier, HistorySealChunkRef,
+        },
         market::{
             BookLevel, CATALOG_OBJECT_SCHEMA_VERSION, EventRegistryInfo, EventTags,
             MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
@@ -2028,6 +2031,7 @@ async fn build_selection_model(input: SelectionModelBuild<'_>) -> Result<MarketS
                 features: replay.config.features.clone(),
                 model_requirements,
                 knowledge_lag_secs: replay.knowledge_lag.as_secs(),
+                route_availability: None,
             },
             candidates.clone(),
         )
@@ -3514,6 +3518,17 @@ impl CohortSeed {
             .decision_at
             .checked_add_signed(Duration::milliseconds(1))
             .context("closure replay window end overflowed")?;
+        let history_sources = self
+            .recommendations
+            .iter()
+            .map(ClosureMarketSource::from)
+            .collect::<Vec<_>>();
+        let execution_history_chunks = closure_history_chunks(
+            &history_sources,
+            self.decision_at,
+            replay.knowledge_lag.as_secs(),
+            self.book_price_shift,
+        )?;
         let window = replay
             .loader
             .load(&WindowSpec {
@@ -3526,6 +3541,8 @@ impl CohortSeed {
                 feature_contract: replay.config.feature_contract,
                 max_horizon_secs: 0,
                 domain: replay.config.domain.clone(),
+                execution_history_chunks,
+                requires_execution_history: true,
             })
             .await?;
         let finalized_execution_evidences =
@@ -4388,6 +4405,33 @@ fn closure_execution_history_rows(
         participants,
         acceptance,
     })
+}
+
+fn closure_history_chunks(
+    sources: &[ClosureMarketSource],
+    decision_at: DateTime<Utc>,
+    knowledge_lag_secs: u64,
+    book_price_shift: Decimal,
+) -> Result<Vec<HistorySealChunkRef>> {
+    sources
+        .iter()
+        .map(|source| {
+            let acceptance = closure_execution_history_rows(
+                source,
+                decision_at,
+                knowledge_lag_secs,
+                book_price_shift,
+            )?
+            .acceptance;
+            Ok(HistorySealChunkRef {
+                chunk_id: acceptance.chunk_id,
+                frontier: ExchangeHistoryFrontier::Activation,
+                state_revision: i64::try_from(acceptance.state_revision)?,
+                from_block: i64::try_from(acceptance.from_block)?,
+                to_block: i64::try_from(acceptance.to_block)?,
+            })
+        })
+        .collect()
 }
 
 fn closure_book_row(
@@ -5995,6 +6039,12 @@ async fn run_shadow_observation(
         .decision_at
         .checked_add_signed(Duration::milliseconds(1))
         .context("closure shadow replay window end overflowed")?;
+    let execution_history_chunks = closure_history_chunks(
+        request.sources,
+        request.decision_at,
+        replay.knowledge_lag.as_secs(),
+        request.book_price_shift,
+    )?;
     let window = replay
         .loader
         .load(&WindowSpec {
@@ -6007,6 +6057,8 @@ async fn run_shadow_observation(
             feature_contract: replay.config.feature_contract,
             max_horizon_secs: 0,
             domain: replay.config.domain.clone(),
+            execution_history_chunks,
+            requires_execution_history: true,
         })
         .await?;
     let finalized_execution_evidences = frozen_finalized_execution_evidences(

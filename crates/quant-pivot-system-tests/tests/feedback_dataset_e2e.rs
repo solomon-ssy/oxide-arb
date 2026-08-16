@@ -72,12 +72,13 @@ use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository, ChQuantFactReadRepository},
     postgres::{
         PgCalibrationArtifactRepository, PgCatalogLedgerRepository, PgClobMarketInfoRepository,
-        PgDomainSourceCursorRepository, PgExecutionAttemptOutcomeRepository, PgFactorRepository,
-        PgFeatureRepository, PgMarketLinkageRepository, PgMarketRepository,
-        PgModelRegistryRepository, PgPolicyRepository, PgPositionRepository,
-        PgRecommendationExecutionRollupRepository, PgRecommendationReportRepository,
-        PgRecommendationRepository, PgRecommendationResolutionOutcomeRepository,
-        PgResolutionObservationRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgDomainSourceCursorRepository, PgExchangeHistoryRepository,
+        PgExecutionAttemptOutcomeRepository, PgFactorRepository, PgFeatureRepository,
+        PgMarketLinkageRepository, PgMarketRepository, PgModelRegistryRepository,
+        PgPolicyRepository, PgPositionRepository, PgRecommendationExecutionRollupRepository,
+        PgRecommendationReportRepository, PgRecommendationRepository,
+        PgRecommendationResolutionOutcomeRepository, PgResolutionObservationRepository,
+        PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
         DomainSourceCursorRepository, FactWriter, FactorRepository, FeatureRepository,
@@ -873,6 +874,7 @@ async fn feedback_service(
             model_registry: Arc::new(PgModelRegistryRepository::new(db.clone())),
             trade_policy_repo: Arc::new(PgTradePolicyRepository::new(db.clone())),
             calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
+            exchange_history_repo: Arc::new(PgExchangeHistoryRepository::new(db.clone())),
         },
         TrainingDatasetBuildConfig {
             features: runtime.profile_artifacts.features.definition,

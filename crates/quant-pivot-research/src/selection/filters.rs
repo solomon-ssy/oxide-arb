@@ -376,6 +376,7 @@ pub const fn accumulate_exclusion(
         ExclusionReason::StaleBook => summary.stale_book_count += 1,
         ExclusionReason::InsufficientLiquidity => summary.insufficient_liquidity_count += 1,
         ExclusionReason::ManuallyBlocked => summary.excluded_by_operator_count += 1,
+        ExclusionReason::RouteNotActivated => summary.route_not_activated_count += 1,
         ExclusionReason::NotOpen
         | ExclusionReason::CategoryDisabled
         | ExclusionReason::SpreadTooWide

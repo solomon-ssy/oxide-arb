@@ -10,7 +10,11 @@ use quant_pivot_models::{
         ChSchemaVersion, ChShares, ChUsd, MarketResolutionFactInput, MarketResolutionRow,
     },
     domain::{
-        data_plane::DecisionSource,
+        data_plane::{
+            CreateHistoryFitSeal, DecisionSource, ExchangeHistoryChunkStatus,
+            ExchangeHistoryContinuityBasis, ExchangeHistoryFrontier, HistorySealChunkRef,
+            NewExchangeHistoryChunk, NewExchangeHistoryPlan, NewHistoryFitSeal,
+        },
         market::{
             CATALOG_OBJECT_SCHEMA_VERSION, CatalogEventChangeInfo, CatalogMarketChangeInfo,
             EventRegistryInfo, MarketRegistryInfo,
@@ -59,11 +63,12 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgModelRegistryRepository, PgPolicyRepository, PgSourceSliceRepository,
-        PgTrainingDatasetRepository,
+        PgExchangeHistoryRepository, PgModelRegistryRepository, PgPolicyRepository,
+        PgSourceSliceRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        ModelRegistryRepository, PolicyRepository, SourceSliceRepository, TrainingDatasetRepository,
+        ExchangeHistoryRepository, ModelRegistryRepository, PolicyRepository,
+        SourceSliceRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -79,6 +84,127 @@ use sea_orm::DatabaseConnection;
 use serde::Serialize;
 
 use super::seeded_uuid;
+
+const SOURCE_FIXTURE_BLOCK: i64 = 1;
+const SOURCE_FIXTURE_CHAIN_ID: i64 = 137;
+
+fn source_fit_plan(created_at: DateTime<Utc>) -> NewExchangeHistoryPlan {
+    NewExchangeHistoryPlan {
+        plan_id: seeded_uuid("source-slice-history-plan"),
+        chain_id: SOURCE_FIXTURE_CHAIN_ID,
+        policy_hash: ContentHash::from_bytes([0x41; 32]),
+        bootstrap_profile_set_hash: ContentHash::from_bytes([0x42; 32]),
+        finalized_anchor_block: 3,
+        finalized_anchor_hash: EvmBlockHash::parse(format!("0x{}", "43".repeat(32)))
+            .expect("fixture finalized anchor hash"),
+        finalized_anchor_timestamp: 1,
+        activation_from_block: 2,
+        activation_through_block: 2,
+        crypto_required_from_block: 2,
+        weather_required_from_block: 1,
+        retention_from_block: SOURCE_FIXTURE_BLOCK,
+        retention_through_block: SOURCE_FIXTURE_BLOCK,
+        created_at,
+    }
+}
+
+fn source_fit_command(
+    profile_ref: &ResearchProfileRef,
+    research_program_hash: ContentHash,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+) -> QuantResult<CreateHistoryFitSeal> {
+    let fit_seal_id = seeded_uuid(&format!(
+        "source-slice-fit-seal:{}:{}:{}:{}",
+        profile_ref.artifact_id(),
+        research_program_hash,
+        window_start.timestamp_micros(),
+        window_end.timestamp_micros(),
+    ))
+    .into();
+    let chunk_id = seeded_uuid(&format!("source-slice-fit-chunk:{fit_seal_id}"));
+    let chunks = vec![HistorySealChunkRef {
+        chunk_id,
+        frontier: ExchangeHistoryFrontier::Retention,
+        state_revision: 1,
+        from_block: SOURCE_FIXTURE_BLOCK,
+        to_block: SOURCE_FIXTURE_BLOCK,
+    }];
+    let plan = source_fit_plan(created_at);
+    let mut command = CreateHistoryFitSeal {
+        seal: NewHistoryFitSeal {
+            fit_seal_id,
+            seal_hash: ContentHash::from_bytes([0; 32]),
+            plan_id: plan.plan_id,
+            window_from_block: SOURCE_FIXTURE_BLOCK,
+            window_to_block: SOURCE_FIXTURE_BLOCK,
+            policy_hash: plan.policy_hash,
+            profile_hash: profile_ref.content_hash,
+            cohort_hash: research_program_hash,
+            created_at,
+        },
+        chunks,
+    };
+    command.seal.seal_hash = command.derive_hash()?;
+    Ok(command)
+}
+
+async fn seed_source_fit_seal(
+    db: &DatabaseConnection,
+    manifest: &SourceSliceManifest,
+) -> QuantResult<()> {
+    let command = source_fit_command(
+        &manifest.profile_ref,
+        manifest.research_program_hash,
+        manifest.window_start,
+        manifest.window_end,
+        manifest.materialized_at,
+    )?;
+    if command.seal.fit_seal_id != manifest.fit_seal_id
+        || command.seal.seal_hash != manifest.fit_seal_hash
+    {
+        return Err(ResearchError::DatasetBuild {
+            detail: "Source Slice fixture FitSeal binding does not match its window".to_owned(),
+        }
+        .into());
+    }
+    let repository = PgExchangeHistoryRepository::new(db.clone());
+    repository
+        .create_or_load_plan(source_fit_plan(manifest.materialized_at))
+        .await?;
+    let chunk = &command.chunks[0];
+    let digest = ContentHash::from_bytes([0x44; 32]);
+    let block_hash =
+        EvmBlockHash::parse(format!("0x{}", "45".repeat(32))).expect("fixture accepted block hash");
+    repository
+        .save_chunk(NewExchangeHistoryChunk {
+            chunk_id: chunk.chunk_id,
+            frontier: chunk.frontier,
+            from_block: chunk.from_block,
+            to_block: chunk.to_block,
+            status: ExchangeHistoryChunkStatus::Accepted,
+            attempt_count: 1,
+            hypersync_count: Some(0),
+            attestor_count: Some(0),
+            hypersync_digest: Some(digest),
+            attestor_digest: Some(digest),
+            first_block_hash: Some(block_hash.clone()),
+            last_block_hash: Some(block_hash.clone()),
+            archive_height: Some(3),
+            continuity_basis: Some(ExchangeHistoryContinuityBasis::HyperSyncBoundaryHeaders),
+            continuity_block: Some(0),
+            continuity_hash: Some(block_hash),
+            effective_through_at: Some(manifest.window_end),
+            state_revision: Some(chunk.state_revision),
+            accepted_at: Some(manifest.materialized_at),
+            created_at: manifest.materialized_at,
+            updated_at: manifest.materialized_at,
+        })
+        .await?;
+    repository.create_fit_seal(command).await?;
+    Ok(())
+}
 
 /// Build a complete deterministic CSCV fixture from synchronous OOS trial columns.
 ///
@@ -1340,60 +1466,103 @@ async fn persist_replayable_objects(
     records: ReplayableSourceRecords,
     profile: &ResearchProfileArtifact,
 ) -> QuantResult<Vec<SourceSliceObjectRef>> {
-    let mut objects = vec![
-        persist_source_object(
-            store,
-            SourceSliceObjectKind::GammaMarketIdentity,
-            Vec::new(),
-        )
-        .await?,
-        persist_source_object(
-            store,
-            SourceSliceObjectKind::CatalogMarket,
-            records.catalog_markets,
-        )
-        .await?,
-        persist_source_object(
-            store,
-            SourceSliceObjectKind::CatalogEvent,
-            records.catalog_events,
-        )
-        .await?,
-        persist_source_object(
-            store,
-            SourceSliceObjectKind::ClobMarketInfo,
-            records.market_info,
-        )
-        .await?,
-        persist_source_object(store, SourceSliceObjectKind::L2Ledger, records.ledger).await?,
-        persist_source_object(store, SourceSliceObjectKind::L2Session, records.sessions).await?,
-        persist_source_object(store, SourceSliceObjectKind::L2Gap, records.gaps).await?,
-        persist_source_object(
-            store,
-            SourceSliceObjectKind::BookMicrostructure,
-            records.microstructure,
-        )
-        .await?,
-        persist_source_object(
-            store,
-            SourceSliceObjectKind::MarketExecution,
-            records.executions,
-        )
-        .await?,
-        persist_source_object(
-            store,
-            SourceSliceObjectKind::ExecutionParticipant,
-            records.participants,
-        )
-        .await?,
-        persist_source_object(
-            store,
-            SourceSliceObjectKind::Resolution,
-            records.resolutions,
-        )
-        .await?,
-    ];
     let required = SourceSliceManifest::required_object_kinds(profile);
+    let mut objects = Vec::with_capacity(required.len());
+    if required.contains(&SourceSliceObjectKind::GammaMarketIdentity) {
+        objects.push(
+            persist_source_object(
+                store,
+                SourceSliceObjectKind::GammaMarketIdentity,
+                Vec::new(),
+            )
+            .await?,
+        );
+    }
+    if required.contains(&SourceSliceObjectKind::CatalogMarket) {
+        objects.push(
+            persist_source_object(
+                store,
+                SourceSliceObjectKind::CatalogMarket,
+                records.catalog_markets,
+            )
+            .await?,
+        );
+    }
+    if required.contains(&SourceSliceObjectKind::CatalogEvent) {
+        objects.push(
+            persist_source_object(
+                store,
+                SourceSliceObjectKind::CatalogEvent,
+                records.catalog_events,
+            )
+            .await?,
+        );
+    }
+    if required.contains(&SourceSliceObjectKind::ClobMarketInfo) {
+        objects.push(
+            persist_source_object(
+                store,
+                SourceSliceObjectKind::ClobMarketInfo,
+                records.market_info,
+            )
+            .await?,
+        );
+    }
+    if required.contains(&SourceSliceObjectKind::L2Ledger) {
+        objects.push(
+            persist_source_object(store, SourceSliceObjectKind::L2Ledger, records.ledger).await?,
+        );
+    }
+    if required.contains(&SourceSliceObjectKind::L2Session) {
+        objects.push(
+            persist_source_object(store, SourceSliceObjectKind::L2Session, records.sessions)
+                .await?,
+        );
+    }
+    if required.contains(&SourceSliceObjectKind::L2Gap) {
+        objects
+            .push(persist_source_object(store, SourceSliceObjectKind::L2Gap, records.gaps).await?);
+    }
+    if required.contains(&SourceSliceObjectKind::BookMicrostructure) {
+        objects.push(
+            persist_source_object(
+                store,
+                SourceSliceObjectKind::BookMicrostructure,
+                records.microstructure,
+            )
+            .await?,
+        );
+    }
+    if required.contains(&SourceSliceObjectKind::MarketExecution) {
+        objects.push(
+            persist_source_object(
+                store,
+                SourceSliceObjectKind::MarketExecution,
+                records.executions,
+            )
+            .await?,
+        );
+    }
+    if required.contains(&SourceSliceObjectKind::ExecutionParticipant) {
+        objects.push(
+            persist_source_object(
+                store,
+                SourceSliceObjectKind::ExecutionParticipant,
+                records.participants,
+            )
+            .await?,
+        );
+    }
+    if required.contains(&SourceSliceObjectKind::Resolution) {
+        objects.push(
+            persist_source_object(
+                store,
+                SourceSliceObjectKind::Resolution,
+                records.resolutions,
+            )
+            .await?,
+        );
+    }
     for kind in [
         SourceSliceObjectKind::MarketLinkage,
         SourceSliceObjectKind::DomainObservation,
@@ -1436,6 +1605,13 @@ fn replayable_manifest(
     objects: Vec<SourceSliceObjectRef>,
 ) -> QuantResult<SourceSliceManifest> {
     let pit_cutoff = fixture.window_end;
+    let fit_seal = source_fit_command(
+        &fixture.profile_ref,
+        fixture.research_program_hash,
+        fixture.window_start,
+        fixture.window_end,
+        pit_cutoff,
+    )?;
     Ok(SourceSliceManifest {
         format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
         profile_ref: fixture.profile_ref.clone(),
@@ -1474,6 +1650,8 @@ fn replayable_manifest(
         schema_contract_version: SchemaContractVersion::v1(),
         decision_policy_snapshot_id: fixture.decision_policy_snapshot_id,
         runtime_config_hash: fixture.runtime_config_hash,
+        fit_seal_id: fit_seal.seal.fit_seal_id,
+        fit_seal_hash: fit_seal.seal.seal_hash,
         dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![
             CanonicalDigest::content_hash_json(&(
@@ -1549,12 +1727,15 @@ pub async fn seed_source_manifest(
         .ensure_builtin_research_profiles()
         .await?;
     let manifest = &stored.manifest;
+    seed_source_fit_seal(db, manifest).await?;
     let identity = SourceSliceIdentity::derive(SourceSliceIdentityInput {
         profile_ref: manifest.profile_ref.clone(),
         evaluation_track: manifest.evaluation_track,
         research_program_hash: manifest.research_program_hash,
         decision_policy_snapshot_id: manifest.decision_policy_snapshot_id,
         runtime_config_hash: manifest.runtime_config_hash,
+        fit_seal_id: manifest.fit_seal_id,
+        fit_seal_hash: manifest.fit_seal_hash,
         window_start: manifest.window_start,
         window_end: manifest.window_end,
         pit_cutoff: manifest.pit_cutoff,
@@ -1594,6 +1775,8 @@ pub async fn seed_source_manifest(
         pit_cutoff: manifest.pit_cutoff,
         decision_policy_snapshot_id: manifest.decision_policy_snapshot_id,
         runtime_config_hash: manifest.runtime_config_hash,
+        fit_seal_id: manifest.fit_seal_id,
+        fit_seal_hash: manifest.fit_seal_hash,
         reader_contract_version: manifest.reader_contract_version.clone(),
         schema_contract_version: manifest.schema_contract_version.clone(),
         source_schema_hash,
@@ -1660,6 +1843,13 @@ pub async fn seed_dataset_source(
     objects.sort_by(|left, right| {
         (left.kind, left.uri.as_str()).cmp(&(right.kind, right.uri.as_str()))
     });
+    let fit_seal = source_fit_command(
+        &input.profile_ref,
+        research_program_hash,
+        input.window_start,
+        input.window_end,
+        input.pit_cutoff,
+    )?;
     let manifest = SourceSliceManifest {
         format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
         profile_ref: input.profile_ref,
@@ -1694,6 +1884,8 @@ pub async fn seed_dataset_source(
         schema_contract_version: SchemaContractVersion::v1(),
         decision_policy_snapshot_id: input.decision_policy_snapshot_id,
         runtime_config_hash,
+        fit_seal_id: fit_seal.seal.fit_seal_id,
+        fit_seal_hash: fit_seal.seal.seal_hash,
         dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         capability_registry_hashes,
         pit_cutoffs: profile_pit_cutoffs(&profile, input.pit_cutoff),
@@ -1760,6 +1952,15 @@ async fn seed_evaluation_source(
     manifest.window_end = input.window_end;
     manifest.pit_cutoff = input.pit_cutoff;
     manifest.materialized_at = input.pit_cutoff;
+    let fit_seal = source_fit_command(
+        &input.profile_ref,
+        manifest.research_program_hash,
+        input.window_start,
+        input.window_end,
+        input.pit_cutoff,
+    )?;
+    manifest.fit_seal_id = fit_seal.seal.fit_seal_id;
+    manifest.fit_seal_hash = fit_seal.seal.seal_hash;
     manifest.catalog_proof = SourceSliceCatalogProof {
         base_complete_batch_id: CatalogSyncBatchId::new(seeded_uuid(&format!(
             "{}:catalog-base",

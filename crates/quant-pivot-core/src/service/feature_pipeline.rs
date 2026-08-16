@@ -25,7 +25,7 @@ use quant_pivot_error::{QuantError, QuantResult, report::ReportError, research::
 use quant_pivot_models::{
     config::FinalizedExchangeHistoryConfig,
     domain::{
-        data_plane::{DecisionBoundary, DecisionSource, ExchangeHistoryFrontier},
+        data_plane::{DecisionBoundary, DecisionSource, HistoryServingHeadSeal},
         quant::{
             FeatureVectorInfo, MarketLinkage, MarketLinkageInfo, MarketSubject, NewFeatureVector,
             NewReportDataQualitySnapshot, WeatherSubject,
@@ -87,6 +87,9 @@ pub struct FeaturePipelineRequest<'a> {
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Liquidity cap used to normalize capture liquidity scores.
     pub liquidity_cap_usd: Usd,
+    /// Decision-time immutable finalized-execution serving head. Required when
+    /// the executable feature contract consumes exchange-history facts.
+    pub execution_history_seal: Option<&'a HistoryServingHeadSeal>,
 }
 
 /// A market whose feature vector failed the data-quality bar and was excluded.
@@ -153,6 +156,21 @@ pub struct FeaturePipelineDeps {
 }
 
 impl FeaturePipelineService {
+    /// Revalidate both `PostgreSQL` seal metadata and the exact active
+    /// `ClickHouse` revisions. Report publication calls this after all expensive
+    /// computation to close replacement/rewind races.
+    pub async fn validate_execution_history_seal(
+        &self,
+        seal: &HistoryServingHeadSeal,
+    ) -> QuantResult<()> {
+        self.exchange_history_repo
+            .validate_serving_head(seal.seal.serving_head_seal_id, seal.seal.seal_hash)
+            .await?;
+        self.window_provider
+            .validate_execution_history(&seal.chunks)
+            .await
+    }
+
     /// Wire the service from boot-time dependencies.
     #[must_use]
     pub fn new(deps: FeaturePipelineDeps) -> Self {
@@ -433,21 +451,32 @@ impl FeaturePipelineService {
         let execution_history = if !builder.needs_execution_history() {
             empty_execution_history_windows(request.included, &request.boundary)
         } else if self.finalized_exchange_history.enabled {
-            let accepted = self
-                .exchange_history_repo
-                .latest_accepted(ExchangeHistoryFrontier::Activation)
+            let serving_head = request.execution_history_seal.ok_or_else(|| {
+                ReportError::HistoryServingHeadUnavailable {
+                    detail: "execution-history features require a decision-time serving-head seal"
+                        .to_owned(),
+                }
+            })?;
+            self.exchange_history_repo
+                .validate_serving_head(
+                    serving_head.seal.serving_head_seal_id,
+                    serving_head.seal.seal_hash,
+                )
                 .await?;
-            let accepted_block = accepted
-                .as_ref()
-                .and_then(|row| u64::try_from(row.to_block).ok());
-            let accepted_through_at = accepted.as_ref().and_then(|row| row.effective_through_at);
+            let accepted_block = u64::try_from(serving_head.seal.accepted_through_block).ok();
+            let accepted_through_at = Some(serving_head.seal.effective_through_at);
             let source_evidence =
                 FinalizedExecutionEvidence::runtime(true, accepted_block, accepted_through_at);
             let trade_lookback =
                 Duration::from_secs(request.features.structural.execution_window_secs);
             let mut windows = self
                 .window_provider
-                .load_execution_windows(request.included, &request.boundary, trade_lookback)
+                .load_execution_windows(
+                    request.included,
+                    &request.boundary,
+                    trade_lookback,
+                    &serving_head.chunks,
+                )
                 .await?;
             for market in request.included {
                 let available = accepted_through_at.is_some_and(|through| {

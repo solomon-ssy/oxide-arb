@@ -679,6 +679,11 @@ async fn seed_cancellable_job(
                 profile_ref: fixture_profile_ref(),
                 purpose: DatasetPurpose::Evaluation,
                 decision_policy_snapshot_id,
+                fit_seal_id: seeded_uuid("browser-cancellable-fit-seal").into(),
+                fit_seal_hash: CanonicalDigest::content_hash_json(&(
+                    "browser-cancellable-fit-seal",
+                    observed_at,
+                ))?,
                 window_start: observed_at - Duration::hours(2),
                 window_end: observed_at - Duration::hours(1),
                 pit_cutoff: observed_at,

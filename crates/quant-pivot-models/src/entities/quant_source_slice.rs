@@ -3,13 +3,13 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::decision_policy_snapshot;
+use super::{decision_policy_snapshot, quant_history_fit_seal};
 use crate::{
     enums::quant::SourceSliceStatus,
     types::{
-        ArtifactUri, ContentHash, DecisionPolicySnapshotId, ReaderContractVersion,
-        ResearchEvaluationTrack, ResearchProfileRef, SchemaContractVersion, SourceSliceId,
-        SourceSliceManifest,
+        ArtifactUri, ContentHash, DecisionPolicySnapshotId, HistoryFitSealId,
+        ReaderContractVersion, ResearchEvaluationTrack, ResearchProfileRef, SchemaContractVersion,
+        SourceSliceId, SourceSliceManifest,
     },
 };
 
@@ -26,6 +26,8 @@ pub struct Model {
     pub research_program_hash: ContentHash,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
+    pub fit_seal_id: HistoryFitSealId,
+    pub fit_seal_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub pit_cutoff: DateTime<Utc>,
@@ -47,6 +49,13 @@ pub struct Model {
         to = "decision_policy_snapshot_id"
     )]
     pub decision_policy_snapshot: BelongsTo<decision_policy_snapshot::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "FitSeal",
+        from = "fit_seal_id",
+        to = "fit_seal_id"
+    )]
+    pub fit_seal: BelongsTo<quant_history_fit_seal::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -25,7 +25,9 @@ gaps discovered during the 2026-07-16 implementation audit.
 - Automatic parity freezes its complete subject and candidate set before a job
   becomes executable. An empty cold store remains not eligible, not failed.
 - Research evidence is canonical, deployment-bound, historically keyed, and
-  remains blocked until the real 200-day source contract is satisfied.
+  remains blocked until each profile's real fit contract is satisfied: 33 days
+  for Pooled, 93 days for Crypto, and 100 days for Weather. The 200-day raw
+  retention floor preserves full research capability; it is not the first-report gate.
 - Authentication uses memory-only access tokens, atomic refresh-family
   rotation, bounded absolute sessions, and session-bound single-use WS tickets.
 - The operator UI fails closed, remains recoverable while the backend is
@@ -53,8 +55,10 @@ gaps discovered during the 2026-07-16 implementation audit.
 - All documented Rust and UI quality gates pass.
 - Clean databases deterministically reach `awaiting_activation`; activation is
   explicit and survives restart.
-- Real 91-day evidence is reported as `blocked_insufficient_history` against
-  the unchanged 200-day requirement.
+- Per-profile evidence is reported independently: Pooled requires 33 days,
+  Crypto 93 days, and Weather 100 days. Missing vertical evidence cannot revoke
+  an already published Pooled report unless a real positive vertical exposure
+  requires that route to model account risk.
 - Automated UI lint, typecheck, unit tests, production build, dependency checks,
   and forbidden-pattern bundle scans pass.
 - No compatibility re-export, legacy schema ledger, query JWT, mock production
@@ -228,10 +232,11 @@ remote CI run or hosted artifact.
 - Production ClickHouse Cloud DDL behavior, deploy-file installation, WORM
   restore proof, and Cloud retention/capacity evidence require the
   real deployment environment and remain promotion gates.
-- The pre-reset store had 1,944,000 rows spanning about 91 days. The required
-  history remains 200 days; after the authorized clean reset the local evidence
-  store is empty and therefore remains fail-closed rather than being backfilled
-  with fixtures or extrapolated data.
+- The pre-reset store had 1,944,000 rows spanning about 91 days. That observation
+  is not current profile evidence. After the authorized clean reset the local
+  evidence store is empty and therefore remains fail-closed rather than being
+  backfilled with fixtures or extrapolated data; promotion requires fresh 33/93/100-day
+  profile proofs and a separate 200-day retention-capability proof.
 - The local host intermittently could not reach Binance and Alchemy. These
   failures are bounded and capability-visible; the RPC provider URL is now
   redacted. Live provider reliability is not inferred from Wiremock tests.
@@ -243,5 +248,6 @@ remote CI run or hosted artifact.
 
 The implementation is **not production-complete** until the disposable W9
 rehearsal, operator-authorized W10 local acceptance, soak, real ClickHouse Cloud,
-deploy-file, WORM restore, retention/capacity, and 200-day readiness artifacts
+deploy-file, WORM restore, retention/capacity, 33/93/100-day profile proofs,
+and the 200-day research-retention artifact
 are archived.

@@ -27,7 +27,7 @@ use quant_pivot_models::{
         MarketResolutionFactInput, MarketResolutionRow, MidPriceBucketRow,
     },
     domain::{
-        data_plane::{DecisionBoundary, DecisionSource},
+        data_plane::{DecisionBoundary, DecisionSource, HistorySealChunkRef},
         market::{
             CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit, CatalogEventCandidate,
             CatalogMarketCandidate, EventRegistryInfo, MarketRegistryInfo, NewCatalogEventChange,
@@ -78,8 +78,9 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgCalibrationArtifactRepository, PgCatalogLedgerRepository, PgClobMarketInfoRepository,
-        PgMarketLinkageRepository, PgMarketRepository, PgModelRegistryRepository,
-        PgPositionRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgExchangeHistoryRepository, PgMarketLinkageRepository, PgMarketRepository,
+        PgModelRegistryRepository, PgPositionRepository, PgTradePolicyRepository,
+        PgTrainingDatasetRepository,
     },
     traits::{
         CatalogLedgerRepository, MarketLinkageRepository, ModelRegistryRepository,
@@ -469,6 +470,7 @@ impl QuantFactReadRepository for ControllableFactRead {
     async fn market_execution_window(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -489,6 +491,7 @@ impl QuantFactReadRepository for ControllableFactRead {
     async fn market_executions_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -499,6 +502,7 @@ impl QuantFactReadRepository for ControllableFactRead {
     async fn execution_participants_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -1215,6 +1219,7 @@ fn service_selection_linkage(
             model_registry: Arc::new(PgModelRegistryRepository::new(db.clone())),
             trade_policy_repo: Arc::new(PgTradePolicyRepository::new(db.clone())),
             calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
+            exchange_history_repo: Arc::new(PgExchangeHistoryRepository::new(db.clone())),
         },
         TrainingDatasetBuildConfig {
             features,

@@ -16,7 +16,7 @@ use quant_pivot_models::{
 use crate::{
     features::AuthoringFeatureCatalog,
     selection::{
-        ExcludedMarket, FilterChain, FilterOutcome, MarketCandidateCtx,
+        ExcludedMarket, ExclusionReason, FilterChain, FilterOutcome, MarketCandidateCtx,
         MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector, SelectedMarket,
         SelectionResult, SelectionThresholds, SelectorHashInput, accumulate_exclusion,
     },
@@ -56,6 +56,21 @@ impl ConfiguredMarketSelector {
         let mut exclusion_summary = SelectionExclusionSummary::default();
 
         for candidate in candidates {
+            if request
+                .route_availability
+                .as_ref()
+                .is_some_and(|availability| !availability.accepts(candidate.category))
+            {
+                let reason = ExclusionReason::RouteNotActivated;
+                accumulate_exclusion(&mut exclusion_summary, &reason);
+                excluded.push(ExcludedMarket {
+                    market_id: candidate.market_id.clone(),
+                    event_id: candidate.event_id.clone(),
+                    primary_token_id: candidate.primary_token_id.clone(),
+                    reason,
+                });
+                continue;
+            }
             let ctx = MarketCandidateCtx {
                 candidate,
                 thresholds: &thresholds,
@@ -239,6 +254,7 @@ mod tests {
             features: FeaturesConfig::default(),
             model_requirements,
             knowledge_lag_secs: 10,
+            route_availability: None,
         }
     }
 

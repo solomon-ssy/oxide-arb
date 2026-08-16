@@ -13,9 +13,14 @@ use arc_swap::ArcSwap;
 use blake3::Hasher;
 use chrono::{DateTime, TimeDelta, Utc};
 use quant_pivot_api::exchange::{
-    AttestedHistoryChunk, CanonicalBlockHeader, ExchangeHistoryAttestor, ExchangeHistoryExtractor,
-    ExchangeHistoryProjection, ExecutionProjectionError, ExtractedHistoryChunk, HistoryClientError,
-    HistoryContinuityProofBasis, HistoryDigest, chunks_agree, history_token_ids, project_history,
+    execution_projector::{
+        ExchangeHistoryProjection, ExecutionProjectionError, history_token_ids, project_history,
+    },
+    history_client::{
+        AttestedHistoryChunk, CanonicalBlockHeader, ExchangeHistoryAttestor,
+        ExchangeHistoryExtractor, ExtractedHistoryChunk, HistoryClientError,
+        HistoryContinuityProofBasis, HistoryDigest, chunks_agree,
+    },
 };
 use quant_pivot_error::{
     QuantError, QuantResult, exchange_history::ExchangeHistoryError, storage::StorageError,
@@ -27,16 +32,17 @@ use quant_pivot_models::{
     },
     config::FinalizedExchangeHistoryConfig,
     domain::data_plane::{
-        ColdStartSloStatus, ExchangeHistoryChunkInfo, ExchangeHistoryChunkStatus,
-        ExchangeHistoryContinuityBasis, ExchangeHistoryFrontier, ExchangeHistoryFrontierProgress,
-        ExchangeHistoryPlanInfo, ExchangeHistoryQuarantineReason, ExchangeHistoryStage,
-        NewExchangeHistoryChunk, NewExchangeHistoryPlan, NewExchangeHistoryQuarantine,
-        ResolveAcceptedHistoryRange,
+        ColdStartSloStatus, CreateHistoryServingHeadSeal, ExchangeHistoryChunkInfo,
+        ExchangeHistoryChunkStatus, ExchangeHistoryContinuityBasis, ExchangeHistoryFrontier,
+        ExchangeHistoryFrontierProgress, ExchangeHistoryPlanInfo,
+        ExchangeHistoryQuarantineEvidence, ExchangeHistoryQuarantineKind, ExchangeHistoryStage,
+        HistorySealChunkRef, NewExchangeHistoryChunk, NewExchangeHistoryPlan,
+        NewExchangeHistoryQuarantine, NewHistoryServingHeadSeal, ResolveAcceptedHistoryRange,
     },
     domain::ports::ExchangeHistoryProgressPort,
     types::{
-        CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID, ContentHash, EvmBlockHash, MarketId,
-        ResearchProfileArtifact, ServingAuthority, TokenId,
+        CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID, ContentHash, EvmBlockHash, HistoryServingHeadSealId,
+        MarketId, ResearchProfileArtifact, ServingAuthority, TokenId,
         WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID, builtin_research_profiles,
     },
 };
@@ -48,7 +54,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::infra::periodic_task::PeriodicTask;
+use crate::{infra::periodic_task::PeriodicTask, observability::metrics_hub::MetricsHub};
 
 const CHUNK_NAMESPACE: Uuid = Uuid::from_u128(0x6f0d_f3a4_7274_5e8f_9d92_7fb3_e3b1_e91a);
 const POLYGON_CHAIN_ID: i64 = 137;
@@ -58,6 +64,8 @@ struct AvailabilityPolicyCommitment {
     finalized_only: bool,
     model_confirmation_blocks: u64,
     provider_agreement: &'static str,
+    extractor_provider_id: String,
+    attestor_provider_id: String,
 }
 
 struct ProjectionQuarantine {
@@ -66,8 +74,8 @@ struct ProjectionQuarantine {
     from_block: u64,
     to_block: u64,
     attempt: i32,
-    reason: ExchangeHistoryQuarantineReason,
-    detail: String,
+    kind: ExchangeHistoryQuarantineKind,
+    evidence: ExchangeHistoryQuarantineEvidence,
     created_at: DateTime<Utc>,
 }
 
@@ -130,6 +138,7 @@ pub struct ExchangeHistoryWorker {
     config: FinalizedExchangeHistoryConfig,
     policy_hash: ContentHash,
     progress: ExchangeHistoryProgressHandle,
+    metrics: Arc<MetricsHub>,
     adaptive_chunk_blocks: AtomicU64,
     adaptive_success_count: AtomicU64,
 }
@@ -141,6 +150,7 @@ impl ExchangeHistoryWorker {
         writers: ExchangeHistoryWriters,
         config: FinalizedExchangeHistoryConfig,
         progress: ExchangeHistoryProgressHandle,
+        metrics: Arc<MetricsHub>,
     ) -> QuantResult<Self> {
         let extractor = ExchangeHistoryExtractor::connect(&config)
             .map_err(|error| extraction_failure(&error))?;
@@ -157,6 +167,7 @@ impl ExchangeHistoryWorker {
             config,
             policy_hash,
             progress,
+            metrics,
             adaptive_chunk_blocks: AtomicU64::new(initial_chunk_blocks),
             adaptive_success_count: AtomicU64::new(0),
         })
@@ -225,6 +236,9 @@ impl ExchangeHistoryWorker {
     }
 
     pub async fn run_once(&self) -> QuantResult<()> {
+        self.refresh_quarantine_metrics().await;
+        self.metrics
+            .set_fresh_boot_slo(slo_label(self.progress.snapshot().slo_status));
         let finalized = self
             .attestor
             .finalized_head()
@@ -240,6 +254,7 @@ impl ExchangeHistoryWorker {
             .await?;
         self.reconcile_frontier(ExchangeHistoryFrontier::Retention, model_head)
             .await?;
+        self.sync_serving_head(&plan).await?;
         let activation_start = plan_block(plan.activation_from_block)?;
         let activation_through = plan_block(plan.activation_through_block)?;
         self.publish_plan(&plan).await?;
@@ -443,11 +458,13 @@ impl ExchangeHistoryWorker {
         divergent: &ExchangeHistoryChunkInfo,
     ) -> QuantResult<()> {
         let now = Utc::now();
-        let detail = format!(
-            "canonical block hash changed inside rollback buffer at range {}..={}",
-            divergent.from_block, divergent.to_block
-        );
-        let evidence_hash = ContentHash::from_bytes(*blake3::hash(detail.as_bytes()).as_bytes());
+        let evidence = ExchangeHistoryQuarantineEvidence::ContinuityMismatch {
+            from_block: block_u64(divergent.from_block)?,
+            to_block: block_u64(divergent.to_block)?,
+            expected: "persisted accepted chunk boundary hashes".to_owned(),
+            actual: "canonical block hash changed inside rollback buffer".to_owned(),
+        };
+        let evidence_hash = quarantine_evidence_hash(&evidence)?;
         let rewound = self
             .history_repo
             .rewind_from(frontier, divergent.from_block, now)
@@ -458,9 +475,9 @@ impl ExchangeHistoryWorker {
                 NewExchangeHistoryQuarantine {
                     quarantine_id: Uuid::now_v7(),
                     chunk_id: divergent.chunk_id,
-                    reason: ExchangeHistoryQuarantineReason::ContinuityMismatch,
+                    kind: ExchangeHistoryQuarantineKind::ContinuityMismatch,
+                    evidence,
                     evidence_hash,
-                    detail,
                     quarantined_at: now,
                 },
             )
@@ -468,7 +485,8 @@ impl ExchangeHistoryWorker {
         for chunk in rewound {
             self.write_revocation(&chunk, now).await?;
         }
-        self.publish_quarantine(ExchangeHistoryQuarantineReason::ContinuityMismatch);
+        self.refresh_quarantine_metric(frontier).await;
+        self.publish_quarantine(ExchangeHistoryQuarantineKind::ContinuityMismatch);
         Ok(())
     }
 
@@ -760,8 +778,13 @@ impl ExchangeHistoryWorker {
                 from_block,
                 to_block,
                 attempt,
-                reason: ExchangeHistoryQuarantineReason::ParentHashMismatch,
-                detail: error.to_string(),
+                kind: ExchangeHistoryQuarantineKind::ParentHashMismatch,
+                evidence: ExchangeHistoryQuarantineEvidence::ContinuityMismatch {
+                    from_block,
+                    to_block,
+                    expected: "accepted predecessor boundary hash".to_owned(),
+                    actual: error.to_string(),
+                },
                 created_at: started_at,
             })
             .await?;
@@ -783,7 +806,7 @@ impl ExchangeHistoryWorker {
         let token_ids = match history_token_ids(&extracted.logs) {
             Ok(token_ids) => token_ids,
             Err(error) => {
-                let reason = projection_reason(&error);
+                let kind = projection_kind(&error);
                 let detail = error.to_string();
                 self.quarantine_projection(ProjectionQuarantine {
                     chunk_id,
@@ -791,8 +814,8 @@ impl ExchangeHistoryWorker {
                     from_block,
                     to_block,
                     attempt,
-                    reason,
-                    detail: detail.clone(),
+                    kind,
+                    evidence: projection_evidence(&error),
                     created_at: started_at,
                 })
                 .await?;
@@ -818,7 +841,7 @@ impl ExchangeHistoryWorker {
         ) {
             Ok(projection) => projection,
             Err(error) => {
-                let reason = projection_reason(&error);
+                let kind = projection_kind(&error);
                 let detail = error.to_string();
                 self.quarantine_projection(ProjectionQuarantine {
                     chunk_id,
@@ -826,8 +849,8 @@ impl ExchangeHistoryWorker {
                     from_block,
                     to_block,
                     attempt,
-                    reason,
-                    detail: detail.clone(),
+                    kind,
+                    evidence: projection_evidence(&error),
                     created_at: started_at,
                 })
                 .await?;
@@ -853,7 +876,103 @@ impl ExchangeHistoryWorker {
                 resolved_at: now,
             })
             .await?;
-        self.publish_accepted(frontier, from_block, to_block, extracted.logs.len(), now);
+        self.refresh_quarantine_metric(frontier).await;
+        if frontier == ExchangeHistoryFrontier::Activation {
+            let plan = self
+                .history_repo
+                .load_plan(POLYGON_CHAIN_ID)
+                .await?
+                .ok_or_else(|| ExchangeHistoryError::Projection {
+                    detail: "accepted activation chunk has no immutable history plan".to_owned(),
+                })?;
+            self.sync_serving_head(&plan).await?;
+        }
+        self.publish_accepted(frontier, from_block, to_block, extracted.logs.len(), now)
+            .await?;
+        Ok(())
+    }
+
+    async fn sync_serving_head(&self, plan: &ExchangeHistoryPlanInfo) -> QuantResult<()> {
+        let mut accepted = self
+            .history_repo
+            .accepted_from(
+                ExchangeHistoryFrontier::Activation,
+                plan.activation_from_block,
+            )
+            .await?;
+        accepted.sort_unstable_by_key(|chunk| chunk.from_block);
+        let mut cursor = plan.activation_from_block;
+        let mut chunks = Vec::new();
+        let mut effective_through_at = None;
+        for chunk in accepted {
+            if chunk.from_block != cursor {
+                break;
+            }
+            let state_revision =
+                chunk
+                    .state_revision
+                    .ok_or_else(|| ExchangeHistoryError::Projection {
+                        detail: format!("accepted chunk {} has no state revision", chunk.chunk_id),
+                    })?;
+            effective_through_at = chunk.effective_through_at;
+            chunks.push(HistorySealChunkRef {
+                chunk_id: chunk.chunk_id,
+                frontier: chunk.frontier,
+                state_revision,
+                from_block: chunk.from_block,
+                to_block: chunk.to_block,
+            });
+            cursor = chunk
+                .to_block
+                .checked_add(1)
+                .ok_or(ExchangeHistoryError::FrontierOverflow)?;
+        }
+        let Some(last) = chunks.last() else {
+            return Ok(());
+        };
+        let effective_through_at =
+            effective_through_at.ok_or_else(|| ExchangeHistoryError::Projection {
+                detail: "accepted activation head has no effective-through timestamp".to_owned(),
+            })?;
+        let latest = self
+            .history_repo
+            .latest_serving_head(ExchangeHistoryFrontier::Activation)
+            .await?;
+        if latest.as_ref().is_some_and(|head| {
+            head.seal.accepted_through_block == last.to_block && head.chunks == chunks
+        }) {
+            return Ok(());
+        }
+        let mut preimage = Vec::with_capacity(chunks.len().saturating_mul(40).saturating_add(80));
+        preimage.extend_from_slice(b"quant-pivot/history-serving-head-id/v1\0");
+        preimage.extend_from_slice(plan.plan_id.as_bytes());
+        for chunk in &chunks {
+            preimage.extend_from_slice(chunk.chunk_id.as_bytes());
+            preimage.extend_from_slice(&chunk.state_revision.to_be_bytes());
+        }
+        let seal_id = HistoryServingHeadSealId::new(Uuid::new_v5(&CHUNK_NAMESPACE, &preimage));
+        let mut command = CreateHistoryServingHeadSeal {
+            seal: NewHistoryServingHeadSeal {
+                serving_head_seal_id: seal_id,
+                seal_hash: ContentHash::from_bytes([0; 32]),
+                plan_id: plan.plan_id,
+                frontier: ExchangeHistoryFrontier::Activation,
+                previous_seal_id: latest.as_ref().map(|head| head.seal.serving_head_seal_id),
+                window_from_block: plan.activation_from_block,
+                accepted_through_block: last.to_block,
+                effective_through_at,
+                policy_hash: plan.policy_hash,
+                created_at: Utc::now(),
+            },
+            chunks,
+        };
+        command.seal.seal_hash =
+            command
+                .derive_hash()
+                .map_err(|error| ExchangeHistoryError::Projection {
+                    detail: format!("derive serving-head seal hash: {error}"),
+                })?;
+        self.history_repo.create_serving_head(command).await?;
         Ok(())
     }
 
@@ -1056,12 +1175,35 @@ impl ExchangeHistoryWorker {
     ) -> QuantResult<()> {
         let chunk_id = range_attempt_id(frontier, from_block, to_block);
         let now = Utc::now();
-        let evidence = mismatch_evidence(extracted.digest, attested.digest);
-        let reason = if continuity_agrees {
-            ExchangeHistoryQuarantineReason::ProviderMismatch
+        let kind = if continuity_agrees {
+            ExchangeHistoryQuarantineKind::ProviderMismatch
         } else {
-            ExchangeHistoryQuarantineReason::ContinuityMismatch
+            ExchangeHistoryQuarantineKind::ContinuityMismatch
         };
+        let evidence = if continuity_agrees {
+            ExchangeHistoryQuarantineEvidence::ProviderMismatch {
+                extractor_digest: ContentHash::from_bytes(extracted.digest.0),
+                attestor_digest: ContentHash::from_bytes(attested.digest.0),
+                extractor_count: u64::try_from(extracted.logs.len()).map_err(|error| {
+                    ExchangeHistoryError::Projection {
+                        detail: format!("extractor log count overflow: {error}"),
+                    }
+                })?,
+                attestor_count: u64::try_from(attested.logs.len()).map_err(|error| {
+                    ExchangeHistoryError::Projection {
+                        detail: format!("attestor log count overflow: {error}"),
+                    }
+                })?,
+            }
+        } else {
+            ExchangeHistoryQuarantineEvidence::ContinuityMismatch {
+                from_block,
+                to_block,
+                expected: "extractor and attestor boundary/anchor proofs agree".to_owned(),
+                actual: "independent provider continuity proofs differ".to_owned(),
+            }
+        };
+        let evidence_hash = quarantine_evidence_hash(&evidence)?;
         self.history_repo
             .quarantine_chunk(
                 chunk_row(
@@ -1076,18 +1218,15 @@ impl ExchangeHistoryWorker {
                 NewExchangeHistoryQuarantine {
                     quarantine_id: Uuid::now_v7(),
                     chunk_id,
-                    reason,
-                    evidence_hash: evidence,
-                    detail: if continuity_agrees {
-                        "provider canonical count/digest/block proof mismatch".to_owned()
-                    } else {
-                        "HyperSync continuity proof differs from independent archive RPC".to_owned()
-                    },
+                    kind,
+                    evidence,
+                    evidence_hash,
                     quarantined_at: now,
                 },
             )
             .await?;
-        self.publish_quarantine(reason);
+        self.refresh_quarantine_metric(frontier).await;
+        self.publish_quarantine(kind);
         Ok(())
     }
 
@@ -1098,12 +1237,12 @@ impl ExchangeHistoryWorker {
             from_block,
             to_block,
             attempt,
-            reason,
-            detail,
+            kind,
+            evidence,
             created_at,
         } = input;
         let now = Utc::now();
-        let evidence_hash = ContentHash::from_bytes(*blake3::hash(detail.as_bytes()).as_bytes());
+        let evidence_hash = quarantine_evidence_hash(&evidence)?;
         self.history_repo
             .quarantine_chunk(
                 chunk_row(
@@ -1118,14 +1257,15 @@ impl ExchangeHistoryWorker {
                 NewExchangeHistoryQuarantine {
                     quarantine_id: Uuid::now_v7(),
                     chunk_id,
-                    reason,
+                    kind,
+                    evidence,
                     evidence_hash,
-                    detail,
                     quarantined_at: now,
                 },
             )
             .await?;
-        self.publish_quarantine(reason);
+        self.refresh_quarantine_metric(frontier).await;
+        self.publish_quarantine(kind);
         Ok(())
     }
 
@@ -1178,14 +1318,14 @@ impl ExchangeHistoryWorker {
         self.progress.publish(progress);
     }
 
-    fn publish_accepted(
+    async fn publish_accepted(
         &self,
         frontier: ExchangeHistoryFrontier,
         from_block: u64,
         to_block: u64,
         logs: usize,
         now: DateTime<Utc>,
-    ) {
+    ) -> QuantResult<()> {
         let mut progress = self.progress.snapshot().as_ref().clone();
         match frontier {
             ExchangeHistoryFrontier::Activation => {
@@ -1201,44 +1341,102 @@ impl ExchangeHistoryWorker {
         progress.logs_accepted = progress
             .logs_accepted
             .saturating_add(u64::try_from(logs).unwrap_or(u64::MAX));
-        let elapsed_ms = now
-            .signed_duration_since(progress.started_at)
-            .num_milliseconds()
-            .max(1);
-        let elapsed_ms = u64::try_from(elapsed_ms).unwrap_or(u64::MAX);
-        progress.block_rate_milli = progress
-            .blocks_processed
-            .saturating_mul(1_000_000)
-            .checked_div(elapsed_ms)
-            .unwrap_or(0);
-        if frontier == ExchangeHistoryFrontier::Activation
-            && let (Some(target), Some(accepted)) =
-                (progress.target_block, progress.accepted_through_block)
-            && progress.block_rate_milli > 0
-        {
-            let remaining = target.saturating_sub(accepted);
-            let eta_secs = remaining
-                .saturating_mul(1_000)
-                .div_ceil(progress.block_rate_milli);
-            let eta_secs = i64::try_from(eta_secs).unwrap_or(i64::MAX);
-            progress.projected_completion_at = now.checked_add_signed(TimeDelta::seconds(eta_secs));
-            progress.slo_status = if eta_secs > 72 * 3_600 {
-                ColdStartSloStatus::Violation
-            } else if eta_secs > 48 * 3_600 {
-                ColdStartSloStatus::Warning
+        if frontier == ExchangeHistoryFrontier::Activation {
+            let activation_from =
+                progress
+                    .activation_from_block
+                    .ok_or_else(|| ExchangeHistoryError::Projection {
+                        detail: "activation progress has no immutable start block".to_owned(),
+                    })?;
+            let accepted_chunks = self
+                .history_repo
+                .accepted_from(
+                    ExchangeHistoryFrontier::Activation,
+                    i64::try_from(activation_from)
+                        .map_err(|_| ExchangeHistoryError::FrontierOverflow)?,
+                )
+                .await?;
+            let accepted = progress.accepted_through_block.ok_or_else(|| {
+                ExchangeHistoryError::Projection {
+                    detail: "accepted activation chunk did not advance the frontier".to_owned(),
+                }
+            })?;
+            let target = progress
+                .target_block
+                .ok_or_else(|| ExchangeHistoryError::Projection {
+                    detail: "activation progress has no immutable target block".to_owned(),
+                })?;
+            let total = target.saturating_sub(activation_from).saturating_add(1);
+            let covered = accepted
+                .saturating_sub(activation_from)
+                .saturating_add(1)
+                .min(total);
+            let warm = accepted_chunks.len() >= 5
+                && covered.saturating_mul(100) >= total.saturating_mul(5);
+            if warm {
+                let mut rates = accepted_chunks
+                    .iter()
+                    .rev()
+                    .take(5)
+                    .filter_map(|chunk| {
+                        let accepted_at = chunk.accepted_at?;
+                        let elapsed_ms = accepted_at
+                            .signed_duration_since(chunk.created_at)
+                            .num_milliseconds()
+                            .max(1);
+                        let elapsed_ms = u64::try_from(elapsed_ms).ok()?;
+                        let span = u64::try_from(
+                            chunk
+                                .to_block
+                                .saturating_sub(chunk.from_block)
+                                .saturating_add(1),
+                        )
+                        .ok()?;
+                        Some(span.saturating_mul(1_000_000) / elapsed_ms)
+                    })
+                    .collect::<Vec<_>>();
+                rates.sort_unstable();
+                let rate = rates.get(rates.len() / 2).copied().unwrap_or_default();
+                progress.block_rate_milli = rate;
+                if rate > 0 {
+                    let remaining = target.saturating_sub(accepted);
+                    let eta_secs = remaining.saturating_mul(1_000).div_ceil(rate);
+                    let eta_secs = i64::try_from(eta_secs).unwrap_or(i64::MAX);
+                    let projected = now.checked_add_signed(TimeDelta::seconds(eta_secs));
+                    progress.projected_completion_at = projected;
+                    let warning_deadline =
+                        progress.started_at.checked_add_signed(TimeDelta::hours(48));
+                    let violation_deadline =
+                        progress.started_at.checked_add_signed(TimeDelta::hours(72));
+                    progress.slo_status = match (projected, warning_deadline, violation_deadline) {
+                        (Some(projected), _, Some(deadline)) if projected > deadline => {
+                            ColdStartSloStatus::Violation
+                        }
+                        (Some(projected), Some(deadline), _) if projected > deadline => {
+                            ColdStartSloStatus::Warning
+                        }
+                        (Some(_), Some(_), Some(_)) => ColdStartSloStatus::OnTrack,
+                        _ => ColdStartSloStatus::Violation,
+                    };
+                }
             } else {
-                ColdStartSloStatus::OnTrack
-            };
+                progress.block_rate_milli = 0;
+                progress.projected_completion_at = None;
+                progress.slo_status = ColdStartSloStatus::WarmingUp;
+            }
         }
         progress.updated_at = now;
+        self.metrics
+            .set_fresh_boot_slo(slo_label(progress.slo_status));
         self.progress.publish(progress);
+        Ok(())
     }
 
-    fn publish_quarantine(&self, reason: ExchangeHistoryQuarantineReason) {
+    fn publish_quarantine(&self, kind: ExchangeHistoryQuarantineKind) {
         let mut progress = self.progress.snapshot().as_ref().clone();
         progress.stage = ExchangeHistoryStage::Quarantined;
         progress.quarantine_count = progress.quarantine_count.saturating_add(1);
-        if reason == ExchangeHistoryQuarantineReason::UnknownToken {
+        if kind == ExchangeHistoryQuarantineKind::UnknownToken {
             progress.unresolved_count = progress.unresolved_count.saturating_add(1);
         }
         progress.updated_at = Utc::now();
@@ -1251,8 +1449,54 @@ impl ExchangeHistoryWorker {
         progress.stage = ExchangeHistoryStage::ActivationReady;
         progress.accepted_through_block = Some(target);
         progress.projected_completion_at = None;
+        let elapsed = now.signed_duration_since(progress.started_at);
+        progress.slo_status = if elapsed > TimeDelta::hours(72) {
+            ColdStartSloStatus::Violation
+        } else if elapsed > TimeDelta::hours(48) {
+            ColdStartSloStatus::Warning
+        } else {
+            ColdStartSloStatus::OnTrack
+        };
         progress.updated_at = now;
+        self.metrics
+            .set_fresh_boot_slo(slo_label(progress.slo_status));
         self.progress.publish(progress);
+    }
+
+    async fn refresh_quarantine_metrics(&self) {
+        self.refresh_quarantine_metric(ExchangeHistoryFrontier::Activation)
+            .await;
+        self.refresh_quarantine_metric(ExchangeHistoryFrontier::Retention)
+            .await;
+    }
+
+    async fn refresh_quarantine_metric(&self, frontier: ExchangeHistoryFrontier) {
+        match self.history_repo.count_active_quarantine(frontier).await {
+            Ok(count) => self
+                .metrics
+                .set_active_history_quarantines(frontier_label(frontier), count),
+            Err(error) => tracing::warn!(
+                %error,
+                frontier = frontier_label(frontier),
+                "active history-quarantine metric refresh failed"
+            ),
+        }
+    }
+}
+
+const fn frontier_label(frontier: ExchangeHistoryFrontier) -> &'static str {
+    match frontier {
+        ExchangeHistoryFrontier::Activation => "activation",
+        ExchangeHistoryFrontier::Retention => "retention",
+    }
+}
+
+const fn slo_label(status: ColdStartSloStatus) -> &'static str {
+    match status {
+        ColdStartSloStatus::WarmingUp => "warming_up",
+        ColdStartSloStatus::OnTrack => "on_track",
+        ColdStartSloStatus::Warning => "warning",
+        ColdStartSloStatus::Violation => "violation",
     }
 }
 
@@ -1352,6 +1596,7 @@ fn chunk_row(
         continuity_block: None,
         continuity_hash: None,
         effective_through_at: None,
+        state_revision: None,
         accepted_at: None,
         created_at,
         updated_at: now,
@@ -1404,6 +1649,10 @@ fn accepted_row(
             )
             .ok_or(ExchangeHistoryError::InvalidTime)?,
         ),
+        state_revision: Some(
+            i64::try_from(state_revision(accepted_at)?)
+                .map_err(|_| ExchangeHistoryError::FrontierOverflow)?,
+        ),
         accepted_at: Some(accepted_at),
         created_at,
         updated_at: accepted_at,
@@ -1433,6 +1682,7 @@ fn chunk_from_info(
         continuity_block: chunk.continuity_block,
         continuity_hash: chunk.continuity_hash.clone(),
         effective_through_at: chunk.effective_through_at,
+        state_revision: chunk.state_revision,
         accepted_at: chunk.accepted_at,
         created_at: chunk.created_at,
         updated_at,
@@ -1445,6 +1695,8 @@ fn policy_hash(config: &FinalizedExchangeHistoryConfig) -> QuantResult<ContentHa
         finalized_only: true,
         model_confirmation_blocks: config.model_confirmation_blocks,
         provider_agreement: "hypersync_plus_independent_archive_rpc_exact_v1",
+        extractor_provider_id: config.hypersync.provider_id.clone(),
+        attestor_provider_id: config.attestor.provider_id.clone(),
     };
     let bytes =
         serde_json::to_vec(&commitment).map_err(|error| ExchangeHistoryError::Projection {
@@ -1459,14 +1711,6 @@ fn dedup_token(table_key: &str, chunk_id: Uuid, batch_index: u64) -> ContentHash
     hasher.update(table_key.as_bytes());
     hasher.update(chunk_id.as_bytes());
     hasher.update(&batch_index.to_be_bytes());
-    ContentHash::from_bytes(*hasher.finalize().as_bytes())
-}
-
-fn mismatch_evidence(left: HistoryDigest, right: HistoryDigest) -> ContentHash {
-    let mut hasher = Hasher::new();
-    hasher.update(b"quant-pivot/exchange-history-mismatch/v1\0");
-    hasher.update(&left.0);
-    hasher.update(&right.0);
     ContentHash::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -1486,25 +1730,76 @@ fn plan_block(block: i64) -> QuantResult<u64> {
     u64::try_from(block).map_err(|_| ExchangeHistoryError::FrontierOverflow.into())
 }
 
-const fn projection_reason(error: &ExecutionProjectionError) -> ExchangeHistoryQuarantineReason {
+const fn projection_kind(error: &ExecutionProjectionError) -> ExchangeHistoryQuarantineKind {
     match error {
         ExecutionProjectionError::UnknownToken { .. } => {
-            ExchangeHistoryQuarantineReason::UnknownToken
+            ExchangeHistoryQuarantineKind::UnknownToken
         }
-        ExecutionProjectionError::MissingAggregate
-        | ExecutionProjectionError::AggregateMismatch
-        | ExecutionProjectionError::MissingMaker => {
-            ExchangeHistoryQuarantineReason::MissingCorrelation
+        ExecutionProjectionError::InvalidTransactionGrammar { .. } => {
+            ExchangeHistoryQuarantineKind::MissingCorrelation
         }
         ExecutionProjectionError::UnknownContract | ExecutionProjectionError::ContractInterval => {
-            ExchangeHistoryQuarantineReason::ContractMismatch
+            ExchangeHistoryQuarantineKind::ContractMismatch
         }
         ExecutionProjectionError::DecodeFailure
         | ExecutionProjectionError::InvalidAmount
         | ExecutionProjectionError::ZeroExecution
         | ExecutionProjectionError::InvalidTimestamp
-        | ExecutionProjectionError::RemovedLog => ExchangeHistoryQuarantineReason::DecodeFailure,
+        | ExecutionProjectionError::RemovedLog => ExchangeHistoryQuarantineKind::DecodeFailure,
     }
+}
+
+fn projection_evidence(error: &ExecutionProjectionError) -> ExchangeHistoryQuarantineEvidence {
+    match error {
+        ExecutionProjectionError::InvalidTransactionGrammar {
+            version,
+            contract,
+            transaction_hash,
+            log_index,
+            expected,
+            actual,
+        } => ExchangeHistoryQuarantineEvidence::ProjectionFailure {
+            version: Some((*version).to_owned()),
+            contract_address: Some(contract.clone()),
+            transaction_hash: Some(transaction_hash.clone()),
+            log_index: Some(*log_index),
+            token_id: None,
+            expected: Some((*expected).to_owned()),
+            actual: (*actual).to_owned(),
+        },
+        ExecutionProjectionError::UnknownToken { token_id } => {
+            ExchangeHistoryQuarantineEvidence::ProjectionFailure {
+                version: None,
+                contract_address: None,
+                transaction_hash: None,
+                log_index: None,
+                token_id: Some(token_id.clone()),
+                expected: Some("token exists in the PIT market identity catalog".to_owned()),
+                actual: error.to_string(),
+            }
+        }
+        _ => ExchangeHistoryQuarantineEvidence::ProjectionFailure {
+            version: None,
+            contract_address: None,
+            transaction_hash: None,
+            log_index: None,
+            token_id: None,
+            expected: None,
+            actual: error.to_string(),
+        },
+    }
+}
+
+fn quarantine_evidence_hash(
+    evidence: &ExchangeHistoryQuarantineEvidence,
+) -> QuantResult<ContentHash> {
+    let bytes = serde_json::to_vec(evidence).map_err(|error| ExchangeHistoryError::Projection {
+        detail: format!("serialize quarantine evidence: {error}"),
+    })?;
+    let mut hasher = Hasher::new();
+    hasher.update(b"quant-pivot/exchange-history-quarantine-evidence/v1\0");
+    hasher.update(&bytes);
+    Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
 }
 
 fn shrinkable(error: &HistoryClientError) -> bool {
@@ -1539,6 +1834,10 @@ const fn projection_failure(detail: String) -> ExchangeHistoryError {
 
 fn block_i64(block: u64) -> QuantResult<i64> {
     i64::try_from(block).map_err(|_| ExchangeHistoryError::FrontierOverflow.into())
+}
+
+fn block_u64(block: i64) -> QuantResult<u64> {
+    u64::try_from(block).map_err(|_| ExchangeHistoryError::FrontierOverflow.into())
 }
 
 fn count_i64(count: usize) -> QuantResult<i64> {

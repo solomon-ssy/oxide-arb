@@ -1,19 +1,18 @@
 //! Per-Route readiness, model lineage, and candidate funnel for a global report run.
 
-use chrono::{DateTime, Utc};
-use schemars::JsonSchema;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
-use serde::{Deserialize, Serialize};
-
 use crate::{
     entities::quant_report_route_run,
     runtime_config::BuyModelRoute,
     types::{
-        CalibrationArtifactId, ContentHash, ModelRunId, ModelVersionId, ReportRouteRunId,
-        ReportRunId, ResearchProfileArtifactId, ResearchProfileRef, ServingAuthority,
-        TradePolicyArtifactId,
+        CalibrationArtifactId, ContentHash, HistoryServingHeadSealId, ModelRunId, ModelVersionId,
+        ReportRouteRunId, ReportRunId, ResearchProfileArtifactId, ResearchProfileRef,
+        ServingAuthority, TradePolicyArtifactId,
     },
 };
+use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
+use serde::{Deserialize, Serialize};
 
 /// Terminal outcome of one represented Route inside a report attempt.
 #[derive(
@@ -41,6 +40,9 @@ pub struct RouteModelLineage {
     pub pit_lineage_digest: ContentHash,
     pub serving_contract_digest: ContentHash,
     pub recommendation_contract_hash: ContentHash,
+    pub report_universe_plan_hash: ContentHash,
+    pub history_serving_head_seal_id: HistoryServingHeadSealId,
+    pub history_serving_head_seal_hash: ContentHash,
     pub serving_authority: ServingAuthority,
 }
 

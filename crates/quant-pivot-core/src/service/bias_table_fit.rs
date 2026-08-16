@@ -365,6 +365,8 @@ impl BiasTableFitService {
             // The bias fit reads only settlement mids — no domain data.
             domain: DomainConfig::disabled(),
             feature_contract: ResearchFeatureContract::FullL2,
+            execution_history_chunks: Vec::new(),
+            requires_execution_history: false,
         };
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.fact_read),

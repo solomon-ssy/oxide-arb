@@ -1,8 +1,8 @@
 # quant-pivot Current Config Field Inventory
 
-> Generated for the W0 as-is audit from the checked-in Rust types and Config API JSON Schema.
-> It records the current contract before the clean-break implementation. The target descriptor
-> registry must reproduce this coverage and explicitly add/remove paths through reviewed disposition.
+> The original W0 inventory is superseded by the clean-break S1 contract. This file retains the
+> reviewed inventory shape, but field names below use the current finalized-exchange-history and
+> execution-quality vocabulary. The generated Config API schema remains authoritative.
 
 ## Runtime Config
 
@@ -28,7 +28,7 @@ binding evidence and schedule collection members expand into readonly/generated 
 | /data_quality/max_feature_bucket_age_secs | integer | migrate to v2 descriptor |
 | /data_quality/max_ingest_lag_ms | integer | migrate to v2 descriptor |
 | /data_quality/max_stale_book_ratio_bps | integer | migrate to v2 descriptor |
-| /data_quality/max_trade_tape_age_secs | integer | migrate to v2 descriptor |
+| /data_quality/max_execution_age_secs | integer | current execution-history staleness descriptor |
 | /data_quality/reject_crossed_books | boolean | migrate to v2 descriptor |
 | /data_quality/reject_empty_books | boolean | migrate to v2 descriptor |
 | /reports/ad_hoc_default_knowledge_lag_secs | integer | migrate to v2 descriptor |
@@ -229,16 +229,16 @@ variants must each receive a complete rendered example.
 | 33 | market_data.data_api.base_url | String | market_data.rs | sensitive | keep as required deploy descriptor |
 | 34 | market_data.data_api.page_size | u32 | market_data.rs | public | keep as required deploy descriptor |
 | 35 | market_data.data_api.size_threshold | u32 | market_data.rs | public | keep as required deploy descriptor |
-| 36 | market_data.trade_tape_on_chain.enabled | bool | market_data.rs | public | keep as required deploy descriptor |
-| 37 | market_data.trade_tape_on_chain.poll_secs | u64 | market_data.rs | public | keep as required deploy descriptor |
-| 38 | market_data.trade_tape_on_chain.confirmations | u64 | market_data.rs | public | keep as required deploy descriptor |
-| 39 | market_data.trade_tape_on_chain.max_blocks_per_tick | u64 | market_data.rs | public | keep as required deploy descriptor |
-| 40 | market_data.trade_tape_on_chain.max_blocks_per_request | u64 | market_data.rs | public | keep as required deploy descriptor |
-| 41 | market_data.trade_tape_on_chain.batch_size | usize | market_data.rs | public | keep as required deploy descriptor |
-| 42 | market_data.trade_tape_on_chain.reconciliation_lookback_secs | u64 | market_data.rs | public | keep as required deploy descriptor |
-| 43 | market_data.trade_tape_on_chain.reconciliation_match_window_ms | u64 | market_data.rs | public | keep as required deploy descriptor |
-| 44 | market_data.trade_tape_on_chain.reconciliation_terminal_age_secs | u64 | market_data.rs | public | keep as required deploy descriptor |
-| 45 | market_data.trade_tape_on_chain.reconciliation_max_rows | usize | market_data.rs | public | keep as required deploy descriptor |
+| 36 | market_data.finalized_exchange_history.enabled | bool | market_data.rs | public | required deploy descriptor |
+| 37 | market_data.finalized_exchange_history.poll_secs | u64 | market_data.rs | public | required deploy descriptor |
+| 38 | market_data.finalized_exchange_history.hypersync.provider_id | String | market_data.rs | public | required provider identity |
+| 39 | market_data.finalized_exchange_history.hypersync.endpoint | String | market_data.rs | sensitive | primary extractor endpoint |
+| 40 | market_data.finalized_exchange_history.hypersync.api_token | SecretText | market_data.rs | secret | primary extractor credential |
+| 41 | market_data.finalized_exchange_history.attestor.provider_id | String | market_data.rs | public | independent witness identity |
+| 42 | market_data.finalized_exchange_history.attestor.rpc_endpoint | PolygonRpcEndpoint | market_data.rs | sensitive | independent witness endpoint |
+| 43 | market_data.finalized_exchange_history.connect_timeout_ms | u64 | market_data.rs | public | required deploy descriptor |
+| 44 | market_data.finalized_exchange_history.request_timeout_ms | u64 | market_data.rs | public | required deploy descriptor |
+| 45 | market_data.finalized_exchange_history.max_response_bytes | usize | market_data.rs | public | required response budget |
 | 46 | domain_sources.binance.enabled | bool | domain_sources.rs | public | keep as required deploy descriptor |
 | 47 | domain_sources.binance.rest_url | String | domain_sources.rs | sensitive | keep as required deploy descriptor |
 | 48 | domain_sources.binance.websocket_url | String | domain_sources.rs | sensitive | keep as required deploy descriptor |

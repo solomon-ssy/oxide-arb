@@ -14,6 +14,7 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::quant::{DomainAvailability, MarketCandidate, MarketDataHealth},
     enums::{common::MarketCategory, market::MarketStatus},
+    runtime_config::BuyModelRoute,
     types::{
         ContentHash, DecisionPolicySnapshotId, EventId, MarketId, Price, SelectionExclusionSummary,
         SelectorHashEvidence, TokenId, Usd,
@@ -109,6 +110,9 @@ struct SelectorContractHashInput<'a> {
     knowledge_lag_secs: u64,
     feature_schema_hash: ContentHash,
     model_requirements_hash: ContentHash,
+    primary_route: Option<BuyModelRoute>,
+    active_routes: &'a [BuyModelRoute],
+    universe_plan_hash: Option<ContentHash>,
 }
 
 /// The canonical, order-normalized shape hashed into a `selector_hash`.
@@ -146,6 +150,12 @@ pub struct SelectorHashInput {
     pub feature_schema_hash: ContentHash,
     /// Ordered, category-aware model requiredness contract.
     pub model_requirements_hash: ContentHash,
+    /// Primary report route, absent for offline PIT selection.
+    pub primary_route: Option<BuyModelRoute>,
+    /// Ordered active report routes from the pinned serving generation.
+    pub active_routes: Vec<BuyModelRoute>,
+    /// Hash of the complete report universe plan.
+    pub universe_plan_hash: Option<ContentHash>,
     /// Complete candidate world, sorted by market id.
     pub candidates: Vec<MarketCandidate>,
     /// Complete selected projection, sorted by market id.
@@ -195,6 +205,16 @@ impl SelectorHashInput {
         let mut excluded = excluded.to_vec();
         excluded.sort_by(|left, right| left.market_id.cmp(&right.market_id));
 
+        let (primary_route, active_routes, universe_plan_hash) = request
+            .route_availability
+            .as_ref()
+            .map_or((None, Vec::new(), None), |availability| {
+                (
+                    Some(availability.primary_route),
+                    availability.active_routes.clone(),
+                    Some(availability.universe_plan_hash),
+                )
+            });
         Ok(Self {
             decision_at: request.decision_at.timestamp_millis(),
             decision_policy_snapshot_id: request.decision_policy_snapshot_id,
@@ -216,6 +236,9 @@ impl SelectorHashInput {
             model_requirements_hash: ResearchHasher::model_feature_requirements(
                 &request.model_requirements,
             )?,
+            primary_route,
+            active_routes,
+            universe_plan_hash,
             candidates,
             included,
             excluded,
@@ -242,6 +265,9 @@ impl SelectorHashInput {
             knowledge_lag_secs: self.knowledge_lag_secs,
             feature_schema_hash: self.feature_schema_hash,
             model_requirements_hash: self.model_requirements_hash,
+            primary_route: self.primary_route,
+            active_routes: &self.active_routes,
+            universe_plan_hash: self.universe_plan_hash,
         };
         let boundary = SelectorBoundaryHashInput {
             decision_at: self.decision_at,

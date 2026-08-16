@@ -23,7 +23,7 @@ use quant_pivot_models::{
     },
     config::FeatureParityComputeConfig,
     domain::{
-        data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
+        data_plane::{DecisionBoundary, DecisionClock, DecisionSource, ExchangeHistoryFrontier},
         quant::{
             FactorValueInfo, FeatureParityRunInfo, FeatureVectorInfo, FrozenFeatureParitySubject,
             FrozenFeatureParitySubjectId, MarketSelectionInfo, MarketSelectionMemberInfo,
@@ -51,9 +51,10 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
-    FactorRepository, FeatureParityRepository, FeatureRepository, MarketLinkageRepository,
-    MarketSelectionRepository, ModelRunRepository, PolicyRepository, QuantFactReadRepository,
-    RecommendationReportRepository, ReportRunRepository, ServingEvidenceRepository,
+    ExchangeHistoryRepository, FactorRepository, FeatureParityRepository, FeatureRepository,
+    MarketLinkageRepository, MarketSelectionRepository, ModelRunRepository, PolicyRepository,
+    QuantFactReadRepository, RecommendationReportRepository, ReportRunRepository,
+    ServingEvidenceRepository,
 };
 use quant_pivot_research::{
     factors::{FactorEngine, FactorValue, MarketFactorOutcome},
@@ -117,6 +118,7 @@ pub struct DurableFeatureParityDeps {
     pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     pub linkages: Arc<dyn MarketLinkageRepository>,
     pub calibration_artifacts: Arc<dyn CalibrationArtifactRepository>,
+    pub exchange_history: Arc<dyn ExchangeHistoryRepository>,
     pub compute: Arc<ComputeExecutor>,
     pub compute_budget: FeatureParityComputeConfig,
 }
@@ -1216,6 +1218,21 @@ impl DurableFeatureParitySource {
             .decision_at()
             .checked_add_signed(ChronoDuration::milliseconds(1))
             .ok_or_else(|| determinism("parity window end is outside chrono range".to_owned()))?;
+        let serving_head = self
+            .deps
+            .exchange_history
+            .serving_head_at(ExchangeHistoryFrontier::Activation, boundary.decision_at())
+            .await?
+            .ok_or_else(|| {
+                determinism("parity replay has no serving head at its decision boundary".to_owned())
+            })?;
+        self.deps
+            .exchange_history
+            .validate_serving_head(
+                serving_head.seal.serving_head_seal_id,
+                serving_head.seal.seal_hash,
+            )
+            .await?;
         let window = loader
             .load(&WindowSpec {
                 window_start: boundary.decision_at(),
@@ -1227,6 +1244,8 @@ impl DurableFeatureParitySource {
                 max_horizon_secs: 0,
                 domain: config.profile_artifacts.domain.definition.clone(),
                 feature_contract: selection_replay.replay_config.feature_contract,
+                execution_history_chunks: serving_head.chunks,
+                requires_execution_history: true,
             })
             .await?;
         let cross = materialize_cross_section(
@@ -1356,6 +1375,7 @@ impl DurableFeatureParitySource {
                     features: config.profile_artifacts.features.definition.clone(),
                     model_requirements,
                     knowledge_lag_secs: boundary.knowledge_lag_secs(),
+                    route_availability: None,
                 },
                 candidate_batch.candidates,
             )
@@ -1410,6 +1430,7 @@ impl DurableFeatureParitySource {
                     features: context.config.profile_artifacts.features.definition.clone(),
                     model_requirements,
                     knowledge_lag_secs: context.boundary.knowledge_lag_secs(),
+                    route_availability: None,
                 },
                 candidates.candidates,
             )

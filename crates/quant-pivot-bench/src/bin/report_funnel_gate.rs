@@ -150,6 +150,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         model_decisions: &model_decisions,
         tiers: &[],
         tier_rejections: &[],
+        tier_build_rejections: &[],
         recommendations: &recommendations,
         event_time: decision_at,
     };

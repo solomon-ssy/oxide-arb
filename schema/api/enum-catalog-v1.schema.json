@@ -1875,6 +1875,377 @@
       ]
     },
     {
+      "name": "FreshBootBlockedReason",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "ProviderMismatch",
+          "wire_value": "provider_mismatch"
+        },
+        {
+          "rust_variant": "UnknownToken",
+          "wire_value": "unknown_token"
+        },
+        {
+          "rust_variant": "DecodeFailure",
+          "wire_value": "decode_failure"
+        },
+        {
+          "rust_variant": "HistoryQuarantined",
+          "wire_value": "history_quarantined"
+        },
+        {
+          "rust_variant": "InsufficientMatureLabels",
+          "wire_value": "insufficient_mature_labels"
+        },
+        {
+          "rust_variant": "DatasetBuildFailed",
+          "wire_value": "dataset_build_failed"
+        },
+        {
+          "rust_variant": "ModelTrainingFailed",
+          "wire_value": "model_training_failed"
+        },
+        {
+          "rust_variant": "CalibrationFailed",
+          "wire_value": "calibration_failed"
+        },
+        {
+          "rust_variant": "CpcvFailed",
+          "wire_value": "cpcv_failed"
+        },
+        {
+          "rust_variant": "QualityGateFailed",
+          "wire_value": "quality_gate_failed"
+        },
+        {
+          "rust_variant": "ParityFailed",
+          "wire_value": "parity_failed"
+        },
+        {
+          "rust_variant": "ScenarioBindingFailed",
+          "wire_value": "scenario_binding_failed"
+        },
+        {
+          "rust_variant": "BootstrapConflict",
+          "wire_value": "bootstrap_conflict"
+        },
+        {
+          "rust_variant": "ReportEnqueueFailed",
+          "wire_value": "report_enqueue_failed"
+        },
+        {
+          "rust_variant": "ReportPublicationFailed",
+          "wire_value": "report_publication_failed"
+        },
+        {
+          "rust_variant": "PolicyUnavailable",
+          "wire_value": "policy_unavailable"
+        },
+        {
+          "rust_variant": "SourceSliceMismatch",
+          "wire_value": "source_slice_mismatch"
+        },
+        {
+          "rust_variant": "RetryBudgetExhausted",
+          "wire_value": "retry_budget_exhausted"
+        },
+        {
+          "rust_variant": "SourceCoverageInvalid",
+          "wire_value": "source_coverage_invalid"
+        }
+      ]
+    },
+    {
+      "name": "FreshBootEventKind",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "RunCreated",
+          "wire_value": "run_created"
+        },
+        {
+          "rust_variant": "SourceCoverageSatisfied",
+          "wire_value": "source_coverage_satisfied"
+        },
+        {
+          "rust_variant": "DatasetStarted",
+          "wire_value": "dataset_started"
+        },
+        {
+          "rust_variant": "DatasetCompleted",
+          "wire_value": "dataset_completed"
+        },
+        {
+          "rust_variant": "TrainingEnqueued",
+          "wire_value": "training_enqueued"
+        },
+        {
+          "rust_variant": "TrainingStarted",
+          "wire_value": "training_started"
+        },
+        {
+          "rust_variant": "TrainingCompleted",
+          "wire_value": "training_completed"
+        },
+        {
+          "rust_variant": "CalibrationDatasetEnqueued",
+          "wire_value": "calibration_dataset_enqueued"
+        },
+        {
+          "rust_variant": "CalibrationDatasetStarted",
+          "wire_value": "calibration_dataset_started"
+        },
+        {
+          "rust_variant": "CalibrationDatasetCompleted",
+          "wire_value": "calibration_dataset_completed"
+        },
+        {
+          "rust_variant": "CalibrationEnqueued",
+          "wire_value": "calibration_enqueued"
+        },
+        {
+          "rust_variant": "CalibrationStarted",
+          "wire_value": "calibration_started"
+        },
+        {
+          "rust_variant": "CalibrationCompleted",
+          "wire_value": "calibration_completed"
+        },
+        {
+          "rust_variant": "CpcvEnqueued",
+          "wire_value": "cpcv_enqueued"
+        },
+        {
+          "rust_variant": "CpcvStarted",
+          "wire_value": "cpcv_started"
+        },
+        {
+          "rust_variant": "CpcvCompleted",
+          "wire_value": "cpcv_completed"
+        },
+        {
+          "rust_variant": "ParityVerified",
+          "wire_value": "parity_verified"
+        },
+        {
+          "rust_variant": "ScenarioBound",
+          "wire_value": "scenario_bound"
+        },
+        {
+          "rust_variant": "BootstrapPrepared",
+          "wire_value": "bootstrap_prepared"
+        },
+        {
+          "rust_variant": "PreflightRefreshed",
+          "wire_value": "preflight_refreshed"
+        },
+        {
+          "rust_variant": "BootstrapCommitted",
+          "wire_value": "bootstrap_committed"
+        },
+        {
+          "rust_variant": "ReportEnabled",
+          "wire_value": "report_enabled"
+        },
+        {
+          "rust_variant": "ReportRetried",
+          "wire_value": "report_retried"
+        },
+        {
+          "rust_variant": "ReportPublished",
+          "wire_value": "report_published"
+        },
+        {
+          "rust_variant": "EvidenceWaitScheduled",
+          "wire_value": "evidence_wait_scheduled"
+        },
+        {
+          "rust_variant": "RetryScheduled",
+          "wire_value": "retry_scheduled"
+        },
+        {
+          "rust_variant": "RetryStarted",
+          "wire_value": "retry_started"
+        },
+        {
+          "rust_variant": "TerminalBlocked",
+          "wire_value": "terminal_blocked"
+        },
+        {
+          "rust_variant": "RetryAccelerated",
+          "wire_value": "retry_accelerated"
+        },
+        {
+          "rust_variant": "Superseded",
+          "wire_value": "superseded"
+        }
+      ]
+    },
+    {
+      "name": "FreshBootRetryReason",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "SourceCoverageIncomplete",
+          "wire_value": "source_coverage_incomplete"
+        },
+        {
+          "rust_variant": "DependencyUnavailable",
+          "wire_value": "dependency_unavailable"
+        },
+        {
+          "rust_variant": "StorageTransient",
+          "wire_value": "storage_transient"
+        },
+        {
+          "rust_variant": "ProviderUnavailable",
+          "wire_value": "provider_unavailable"
+        },
+        {
+          "rust_variant": "JobRetryScheduled",
+          "wire_value": "job_retry_scheduled"
+        },
+        {
+          "rust_variant": "PreflightStale",
+          "wire_value": "preflight_stale"
+        },
+        {
+          "rust_variant": "ReportPending",
+          "wire_value": "report_pending"
+        }
+      ]
+    },
+    {
+      "name": "FreshBootStage",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "AwaitingSourceCoverage",
+          "wire_value": "awaiting_source_coverage"
+        },
+        {
+          "rust_variant": "DatasetQueued",
+          "wire_value": "dataset_queued"
+        },
+        {
+          "rust_variant": "DatasetRunning",
+          "wire_value": "dataset_running"
+        },
+        {
+          "rust_variant": "DatasetReady",
+          "wire_value": "dataset_ready"
+        },
+        {
+          "rust_variant": "TrainingQueued",
+          "wire_value": "training_queued"
+        },
+        {
+          "rust_variant": "TrainingRunning",
+          "wire_value": "training_running"
+        },
+        {
+          "rust_variant": "TrainingReady",
+          "wire_value": "training_ready"
+        },
+        {
+          "rust_variant": "CalibrationDatasetQueued",
+          "wire_value": "calibration_dataset_queued"
+        },
+        {
+          "rust_variant": "CalibrationDatasetRunning",
+          "wire_value": "calibration_dataset_running"
+        },
+        {
+          "rust_variant": "CalibrationDatasetReady",
+          "wire_value": "calibration_dataset_ready"
+        },
+        {
+          "rust_variant": "CalibrationQueued",
+          "wire_value": "calibration_queued"
+        },
+        {
+          "rust_variant": "CalibrationRunning",
+          "wire_value": "calibration_running"
+        },
+        {
+          "rust_variant": "CalibrationReady",
+          "wire_value": "calibration_ready"
+        },
+        {
+          "rust_variant": "CpcvQueued",
+          "wire_value": "cpcv_queued"
+        },
+        {
+          "rust_variant": "CpcvRunning",
+          "wire_value": "cpcv_running"
+        },
+        {
+          "rust_variant": "CpcvReady",
+          "wire_value": "cpcv_ready"
+        },
+        {
+          "rust_variant": "ParityReady",
+          "wire_value": "parity_ready"
+        },
+        {
+          "rust_variant": "ScenarioReady",
+          "wire_value": "scenario_ready"
+        },
+        {
+          "rust_variant": "BootstrapPreflight",
+          "wire_value": "bootstrap_preflight"
+        },
+        {
+          "rust_variant": "BootstrapCommitted",
+          "wire_value": "bootstrap_committed"
+        },
+        {
+          "rust_variant": "FirstReportQueued",
+          "wire_value": "first_report_queued"
+        },
+        {
+          "rust_variant": "FirstReportPublished",
+          "wire_value": "first_report_published"
+        }
+      ]
+    },
+    {
+      "name": "FreshBootStatus",
+      "module": "quant",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "WaitingEvidence",
+          "wire_value": "waiting_evidence"
+        },
+        {
+          "rust_variant": "RetryScheduled",
+          "wire_value": "retry_scheduled"
+        },
+        {
+          "rust_variant": "Running",
+          "wire_value": "running"
+        },
+        {
+          "rust_variant": "BlockedTerminal",
+          "wire_value": "blocked_terminal"
+        },
+        {
+          "rust_variant": "Superseded",
+          "wire_value": "superseded"
+        },
+        {
+          "rust_variant": "Succeeded",
+          "wire_value": "succeeded"
+        }
+      ]
+    },
+    {
       "name": "IneligibilityReason",
       "module": "quant",
       "kind": "wire",

@@ -16,7 +16,10 @@ use quant_pivot_models::{
             BuildTrainingDatasetRequest, CpcvBacktestJobParams, FitModelCalibratorRequest,
             ModelTrainJobParams, RunCpcvBacktestRequest, TrainModelRequest,
         },
-        data_plane::{ExchangeHistoryChunkInfo, ExchangeHistoryFrontier},
+        data_plane::{
+            CreateHistoryFitSeal, ExchangeHistoryChunkInfo, ExchangeHistoryFrontier,
+            HistorySealChunkRef, NewHistoryFitSeal,
+        },
         ports::{GovernanceActor, ModelCalibrationFitJobParams},
         quant::{
             AdvanceFreshBootRun, BlockFreshBootRun, BootstrapModelRoute, DelayFreshBootRun,
@@ -34,13 +37,14 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::BuyModelRoute,
     types::{
-        BacktestPathSetId, CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID, EvmBlockHash, FreshBootRunId,
-        ModelRunId, ModelSpecId, ModelVersionId, POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID,
-        ResearchJobParams, ResearchProfileArtifact, ResearchProfileArtifactId,
-        ResearchProfileDataSource, ResearchReadinessEvidencePayload, ResearchReadinessSource,
-        RetentionRunwayEvidenceV1, SchemaVersion, ServingAuthority, TrainingDatasetId,
-        TrainingSampleSources, WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID, WorkerId,
-        builtin_research_profiles, model_lineage::ModelVersionDerivation,
+        BacktestPathSetId, CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID, ContentHash, EvmBlockHash,
+        FreshBootRunId, HistoryFitSealId, ModelRunId, ModelSpecId, ModelVersionId,
+        POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID, ResearchJobParams, ResearchProfileArtifact,
+        ResearchProfileArtifactId, ResearchProfileDataSource, ResearchReadinessEvidencePayload,
+        ResearchReadinessSource, RetentionRunwayEvidenceV1, SchemaVersion, ServingAuthority,
+        TrainingDatasetId, TrainingSampleSources, WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID,
+        WorkerId, backtest::CpcvFoldValidationRegime, builtin_research_profiles,
+        model_lineage::ModelVersionDerivation,
     },
 };
 use quant_pivot_repository::{
@@ -60,8 +64,10 @@ use super::{
     AppContext, ports::research_job::CoreResearchJobPort, task_id::TaskId, task_registry::AppRunner,
 };
 use crate::{
+    observability::metrics_hub::MetricsHub,
     report::{AdHocReportRequest, ReportLifecycleService},
     service::{
+        bootstrap_cpcv_evidence::BootstrapCpcvEvidence,
         frozen_model_parity::FrozenModelParityService,
         model_route_bootstrap::ModelRouteBootstrapService,
         model_route_governance::ModelRouteGovernanceService,
@@ -76,11 +82,19 @@ const CLAIM_LEASE: ChronoDuration = ChronoDuration::seconds(10);
 const SOURCE_RETRY: ChronoDuration = ChronoDuration::seconds(30);
 const CALIBRATION_WINDOW_HOURS: i64 = 23;
 const JOB_ACTOR: &str = "system:fresh_boot_orchestrator";
+const FIT_SEAL_NAMESPACE: Uuid = Uuid::from_u128(0x4af6_8803_6955_5c7a_86df_d617_6665_5fb1);
+
+fn duration_seconds(from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
+    to.signed_duration_since(from)
+        .to_std()
+        .map_or(0.0, |duration| duration.as_secs_f64())
+}
 
 struct HistoryWindow {
     from_block: i64,
     through_block: i64,
     effective_through: DateTime<Utc>,
+    chunks: Vec<HistorySealChunkRef>,
 }
 
 enum HistoryCoverageError {
@@ -127,6 +141,7 @@ struct FreshBootDeps {
     report_lifecycle: Arc<ReportLifecycleService>,
     report_runs: Arc<dyn ReportRunRepository>,
     reports: Arc<dyn RecommendationReportRepository>,
+    metrics: Arc<MetricsHub>,
 }
 
 /// Crash-safe coordinator. Every call to `tick` writes at most one FSM edge per
@@ -354,7 +369,7 @@ impl FreshBootOrchestrator {
             FreshBootStage::ScenarioReady => Box::pin(self.persist_preflight(run)).await,
             FreshBootStage::BootstrapPreflight => Box::pin(self.commit_bootstrap(run)).await,
             FreshBootStage::BootstrapCommitted => Box::pin(self.enable_report(run)).await,
-            FreshBootStage::ReportEligible => Box::pin(self.observe_report(run)).await,
+            FreshBootStage::FirstReportQueued => Box::pin(self.observe_report(run)).await,
             FreshBootStage::FirstReportPublished => Ok(()),
         }
     }
@@ -384,6 +399,36 @@ impl FreshBootOrchestrator {
             Err(HistoryCoverageError::Storage(error)) => return Err(error.into()),
         };
         let profile = Self::profile_for_run(&run)?;
+        let cohort_hash = CanonicalDigest::content_hash_json(&profile.spec.cohort_contract)?;
+        let fit_seal_id = HistoryFitSealId::new(Uuid::new_v5(
+            &FIT_SEAL_NAMESPACE,
+            format!(
+                "{}:{}:{}:{}:{}:{}",
+                run.run_id,
+                history.from_block,
+                history.through_block,
+                profile.profile_ref.id,
+                profile.profile_ref.version,
+                profile.profile_ref.content_hash,
+            )
+            .as_bytes(),
+        ));
+        let mut fit_command = CreateHistoryFitSeal {
+            seal: NewHistoryFitSeal {
+                fit_seal_id,
+                seal_hash: ContentHash::from_bytes([0; 32]),
+                plan_id: plan.plan_id,
+                window_from_block: history.from_block,
+                window_to_block: history.through_block,
+                policy_hash: plan.policy_hash,
+                profile_hash: run.profile_hash,
+                cohort_hash,
+                created_at: Utc::now(),
+            },
+            chunks: history.chunks,
+        };
+        fit_command.seal.seal_hash = fit_command.derive_hash()?;
+        let fit_seal = self.deps.history.create_fit_seal(fit_command).await?;
         let windows = Self::dataset_windows(&profile, history.effective_through);
         let verified = self.deps.readiness.latest_verified(Utc::now()).await?;
         let Some(evidence) = verified.retention else {
@@ -424,6 +469,8 @@ impl FreshBootOrchestrator {
             pit_cutoff: history.effective_through,
             history_from_block: history.from_block,
             history_through_block: history.through_block,
+            fit_seal_id: fit_seal.seal.fit_seal_id,
+            fit_seal_hash: fit_seal.seal.seal_hash,
             requirements,
             sealed_at: Utc::now(),
         };
@@ -521,6 +568,7 @@ impl FreshBootOrchestrator {
         let mut cursor = from;
         let mut effective_through = None;
         let mut previous_hash = None;
+        let mut sealed_chunks = Vec::new();
         for chunk in &chunks {
             Self::verify_chunk(chunk, cursor, through, previous_hash.as_ref())?;
             cursor = chunk
@@ -531,6 +579,17 @@ impl FreshBootOrchestrator {
                 ))?;
             effective_through = chunk.effective_through_at;
             previous_hash.clone_from(&chunk.last_block_hash);
+            sealed_chunks.push(HistorySealChunkRef {
+                chunk_id: chunk.chunk_id,
+                frontier: chunk.frontier,
+                state_revision: chunk
+                    .state_revision
+                    .ok_or(HistoryCoverageError::Incomplete(
+                        "accepted history chunk has no state revision",
+                    ))?,
+                from_block: chunk.from_block,
+                to_block: chunk.to_block,
+            });
             if chunk.to_block == through {
                 break;
             }
@@ -546,6 +605,7 @@ impl FreshBootOrchestrator {
             effective_through: effective_through.ok_or(HistoryCoverageError::Incomplete(
                 "accepted history window has no PIT availability timestamp",
             ))?,
+            chunks: sealed_chunks,
         })
     }
 
@@ -656,6 +716,8 @@ impl FreshBootOrchestrator {
             profile_ref,
             purpose,
             decision_policy_snapshot_id: run.decision_policy_snapshot_id,
+            fit_seal_id: manifest.fit_seal_id,
+            fit_seal_hash: manifest.fit_seal_hash,
             window_start,
             window_end,
             pit_cutoff: manifest.pit_cutoff,
@@ -1048,15 +1110,68 @@ impl FreshBootOrchestrator {
             .find_by_id(&path_set_id)
             .await?
             .ok_or_else(|| Self::invalid("successful CPCV job has no path-set row"))?;
-        if Some(path_set.model_version_id) != run.model_version_id
-            || Some(path_set.training_dataset_id) != run.training_dataset_id
-            || path_set.decision_policy_snapshot_id != run.decision_policy_snapshot_id
+        let model_version_id = run
+            .model_version_id
+            .ok_or_else(|| Self::invalid("fresh boot has no calibrated model"))?;
+        let training_dataset_id = run
+            .training_dataset_id
+            .ok_or_else(|| Self::invalid("fresh boot has no training Dataset"))?;
+        let model = self
+            .deps
+            .model_registry
+            .find_model_version(&model_version_id)
+            .await?
+            .ok_or_else(|| Self::invalid("fresh-boot CPCV model does not exist"))?;
+        let dataset = self
+            .deps
+            .datasets
+            .find_by_id(&training_dataset_id)
+            .await?
+            .ok_or_else(|| Self::invalid("fresh-boot CPCV Dataset does not exist"))?;
+        let fit_seal = self
+            .deps
+            .history
+            .validate_fit_seal(
+                dataset.source_lineage.fit_seal_id,
+                dataset.source_lineage.fit_seal_hash,
+            )
+            .await
+            .inspect_err(|_| {
+                self.deps.metrics.record_history_window_invalidation("fit");
+            })?;
+        let bundle = self
+            .deps
+            .policies
+            .load_current_bundle()
+            .await?
+            .ok_or_else(|| Self::invalid("fresh-boot CPCV has no active policy bundle"))?;
+        let profile = Self::profile_for_run(&run)?;
+        if bundle.decision_policy_snapshot_id != run.decision_policy_snapshot_id {
+            return self
+                .block(
+                    run,
+                    FreshBootBlockedReason::CpcvFailed,
+                    "CPCV policy snapshot differs from the fresh-boot immutable run",
+                )
+                .await;
+        }
+        if let Err(error) = (BootstrapCpcvEvidence {
+            path_set: &path_set,
+            model: &model,
+            dataset: &dataset,
+            fit_seal: &fit_seal,
+            profile: &profile,
+            policy_snapshot_id: run.decision_policy_snapshot_id,
+            policy_snapshot_hash: bundle.snapshot_hash,
+            required_regime: CpcvFoldValidationRegime::PredictiveUtility,
+        })
+        .validate()
         {
             return self
                 .block(
                     run,
                     FreshBootBlockedReason::CpcvFailed,
-                    "CPCV path set differs from the fresh-boot candidate preimage",
+                    &format!("fresh-boot CPCV evidence failed validation: {error}"),
                 )
                 .await;
         }
@@ -1195,6 +1310,36 @@ impl FreshBootOrchestrator {
         let model_version_id = run
             .model_version_id
             .ok_or_else(|| Self::invalid("fresh boot has no calibrated model"))?;
+        let refreshed = match Box::pin(self.deps.bootstrap.prepare(model_version_id)).await {
+            Ok(plan) => plan.preflight().clone(),
+            Err(error) if Self::retry_reason(&error).is_some() => return Err(error),
+            Err(error) => {
+                return self
+                    .block(
+                        run,
+                        FreshBootBlockedReason::BootstrapConflict,
+                        &format!("bootstrap pre-commit evidence validation failed: {error}"),
+                    )
+                    .await;
+            }
+        };
+        let preflight_hash = preflight.preflight_hash();
+        if refreshed.preflight_hash() != preflight_hash {
+            let binding = refreshed.manifest().scenario_model_binding();
+            return self
+                .advance(
+                    run,
+                    FreshBootEventKind::PreflightRefreshed,
+                    FreshBootAdvancePatch {
+                        scenario_artifact_id: Some(binding.portfolio_scenario_model_artifact_id),
+                        scenario_artifact_hash: Some(binding.model_content_hash),
+                        bootstrap_preflight_hash: Some(refreshed.preflight_hash()),
+                        bootstrap_preflight: Some(refreshed),
+                        ..FreshBootAdvancePatch::default()
+                    },
+                )
+                .await;
+        }
         let request = BootstrapModelRoute {
             model_version_id,
             expected_policy_generation: preflight.expected_policy_generation(),
@@ -1204,7 +1349,6 @@ impl FreshBootOrchestrator {
             reason_code: FRESH_BOOT_REASON_CODE.to_owned(),
             note: format!("system fresh-boot activation for run {}", run.run_id),
         };
-        let preflight_hash = preflight.preflight_hash();
         let commit = match self
             .deps
             .route_governance
@@ -1213,42 +1357,6 @@ impl FreshBootOrchestrator {
         {
             Ok(commit) => commit,
             Err(error) => {
-                let plan = match Box::pin(self.deps.bootstrap.prepare(model_version_id)).await {
-                    Ok(plan) => plan,
-                    Err(refresh_error) if Self::retry_reason(&refresh_error).is_some() => {
-                        return Err(refresh_error);
-                    }
-                    Err(refresh_error) => {
-                        return self
-                            .block(
-                                run,
-                                FreshBootBlockedReason::BootstrapConflict,
-                                &format!(
-                                    "bootstrap commit and preflight refresh failed: commit={error}; refresh={refresh_error}"
-                                ),
-                            )
-                            .await;
-                    }
-                };
-                let refreshed = plan.preflight().clone();
-                if refreshed.preflight_hash() != preflight_hash {
-                    let binding = refreshed.manifest().scenario_model_binding();
-                    return self
-                        .advance(
-                            run,
-                            FreshBootEventKind::PreflightRefreshed,
-                            FreshBootAdvancePatch {
-                                scenario_artifact_id: Some(
-                                    binding.portfolio_scenario_model_artifact_id,
-                                ),
-                                scenario_artifact_hash: Some(binding.model_content_hash),
-                                bootstrap_preflight_hash: Some(refreshed.preflight_hash()),
-                                bootstrap_preflight: Some(refreshed),
-                                ..FreshBootAdvancePatch::default()
-                            },
-                        )
-                        .await;
-                }
                 if let Some(reason) = Self::retry_reason(&error) {
                     return self
                         .schedule_retry(
@@ -1327,7 +1435,6 @@ impl FreshBootOrchestrator {
             run,
             FreshBootEventKind::ReportEnabled,
             FreshBootAdvancePatch {
-                manual_report_ready_at: Some(now),
                 first_report_run_id: Some(outcome.run().report_run_id),
                 next_scheduled_report_at,
                 ..FreshBootAdvancePatch::default()
@@ -1458,6 +1565,9 @@ impl FreshBootOrchestrator {
         event: FreshBootEventKind,
         patch: FreshBootAdvancePatch,
     ) -> QuantResult<()> {
+        let now = Utc::now();
+        let stage = run.stage.to_string();
+        let stage_duration = duration_seconds(run.stage_entered_at, now);
         let evidence_hash = patch
             .source_coverage_hash
             .or(patch.source_slice_hash)
@@ -1474,9 +1584,12 @@ impl FreshBootOrchestrator {
                 evidence_hash,
                 actor: JOB_ACTOR.to_owned(),
                 detail: None,
-                occurred_at: Utc::now(),
+                occurred_at: now,
             })
             .await?;
+        self.deps
+            .metrics
+            .observe_fresh_boot_stage(&stage, "advanced", stage_duration);
         info!(
             run_id = %updated.run_id,
             stage = %updated.stage,
@@ -1505,6 +1618,9 @@ impl FreshBootOrchestrator {
         reason: FreshBootBlockedReason,
         detail: &str,
     ) -> QuantResult<()> {
+        let now = Utc::now();
+        let stage = run.stage.to_string();
+        let stage_duration = duration_seconds(run.stage_entered_at, now);
         let detail = Self::bounded_detail(detail);
         self.deps
             .runs
@@ -1514,9 +1630,12 @@ impl FreshBootOrchestrator {
                 reason,
                 detail,
                 actor: JOB_ACTOR.to_owned(),
-                occurred_at: Utc::now(),
+                occurred_at: now,
             })
             .await?;
+        self.deps
+            .metrics
+            .observe_fresh_boot_stage(&stage, "blocked", stage_duration);
         Ok(())
     }
 
@@ -1838,6 +1957,7 @@ impl AppContext {
             report_runs: Arc::clone(&self.infra.repos.report_run) as Arc<dyn ReportRunRepository>,
             reports: Arc::clone(&self.infra.repos.recommendation_report)
                 as Arc<dyn RecommendationReportRepository>,
+            metrics: Arc::clone(&self.infra.metrics),
         });
         runner.spawn(TaskId::FreshBootOrchestrator, move |token| async move {
             Box::pin(orchestrator.run(token)).await;

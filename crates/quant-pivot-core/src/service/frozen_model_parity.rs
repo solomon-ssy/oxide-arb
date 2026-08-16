@@ -877,6 +877,7 @@ mod tests {
         features::FeatureVector, model::model_input_contract_hash, selection::SelectedMarket,
         training::TrainingExample,
     };
+    use uuid::Uuid;
 
     use super::{
         FrozenEvidenceRequest, frozen_model_evidence_rows, validate_passed_parity,
@@ -939,6 +940,8 @@ mod tests {
         ) -> DatasetSourceLineage {
             DatasetSourceLineage {
                 format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+                fit_seal_id: Uuid::from_u128(12).into(),
+                fit_seal_hash: hash('b'),
                 source_slice_id: SourceSliceId::from_v7(),
                 source_slice_identity_hash: hash('c'),
                 research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(

@@ -14,7 +14,10 @@ use quant_pivot_models::{
         QuantReportRecommendationFactRow, ReportMarketFunnelRow, WeatherForecastFactRow,
         WeatherObservationFactRow,
     },
-    domain::api::FeatureParityEventListQuery,
+    domain::{
+        api::FeatureParityEventListQuery,
+        data_plane::{ExchangeHistoryFrontier, HistorySealChunkRef},
+    },
     enums::clickhouse::{
         ChAvailabilityBasis, ChCanonicalBookEventType, ChExchangeSide, ChExchangeVersion,
         ChExecutionParticipantRole, ChOutcomeSide,
@@ -610,6 +613,7 @@ pub async fn replacing_merge_tree_row() {
 
 fn book_row(
     token: &str,
+    market_id: &MarketId,
     event_time_ms: i64,
     ingestion_time_ms: i64,
     sequence: u64,
@@ -619,7 +623,7 @@ fn book_row(
         stream_session_id: Uuid::nil(),
         shard_id: 0,
         token_id: TokenId::new(token),
-        market_id: Some(MarketId::new("0xchpit")),
+        market_id: Some(market_id.clone()),
         token_sequence: sequence,
         event_type: ChCanonicalBookEventType::Snapshot,
         bid_prices: vec![ChPrice::from(Price::new(mid))],
@@ -689,6 +693,7 @@ pub async fn ch_read_orders_tiebreaker() {
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(pool);
     let token = TokenId::new("ch-pit-yes");
+    let market_id = MarketId::new("0xchpit");
     let event_time = fresh_event_time_ms();
 
     insert_book_rows(
@@ -696,6 +701,7 @@ pub async fn ch_read_orders_tiebreaker() {
         &[
             book_row(
                 token.as_str(),
+                &market_id,
                 event_time,
                 event_time + 1,
                 1,
@@ -703,6 +709,7 @@ pub async fn ch_read_orders_tiebreaker() {
             ),
             book_row(
                 token.as_str(),
+                &market_id,
                 event_time,
                 event_time + 2,
                 1,
@@ -750,19 +757,16 @@ pub async fn scans_reject_unavailable_rows() {
     let market_id = MarketId::new("0xavailability-axis");
     let token_id = TokenId::new("availability-axis-yes");
     let late_ingestion = event_time + 10_000;
-    let chunk_id = Uuid::now_v7();
-    let digest = ChDigest::new([8_u8; 32]);
-    let execution = execution_row(
+    let book = book_row(
+        token_id.as_str(),
         &market_id,
-        &token_id,
         event_time,
         late_ingestion,
-        chunk_id,
-        digest,
+        1,
+        Decimal::new(50, 2),
     );
-    let acceptance = acceptance_row(chunk_id, event_time, digest);
-    insert_executions(&client, slice::from_ref(&execution)).await;
-    insert_acceptances(&client, slice::from_ref(&acceptance)).await;
+    insert_book_rows(&client, slice::from_ref(&book)).await;
+    wait_book_snapshot_rows(&client, &token_id, 1).await;
 
     assert!(
         read.observed_markets_between(event_time - 1, event_time + 1, event_time)
@@ -1338,10 +1342,18 @@ pub async fn revoked_chunk_is_hidden() {
         .expect("write participant");
     participant_insert.end().await.expect("end participant");
     insert_acceptances(&client, slice::from_ref(&acceptance)).await;
+    let seal_chunks = vec![HistorySealChunkRef {
+        chunk_id,
+        frontier: ExchangeHistoryFrontier::Activation,
+        state_revision: i64::try_from(acceptance.state_revision).expect("state revision"),
+        from_block: i64::try_from(acceptance.from_block).expect("from block"),
+        to_block: i64::try_from(acceptance.to_block).expect("to block"),
+    }];
 
     let rows = read
         .market_execution_window(
             vec![market_id.clone()],
+            seal_chunks.clone(),
             event_time - 1,
             event_time + 1,
             event_time + 1,
@@ -1353,14 +1365,17 @@ pub async fn revoked_chunk_is_hidden() {
     revoked.active = 0;
     revoked.state_revision = 2;
     insert_acceptances(&client, slice::from_ref(&revoked)).await;
-    let hidden = read
+    let invalidated = read
         .market_execution_window(
             vec![market_id],
+            seal_chunks,
             event_time - 1,
             event_time + 1,
             event_time + 1,
         )
-        .await
-        .expect("read after revocation");
-    assert!(hidden.is_empty());
+        .await;
+    assert!(
+        matches!(invalidated, Err(StorageError::StateConflict { .. })),
+        "revoking a sealed chunk must invalidate the read rather than look like an empty window"
+    );
 }

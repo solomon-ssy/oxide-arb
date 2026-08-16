@@ -601,6 +601,7 @@ impl AppContext {
             writers,
             config.clone(),
             self.data.exchange_history_progress.clone(),
+            Arc::clone(&self.infra.metrics),
         )
         .map(Arc::new)
         .map(Some)

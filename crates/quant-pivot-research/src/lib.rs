@@ -319,6 +319,8 @@ pub(crate) mod test_support {
         fn manifest(&self, plane: &FactorServingPlane, family: ModelFamily) -> DatasetManifest {
             let source_lineage = DatasetSourceLineage {
                 format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+                fit_seal_id: Uuid::from_u128(17).into(),
+                fit_seal_hash: content_hash("model-fixture-fit-seal"),
                 source_slice_id: self.source_slice_id,
                 source_slice_identity_hash: content_hash("model-fixture-source-slice"),
                 research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(

@@ -632,6 +632,22 @@ impl ModelServingGenerationStore {
             .collect()
     }
 
+    /// Resolve every currently active route from one immutable generation.
+    /// Missing vertical routes are an expected bootstrap state; callers decide
+    /// whether a concrete candidate or open exposure requires one of them.
+    pub async fn resolve_available_routes(
+        &self,
+        request: ModelServingGenerationRequest<'_>,
+    ) -> QuantResult<Vec<ModelServingRouteSnapshot>> {
+        let generation = self.resolve_generation(request).await?;
+        Ok(BuyModelRoute::ALL
+            .into_iter()
+            .filter_map(|route| {
+                ModelServingGeneration::route_snapshot(Arc::clone(&generation), route)
+            })
+            .collect())
+    }
+
     async fn resolve_generation(
         &self,
         request: ModelServingGenerationRequest<'_>,

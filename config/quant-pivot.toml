@@ -76,6 +76,8 @@ clob_market_info_refresh_secs = 900
 chain_id = 137
 
 [polymarket.onchain]
+# Stable settlement/read RPC provider identity; must differ from both history providers.
+provider_id = "polygon_public_rpc"
 # Field: polymarket.onchain.rpc_timeout_ms
 # Purpose: RPC request timeout (ms). Default: `10000`.
 # Requirement: Required; recommended value: 10000.
@@ -614,6 +616,8 @@ full_history_blocks_per_tick = 5000
 batch_size = 1000
 
 [market_data.finalized_exchange_history.hypersync]
+# Stable primary extraction provider identity.
+provider_id = "envio_hypersync_polygon"
 # Field: market_data.finalized_exchange_history.hypersync.endpoint
 # Purpose: Primary finalized Polygon exchange-history extraction endpoint.
 # Requirement: Required; recommended value: "https://polygon.hypersync.xyz".
@@ -638,6 +642,8 @@ endpoint = "https://polygon.hypersync.xyz"
 api_token = ""
 
 [market_data.finalized_exchange_history.attestor]
+# Stable independent archive witness identity.
+provider_id = "publicnode_polygon_archive"
 # Field: market_data.finalized_exchange_history.attestor.max_blocks_per_log_request
 # Purpose: Maximum inclusive block span in one `eth_getLogs` request.
 # Requirement: Required; recommended value: 10.
@@ -673,7 +679,7 @@ max_concurrent_log_requests = 2
 # Variants: protected, public.
 [market_data.finalized_exchange_history.attestor.rpc_endpoint]
 source = "public"
-url = "https://polygon-rpc.com"
+url = "https://polygon-bor-rpc.publicnode.com"
 
 [domain_sources.binance]
 # Field: domain_sources.binance.enabled

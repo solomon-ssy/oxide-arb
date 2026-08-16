@@ -16,6 +16,7 @@ use quant_pivot_models::{
         RouteCompatibilityDigests, RouteContractHash, ScenarioDistribution, ScenarioWeight,
     },
     enums::{quant::ModelRunKind, runtime_config::ConfigResourceKind},
+    hashing::CanonicalDigest,
     runtime_config::{
         BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot, ModelBinding, ModelBindingSource,
         PortfolioScenarioModelArtifactBinding,
@@ -23,7 +24,8 @@ use quant_pivot_models::{
     types::{
         BacktestPathSetId, CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId,
         ModelRunId, ModelVersionId, PolicyBundleGeneration, PortfolioScenarioModelArtifactId,
-        SchemaVersion, TrainingDatasetId,
+        ResearchFeatureContract, ResearchProfileRef, SchemaVersion, ServingAuthority,
+        TrainingDatasetId,
         backtest::{
             BacktestPath, CpcvEstimatorIdentity, CpcvFoldArtifact, CpcvFoldArtifacts,
             CpcvFoldCalibrationPolicy, CpcvFoldValidationRegime, CpcvMethodologyBinding,
@@ -72,6 +74,13 @@ const EXPECTED_BLOCK_LENGTH: u32 = 8;
 const SCENARIO_HORIZON_BUCKETS: u32 = 30;
 const PATH_HISTORY_DAYS: i64 = 180;
 
+#[derive(serde::Serialize)]
+struct BootstrapRecommendationContract<'a> {
+    profile_ref: &'a ResearchProfileRef,
+    feature_contract: ResearchFeatureContract,
+    serving_authority: ServingAuthority,
+}
+
 struct FixtureRouteContract {
     route: BuyModelRoute,
     model_version_id: ModelVersionId,
@@ -104,10 +113,36 @@ impl FixtureRouteContract {
             .calibration
             .as_ref()
             .context("scenario Route serving contract has no calibration")?;
-        let trade_policy = bindings
-            .trade_policy
-            .as_ref()
-            .context("scenario Route serving contract has no Trade Policy")?;
+        let profile = bindings
+            .model
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(AnyhowError::msg)
+            .context("resolve scenario Route ResearchProfile")?;
+        let recommendation_contract_hash = match profile.spec.serving_authority {
+            ServingAuthority::ExecutionEligible => {
+                bindings
+                    .trade_policy
+                    .as_ref()
+                    .context("execution scenario Route serving contract has no Trade Policy")?
+                    .content_hash
+            }
+            ServingAuthority::ReportOnlyWithLiveL2 => {
+                ensure!(
+                    bindings.trade_policy.is_none(),
+                    "ReportOnly scenario Route must not bind a Trade Policy"
+                );
+                CanonicalDigest::content_hash_typed(
+                    "quant-pivot/bootstrap-recommendation-contract",
+                    1,
+                    &BootstrapRecommendationContract {
+                        profile_ref: &profile.profile_ref,
+                        feature_contract: profile.spec.feature_contract,
+                        serving_authority: profile.spec.serving_authority,
+                    },
+                )?
+            }
+        };
         let ModelVersionDerivation::ReturnCalibration {
             parent_model_version_id,
             calibration_artifact_id,
@@ -134,7 +169,7 @@ impl FixtureRouteContract {
             calibration_source_serving_contract_hash: calibration_source.serving_contract_hash,
             calibration_artifact_id: calibration.artifact_id,
             calibration_contract_hash: calibration.content_hash,
-            recommendation_contract_hash: trade_policy.content_hash,
+            recommendation_contract_hash,
             prediction_horizon_secs: version.model_spec_prediction_horizon_secs,
         })
     }
@@ -362,7 +397,7 @@ pub async fn bootstrap_weather_evaluation_portfolio(
 pub async fn activate_report_portfolio(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
-    routes: impl IntoIterator<Item = BuyModelRoute>,
+    route_sets: impl IntoIterator<Item = RepresentedRouteSet>,
     visible_at: DateTime<Utc>,
 ) -> Result<DecisionPolicySnapshotId> {
     let policies = PgPolicyRepository::new(db.clone());
@@ -370,10 +405,20 @@ pub async fn activate_report_portfolio(
         .load_current_bundle()
         .await?
         .context("report scenario fixture has no active policy bundle")?;
-    let represented = RepresentedRouteSet::from_routes(routes)?;
+    let route_sets = route_sets.into_iter().collect::<Vec<_>>();
+    ensure!(
+        !route_sets.is_empty(),
+        "report scenario fixture requires represented Route sets"
+    );
+    let mut represented_routes = route_sets
+        .iter()
+        .flat_map(|represented| represented.routes.iter().copied())
+        .collect::<Vec<_>>();
+    represented_routes.sort_unstable();
+    represented_routes.dedup();
     let registry = PgModelRegistryRepository::new(db.clone());
     let mut versions = BTreeMap::new();
-    for route in &represented.routes {
+    for route in &represented_routes {
         let model_version_id = base
             .snapshot
             .model_routing
@@ -398,7 +443,7 @@ pub async fn activate_report_portfolio(
         artifact_store,
         &base.snapshot,
         &versions,
-        slice::from_ref(&represented),
+        &route_sets,
         replay_data_cutoff,
         evidence_clock,
     )
@@ -408,7 +453,6 @@ pub async fn activate_report_portfolio(
         .checked_next()
         .context("report scenario policy generation overflowed")?;
     let bindings = graph.bindings;
-    let represented_routes = represented.routes;
     Ok(activate_policy_bundle(
         &policies,
         ConfigResourceKind::ModelRouting,
@@ -936,7 +980,12 @@ const fn route_return(route: BuyModelRoute, ordinal: i64) -> Decimal {
             1 | 6 | 11 => dec!(-0.007),
             _ => dec!(0.003),
         },
-        BuyModelRoute::Pooled => Decimal::ZERO,
+        BuyModelRoute::Pooled => match cycle {
+            0 | 5 | 9 => dec!(0.012),
+            2 | 7 => dec!(0.008),
+            1 | 6 | 10 => dec!(-0.006),
+            _ => dec!(0.003),
+        },
     }
 }
 
@@ -955,7 +1004,12 @@ const fn route_payout_residual(route: BuyModelRoute, ordinal: i64) -> Decimal {
             1 | 6 | 11 => dec!(-0.07),
             _ => dec!(0.015),
         },
-        BuyModelRoute::Pooled => Decimal::ZERO,
+        BuyModelRoute::Pooled => match cycle {
+            0 | 5 | 9 => dec!(0.08),
+            2 | 7 => dec!(0.04),
+            1 | 6 | 10 => dec!(-0.06),
+            _ => dec!(0.01),
+        },
     }
 }
 

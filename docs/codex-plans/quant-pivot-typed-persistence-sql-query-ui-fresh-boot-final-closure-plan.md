@@ -147,7 +147,9 @@ CI 必须双向证明：每个候选字段恰有一个 decision；decision 指�
 
 - `role.code: String` → `RoleCode`；
 - `quant_source_slice.evaluation_track: String` → canonical `ResearchEvaluationTrack` persistence type；
-- `quant_trade_tape_block_cursor.source/status: String` → `TradeTapeSourceKind` / `TradeTapeBlockCursorStatus`；
+- finalized exchange-history 的 `frontier/status/kind` 分别使用 canonical
+  `ExchangeHistoryFrontier` / `ExchangeHistoryChunkStatus` /
+  `ExchangeHistoryQuarantineKind`；禁止恢复 trade-tape cursor 或兼容类型；
 - feature-parity/research-job/system-bootstrap 的 `acting_role` → 区分 `RoleCode`、system actor kind 与 display snapshot；
 - `failure_code` / `diagnostic_kind` → `DiagnosticCode` 或对应 closed diagnostic enum；
 - `quant_research_job.result_ref: Option<Uuid>` → `result_kind + tagged result reference`，不包装成虚假单一 ID；

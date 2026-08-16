@@ -23,7 +23,7 @@ use quant_pivot_research::{
     selection::{ExcludedMarket, ExclusionReason, MarketSelectionSnapshot, SelectedMarket},
 };
 
-use super::types::ReportTierRejection;
+use super::types::{EconomicTierBuildRejection, ReportTierRejection};
 use crate::service::{feature_pipeline::RejectedMarket, model_runner::ModelMarketDecision};
 
 /// Published recommendation identity used to close a market funnel row.
@@ -47,6 +47,7 @@ pub struct ReportFunnelInput<'a> {
     pub model_decisions: &'a [ModelMarketDecision],
     pub tiers: &'a [ExecutableEconomicTier],
     pub tier_rejections: &'a [ReportTierRejection],
+    pub tier_build_rejections: &'a [EconomicTierBuildRejection],
     pub recommendations: &'a [PublishedRecommendationRef],
     pub event_time: DateTime<Utc>,
 }
@@ -89,6 +90,11 @@ pub fn build_report_market_funnel(
         .iter()
         .map(|rejection| (rejection.economic_tier_id, rejection.code))
         .collect::<HashMap<_, _>>();
+    let tier_build_rejections = input
+        .tier_build_rejections
+        .iter()
+        .map(|rejection| (rejection.market_id().clone(), rejection))
+        .collect::<HashMap<_, _>>();
 
     let mut rows =
         Vec::with_capacity(input.selection.included.len() + input.selection.excluded.len());
@@ -119,6 +125,7 @@ pub fn build_report_market_funnel(
                 .get(&market.market_id)
                 .map_or(&[][..], Vec::as_slice),
             rejected_tiers: &rejected_tiers,
+            tier_build_rejection: tier_build_rejections.get(&market.market_id).copied(),
             recommendation: recommendations.get(&market.market_id).copied(),
         };
         rows.push(included_row(state)?);
@@ -144,22 +151,30 @@ struct IncludedFunnelState<'a> {
     model_decision: Option<&'a ModelMarketDecision>,
     tiers: &'a [&'a ExecutableEconomicTier],
     rejected_tiers: &'a HashMap<EconomicTierId, TierAdmissionRejectionCode>,
+    tier_build_rejection: Option<&'a EconomicTierBuildRejection>,
     recommendation: Option<&'a PublishedRecommendationRef>,
+}
+
+impl IncludedFunnelState<'_> {
+    fn validated_route(self) -> QuantResult<BuyModelRoute> {
+        let route = BuyModelRoute::from(self.market.category);
+        if self.route_run.route != route {
+            return Err(ReportError::InvariantViolation {
+                stage: "report_funnel",
+                detail: format!(
+                    "market {} Route does not match its Route run",
+                    self.market.market_id
+                ),
+            }
+            .into());
+        }
+        Ok(route)
+    }
 }
 
 fn included_row(state: IncludedFunnelState<'_>) -> QuantResult<ReportMarketFunnelRow> {
     let lineage = state.route_run.lineage_json.as_ref();
-    let route = BuyModelRoute::from(state.market.category);
-    if state.route_run.route != route {
-        return Err(ReportError::InvariantViolation {
-            stage: "report_funnel",
-            detail: format!(
-                "market {} Route does not match its Route run",
-                state.market.market_id
-            ),
-        }
-        .into());
-    }
+    let route = state.validated_route()?;
 
     let mut signal_candidate_id = state
         .model_decision
@@ -228,12 +243,29 @@ fn included_row(state: IncludedFunnelState<'_>) -> QuantResult<ReportMarketFunne
                 None,
             )
         } else if state.tiers.is_empty() {
-            (
-                ReportFunnelStage::PolicyReady,
-                ReportFunnelReason::ExecutableEntryUnavailable,
-                ReportFunnelDiagnostics::None {},
-                None,
-            )
+            match state.tier_build_rejection {
+                Some(EconomicTierBuildRejection::InsufficientLiveDepth {
+                    visible_usd,
+                    required_usd,
+                    limit_price,
+                    ..
+                }) => (
+                    ReportFunnelStage::PolicyReady,
+                    ReportFunnelReason::InsufficientLiveDepth,
+                    ReportFunnelDiagnostics::InsufficientLiveDepth {
+                        visible_usd: *visible_usd,
+                        required_usd: *required_usd,
+                        limit_price: *limit_price,
+                    },
+                    None,
+                ),
+                None => (
+                    ReportFunnelStage::PolicyReady,
+                    ReportFunnelReason::ExecutableEntryUnavailable,
+                    ReportFunnelDiagnostics::None {},
+                    None,
+                ),
+            }
         } else {
             let admitted = state
                 .tiers
@@ -417,6 +449,13 @@ fn validate_unique_inputs(input: &ReportFunnelInput<'_>) -> QuantResult<()> {
             .iter()
             .map(|rejection| rejection.economic_tier_id),
         "tier rejection",
+    )?;
+    ensure_unique(
+        input
+            .tier_build_rejections
+            .iter()
+            .map(EconomicTierBuildRejection::market_id),
+        "tier build rejection market",
     )
 }
 
@@ -463,6 +502,10 @@ fn exclusion_terminal(
         ExclusionReason::CategoryDisabled => terminal(
             ReportFunnelStage::BusinessEligible,
             ReportFunnelReason::CategoryDisabled,
+        ),
+        ExclusionReason::RouteNotActivated => terminal(
+            ReportFunnelStage::BusinessEligible,
+            ReportFunnelReason::RouteNotActivated,
         ),
         ExclusionReason::InsufficientLiquidity => terminal(
             ReportFunnelStage::ExecutableDataEligible,

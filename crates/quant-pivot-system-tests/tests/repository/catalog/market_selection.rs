@@ -73,6 +73,7 @@ pub async fn create_snapshot_find_members() {
             stale_book_count: 1,
             insufficient_liquidity_count: 0,
             excluded_by_operator_count: 0,
+            route_not_activated_count: 0,
             other_count: 0,
         },
     };

@@ -748,6 +748,24 @@ bundle generation/snapshot identity；默认 `system_runtime_control.settlement_
 bootstrap 会使启动 fail closed，而不是静默生成策略。
 
 本项目当前没有生产历史。本轮 schema/data/format 只维护一个 clean-install boot truth；变更后重新创建受控、可销毁的开发/验收数据库并 fresh boot，不实现升级 migration、旧 schema 共享、双写或兼容回滚。任何真实数据库销毁或 production cutover 都必须另行获得操作者明确授权。资金写入仍独立由 runtime mode、kill switch、`SettlementWritePolicy` 与 money-path admission 控制。
+
+### 7.6 S1 FreshBoot 业务能力与历史封印
+
+`GET /api/system/fresh-boot` 对外只投影四段能力进度：`awaiting_history → bootstrapping → first_report_queued → first_report_ready`。PostgreSQL 中的 Dataset、Training、Calibration、CPCV、Parity、Scenario、Bootstrap 等内部状态仍是诊断和恢复权威，禁止把内部状态机折叠成四个持久化阶段。
+
+首个业务完成点是 Pooled `RecommendationReport` 已 `Published` 且返回非空 `first_report_id`。`first_report_run_id` 只表示排队或生成中，不能打开报告。Crypto / Weather 可以继续构建或独立阻断；UI 与告警必须分别表达“Pooled 首报已可用”和“全部 Route 已就绪”。
+
+12–36 小时首报 SLO 只适用于空仓或仅有 Pooled 正敞口的 funder。若 funder 已持有 Crypto 或 Weather 正持仓，账户风险必须 fail closed：即使 Pooled Champion 已提交，第一份报告仍要等对应 Route bootstrap 和 scenario leg 完成。该行为是产品合同，不是 canary 回归；零持仓不扩张 represented routes。
+
+历史读取使用两类不可变证据，禁止混用：
+
+- `FitSeal` 冻结 Dataset / CPCV / bootstrap 的精确 `chunk_id + state_revision`，永久只读；
+- `ServingHeadSeal` 在每个 accepted chunk 后创建新版本并单调扩展。报告在 `decision_at` 绑定当时的 head/hash，用它读取最近 24 小时 execution 特征，并在 `Published` 前重验 revision 和窗口内 active quarantine；
+- replacement 只创建新 seal，旧 seal 永不改写。任何 revision 变化或窗口内 active quarantine 都返回 `HistoryWindowInvalidated` 并阻断 Dataset Ready、bootstrap commit 或报告发布。
+
+HyperSync 拉取 chunk 全区间 header 并验证 extractor 侧 parent chain。独立 attestor 只读取 `from`、`to`、confirmation anchor 和本 chunk 日志涉及的去重稀疏 block header；两侧都必须用各自 provider 的 header 校验 `log.block_hash`，禁止用 HyperSync timestamp 填充 attestor 事实。
+
+活动隔离通过 `GET /api/system/exchange-history/quarantines?status=active` 查询。隔离是 typed evidence，不提供 skip/bypass；必须接受 replacement chunk 并形成新的 seal 后才解除发布阻断。
 ## 8. 生成与阅读报告
 
 ### 8.0 前置条件（冷启动必读）

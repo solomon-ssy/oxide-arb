@@ -24,6 +24,7 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::{postgres::setup_pg, support::execution_pg_seed};
 use rust_decimal::Decimal;
 use sea_orm::ConnectionTrait;
+use uuid::Uuid;
 
 fn hash(seed: char) -> ContentHash {
     ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("valid hash")
@@ -44,6 +45,8 @@ fn job(job_id: ResearchJobId) -> NewResearchJob {
                 selection: TradePolicyFitSelection {
                     profile_ref: execution_pg_seed::fixture_profile_ref(),
                     pit_cutoff: Utc::now(),
+                    fit_seal_id: Uuid::now_v7().into(),
+                    fit_seal_hash: hash('f'),
                 },
                 evaluation_track: ResearchEvaluationTrack::ResearchOnly,
                 candidates: Vec::new(),

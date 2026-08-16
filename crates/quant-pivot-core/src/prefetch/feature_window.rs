@@ -18,7 +18,8 @@ use quant_pivot_models::{
     clickhouse::{BOOK_MICROSTRUCTURE_1S_BUCKET_MILLIS, BookMicrostructureRow},
     domain::data_plane::{
         CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation,
-        ExecutionParticipantPrint, WeatherForecastPoint, WeatherObservationFact,
+        ExecutionParticipantPrint, HistorySealChunkRef, WeatherForecastPoint,
+        WeatherObservationFact,
     },
     types::{Bps, DomainInstrumentKey, MarketId, Price, TokenId, Usd},
 };
@@ -39,6 +40,18 @@ impl FeatureWindowProvider {
     #[must_use]
     pub fn new(fact_read: Arc<dyn QuantFactReadRepository>) -> Self {
         Self { fact_read }
+    }
+
+    /// Revalidate the exact `ClickHouse` active revisions bound into a serving
+    /// head without reading feature rows.
+    pub async fn validate_execution_history(
+        &self,
+        history_chunks: &[HistorySealChunkRef],
+    ) -> QuantResult<()> {
+        self.fact_read
+            .validate_execution_history_chunks(history_chunks.to_vec())
+            .await
+            .map_err(Into::into)
     }
 
     /// Load a per-token window for every selected market.
@@ -391,6 +404,7 @@ impl FeatureWindowProvider {
         markets: &[SelectedMarket],
         boundary: &DecisionBoundary,
         lookback: Duration,
+        history_chunks: &[HistorySealChunkRef],
     ) -> QuantResult<HashMap<MarketId, FinalizedExecutionWindowSnapshot>> {
         let market_ids: Vec<MarketId> = markets
             .iter()
@@ -406,6 +420,7 @@ impl FeatureWindowProvider {
             .fact_read
             .market_execution_window(
                 market_ids,
+                history_chunks.to_vec(),
                 from.timestamp_millis(),
                 cutoff.timestamp_millis(),
                 boundary.decision_at().timestamp_millis(),

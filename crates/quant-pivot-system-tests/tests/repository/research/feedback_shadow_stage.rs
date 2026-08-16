@@ -27,8 +27,8 @@ use quant_pivot_models::{
             FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackEvaluationUseInput,
             FeedbackStageEventInput, FeedbackStageJobIdentity, ModelVersionInfo, NewFeedbackCycle,
             NewFeedbackEvaluationUse, NewFeedbackStageEvent, NewModelVersion, NewResearchJob,
-            NewShadowComparison, NoopProgressSink, ResearchJobArtifactRef, ResearchJobFinalization,
-            ResearchJobResultRef,
+            NewShadowComparison, NoopProgressSink, RepresentedRouteSet, ResearchJobArtifactRef,
+            ResearchJobFinalization, ResearchJobResultRef,
         },
     },
     entities::quant_shadow_comparison::Entity as ShadowComparisonEntity,
@@ -587,9 +587,15 @@ pub async fn activate_crypto_generation(
         .expect("activated P03 bundle");
     assert_eq!(bundle.decision_policy_snapshot_id, snapshot_id);
     let visible_at = db.statement_time().await + Duration::seconds(1);
-    activate_report_portfolio(db, store, [BuyModelRoute::Crypto], visible_at)
-        .await
-        .expect("activate exact P03 Crypto scenario model");
+    activate_report_portfolio(
+        db,
+        store,
+        [RepresentedRouteSet::from_routes([BuyModelRoute::Crypto])
+            .expect("Crypto represented Route set")],
+        visible_at,
+    )
+    .await
+    .expect("activate exact P03 Crypto scenario model");
     build_serving(db, store).await
 }
 

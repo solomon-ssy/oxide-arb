@@ -193,6 +193,17 @@ pub enum ResearchError {
         detail: String,
     },
 
+    /// A research profile's explicit category/linkage cohort admitted no
+    /// point-in-time market rows. Required vertical contracts must never be
+    /// inferred indirectly from whichever source columns happen to exist.
+    #[error("research cohort mismatch for `{profile}`: {detail}")]
+    CohortMismatch {
+        /// Immutable research-profile identity.
+        profile: String,
+        /// Exact category or linkage contract that rejected the cohort.
+        detail: String,
+    },
+
     /// A forward label could not be resolved due to inconsistent forward data.
     #[error("label resolution failed: {detail}")]
     LabelResolution {

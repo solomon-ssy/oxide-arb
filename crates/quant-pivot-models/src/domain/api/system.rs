@@ -7,7 +7,12 @@ use validator::Validate;
 
 use crate::{
     domain::{
-        data_plane::ExchangeHistoryFrontierProgress,
+        data_plane::{
+            ExchangeHistoryFrontier, ExchangeHistoryFrontierProgress,
+            ExchangeHistoryQuarantineDisposition, ExchangeHistoryQuarantineEvidence,
+            ExchangeHistoryQuarantineKind, ExchangeHistoryQuarantineRecord,
+            ExchangeHistoryQuarantineStatus, ExchangeHistoryStage,
+        },
         governance::SystemStatus,
         quant::{FreshBootRunEventInfo, FreshBootRunInfo, FreshBootSourceCoverageManifest},
     },
@@ -28,6 +33,88 @@ use crate::{
         ResearchJobId, ResearchProfileArtifactId, SourceSliceId, TrainingDatasetId,
     },
 };
+
+/// Operator keyset filter for immutable exchange-history quarantine evidence.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExchangeHistoryQuarantineQuery {
+    #[serde(default)]
+    pub status: ExchangeHistoryQuarantineStatus,
+    pub frontier: Option<ExchangeHistoryFrontier>,
+    pub kind: Option<ExchangeHistoryQuarantineKind>,
+    pub after: Option<Uuid>,
+    pub limit: Option<u64>,
+}
+
+impl ExchangeHistoryQuarantineQuery {
+    pub const MAX_LIMIT: u64 = 100;
+
+    #[must_use]
+    pub fn normalized_limit(&self) -> Option<u64> {
+        match self.limit.unwrap_or(50) {
+            value @ 1..=Self::MAX_LIMIT => Some(value),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExchangeHistoryQuarantineResolutionView {
+    pub resolution_id: Uuid,
+    pub disposition: ExchangeHistoryQuarantineDisposition,
+    pub replacement_chunk_id: Uuid,
+    pub evidence_hash: ContentHash,
+    pub actor: String,
+    pub resolved_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExchangeHistoryQuarantineView {
+    pub quarantine_id: Uuid,
+    pub chunk_id: Uuid,
+    pub frontier: ExchangeHistoryFrontier,
+    pub from_block: i64,
+    pub to_block: i64,
+    pub kind: ExchangeHistoryQuarantineKind,
+    pub evidence: ExchangeHistoryQuarantineEvidence,
+    pub evidence_hash: ContentHash,
+    pub quarantined_at: DateTime<Utc>,
+    pub resolution: Option<ExchangeHistoryQuarantineResolutionView>,
+}
+
+impl From<ExchangeHistoryQuarantineRecord> for ExchangeHistoryQuarantineView {
+    fn from(record: ExchangeHistoryQuarantineRecord) -> Self {
+        let resolution =
+            record
+                .resolution
+                .map(|resolution| ExchangeHistoryQuarantineResolutionView {
+                    resolution_id: resolution.resolution_id,
+                    disposition: resolution.disposition,
+                    replacement_chunk_id: resolution.replacement_chunk_id,
+                    evidence_hash: resolution.evidence_hash,
+                    actor: resolution.actor,
+                    resolved_at: resolution.resolved_at,
+                });
+        Self {
+            quarantine_id: record.quarantine.quarantine_id,
+            chunk_id: record.quarantine.chunk_id,
+            frontier: record.chunk.frontier,
+            from_block: record.chunk.from_block,
+            to_block: record.chunk.to_block,
+            kind: record.quarantine.kind,
+            evidence: record.quarantine.evidence,
+            evidence_hash: record.quarantine.evidence_hash,
+            quarantined_at: record.quarantine.quarantined_at,
+            resolution,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExchangeHistoryQuarantinePageView {
+    pub items: Vec<ExchangeHistoryQuarantineView>,
+    pub next_after: Option<Uuid>,
+}
 
 /// Typed operator action selected from the current durable state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,7 +144,7 @@ impl FreshBootBlockerScope {
             FreshBootStage::BootstrapPreflight | FreshBootStage::BootstrapCommitted => {
                 Self::BootstrapGovernance
             }
-            FreshBootStage::ReportEligible | FreshBootStage::FirstReportPublished => {
+            FreshBootStage::FirstReportQueued | FreshBootStage::FirstReportPublished => {
                 Self::ReportPublication
             }
             _ => Self::ResearchJob,
@@ -114,7 +201,6 @@ pub struct FreshBootRunProgressView {
     pub active_job_id: Option<ResearchJobId>,
     pub last_job_id: Option<ResearchJobId>,
     pub bootstrap_policy_activation_id: Option<PolicyActivationId>,
-    pub manual_report_ready_at: Option<DateTime<Utc>>,
     pub first_report_run_id: Option<ReportRunId>,
     pub first_report_id: Option<RecommendationReportId>,
     pub next_scheduled_report_at: Option<DateTime<Utc>>,
@@ -187,7 +273,6 @@ impl From<FreshBootRunInfo> for FreshBootRunProgressView {
             active_job_id: run.active_job_id,
             last_job_id: run.last_job_id,
             bootstrap_policy_activation_id: run.bootstrap_policy_activation_id,
-            manual_report_ready_at: run.manual_report_ready_at,
             first_report_run_id: run.first_report_run_id,
             first_report_id: run.first_report_id,
             next_scheduled_report_at: run.next_scheduled_report_at,
@@ -258,7 +343,90 @@ pub struct FreshBootProfileProgressView {
     pub training_sample_count: Option<i64>,
     pub calibration_dataset_status: Option<TrainingDatasetStatus>,
     pub calibration_sample_count: Option<i64>,
-    pub manual_report_ready: bool,
+}
+
+/// Backend-owned aggregate capability state. Consumers must not infer this
+/// state from a profile count or collapse queued and published reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FreshBootCapabilityState {
+    AwaitingHistory,
+    Bootstrapping,
+    FirstReportQueued,
+    FirstReportReady,
+    AllRoutesReady,
+    PartialBlocked,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreshBootCapabilitySummary {
+    pub state: FreshBootCapabilityState,
+    pub pooled_first_report_id: Option<RecommendationReportId>,
+    pub first_report_ready: bool,
+    pub all_routes_ready: bool,
+    pub blocked_routes: Vec<BuyModelRoute>,
+}
+
+impl FreshBootCapabilitySummary {
+    #[must_use]
+    pub fn from_profiles(
+        history: &ExchangeHistoryFrontierProgress,
+        profiles: &[FreshBootProfileProgressView],
+    ) -> Self {
+        let pooled = profiles
+            .iter()
+            .find(|profile| profile.run.route == BuyModelRoute::Pooled);
+        let pooled_first_report_id = pooled.and_then(|profile| profile.run.first_report_id);
+        let pooled_ready = pooled.is_some_and(|profile| {
+            profile.run.stage == FreshBootStage::FirstReportPublished
+                && profile.run.status == FreshBootStatus::Succeeded
+                && profile.run.first_report_id.is_some()
+        });
+        let pooled_queued = pooled.is_some_and(|profile| {
+            profile.run.stage == FreshBootStage::FirstReportQueued
+                && profile.run.first_report_run_id.is_some()
+                && profile.run.first_report_id.is_none()
+        });
+        let blocked_routes = profiles
+            .iter()
+            .filter(|profile| profile.run.status == FreshBootStatus::BlockedTerminal)
+            .map(|profile| profile.run.route)
+            .collect::<Vec<_>>();
+        let all_routes_ready = BuyModelRoute::ALL.into_iter().all(|route| {
+            profiles.iter().any(|profile| {
+                profile.run.route == route
+                    && profile.run.stage == FreshBootStage::FirstReportPublished
+                    && profile.run.status == FreshBootStatus::Succeeded
+                    && profile.run.first_report_id.is_some()
+            })
+        });
+        let pooled_blocked = blocked_routes.contains(&BuyModelRoute::Pooled);
+        let state = if history.stage == ExchangeHistoryStage::Quarantined || pooled_blocked {
+            FreshBootCapabilityState::Blocked
+        } else if all_routes_ready {
+            FreshBootCapabilityState::AllRoutesReady
+        } else if pooled_ready && !blocked_routes.is_empty() {
+            FreshBootCapabilityState::PartialBlocked
+        } else if pooled_ready {
+            FreshBootCapabilityState::FirstReportReady
+        } else if pooled_queued {
+            FreshBootCapabilityState::FirstReportQueued
+        } else if !blocked_routes.is_empty() {
+            FreshBootCapabilityState::PartialBlocked
+        } else if profiles.is_empty() && history.stage != ExchangeHistoryStage::ActivationReady {
+            FreshBootCapabilityState::AwaitingHistory
+        } else {
+            FreshBootCapabilityState::Bootstrapping
+        };
+        Self {
+            state,
+            pooled_first_report_id,
+            first_report_ready: pooled_ready,
+            all_routes_ready,
+            blocked_routes,
+        }
+    }
 }
 
 /// Complete operator projection of the L2-free cold-start path.
@@ -266,6 +434,7 @@ pub struct FreshBootProfileProgressView {
 pub struct FreshBootProgressView {
     pub observed_at: DateTime<Utc>,
     pub exchange_history: ExchangeHistoryFrontierProgress,
+    pub capability: FreshBootCapabilitySummary,
     pub profiles: Vec<FreshBootProfileProgressView>,
 }
 

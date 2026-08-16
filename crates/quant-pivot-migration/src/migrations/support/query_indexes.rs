@@ -3632,6 +3632,108 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
+        name: "idx_quant_history_fit_seal_plan_window",
+        table: "quant_history_fit_seal",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "plan_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "window_from_block",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "window_to_block",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_history_fit_seal_chunk_chunk",
+        table: "quant_history_fit_seal_chunk",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "chunk_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "state_revision",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_history_serving_head_lookup",
+        table: "quant_history_serving_head_seal",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "frontier",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
+                direction: IndexDirection::Desc,
+            },
+            IndexColumnSpec {
+                name: "serving_head_seal_id",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_history_serving_head_predecessor",
+        table: "quant_history_serving_head_seal",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "previous_seal_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("(previous_seal_id IS NOT NULL)"),
+    },
+    IndexSpec {
+        name: "uq_quant_history_serving_head_root",
+        table: "quant_history_serving_head_seal",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "frontier",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("(previous_seal_id IS NULL)"),
+    },
+    IndexSpec {
+        name: "idx_quant_history_serving_head_chunk_chunk",
+        table: "quant_history_serving_head_seal_chunk",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "chunk_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "state_revision",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
         name: "idx_quant_exchange_history_quarantine_chunk",
         table: "quant_exchange_history_quarantine",
         method: IndexMethod::BTree,
@@ -3643,6 +3745,23 @@ const INDEXES: &[IndexSpec] = &[
             },
             IndexColumnSpec {
                 name: "quarantined_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_exchange_history_quarantine_kind_page",
+        table: "quant_exchange_history_quarantine",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "kind",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "quarantine_id",
                 direction: IndexDirection::Desc,
             },
         ],

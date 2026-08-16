@@ -974,6 +974,14 @@ pub struct ResearchJobId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FreshBootRunId(Uuid);
 
+/// Immutable identity of one finalized-history fit-window seal.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HistoryFitSealId(Uuid);
+
+/// Immutable identity of one finalized-history serving-head seal version.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HistoryServingHeadSealId(Uuid);
+
 impl FreshBootRunId {
     /// Derive the run identity from its complete idempotency preimage.
     #[must_use]

@@ -515,6 +515,32 @@ impl ModelRunner {
             .collect()
     }
 
+    /// Pin the complete set of active routes from one serving generation.
+    pub async fn available_route_requirements(
+        &self,
+        policy: &DecisionPolicySnapshotInfo,
+    ) -> QuantResult<Vec<ActiveModelRequirements>> {
+        let serving = self
+            .serving_generations
+            .resolve_available_routes(ModelServingGenerationRequest::from(policy))
+            .await?;
+        serving
+            .into_iter()
+            .map(|serving| {
+                serving.validate_active()?;
+                let route = serving.route();
+                let version = serving.active_version().clone();
+                Ok(ActiveModelRequirements {
+                    route,
+                    model_version_id: version.model_version_id,
+                    version,
+                    model_requirements: serving.model_requirements(),
+                    serving,
+                })
+            })
+            .collect()
+    }
+
     /// The active path: exact route → family dispatch → infer → emit.
     async fn run_active(
         &self,

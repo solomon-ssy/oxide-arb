@@ -6610,9 +6610,22 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "accepted_at",
+      "name": "state_revision",
       "nullable": true,
       "ordinal": 18,
+      "storage": "p",
+      "table": "quant_exchange_history_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "accepted_at",
+      "nullable": true,
+      "ordinal": 19,
       "storage": "p",
       "table": "quant_exchange_history_chunk",
       "type": "timestamp with time zone"
@@ -6625,7 +6638,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 19,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_exchange_history_chunk",
       "type": "timestamp with time zone"
@@ -6638,7 +6651,7 @@
       "identity": "",
       "name": "updated_at",
       "nullable": false,
-      "ordinal": 20,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_exchange_history_chunk",
       "type": "timestamp with time zone"
@@ -6857,12 +6870,25 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "reason",
+      "name": "kind",
       "nullable": false,
       "ordinal": 3,
       "storage": "p",
       "table": "quant_exchange_history_quarantine",
-      "type": "qp_exchange_history_quarantine_reason"
+      "type": "qp_exchange_history_quarantine_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_exchange_history_quarantine",
+      "type": "jsonb"
     },
     {
       "collation": "default",
@@ -6871,19 +6897,6 @@
       "generated": "",
       "identity": "",
       "name": "evidence_hash",
-      "nullable": false,
-      "ordinal": 4,
-      "storage": "x",
-      "table": "quant_exchange_history_quarantine",
-      "type": "character varying"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "detail",
       "nullable": false,
       "ordinal": 5,
       "storage": "x",
@@ -12343,22 +12356,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "manual_report_ready_at",
-      "nullable": true,
-      "ordinal": 28,
-      "storage": "p",
-      "table": "quant_fresh_boot_run",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
       "name": "first_report_run_id",
       "nullable": true,
-      "ordinal": 29,
+      "ordinal": 28,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "uuid"
@@ -12371,7 +12371,7 @@
       "identity": "",
       "name": "first_report_id",
       "nullable": true,
-      "ordinal": 30,
+      "ordinal": 29,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "uuid"
@@ -12384,7 +12384,7 @@
       "identity": "",
       "name": "next_scheduled_report_at",
       "nullable": true,
-      "ordinal": 31,
+      "ordinal": 30,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "timestamp with time zone"
@@ -12397,7 +12397,7 @@
       "identity": "",
       "name": "retry_reason",
       "nullable": true,
-      "ordinal": 32,
+      "ordinal": 31,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "qp_fresh_boot_retry_reason"
@@ -12410,7 +12410,7 @@
       "identity": "",
       "name": "retry_detail",
       "nullable": true,
-      "ordinal": 33,
+      "ordinal": 32,
       "storage": "x",
       "table": "quant_fresh_boot_run",
       "type": "character varying"
@@ -12423,7 +12423,7 @@
       "identity": "",
       "name": "retry_count",
       "nullable": false,
-      "ordinal": 34,
+      "ordinal": 33,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "integer"
@@ -12436,7 +12436,7 @@
       "identity": "",
       "name": "next_attempt_at",
       "nullable": true,
-      "ordinal": 35,
+      "ordinal": 34,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "timestamp with time zone"
@@ -12449,7 +12449,7 @@
       "identity": "",
       "name": "blocked_reason",
       "nullable": true,
-      "ordinal": 36,
+      "ordinal": 35,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "qp_fresh_boot_blocked_reason"
@@ -12462,7 +12462,7 @@
       "identity": "",
       "name": "blocked_detail",
       "nullable": true,
-      "ordinal": 37,
+      "ordinal": 36,
       "storage": "x",
       "table": "quant_fresh_boot_run",
       "type": "character varying"
@@ -12475,7 +12475,7 @@
       "identity": "",
       "name": "lease_owner",
       "nullable": true,
-      "ordinal": 38,
+      "ordinal": 37,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "uuid"
@@ -12488,7 +12488,7 @@
       "identity": "",
       "name": "lease_expires_at",
       "nullable": true,
-      "ordinal": 39,
+      "ordinal": 38,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "timestamp with time zone"
@@ -12501,7 +12501,7 @@
       "identity": "",
       "name": "idempotency_key",
       "nullable": false,
-      "ordinal": 40,
+      "ordinal": 39,
       "storage": "x",
       "table": "quant_fresh_boot_run",
       "type": "text"
@@ -12514,7 +12514,7 @@
       "identity": "",
       "name": "revision",
       "nullable": false,
-      "ordinal": 41,
+      "ordinal": 40,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "bigint"
@@ -12527,7 +12527,7 @@
       "identity": "",
       "name": "stage_entered_at",
       "nullable": false,
-      "ordinal": 42,
+      "ordinal": 41,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "timestamp with time zone"
@@ -12540,7 +12540,7 @@
       "identity": "",
       "name": "started_at",
       "nullable": false,
-      "ordinal": 43,
+      "ordinal": 42,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "timestamp with time zone"
@@ -12553,7 +12553,7 @@
       "identity": "",
       "name": "completed_at",
       "nullable": true,
-      "ordinal": 44,
+      "ordinal": 43,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "timestamp with time zone"
@@ -12566,7 +12566,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 45,
+      "ordinal": 44,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "timestamp with time zone"
@@ -12579,7 +12579,7 @@
       "identity": "",
       "name": "updated_at",
       "nullable": false,
-      "ordinal": 46,
+      "ordinal": 45,
       "storage": "p",
       "table": "quant_fresh_boot_run",
       "type": "timestamp with time zone"
@@ -12791,6 +12791,409 @@
       "storage": "x",
       "table": "quant_fresh_boot_run_event",
       "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "fit_seal_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_history_fit_seal",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "seal_hash",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "x",
+      "table": "quant_history_fit_seal",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "plan_id",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_history_fit_seal",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "window_from_block",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_history_fit_seal",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "window_to_block",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_history_fit_seal",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "policy_hash",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_history_fit_seal",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_hash",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_history_fit_seal",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "cohort_hash",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_history_fit_seal",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_history_fit_seal",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "fit_seal_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_history_fit_seal_chunk",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "chunk_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_history_fit_seal_chunk",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "frontier",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_history_fit_seal_chunk",
+      "type": "qp_exchange_history_frontier"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "state_revision",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_history_fit_seal_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "from_block",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_history_fit_seal_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "to_block",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_history_fit_seal_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "serving_head_seal_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "seal_hash",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "x",
+      "table": "quant_history_serving_head_seal",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "plan_id",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "frontier",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal",
+      "type": "qp_exchange_history_frontier"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "previous_seal_id",
+      "nullable": true,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "window_from_block",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "accepted_through_block",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "effective_through_at",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "policy_hash",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_history_serving_head_seal",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "serving_head_seal_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal_chunk",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "chunk_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal_chunk",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "frontier",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal_chunk",
+      "type": "qp_exchange_history_frontier"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "state_revision",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "from_block",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal_chunk",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "to_block",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_history_serving_head_seal_chunk",
+      "type": "bigint"
     },
     {
       "collation": null,
@@ -21807,9 +22210,35 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "window_start",
+      "name": "fit_seal_id",
       "nullable": false,
       "ordinal": 8,
+      "storage": "p",
+      "table": "quant_source_slice",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "fit_seal_hash",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_source_slice",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "window_start",
+      "nullable": false,
+      "ordinal": 10,
       "storage": "p",
       "table": "quant_source_slice",
       "type": "timestamp with time zone"
@@ -21822,7 +22251,7 @@
       "identity": "",
       "name": "window_end",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 11,
       "storage": "p",
       "table": "quant_source_slice",
       "type": "timestamp with time zone"
@@ -21835,7 +22264,7 @@
       "identity": "",
       "name": "pit_cutoff",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_source_slice",
       "type": "timestamp with time zone"
@@ -21848,7 +22277,7 @@
       "identity": "",
       "name": "reader_contract_version",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 13,
       "storage": "x",
       "table": "quant_source_slice",
       "type": "character varying"
@@ -21861,7 +22290,7 @@
       "identity": "",
       "name": "schema_contract_version",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 14,
       "storage": "x",
       "table": "quant_source_slice",
       "type": "character varying"
@@ -21874,7 +22303,7 @@
       "identity": "",
       "name": "status",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 15,
       "storage": "p",
       "table": "quant_source_slice",
       "type": "qp_source_slice_status"
@@ -21887,7 +22316,7 @@
       "identity": "",
       "name": "manifest_uri",
       "nullable": true,
-      "ordinal": 14,
+      "ordinal": 16,
       "storage": "x",
       "table": "quant_source_slice",
       "type": "text"
@@ -21900,7 +22329,7 @@
       "identity": "",
       "name": "manifest_hash",
       "nullable": true,
-      "ordinal": 15,
+      "ordinal": 17,
       "storage": "x",
       "table": "quant_source_slice",
       "type": "text"
@@ -21913,7 +22342,7 @@
       "identity": "",
       "name": "manifest",
       "nullable": true,
-      "ordinal": 16,
+      "ordinal": 18,
       "storage": "x",
       "table": "quant_source_slice",
       "type": "jsonb"
@@ -21926,7 +22355,7 @@
       "identity": "",
       "name": "failure_detail",
       "nullable": true,
-      "ordinal": 17,
+      "ordinal": 19,
       "storage": "x",
       "table": "quant_source_slice",
       "type": "character varying"
@@ -21939,7 +22368,7 @@
       "identity": "",
       "name": "completed_at",
       "nullable": true,
-      "ordinal": 18,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_source_slice",
       "type": "timestamp with time zone"
@@ -21952,7 +22381,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 19,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_source_slice",
       "type": "timestamp with time zone"
@@ -25741,9 +26170,9 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK ((((evidence_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((length(btrim((detail)::text)) >= 1) AND (length(btrim((detail)::text)) <= 2048)) AND (octet_length((detail)::text) = length((detail)::text))))",
+      "definition": "CHECK ((((evidence_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(evidence) = 'object'::text) AND (evidence ? 'kind'::text) AND (((kind = 'provider_mismatch'::qp_exchange_history_quarantine_kind) AND ((evidence ->> 'kind'::text) = 'provider_mismatch'::text)) OR ((kind = ANY (ARRAY['continuity_mismatch'::qp_exchange_history_quarantine_kind, 'parent_hash_mismatch'::qp_exchange_history_quarantine_kind])) AND ((evidence ->> 'kind'::text) = 'continuity_mismatch'::text)) OR ((kind = ANY (ARRAY['decode_failure'::qp_exchange_history_quarantine_kind, 'unknown_token'::qp_exchange_history_quarantine_kind, 'missing_correlation'::qp_exchange_history_quarantine_kind, 'contract_mismatch'::qp_exchange_history_quarantine_kind])) AND ((evidence ->> 'kind'::text) = 'projection_failure'::text)) OR ((kind = 'archive_probe_failure'::qp_exchange_history_quarantine_kind) AND ((evidence ->> 'kind'::text) = 'archive_probe_failure'::text)))))",
       "initially_deferred": false,
-      "name": "ck_quant_exchange_history_quarantine_detail",
+      "name": "ck_quant_exchange_history_quarantine_evidence",
       "table": "quant_exchange_history_quarantine",
       "type": "c",
       "validated": true
@@ -27145,7 +27574,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK ((((stage = 'awaiting_source_coverage'::qp_fresh_boot_stage) OR ((source_coverage_manifest IS NOT NULL) AND (source_coverage_hash IS NOT NULL) AND (model_spec_id IS NOT NULL))) AND ((stage < 'dataset_ready'::qp_fresh_boot_stage) OR ((training_dataset_id IS NOT NULL) AND (source_slice_id IS NOT NULL) AND (source_slice_hash IS NOT NULL))) AND ((stage < 'training_ready'::qp_fresh_boot_stage) OR (source_model_version_id IS NOT NULL)) AND ((stage < 'calibration_dataset_ready'::qp_fresh_boot_stage) OR (calibration_dataset_id IS NOT NULL)) AND ((stage < 'calibration_ready'::qp_fresh_boot_stage) OR ((model_version_id IS NOT NULL) AND (calibration_id IS NOT NULL))) AND ((stage < 'cpcv_ready'::qp_fresh_boot_stage) OR (path_set_id IS NOT NULL)) AND ((stage < 'parity_ready'::qp_fresh_boot_stage) OR (parity_run_id IS NOT NULL)) AND ((stage < 'scenario_ready'::qp_fresh_boot_stage) OR ((scenario_artifact_id IS NOT NULL) AND (scenario_artifact_hash IS NOT NULL))) AND ((stage < 'bootstrap_preflight'::qp_fresh_boot_stage) OR ((bootstrap_preflight IS NOT NULL) AND (bootstrap_preflight_hash IS NOT NULL))) AND ((stage < 'bootstrap_committed'::qp_fresh_boot_stage) OR (bootstrap_policy_activation_id IS NOT NULL)) AND ((stage < 'report_eligible'::qp_fresh_boot_stage) OR ((manual_report_ready_at IS NOT NULL) AND (first_report_run_id IS NOT NULL))) AND ((stage < 'first_report_published'::qp_fresh_boot_stage) OR (first_report_id IS NOT NULL))))",
+      "definition": "CHECK ((((stage = 'awaiting_source_coverage'::qp_fresh_boot_stage) OR ((source_coverage_manifest IS NOT NULL) AND (source_coverage_hash IS NOT NULL) AND (model_spec_id IS NOT NULL))) AND ((stage < 'dataset_ready'::qp_fresh_boot_stage) OR ((training_dataset_id IS NOT NULL) AND (source_slice_id IS NOT NULL) AND (source_slice_hash IS NOT NULL))) AND ((stage < 'training_ready'::qp_fresh_boot_stage) OR (source_model_version_id IS NOT NULL)) AND ((stage < 'calibration_dataset_ready'::qp_fresh_boot_stage) OR (calibration_dataset_id IS NOT NULL)) AND ((stage < 'calibration_ready'::qp_fresh_boot_stage) OR ((model_version_id IS NOT NULL) AND (calibration_id IS NOT NULL))) AND ((stage < 'cpcv_ready'::qp_fresh_boot_stage) OR (path_set_id IS NOT NULL)) AND ((stage < 'parity_ready'::qp_fresh_boot_stage) OR (parity_run_id IS NOT NULL)) AND ((stage < 'scenario_ready'::qp_fresh_boot_stage) OR ((scenario_artifact_id IS NOT NULL) AND (scenario_artifact_hash IS NOT NULL))) AND ((stage < 'bootstrap_preflight'::qp_fresh_boot_stage) OR ((bootstrap_preflight IS NOT NULL) AND (bootstrap_preflight_hash IS NOT NULL))) AND ((stage < 'bootstrap_committed'::qp_fresh_boot_stage) OR (bootstrap_policy_activation_id IS NOT NULL)) AND ((stage < 'first_report_queued'::qp_fresh_boot_stage) OR (first_report_run_id IS NOT NULL)) AND ((stage < 'first_report_published'::qp_fresh_boot_stage) OR (first_report_id IS NOT NULL))))",
       "initially_deferred": false,
       "name": "ck_quant_fresh_boot_run_stage",
       "table": "quant_fresh_boot_run",
@@ -27154,7 +27583,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK ((((status = ANY (ARRAY['waiting_evidence'::qp_fresh_boot_status, 'retry_scheduled'::qp_fresh_boot_status])) AND (retry_reason IS NOT NULL) AND (retry_detail IS NOT NULL) AND (next_attempt_at IS NOT NULL) AND (blocked_reason IS NULL) AND (blocked_detail IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NULL)) OR ((status = 'running'::qp_fresh_boot_status) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (blocked_reason IS NULL) AND (blocked_detail IS NULL) AND (completed_at IS NULL)) OR ((status = 'blocked_terminal'::qp_fresh_boot_status) AND (blocked_reason IS NOT NULL) AND (blocked_detail IS NOT NULL) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'superseded'::qp_fresh_boot_status) AND (blocked_reason IS NOT NULL) AND (blocked_detail IS NOT NULL) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'succeeded'::qp_fresh_boot_status) AND (stage = 'first_report_published'::qp_fresh_boot_stage) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (blocked_reason IS NULL) AND (blocked_detail IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NOT NULL) AND (first_report_id IS NOT NULL) AND (manual_report_ready_at IS NOT NULL))))",
+      "definition": "CHECK ((((status = ANY (ARRAY['waiting_evidence'::qp_fresh_boot_status, 'retry_scheduled'::qp_fresh_boot_status])) AND (retry_reason IS NOT NULL) AND (retry_detail IS NOT NULL) AND (next_attempt_at IS NOT NULL) AND (blocked_reason IS NULL) AND (blocked_detail IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NULL)) OR ((status = 'running'::qp_fresh_boot_status) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (blocked_reason IS NULL) AND (blocked_detail IS NULL) AND (completed_at IS NULL)) OR ((status = 'blocked_terminal'::qp_fresh_boot_status) AND (blocked_reason IS NOT NULL) AND (blocked_detail IS NOT NULL) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'superseded'::qp_fresh_boot_status) AND (blocked_reason IS NOT NULL) AND (blocked_detail IS NOT NULL) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'succeeded'::qp_fresh_boot_status) AND (stage = 'first_report_published'::qp_fresh_boot_stage) AND (retry_reason IS NULL) AND (retry_detail IS NULL) AND (next_attempt_at IS NULL) AND (blocked_reason IS NULL) AND (blocked_detail IS NULL) AND (lease_owner IS NULL) AND (completed_at IS NOT NULL) AND (first_report_id IS NOT NULL))))",
       "initially_deferred": false,
       "name": "ck_quant_fresh_boot_run_status",
       "table": "quant_fresh_boot_run",
@@ -27384,6 +27813,159 @@
       "name": "uq_quant_fresh_boot_run_event_sequence",
       "table": "quant_fresh_boot_run_event",
       "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((window_from_block > 0) AND (window_to_block >= window_from_block) AND ((seal_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((policy_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((profile_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((cohort_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_history_fit_seal",
+      "table": "quant_history_fit_seal",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (plan_id) REFERENCES quant_exchange_history_plan(plan_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_history_fit_seal-plan_id",
+      "table": "quant_history_fit_seal",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (fit_seal_id)",
+      "initially_deferred": false,
+      "name": "quant_history_fit_seal_pkey",
+      "table": "quant_history_fit_seal",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (seal_hash)",
+      "initially_deferred": false,
+      "name": "quant_history_fit_seal_seal_hash_key",
+      "table": "quant_history_fit_seal",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((state_revision > 0) AND (from_block > 0) AND (to_block >= from_block)))",
+      "initially_deferred": false,
+      "name": "ck_quant_history_fit_seal_chunk",
+      "table": "quant_history_fit_seal_chunk",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (chunk_id) REFERENCES quant_exchange_history_chunk(chunk_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_history_fit_seal_chunk-chunk_id",
+      "table": "quant_history_fit_seal_chunk",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (fit_seal_id) REFERENCES quant_history_fit_seal(fit_seal_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_history_fit_seal_chunk-fit_seal_id",
+      "table": "quant_history_fit_seal_chunk",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (fit_seal_id, chunk_id)",
+      "initially_deferred": false,
+      "name": "pk-quant_history_fit_seal_chunk",
+      "table": "quant_history_fit_seal_chunk",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((window_from_block > 0) AND (accepted_through_block >= window_from_block) AND (effective_through_at <= created_at) AND ((seal_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((policy_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((previous_seal_id IS NULL) OR (previous_seal_id <> serving_head_seal_id))))",
+      "initially_deferred": false,
+      "name": "ck_quant_history_serving_head_seal",
+      "table": "quant_history_serving_head_seal",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (plan_id) REFERENCES quant_exchange_history_plan(plan_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_history_serving_head_seal-plan_id",
+      "table": "quant_history_serving_head_seal",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (previous_seal_id) REFERENCES quant_history_serving_head_seal(serving_head_seal_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_history_serving_head_seal-previous_seal_id",
+      "table": "quant_history_serving_head_seal",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (serving_head_seal_id)",
+      "initially_deferred": false,
+      "name": "quant_history_serving_head_seal_pkey",
+      "table": "quant_history_serving_head_seal",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (seal_hash)",
+      "initially_deferred": false,
+      "name": "quant_history_serving_head_seal_seal_hash_key",
+      "table": "quant_history_serving_head_seal",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((state_revision > 0) AND (from_block > 0) AND (to_block >= from_block)))",
+      "initially_deferred": false,
+      "name": "ck_quant_history_serving_head_seal_chunk",
+      "table": "quant_history_serving_head_seal_chunk",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (chunk_id) REFERENCES quant_exchange_history_chunk(chunk_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_history_serving_head_seal_chunk-chunk_id",
+      "table": "quant_history_serving_head_seal_chunk",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (serving_head_seal_id) REFERENCES quant_history_serving_head_seal(serving_head_seal_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_history_serving_head_seal_chunk-serving_head_seal_id",
+      "table": "quant_history_serving_head_seal_chunk",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (serving_head_seal_id, chunk_id)",
+      "initially_deferred": false,
+      "name": "pk-quant_history_serving_head_seal_chunk",
+      "table": "quant_history_serving_head_seal_chunk",
+      "type": "p",
       "validated": true
     },
     {
@@ -30025,7 +30607,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'profile_ref'::text, 'evaluation_track'::text, 'research_program_hash'::text, 'window_start'::text, 'window_end'::text, 'pit_cutoff'::text, 'reader_contract_version'::text, 'schema_contract_version'::text, 'decision_policy_snapshot_id'::text, 'runtime_config_hash'::text, 'dataset_format_version'::text, 'capability_registry_hashes'::text, 'objects'::text]) AND (((manifest ->> 'format_version'::text))::integer = 4) AND ((manifest -> 'profile_ref'::text) = profile_ref) AND ((manifest ->> 'evaluation_track'::text) = (evaluation_track)::text) AND ((manifest ->> 'research_program_hash'::text) = research_program_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND (((manifest ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND ((manifest ->> 'reader_contract_version'::text) = (reader_contract_version)::text) AND ((manifest ->> 'schema_contract_version'::text) = (schema_contract_version)::text) AND (((manifest ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((manifest ->> 'runtime_config_hash'::text) = runtime_config_hash) AND (((manifest ->> 'dataset_format_version'::text))::integer = 3) AND (jsonb_typeof((manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (jsonb_typeof((manifest -> 'objects'::text)) = 'array'::text) AND (jsonb_array_length((manifest -> 'objects'::text)) > 0))))",
+      "definition": "CHECK ((((fit_seal_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'profile_ref'::text, 'evaluation_track'::text, 'research_program_hash'::text, 'window_start'::text, 'window_end'::text, 'pit_cutoff'::text, 'reader_contract_version'::text, 'schema_contract_version'::text, 'decision_policy_snapshot_id'::text, 'runtime_config_hash'::text, 'fit_seal_id'::text, 'fit_seal_hash'::text, 'dataset_format_version'::text, 'capability_registry_hashes'::text, 'objects'::text]) AND (((manifest ->> 'format_version'::text))::integer = 5) AND ((manifest -> 'profile_ref'::text) = profile_ref) AND ((manifest ->> 'evaluation_track'::text) = (evaluation_track)::text) AND ((manifest ->> 'research_program_hash'::text) = research_program_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND (((manifest ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND ((manifest ->> 'reader_contract_version'::text) = (reader_contract_version)::text) AND ((manifest ->> 'schema_contract_version'::text) = (schema_contract_version)::text) AND (((manifest ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((manifest ->> 'runtime_config_hash'::text) = runtime_config_hash) AND (((manifest ->> 'fit_seal_id'::text))::uuid = fit_seal_id) AND ((manifest ->> 'fit_seal_hash'::text) = (fit_seal_hash)::text) AND (((manifest ->> 'dataset_format_version'::text))::integer = 4) AND (jsonb_typeof((manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (jsonb_typeof((manifest -> 'objects'::text)) = 'array'::text) AND (jsonb_array_length((manifest -> 'objects'::text)) > 0)))))",
       "initially_deferred": false,
       "name": "ck_quant_source_slice_manifest",
       "table": "quant_source_slice",
@@ -30037,6 +30619,15 @@
       "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
       "initially_deferred": false,
       "name": "fk-quant_source_slice-decision_policy_snapshot_id",
+      "table": "quant_source_slice",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (fit_seal_id) REFERENCES quant_history_fit_seal(fit_seal_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_source_slice-fit_seal_id",
       "table": "quant_source_slice",
       "type": "f",
       "validated": true
@@ -30232,7 +30823,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND (knowledge_lag_secs >= 0) AND (feature_schema_version >= 1) AND ((sample_interval_secs > 0) OR ((sample_interval_secs = 0) AND (cohort_manifest IS NOT NULL))) AND (jsonb_typeof(horizons_secs) = 'array'::text) AND (jsonb_array_length(horizons_secs) > 0) AND (jsonb_typeof(source_lineage) = 'object'::text) AND (source_lineage ?& ARRAY['format_version'::text, 'source_slice_id'::text, 'research_profile_artifact_id'::text, 'source_window_start'::text, 'source_window_end'::text, 'pit_cutoff'::text, 'decision_policy_snapshot_id'::text, 'capability_registry_hashes'::text]) AND (((source_lineage ->> 'format_version'::text))::integer = 1) AND (((source_lineage ->> 'source_slice_id'::text))::uuid = source_slice_id) AND ((source_lineage ->> 'research_profile_artifact_id'::text) = research_profile_artifact_id) AND (((source_lineage ->> 'source_window_start'::text))::timestamp with time zone <= window_start) AND (((source_lineage ->> 'source_window_end'::text))::timestamp with time zone >= window_end) AND (((source_lineage ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND (((source_lineage ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND (jsonb_typeof((source_lineage -> 'capability_registry_hashes'::text)) = 'array'::text)))",
+      "definition": "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND (knowledge_lag_secs >= 0) AND (feature_schema_version >= 1) AND ((sample_interval_secs > 0) OR ((sample_interval_secs = 0) AND (cohort_manifest IS NOT NULL))) AND (jsonb_typeof(horizons_secs) = 'array'::text) AND (jsonb_array_length(horizons_secs) > 0) AND (jsonb_typeof(source_lineage) = 'object'::text) AND (source_lineage ?& ARRAY['format_version'::text, 'source_slice_id'::text, 'research_profile_artifact_id'::text, 'source_window_start'::text, 'source_window_end'::text, 'pit_cutoff'::text, 'decision_policy_snapshot_id'::text, 'fit_seal_id'::text, 'fit_seal_hash'::text, 'capability_registry_hashes'::text]) AND (((source_lineage ->> 'format_version'::text))::integer = 2) AND (((source_lineage ->> 'source_slice_id'::text))::uuid = source_slice_id) AND ((source_lineage ->> 'research_profile_artifact_id'::text) = research_profile_artifact_id) AND (((source_lineage ->> 'source_window_start'::text))::timestamp with time zone <= window_start) AND (((source_lineage ->> 'source_window_end'::text))::timestamp with time zone >= window_end) AND (((source_lineage ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND (((source_lineage ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND (((source_lineage ->> 'fit_seal_id'::text))::uuid IS NOT NULL) AND ((source_lineage ->> 'fit_seal_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof((source_lineage -> 'capability_registry_hashes'::text)) = 'array'::text)))",
       "initially_deferred": false,
       "name": "ck_quant_training_dataset_lineage",
       "table": "quant_training_dataset",
@@ -30241,7 +30832,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'training_dataset_id'::text, 'source_lineage'::text, 'cohort_manifest'::text, 'model_spec_id'::text, 'model_family'::text, 'model_spec_definition_hash'::text, 'trade_policy_artifact_id'::text, 'trade_policy_hash'::text, 'window_start'::text, 'window_end'::text, 'purpose'::text, 'knowledge_lag_secs'::text, 'sample_interval_secs'::text, 'horizons_secs'::text, 'feature_schema_version'::text, 'feature_schema_hash'::text, 'factor_serving_plane'::text, 'label_schema_hash'::text, 'semantic_dataset_hash'::text, 'source_fingerprint'::text, 'sample_count'::text]) AND ((manifest - ARRAY['format_version'::text, 'training_dataset_id'::text, 'source_lineage'::text, 'cohort_manifest'::text, 'model_spec_id'::text, 'model_family'::text, 'model_spec_definition_hash'::text, 'trade_policy_artifact_id'::text, 'trade_policy_hash'::text, 'window_start'::text, 'window_end'::text, 'purpose'::text, 'knowledge_lag_secs'::text, 'sample_interval_secs'::text, 'horizons_secs'::text, 'feature_schema_version'::text, 'feature_schema_hash'::text, 'factor_serving_plane'::text, 'label_schema_hash'::text, 'semantic_dataset_hash'::text, 'source_fingerprint'::text, 'sample_count'::text]) = '{}'::jsonb) AND (((manifest ->> 'format_version'::text))::integer = 3) AND (((manifest ->> 'training_dataset_id'::text))::uuid = training_dataset_id) AND ((manifest -> 'source_lineage'::text) = source_lineage) AND (((cohort_manifest IS NULL) AND ((manifest -> 'cohort_manifest'::text) = 'null'::jsonb)) OR ((cohort_manifest IS NOT NULL) AND ((manifest -> 'cohort_manifest'::text) = cohort_manifest))) AND (((manifest ->> 'model_spec_id'::text))::uuid = model_spec_id) AND ((manifest ->> 'model_family'::text) = (model_family)::text) AND ((manifest ->> 'model_spec_definition_hash'::text) = (model_spec_definition_hash)::text) AND ((((manifest -> 'trade_policy_artifact_id'::text) = 'null'::jsonb) AND ((manifest -> 'trade_policy_hash'::text) = 'null'::jsonb)) OR ((jsonb_typeof((manifest -> 'trade_policy_artifact_id'::text)) = 'string'::text) AND (((manifest ->> 'trade_policy_artifact_id'::text))::uuid IS NOT NULL) AND (jsonb_typeof((manifest -> 'trade_policy_hash'::text)) = 'string'::text) AND ((manifest ->> 'trade_policy_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text))) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND ((manifest ->> 'purpose'::text) = (purpose)::text) AND (((manifest ->> 'knowledge_lag_secs'::text))::bigint = knowledge_lag_secs) AND (((manifest ->> 'sample_interval_secs'::text))::bigint = sample_interval_secs) AND ((manifest -> 'horizons_secs'::text) = horizons_secs) AND (((manifest ->> 'feature_schema_version'::text))::integer = feature_schema_version) AND ((manifest ->> 'feature_schema_hash'::text) = feature_schema_hash) AND ((manifest -> 'factor_serving_plane'::text) = factor_serving_plane) AND ((factor_serving_plane ->> 'factor_schema_hash'::text) = factor_schema_hash) AND ((manifest ->> 'label_schema_hash'::text) = label_schema_hash) AND ((manifest ->> 'semantic_dataset_hash'::text) = dataset_hash) AND ((manifest ->> 'source_fingerprint'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (((manifest ->> 'sample_count'::text))::bigint = sample_count))))",
+      "definition": "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'training_dataset_id'::text, 'source_lineage'::text, 'cohort_manifest'::text, 'model_spec_id'::text, 'model_family'::text, 'model_spec_definition_hash'::text, 'trade_policy_artifact_id'::text, 'trade_policy_hash'::text, 'window_start'::text, 'window_end'::text, 'purpose'::text, 'knowledge_lag_secs'::text, 'sample_interval_secs'::text, 'horizons_secs'::text, 'feature_schema_version'::text, 'feature_schema_hash'::text, 'factor_serving_plane'::text, 'label_schema_hash'::text, 'semantic_dataset_hash'::text, 'source_fingerprint'::text, 'sample_count'::text]) AND ((manifest - ARRAY['format_version'::text, 'training_dataset_id'::text, 'source_lineage'::text, 'cohort_manifest'::text, 'model_spec_id'::text, 'model_family'::text, 'model_spec_definition_hash'::text, 'trade_policy_artifact_id'::text, 'trade_policy_hash'::text, 'window_start'::text, 'window_end'::text, 'purpose'::text, 'knowledge_lag_secs'::text, 'sample_interval_secs'::text, 'horizons_secs'::text, 'feature_schema_version'::text, 'feature_schema_hash'::text, 'factor_serving_plane'::text, 'label_schema_hash'::text, 'semantic_dataset_hash'::text, 'source_fingerprint'::text, 'sample_count'::text]) = '{}'::jsonb) AND (((manifest ->> 'format_version'::text))::integer = 4) AND (((manifest ->> 'training_dataset_id'::text))::uuid = training_dataset_id) AND ((manifest -> 'source_lineage'::text) = source_lineage) AND (((cohort_manifest IS NULL) AND ((manifest -> 'cohort_manifest'::text) = 'null'::jsonb)) OR ((cohort_manifest IS NOT NULL) AND ((manifest -> 'cohort_manifest'::text) = cohort_manifest))) AND (((manifest ->> 'model_spec_id'::text))::uuid = model_spec_id) AND ((manifest ->> 'model_family'::text) = (model_family)::text) AND ((manifest ->> 'model_spec_definition_hash'::text) = (model_spec_definition_hash)::text) AND ((((manifest -> 'trade_policy_artifact_id'::text) = 'null'::jsonb) AND ((manifest -> 'trade_policy_hash'::text) = 'null'::jsonb)) OR ((jsonb_typeof((manifest -> 'trade_policy_artifact_id'::text)) = 'string'::text) AND (((manifest ->> 'trade_policy_artifact_id'::text))::uuid IS NOT NULL) AND (jsonb_typeof((manifest -> 'trade_policy_hash'::text)) = 'string'::text) AND ((manifest ->> 'trade_policy_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text))) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND ((manifest ->> 'purpose'::text) = (purpose)::text) AND (((manifest ->> 'knowledge_lag_secs'::text))::bigint = knowledge_lag_secs) AND (((manifest ->> 'sample_interval_secs'::text))::bigint = sample_interval_secs) AND ((manifest -> 'horizons_secs'::text) = horizons_secs) AND (((manifest ->> 'feature_schema_version'::text))::integer = feature_schema_version) AND ((manifest ->> 'feature_schema_hash'::text) = feature_schema_hash) AND ((manifest -> 'factor_serving_plane'::text) = factor_serving_plane) AND ((factor_serving_plane ->> 'factor_schema_hash'::text) = factor_schema_hash) AND ((manifest ->> 'label_schema_hash'::text) = label_schema_hash) AND ((manifest ->> 'semantic_dataset_hash'::text) = dataset_hash) AND ((manifest ->> 'source_fingerprint'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (((manifest ->> 'sample_count'::text))::bigint = sample_count))))",
       "initially_deferred": false,
       "name": "ck_quant_training_dataset_manifest",
       "table": "quant_training_dataset",
@@ -30793,7 +31384,7 @@
         "contract_mismatch",
         "archive_probe_failure"
       ],
-      "name": "qp_exchange_history_quarantine_reason"
+      "name": "qp_exchange_history_quarantine_kind"
     },
     {
       "labels": [
@@ -31180,7 +31771,7 @@
         "scenario_ready",
         "bootstrap_preflight",
         "bootstrap_committed",
-        "report_eligible",
+        "first_report_queued",
         "first_report_published"
       ],
       "name": "qp_fresh_boot_stage"
@@ -35610,6 +36201,202 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_history_fit_seal",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal_chunk",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal_chunk",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal_chunk",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal_chunk",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal_chunk",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal_chunk",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_fit_seal_chunk",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal_chunk",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal_chunk",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal_chunk",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal_chunk",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal_chunk",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal_chunk",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_history_serving_head_seal_chunk",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_market_linkage",
       "privilege": "DELETE"
     },
@@ -39770,6 +40557,16 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_exchange_history_quarantine_kind_page ON public.quant_exchange_history_quarantine USING btree (kind, quarantine_id DESC)",
+      "method": "btree",
+      "name": "idx_quant_exchange_history_quarantine_kind_page",
+      "primary": false,
+      "ready": true,
+      "table": "quant_exchange_history_quarantine",
+      "unique": false,
+      "valid": true
+    },
+    {
       "definition": "CREATE UNIQUE INDEX quant_exchange_history_quarantine_pkey ON public.quant_exchange_history_quarantine USING btree (quarantine_id)",
       "method": "btree",
       "name": "quant_exchange_history_quarantine_pkey",
@@ -40796,6 +41593,126 @@
       "primary": false,
       "ready": true,
       "table": "quant_fresh_boot_run_event",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_history_fit_seal_plan_window ON public.quant_history_fit_seal USING btree (plan_id, window_from_block, window_to_block, created_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_history_fit_seal_plan_window",
+      "primary": false,
+      "ready": true,
+      "table": "quant_history_fit_seal",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_history_fit_seal_pkey ON public.quant_history_fit_seal USING btree (fit_seal_id)",
+      "method": "btree",
+      "name": "quant_history_fit_seal_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_history_fit_seal",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_history_fit_seal_seal_hash_key ON public.quant_history_fit_seal USING btree (seal_hash)",
+      "method": "btree",
+      "name": "quant_history_fit_seal_seal_hash_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_history_fit_seal",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_history_fit_seal_chunk_chunk ON public.quant_history_fit_seal_chunk USING btree (chunk_id, state_revision)",
+      "method": "btree",
+      "name": "idx_quant_history_fit_seal_chunk_chunk",
+      "primary": false,
+      "ready": true,
+      "table": "quant_history_fit_seal_chunk",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX \"pk-quant_history_fit_seal_chunk\" ON public.quant_history_fit_seal_chunk USING btree (fit_seal_id, chunk_id)",
+      "method": "btree",
+      "name": "pk-quant_history_fit_seal_chunk",
+      "primary": true,
+      "ready": true,
+      "table": "quant_history_fit_seal_chunk",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_history_serving_head_lookup ON public.quant_history_serving_head_seal USING btree (frontier, created_at DESC, serving_head_seal_id DESC)",
+      "method": "btree",
+      "name": "idx_quant_history_serving_head_lookup",
+      "primary": false,
+      "ready": true,
+      "table": "quant_history_serving_head_seal",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_history_serving_head_seal_pkey ON public.quant_history_serving_head_seal USING btree (serving_head_seal_id)",
+      "method": "btree",
+      "name": "quant_history_serving_head_seal_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_history_serving_head_seal",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_history_serving_head_seal_seal_hash_key ON public.quant_history_serving_head_seal USING btree (seal_hash)",
+      "method": "btree",
+      "name": "quant_history_serving_head_seal_seal_hash_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_history_serving_head_seal",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_history_serving_head_predecessor ON public.quant_history_serving_head_seal USING btree (previous_seal_id) WHERE (previous_seal_id IS NOT NULL)",
+      "method": "btree",
+      "name": "uq_quant_history_serving_head_predecessor",
+      "primary": false,
+      "ready": true,
+      "table": "quant_history_serving_head_seal",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_history_serving_head_root ON public.quant_history_serving_head_seal USING btree (frontier) WHERE (previous_seal_id IS NULL)",
+      "method": "btree",
+      "name": "uq_quant_history_serving_head_root",
+      "primary": false,
+      "ready": true,
+      "table": "quant_history_serving_head_seal",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_history_serving_head_chunk_chunk ON public.quant_history_serving_head_seal_chunk USING btree (chunk_id, state_revision)",
+      "method": "btree",
+      "name": "idx_quant_history_serving_head_chunk_chunk",
+      "primary": false,
+      "ready": true,
+      "table": "quant_history_serving_head_seal_chunk",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX \"pk-quant_history_serving_head_seal_chunk\" ON public.quant_history_serving_head_seal_chunk USING btree (serving_head_seal_id, chunk_id)",
+      "method": "btree",
+      "name": "pk-quant_history_serving_head_seal_chunk",
+      "primary": true,
+      "ready": true,
+      "table": "quant_history_serving_head_seal_chunk",
       "unique": true,
       "valid": true
     },
@@ -43317,6 +44234,34 @@
     },
     {
       "kind": "r",
+      "name": "quant_history_fit_seal",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_history_fit_seal_chunk",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_history_serving_head_seal",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_history_serving_head_seal_chunk",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_market_linkage",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -44077,6 +45022,30 @@
       "enabled": "O",
       "name": "trg_quant_fresh_boot_run_event_append_only",
       "table": "quant_fresh_boot_run_event"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_history_fit_seal_append_only BEFORE DELETE OR UPDATE ON public.quant_history_fit_seal FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_history_fit_seal_append_only",
+      "table": "quant_history_fit_seal"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_history_fit_seal_chunk_append_only BEFORE DELETE OR UPDATE ON public.quant_history_fit_seal_chunk FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_history_fit_seal_chunk_append_only",
+      "table": "quant_history_fit_seal_chunk"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_history_serving_head_seal_append_only BEFORE DELETE OR UPDATE ON public.quant_history_serving_head_seal FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_history_serving_head_seal_append_only",
+      "table": "quant_history_serving_head_seal"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_history_serving_head_seal_chunk_append_only BEFORE DELETE OR UPDATE ON public.quant_history_serving_head_seal_chunk FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_history_serving_head_seal_chunk_append_only",
+      "table": "quant_history_serving_head_seal_chunk"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_model_candidate_manifest_append_only BEFORE DELETE OR UPDATE ON public.quant_model_candidate_manifest FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",

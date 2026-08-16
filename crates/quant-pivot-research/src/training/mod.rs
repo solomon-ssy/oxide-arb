@@ -1222,6 +1222,8 @@ pub(crate) mod fixtures {
         let pit_cutoff = window_end + Duration::seconds(60);
         DatasetSourceLineage {
             format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            fit_seal_id: Uuid::from_u128(19).into(),
+            fit_seal_hash: hash('3'),
             source_slice_id: SourceSliceId::from_v7(),
             source_slice_identity_hash: hash('4'),
             research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile_ref),

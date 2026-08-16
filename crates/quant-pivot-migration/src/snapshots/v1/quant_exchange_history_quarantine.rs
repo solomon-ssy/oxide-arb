@@ -2,9 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::{
-    quant_exchange_history_chunk, sea_orm_active_enums::QpExchangeHistoryQuarantineReason,
-};
+use super::{quant_exchange_history_chunk, sea_orm_active_enums::QpExchangeHistoryQuarantineKind};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -13,9 +11,10 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub quarantine_id: Uuid,
     pub chunk_id: Uuid,
-    pub reason: QpExchangeHistoryQuarantineReason,
+    pub kind: QpExchangeHistoryQuarantineKind,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub evidence: Json,
     pub evidence_hash: String,
-    pub detail: String,
     pub quarantined_at: DateTimeWithTimeZone,
 
     #[sea_orm(

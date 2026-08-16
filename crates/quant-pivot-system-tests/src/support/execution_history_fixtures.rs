@@ -13,15 +13,18 @@ use quant_pivot_models::{
     },
     config::FinalizedExchangeHistoryConfig,
     domain::data_plane::{
-        ExchangeHistoryChunkInfo, ExchangeHistoryChunkStatus, ExchangeHistoryContinuityBasis,
-        ExchangeHistoryFrontier, ExchangeHistoryPlanInfo, ExchangeHistoryQuarantineInfo,
-        ExchangeHistoryQuarantineResolutionInfo, NewExchangeHistoryChunk, NewExchangeHistoryPlan,
-        NewExchangeHistoryQuarantine, NewExchangeHistoryQuarantineResolution,
-        ResolveAcceptedHistoryRange,
+        CreateHistoryFitSeal, CreateHistoryServingHeadSeal, ExchangeHistoryChunkInfo,
+        ExchangeHistoryChunkStatus, ExchangeHistoryContinuityBasis, ExchangeHistoryFrontier,
+        ExchangeHistoryPlanInfo, ExchangeHistoryQuarantineInfo, ExchangeHistoryQuarantineRead,
+        ExchangeHistoryQuarantineRecord, ExchangeHistoryQuarantineResolutionInfo, HistoryFitSeal,
+        HistorySealChunkRef, HistoryServingHeadSeal, HistoryServingHeadSealInfo,
+        NewExchangeHistoryChunk, NewExchangeHistoryPlan, NewExchangeHistoryQuarantine,
+        NewExchangeHistoryQuarantineResolution, ResolveAcceptedHistoryRange,
     },
     enums::clickhouse::{ChExchangeSide, ChExecutionParticipantRole},
     types::{
-        ContentHash, DomainInstrumentKey, EvmBlockHash, MarketId, Price, Shares, TokenId, Usd,
+        ContentHash, DomainInstrumentKey, EvmBlockHash, HistoryFitSealId, HistoryServingHeadSealId,
+        MarketId, Price, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::traits::{ExchangeHistoryRepository, QuantFactReadRepository};
@@ -30,6 +33,41 @@ use uuid::Uuid;
 
 /// Default whale-window execution count (passes the structural gate of 20).
 pub const WHALE_FIXTURE_EXECUTION_COUNT: usize = 25;
+
+/// Immutable activation head used by hermetic online feature/report fixtures.
+#[must_use]
+pub fn live_activation_head() -> HistoryServingHeadSeal {
+    live_history_head(ExchangeHistoryFrontier::Activation)
+}
+
+fn live_history_head(frontier: ExchangeHistoryFrontier) -> HistoryServingHeadSeal {
+    let chunk = live_chunk(frontier);
+    HistoryServingHeadSeal {
+        seal: HistoryServingHeadSealInfo {
+            serving_head_seal_id: Uuid::from_u128(8).into(),
+            seal_hash: ContentHash::from_bytes([8; 32]),
+            plan_id: Uuid::from_u128(9),
+            frontier,
+            previous_seal_id: None,
+            window_from_block: chunk.from_block,
+            accepted_through_block: chunk.to_block,
+            effective_through_at: chunk
+                .effective_through_at
+                .expect("fixture accepted-through timestamp"),
+            policy_hash: chunk
+                .hypersync_digest
+                .expect("fixture accepted chunk digest"),
+            created_at: chunk.created_at,
+        },
+        chunks: vec![HistorySealChunkRef {
+            chunk_id: chunk.chunk_id,
+            frontier,
+            state_revision: chunk.state_revision.expect("fixture state revision"),
+            from_block: chunk.from_block,
+            to_block: chunk.to_block,
+        }],
+    }
+}
 
 /// Build bilateral on-chain participant rows with concentrated maker notional.
 ///
@@ -144,7 +182,9 @@ fn bilateral_execution_rows(
 }
 
 /// Accepted-frontier repository used by in-memory feature fixtures.
-pub struct LiveExchangeHistoryRepo;
+pub struct LiveExchangeHistoryRepo {
+    head_available: bool,
+}
 
 fn live_chunk(frontier: ExchangeHistoryFrontier) -> ExchangeHistoryChunkInfo {
     let now = Utc::now();
@@ -173,6 +213,7 @@ fn live_chunk(frontier: ExchangeHistoryFrontier) -> ExchangeHistoryChunkInfo {
         continuity_block: Some(0),
         continuity_hash: Some(block_hash),
         effective_through_at: Some(through),
+        state_revision: Some(1),
         accepted_at: Some(now),
         created_at: now,
         updated_at: now,
@@ -221,14 +262,14 @@ impl ExchangeHistoryRepository for LiveExchangeHistoryRepo {
         &self,
         frontier: ExchangeHistoryFrontier,
     ) -> Result<Option<ExchangeHistoryChunkInfo>, StorageError> {
-        Ok(Some(live_chunk(frontier)))
+        Ok(self.head_available.then(|| live_chunk(frontier)))
     }
 
     async fn earliest_accepted(
         &self,
         frontier: ExchangeHistoryFrontier,
     ) -> Result<Option<ExchangeHistoryChunkInfo>, StorageError> {
-        Ok(Some(live_chunk(frontier)))
+        Ok(self.head_available.then(|| live_chunk(frontier)))
     }
 
     async fn accepted_from(
@@ -267,6 +308,13 @@ impl ExchangeHistoryRepository for LiveExchangeHistoryRepo {
         Ok(Vec::new())
     }
 
+    async fn page_quarantine(
+        &self,
+        _query: ExchangeHistoryQuarantineRead,
+    ) -> Result<Vec<ExchangeHistoryQuarantineRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+
     async fn active_quarantine(
         &self,
         _frontier: ExchangeHistoryFrontier,
@@ -275,6 +323,13 @@ impl ExchangeHistoryRepository for LiveExchangeHistoryRepo {
         _limit: u64,
     ) -> Result<Vec<ExchangeHistoryQuarantineInfo>, StorageError> {
         Ok(Vec::new())
+    }
+
+    async fn count_active_quarantine(
+        &self,
+        _frontier: ExchangeHistoryFrontier,
+    ) -> Result<u64, StorageError> {
+        Ok(0)
     }
 
     async fn resolve_quarantine(
@@ -296,12 +351,93 @@ impl ExchangeHistoryRepository for LiveExchangeHistoryRepo {
             detail: "LiveExchangeHistoryRepo is read-only".to_owned(),
         })
     }
+
+    async fn create_fit_seal(
+        &self,
+        _command: CreateHistoryFitSeal,
+    ) -> Result<HistoryFitSeal, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("history_fit_seal"),
+            detail: "LiveExchangeHistoryRepo is read-only".to_owned(),
+        })
+    }
+
+    async fn find_fit_seal(
+        &self,
+        _fit_seal_id: HistoryFitSealId,
+    ) -> Result<Option<HistoryFitSeal>, StorageError> {
+        Ok(None)
+    }
+
+    async fn create_serving_head(
+        &self,
+        _command: CreateHistoryServingHeadSeal,
+    ) -> Result<HistoryServingHeadSeal, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("history_serving_head_seal"),
+            detail: "LiveExchangeHistoryRepo is read-only".to_owned(),
+        })
+    }
+
+    async fn latest_serving_head(
+        &self,
+        frontier: ExchangeHistoryFrontier,
+    ) -> Result<Option<HistoryServingHeadSeal>, StorageError> {
+        Ok(self.head_available.then(|| live_history_head(frontier)))
+    }
+
+    async fn serving_head_at(
+        &self,
+        frontier: ExchangeHistoryFrontier,
+        _decision_at: DateTime<Utc>,
+    ) -> Result<Option<HistoryServingHeadSeal>, StorageError> {
+        self.latest_serving_head(frontier).await
+    }
+
+    async fn validate_fit_seal(
+        &self,
+        _fit_seal_id: HistoryFitSealId,
+        _seal_hash: ContentHash,
+    ) -> Result<HistoryFitSeal, StorageError> {
+        Err(StorageError::not_found("history_fit_seal", "fixture"))
+    }
+
+    async fn validate_serving_head(
+        &self,
+        serving_head_seal_id: HistoryServingHeadSealId,
+        seal_hash: ContentHash,
+    ) -> Result<HistoryServingHeadSeal, StorageError> {
+        let seal = self
+            .latest_serving_head(ExchangeHistoryFrontier::Activation)
+            .await?
+            .ok_or_else(|| StorageError::not_found("history_serving_head_seal", "fixture"))?;
+        if seal.seal.serving_head_seal_id != serving_head_seal_id
+            || seal.seal.seal_hash != seal_hash
+        {
+            return Err(StorageError::state_conflict(
+                "history_serving_head_seal",
+                Some(serving_head_seal_id),
+                "fixture serving seal mismatch",
+            ));
+        }
+        Ok(seal)
+    }
 }
 
 /// Healthy ingest cursor repo for tests.
 #[must_use]
 pub fn live_history_repo() -> Arc<dyn ExchangeHistoryRepository> {
-    Arc::new(LiveExchangeHistoryRepo)
+    Arc::new(LiveExchangeHistoryRepo {
+        head_available: true,
+    })
+}
+
+/// Disabled/unwarmed finalized-history source for monitor degradation tests.
+#[must_use]
+pub fn unavailable_history_repo() -> Arc<dyn ExchangeHistoryRepository> {
+    Arc::new(LiveExchangeHistoryRepo {
+        head_available: false,
+    })
 }
 
 /// Enabled finalized-history policy for fixtures with accepted history facts.
@@ -438,6 +574,7 @@ impl QuantFactReadRepository for ConfigurableFactRead {
     async fn market_execution_window(
         &self,
         market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,
@@ -462,24 +599,32 @@ impl QuantFactReadRepository for ConfigurableFactRead {
     async fn market_executions_between(
         &self,
         market_ids: Vec<MarketId>,
+        history_chunks: Vec<HistorySealChunkRef>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Vec<MarketExecutionRow>, StorageError> {
         self.inner
-            .market_executions_between(market_ids, from_ms, to_ms, decision_at_ms)
+            .market_executions_between(market_ids, history_chunks, from_ms, to_ms, decision_at_ms)
             .await
     }
 
     async fn execution_participants_between(
         &self,
         market_ids: Vec<MarketId>,
+        history_chunks: Vec<HistorySealChunkRef>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Vec<ExecutionParticipantRow>, StorageError> {
         self.inner
-            .execution_participants_between(market_ids, from_ms, to_ms, decision_at_ms)
+            .execution_participants_between(
+                market_ids,
+                history_chunks,
+                from_ms,
+                to_ms,
+                decision_at_ms,
+            )
             .await
     }
 

@@ -2,7 +2,7 @@
 
 use actix_web::{
     http::Method,
-    web::{Data, Path},
+    web::{Data, Path, Query},
 };
 use chrono::Utc;
 use quant_pivot_models::{
@@ -13,8 +13,14 @@ use quant_pivot_models::{
             FreshBootRunDetailView, FreshBootRunEventView, FreshBootRunProgressView,
             RetryFreshBootRunRequest, SetKillSwitchRequest, SupersedeFreshBootRunRequest,
             SwitchQuantModeRequest, SwitchSettlementWritePolicyRequest, SystemStatusView,
+            system::{
+                ExchangeHistoryQuarantinePageView, ExchangeHistoryQuarantineQuery,
+                ExchangeHistoryQuarantineView, FreshBootCapabilitySummary,
+            },
         },
-        data_plane::{ExchangeHistoryFrontier, ExchangeHistoryFrontierProgress},
+        data_plane::{
+            ExchangeHistoryFrontier, ExchangeHistoryFrontierProgress, ExchangeHistoryQuarantineRead,
+        },
         governance::{HealthReport, KillSwitchView, RuntimeControlSnapshot},
         ports::{QuantModeTransitionReport, SetKillSwitchCommand},
         quant::{FreshBootRunContract, SupersedeFreshBootRun},
@@ -53,6 +59,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/system/exchange-history",
             Rule::ResourceOp(ResourceType::System, Operation::Read),
             exchange_history,
+        ),
+        spec(
+            Method::GET,
+            "/system/exchange-history/quarantines",
+            Rule::ResourceOp(ResourceType::System, Operation::Read),
+            exchange_history_quarantines,
         ),
         spec(
             Method::GET,
@@ -140,6 +152,50 @@ pub async fn exchange_history(
     WebResponse::ok(state.exchange_history_progress.snapshot())
 }
 
+pub async fn exchange_history_quarantines(
+    state: Data<AppState>,
+    query: Query<ExchangeHistoryQuarantineQuery>,
+) -> Result<WebResponse<ExchangeHistoryQuarantinePageView>, WebError> {
+    let query = query.into_inner();
+    let limit = query.normalized_limit().ok_or_else(|| {
+        WebError::BadRequest(format!(
+            "limit must be between 1 and {}",
+            ExchangeHistoryQuarantineQuery::MAX_LIMIT
+        ))
+    })?;
+    let fetch_limit = limit
+        .checked_add(1)
+        .ok_or_else(|| WebError::BadRequest("quarantine page limit overflowed".to_owned()))?;
+    let mut records = state
+        .exchange_history
+        .page_quarantine(ExchangeHistoryQuarantineRead {
+            status: query.status,
+            frontier: query.frontier,
+            kind: query.kind,
+            after: query.after,
+            limit: fetch_limit,
+        })
+        .await?;
+    let has_more = records.len()
+        > usize::try_from(limit)
+            .map_err(|error| WebError::BadRequest(format!("invalid page limit: {error}")))?;
+    records.truncate(
+        usize::try_from(limit)
+            .map_err(|error| WebError::BadRequest(format!("invalid page limit: {error}")))?,
+    );
+    let items = records
+        .into_iter()
+        .map(ExchangeHistoryQuarantineView::from)
+        .collect::<Vec<_>>();
+    let next_after = has_more
+        .then(|| items.last().map(|item| item.quarantine_id))
+        .flatten();
+    Ok(WebResponse::ok(ExchangeHistoryQuarantinePageView {
+        items,
+        next_after,
+    }))
+}
+
 pub async fn fresh_boot(
     state: Data<AppState>,
 ) -> Result<WebResponse<FreshBootProgressView>, WebError> {
@@ -161,7 +217,6 @@ pub async fn fresh_boot(
             Some(id) => state.fresh_boot_datasets.find_by_id(&id).await?,
             None => None,
         };
-        let manual_report_ready = run.manual_report_ready_at.is_some();
         profiles.push(FreshBootProfileProgressView {
             run: run.into(),
             last_event,
@@ -169,12 +224,14 @@ pub async fn fresh_boot(
             training_sample_count: training.and_then(|dataset| dataset.sample_count),
             calibration_dataset_status: calibration.as_ref().map(|dataset| dataset.status),
             calibration_sample_count: calibration.and_then(|dataset| dataset.sample_count),
-            manual_report_ready,
         });
     }
+    let exchange_history = state.exchange_history_progress.snapshot();
+    let capability = FreshBootCapabilitySummary::from_profiles(&exchange_history, &profiles);
     Ok(WebResponse::ok(FreshBootProgressView {
         observed_at: Utc::now(),
-        exchange_history: state.exchange_history_progress.snapshot(),
+        exchange_history,
+        capability,
         profiles,
     }))
 }

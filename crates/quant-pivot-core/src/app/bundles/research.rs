@@ -149,6 +149,8 @@ pub struct ResearchBundle {
     pub training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
     /// Server-owned point-in-time source-slice materialization ledger.
     pub source_slice_repo: Arc<dyn SourceSliceRepository>,
+    /// Immutable fit/serving history seals for every execution-history consumer.
+    pub exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
     /// Governed executable trade-policy catalog.
     pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
     /// Append-only backtest-report ledger persistence.
@@ -216,6 +218,11 @@ struct ModelResearchRepos {
     model_registry: Arc<dyn ModelRegistryRepository>,
     calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     shadow_comparison: Arc<dyn ShadowComparisonRepository>,
+}
+
+struct PreimageServices {
+    trade_policy: Arc<TradePolicyPreimageVerifier>,
+    serving: Arc<ModelServingPreimageService>,
 }
 
 #[derive(Clone, Copy)]
@@ -339,6 +346,38 @@ fn assemble_model_repositories(deps: &ResearchBundleDeps<'_>) -> ModelResearchRe
     }
 }
 
+fn assemble_preimage_services(
+    deps: &ResearchBundleDeps<'_>,
+    artifact_store: &Arc<dyn ArtifactStore>,
+    evidence: &ResearchEvidence,
+    offline: &OfflineResearchRepos,
+    model_registry: &Arc<dyn ModelRegistryRepository>,
+) -> PreimageServices {
+    let repos = &deps.infra.repos;
+    let trade_policy = Arc::new(TradePolicyPreimageVerifier::new(
+        TradePolicyPreimageVerifierDeps {
+            trade_policy_repo: Arc::clone(&repos.trade_policy) as Arc<dyn TradePolicyRepository>,
+            dataset_repo: Arc::clone(&offline.training_dataset),
+            model_registry_repo: Arc::clone(model_registry),
+            evidence: Arc::clone(&evidence.trade_policy),
+        },
+    ));
+    let serving = Arc::new(ModelServingPreimageService::new(ModelServingPreimageDeps {
+        model_registry_repo: Arc::clone(model_registry),
+        dataset_repo: Arc::clone(&offline.training_dataset),
+        source_slice_repo: Arc::clone(&repos.source_slice) as Arc<dyn SourceSliceRepository>,
+        policy_repo: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
+        calibration_repo: Arc::clone(&repos.calibration_artifact)
+            as Arc<dyn CalibrationArtifactRepository>,
+        trade_policy_preimages: Arc::clone(&trade_policy),
+        artifact_store: Arc::clone(artifact_store),
+    }));
+    PreimageServices {
+        trade_policy,
+        serving,
+    }
+}
+
 impl ResearchBundle {
     /// Build the research bundle from deploy config plus wired infra/data handles.
     ///
@@ -364,27 +403,16 @@ impl ResearchBundle {
             shadow_comparison: shadow_comparison_repo,
         } = assemble_model_repositories(deps);
         let offline = Self::assemble_offline_repositories(deps);
-        let trade_policy_preimages = Arc::new(TradePolicyPreimageVerifier::new(
-            TradePolicyPreimageVerifierDeps {
-                trade_policy_repo: Arc::clone(&repos.trade_policy)
-                    as Arc<dyn TradePolicyRepository>,
-                dataset_repo: Arc::clone(&offline.training_dataset),
-                model_registry_repo: Arc::clone(&model_registry_repo),
-                evidence: Arc::clone(&evidence.trade_policy),
-            },
-        ));
-        let serving_preimages =
-            Arc::new(ModelServingPreimageService::new(ModelServingPreimageDeps {
-                model_registry_repo: Arc::clone(&model_registry_repo),
-                dataset_repo: Arc::clone(&offline.training_dataset),
-                source_slice_repo: Arc::clone(&repos.source_slice)
-                    as Arc<dyn SourceSliceRepository>,
-                policy_repo: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
-                calibration_repo: Arc::clone(&repos.calibration_artifact)
-                    as Arc<dyn CalibrationArtifactRepository>,
-                trade_policy_preimages: Arc::clone(&trade_policy_preimages),
-                artifact_store: Arc::clone(&artifact_store),
-            }));
+        let PreimageServices {
+            trade_policy: trade_policy_preimages,
+            serving: serving_preimages,
+        } = assemble_preimage_services(
+            deps,
+            &artifact_store,
+            &evidence,
+            &offline,
+            &model_registry_repo,
+        );
         let runtime_registry = Arc::new(ModelServingRuntimeRegistry::new(
             deps.deploy.research.model_serving_registry,
             Arc::clone(&serving_preimages),
@@ -471,6 +499,8 @@ impl ResearchBundle {
             model_runner,
             training_dataset_repo: offline.training_dataset,
             source_slice_repo: Arc::clone(&repos.source_slice) as Arc<dyn SourceSliceRepository>,
+            exchange_history_repo: Arc::clone(&repos.exchange_history)
+                as Arc<dyn ExchangeHistoryRepository>,
             trade_policy_repo: Arc::clone(&repos.trade_policy) as Arc<dyn TradePolicyRepository>,
             backtest_report_repo: offline.backtest_report,
             backtest_path_set_repo: Arc::clone(&offline.backtest_path_set),
@@ -520,6 +550,7 @@ impl ResearchBundle {
                 model_registry: Arc::clone(&self.model_registry_repo),
                 trade_policy_repo: Arc::clone(&self.trade_policy_repo),
                 calibration_repo: Arc::clone(&self.calibration_artifact_repo),
+                exchange_history_repo: Arc::clone(&self.exchange_history_repo),
             },
             wire.config,
             wire.max_spine_samples,
@@ -635,6 +666,7 @@ impl ResearchBundle {
             ModelRouteBootstrapServiceDeps {
                 route_evidence: Arc::clone(&evidence),
                 path_sets: Arc::clone(&offline.backtest_path_set),
+                history: Arc::clone(&repos.exchange_history) as Arc<dyn ExchangeHistoryRepository>,
                 backtests: Arc::clone(&offline.backtest_report),
                 cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
                 model_governance: Arc::clone(model_governance),

@@ -28,6 +28,7 @@ pub struct Model {
     pub continuity_block: Option<i64>,
     pub continuity_hash: Option<String>,
     pub effective_through_at: Option<DateTimeWithTimeZone>,
+    pub state_revision: Option<i64>,
     pub accepted_at: Option<DateTimeWithTimeZone>,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,

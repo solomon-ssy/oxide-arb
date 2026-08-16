@@ -106,6 +106,9 @@ pub fn run() -> Result<()> {
     violations.extend(validate_serving_dead_semantics(&metadata.workspace_root)?);
     violations.extend(validate_model_serving_registry(&metadata.workspace_root)?);
     violations.extend(validate_model_category_routes(&metadata.workspace_root)?);
+    violations.extend(validate_execution_history_queries(
+        &metadata.workspace_root,
+    )?);
     if violations.is_empty() {
         println!("architecture check passed");
         return Ok(());
@@ -317,6 +320,89 @@ fn read_architecture_source(
     let path = workspace_root.join(relative_path);
     let source = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     Ok((path, source))
+}
+
+fn validate_execution_history_queries(workspace_root: &Path) -> Result<Vec<String>> {
+    const SOURCE_ROOTS: &[&str] = &[
+        "crates/quant-pivot-api/src",
+        "crates/quant-pivot-bin/src",
+        "crates/quant-pivot-core/src",
+        "crates/quant-pivot-repository/src",
+        "crates/quant-pivot-research/src",
+        "crates/quant-pivot-storage/src",
+        "crates/quant-pivot-web/src",
+    ];
+    const EXECUTION_TABLES: &[&str] = &[
+        "quant_exchange_log_raw",
+        "quant_exchange_event",
+        "quant_exchange_match",
+        "quant_market_execution",
+        "quant_execution_participant",
+    ];
+    const ACTIVE_PREDICATE: &str = "argMax(active, state_revision) = 1";
+
+    let mut paths = Vec::new();
+    for root in SOURCE_ROOTS {
+        collect_contract_sources(&workspace_root.join(root), &mut paths)?;
+    }
+    paths.sort();
+    let mut violations = Vec::new();
+    let mut serving_query_count = 0_usize;
+    for path in paths {
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let queries = match path.extension().and_then(|extension| extension.to_str()) {
+            Some("rs") => {
+                let syntax = syn::parse_file(&source)
+                    .with_context(|| format!("parse {}", path.display()))?;
+                let mut visitor = ExecutionHistoryQueryVisitor::default();
+                visitor.visit_file(&syntax);
+                visitor.queries
+            }
+            Some("sql") => source
+                .split(';')
+                .filter(|statement| statement.to_ascii_uppercase().contains("SELECT"))
+                .map(str::to_owned)
+                .collect(),
+            _ => continue,
+        };
+        for query in queries {
+            if !EXECUTION_TABLES.iter().any(|table| query.contains(table)) {
+                continue;
+            }
+            serving_query_count = serving_query_count.saturating_add(1);
+            if !query.contains(ACTIVE_PREDICATE) {
+                violations.push(format!(
+                    "{} contains an execution-history SELECT without the active state-revision predicate",
+                    path.display()
+                ));
+            }
+        }
+    }
+    if serving_query_count == 0 {
+        violations.push(
+            "no production execution-history serving SELECT was found for the active-revision contract"
+                .to_owned(),
+        );
+    }
+    Ok(violations)
+}
+
+#[derive(Default)]
+struct ExecutionHistoryQueryVisitor {
+    queries: Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for ExecutionHistoryQueryVisitor {
+    fn visit_lit(&mut self, literal: &'ast Lit) {
+        if let Lit::Str(value) = literal {
+            let query = value.value();
+            if query.to_ascii_uppercase().contains("SELECT") {
+                self.queries.push(query);
+            }
+        }
+        visit::visit_lit(self, literal);
+    }
 }
 
 fn validate_removed_contract(
@@ -1157,16 +1243,16 @@ fn validate_category_runtime(
         (
             report_path,
             report,
-            "active_route_requirements(ActiveRouteRequirementsRequest {",
+            "available_route_requirements(&context.version)",
             1,
-            "the report must resolve all represented Routes before model-dependent filtering",
+            "the report must pin the complete active Route set before candidate selection",
         ),
         (
             report_path,
             report,
-            "policy: &context.version,",
+            "context.version.snapshot_hash,\n                primary_route,\n                &active_routes,",
             1,
-            "the report must resolve serving from the frozen durable policy artifact",
+            "the immutable universe hash must bind the frozen durable policy artifact",
         ),
         (
             report_path,

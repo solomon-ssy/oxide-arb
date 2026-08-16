@@ -5,8 +5,9 @@ use quant_pivot_models::{
     enums::{common::MarketCategory, model::ModelFamily},
     types::{
         CRYPTO_PRICE_15M_HORIZON_SECS, ContentHash, ModelInputContract, ModelSpecId,
-        ModelTrainingContract, POOLED_1H_HORIZON_SECS, ResearchProfileRef, SchemaVersion,
-        WEATHER_FORECAST_24H_HORIZON_SECS, builtin_research_profiles,
+        ModelTrainingContract, POOLED_1H_HORIZON_SECS, POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID,
+        ResearchProfileRef, SchemaVersion, WEATHER_FORECAST_24H_HORIZON_SECS,
+        builtin_research_profiles,
         model_spec::{ModelSpecDefinition, ModelSpecThesis},
     },
 };
@@ -56,6 +57,17 @@ pub fn pooled_profile_ref() -> ResearchProfileRef {
                 && profile.spec.feature_contract.requires_l2()
         })
         .expect("pooled ResearchProfile")
+        .profile_ref
+}
+
+/// Exact built-in pooled `ReportOnly` bootstrap `ResearchProfile` reference.
+#[must_use]
+pub fn pooled_bootstrap_profile_ref() -> ResearchProfileRef {
+    builtin_research_profiles()
+        .expect("built-in ResearchProfiles")
+        .into_iter()
+        .find(|profile| profile.profile_ref.id.as_str() == POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID)
+        .expect("pooled bootstrap ResearchProfile")
         .profile_ref
 }
 

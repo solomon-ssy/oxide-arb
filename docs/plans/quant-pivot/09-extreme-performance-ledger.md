@@ -214,16 +214,14 @@
 
 ### PERF-09
 
-- [x] 盘点 MarketWs LastTrade 当前 ledger commit 后的第二次 DurableWriter ACK 与 trade tape schema。
-- [x] 创建 `quant_book_l2_ledger` → `quant_trade_tape` materialized view，只投影 `LastTrade`。
-- [x] 删除 canonical MarketWs `write_last_trade_projection`、逐 row ACK 与 source-event 字符串格式化。
-- [x] 保留 OnChain trade tape 直接写路径并验证 source 语义隔离。
-- [x] 验证每个 LastTrade 逻辑投影一次、重试幂等/去重契约、workspace Clippy 与 architecture check。
+- [x] `quant_book_l2_ledger` 是 MarketWs `LastTrade` 的唯一事实 owner；删除第二次 DurableWriter ACK、派生表和兼容 reader。
+- [x] finalized exchange history 独立投影链上 V1/V2 execution 与 participant 事实，不消费 MarketWs `LastTrade` 作为替代来源。
+- [x] 两条事实链分别验证重试幂等、去重、hash、PIT availability 与 source 语义隔离；禁止 dual write。
 - [x] manifest 从隔离的 ClickHouse 26.5 clean database 实际 DDL 再生成；临时数据库随后删除，未触碰现有 `quant_pivot` 数据。
-- [x] `quant_book_l2_ledger` 与 `quant_trade_tape` 启用 10,000-block non-replicated dedup window；async writer 显式设置 `async_insert=1`、`wait_for_async_insert=1`、`async_insert_deduplicate=1` 与 100ms flush timeout。
+- [x] `quant_book_l2_ledger` 启用 10,000-block non-replicated dedup window；async writer 显式设置 `async_insert=1`、`wait_for_async_insert=1`、`async_insert_deduplicate=1` 与 100ms flush timeout。
+- [x] execution history 使用 append-only acceptance revision、`FitSeal` 与 `ServingHeadSeal`；所有 serving query 同时绑定 exact chunk set 和 active revision predicate。
 - [x] runtime、schema plan/apply/verify/manifest 对 ClickHouse `<26.1` fail closed；parser/版本门槛单测通过。
-- [x] 真实 `clickhouse-server:26.5` infrastructure suite：重复提交相同 LastTrade 两次后 ledger=1、trade tape=1，且 hash、side、price、size、fee、coverage、session/sequence 全字段投影正确；全套 1/1 scenario suite 通过。
-- [x] `cargo test -p quant-pivot-core book_fact_writer` 10 passed；`data_pipeline` 5 passed；`cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo xtask architecture check` 通过。
+- [x] `cargo test -p quant-pivot-core book_fact_writer`、execution-history grammar/rewind/seal tests、workspace Clippy 与 architecture check 构成当前恢复门禁。
 
 ### PERF-10
 

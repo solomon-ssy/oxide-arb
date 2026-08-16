@@ -52,7 +52,7 @@ use quant_pivot_models::{
         ExecutionParticipantRow, MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow,
     },
     domain::{
-        data_plane::DecisionClock,
+        data_plane::{DecisionClock, HistorySealChunkRef},
         market::{
             EventRegistryInfo, MarketRegistryInfo, TokenInfo,
             book::{BookLevel, BookSnapshot},
@@ -104,8 +104,8 @@ use quant_pivot_system_tests::{
     support::{
         catalog_fixtures::{make_event, make_market},
         execution_history_fixtures::{
-            ConfigurableFactRead, live_history_config, live_history_repo,
-            whale_concentration_by_market,
+            ConfigurableFactRead, live_activation_head, live_history_config, live_history_repo,
+            unavailable_history_repo, whale_concentration_by_market,
         },
         fact_sink::DiscardFactWriter,
         factor_definitions::register_all_factor_definitions,
@@ -183,6 +183,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn market_execution_window(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -203,6 +204,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn market_executions_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -213,6 +215,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn execution_participants_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -520,6 +523,7 @@ impl WhaleTapeConcHarness {
 
         let domain = DomainConfig::disabled();
         let included = vec![CATALOG.selected_market()];
+        let execution_history_seal = live_activation_head();
         feature_pipeline
             .run(FeaturePipelineRequest {
                 included: &included,
@@ -534,9 +538,36 @@ impl WhaleTapeConcHarness {
                 pit: &self.live_pit,
                 decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
                 liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
+                execution_history_seal: Some(&execution_history_seal),
             })
             .await
             .expect("feature pipeline")
+    }
+
+    async fn assert_monitor_without_head(&self) {
+        let runtime = Arc::new(DecisionPolicySnapshot::default());
+        let monitor = CoreStructuralMonitor::new(
+            Arc::clone(&self.registry),
+            Arc::clone(&self.book_store),
+            Arc::new(FeatureWindowProvider::new(Arc::clone(&self.fact_read))),
+            unavailable_history_repo(),
+            Arc::new(FixedRuntimeConfig(runtime)),
+            live_history_config(),
+        );
+        let summary = monitor
+            .participant_concentration()
+            .await
+            .expect("an unwarmed serving head is an explicit unavailable monitor state");
+        let market = summary
+            .markets
+            .iter()
+            .find(|view| view.market_id == self.market_id)
+            .expect("active market remains visible while finalized history is unavailable");
+        assert_eq!(market.composite_raw, None);
+        assert_eq!(
+            market.missing_reason.as_deref(),
+            Some("execution_history_unavailable")
+        );
     }
 }
 
@@ -742,5 +773,6 @@ pub async fn whale_execution_history_monitor() {
 
     run_factor_round_concentration(&harness, &feature_result, expected_composite).await;
     assert_monitor_matches_canonical(&harness, expected_composite).await;
+    harness.assert_monitor_without_head().await;
     drop(harness);
 }

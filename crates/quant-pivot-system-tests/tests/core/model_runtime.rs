@@ -42,7 +42,7 @@ use quant_pivot_models::{
     },
     config::{ArtifactStoreDeployConfig, ClickHouseConfig},
     domain::{
-        data_plane::{DecisionBoundary, DecisionClock},
+        data_plane::{DecisionBoundary, DecisionClock, HistorySealChunkRef},
         governance::DecisionPolicySnapshotInfo,
         market::{
             EventRegistryInfo, MarketRegistryInfo, TokenInfo,
@@ -111,7 +111,7 @@ use quant_pivot_system_tests::{
         SelectorFixture,
         catalog_fixtures::{make_event, make_market},
         execution_history_fixtures::{
-            ConfigurableFactRead, live_history_config, live_history_repo,
+            ConfigurableFactRead, live_activation_head, live_history_config, live_history_repo,
             whale_concentration_by_market,
         },
         fact_sink::DiscardFactWriter,
@@ -178,6 +178,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn market_execution_window(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -198,6 +199,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn market_executions_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -208,6 +210,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn execution_participants_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -722,6 +725,7 @@ async fn build_cross_section_features(
         EXECUTION_STALENESS_SECS,
         EXECUTION_COVERAGE_RATIO,
     ]);
+    let execution_history_seal = live_activation_head();
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
@@ -734,6 +738,7 @@ async fn build_cross_section_features(
             pit: &live_pit,
             decision_policy_snapshot_id,
             liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
+            execution_history_seal: Some(&execution_history_seal),
         })
         .await
         .expect("feature pipeline");

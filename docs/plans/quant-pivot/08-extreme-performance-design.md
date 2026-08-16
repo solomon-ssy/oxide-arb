@@ -62,8 +62,9 @@ channel。只有 ClickHouse durable ack 后才按顺序应用订单簿并发布 
 
 `quant_book_l2_ledger` 同时承载 `Snapshot`、`Delta`、`TickSizeChange`、`Gap`
 和 `LastTrade`。盘口使用 typed Decimal arrays，hash 使用 `FixedString(32)`。
-MarketWs trade 由 ledger materialized view 派生到 `quant_trade_tape`，因此同一
-canonical batch 只等待一个 durable sink。
+MarketWs `LastTrade` 只保留在 canonical L2 ledger；参与者和成交结构特征来自
+独立的 finalized exchange-history 投影。两条事实链各自只有一个 durable owner，
+不得用 materialized view、dual write 或兼容 reader 合并语义。
 
 Hash 使用域分隔固定宽度编码：schema、UUID、shard、token、sequence、事件
 类型、时间和 variant 字段按固定顺序写入 BLAKE3。Price、Shares、Fee 分别

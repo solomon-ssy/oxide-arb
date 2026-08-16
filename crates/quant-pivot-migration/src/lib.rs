@@ -99,14 +99,6 @@ pub async fn inspect_preproduction_postgres(
             connection_count: 0,
         });
     }
-    let connection_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM pg_stat_activity \
-             WHERE datname = $1 AND pid <> pg_backend_pid()",
-    )
-    .bind(PREPRODUCTION_DATABASE)
-    .fetch_one(&maintenance)
-    .await
-    .map_err(migration_error("count PostgreSQL target connections"))?;
     let target_url = config
         .try_connection_url()
         .map_err(|error| StorageError::Migration(format!("build PG target URL: {error}")))?;
@@ -130,6 +122,13 @@ pub async fn inspect_preproduction_postgres(
     .await
     .map_err(migration_error("count PostgreSQL target objects"))?;
     target.close().await;
+    let connection_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM pg_stat_activity WHERE datname = $1",
+    )
+    .bind(PREPRODUCTION_DATABASE)
+    .fetch_one(&maintenance)
+    .await
+    .map_err(migration_error("count PostgreSQL target connections"))?;
     maintenance.close().await;
     Ok(PreproductionPostgresInventory {
         database_exists,

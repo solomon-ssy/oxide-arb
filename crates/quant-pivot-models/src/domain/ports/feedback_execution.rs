@@ -2209,6 +2209,7 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_error::feedback::FeedbackError;
     use serde_json::{from_value, json, to_value};
+    use uuid::Uuid;
 
     use super::{
         FEEDBACK_LEARNING_MAX_CANDIDATES, FeedbackCalibrationCommand, FeedbackCalibrationJobParams,
@@ -2300,6 +2301,8 @@ mod tests {
         ) -> DatasetSourceLineage {
             DatasetSourceLineage {
                 format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+                fit_seal_id: Uuid::from_u128(16).into(),
+                fit_seal_hash: hash(16),
                 source_slice_id: SourceSliceId::from_v7(),
                 source_slice_identity_hash: hash(2),
                 research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(

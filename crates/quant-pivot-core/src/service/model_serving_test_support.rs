@@ -49,6 +49,7 @@ use quant_pivot_research::{
         factor_heads::FactorHeadSpec,
     },
 };
+use uuid::Uuid;
 
 use crate::test_fixtures::model_spec_fixtures::model_spec_lineage_fixture;
 
@@ -218,6 +219,8 @@ impl FactorArtifactFixture {
             .expect("window end");
         let source_lineage = DatasetSourceLineage {
             format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            fit_seal_id: Uuid::from_u128(13).into(),
+            fit_seal_hash: content_hash("model-serving-test-fit-seal"),
             source_slice_id: SourceSliceId::from_v7(),
             source_slice_identity_hash: content_hash("model-serving-test-source-slice"),
             research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(

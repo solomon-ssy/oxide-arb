@@ -22,17 +22,17 @@ use quant_pivot_models::{
     runtime_config::DecisionPolicySnapshot,
     types::{
         ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
-        DatasetSourceLineage, DecisionPolicySnapshotId, ResearchEvaluationTrack,
+        DatasetSourceLineage, DecisionPolicySnapshotId, HistoryFitSealId, ResearchEvaluationTrack,
         ResearchProfileArtifact, ResearchProfileRef, SourceSliceManifest, SourceSliceManifestRef,
         TrainingDatasetId, TrainingSampleSource, TrainingSampleSources, Usd,
     },
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
-    FactorRepository, FeatureRepository, MarketLinkageRepository, MarketRepository,
-    ModelRegistryRepository, PolicyRepository, PositionRepository, QuantFactReadRepository,
-    RecommendationReportRepository, ServingEvidenceRepository, SourceSliceRepository,
-    TradePolicyRepository, TrainingDatasetRepository,
+    ExchangeHistoryRepository, FactorRepository, FeatureRepository, MarketLinkageRepository,
+    MarketRepository, ModelRegistryRepository, PolicyRepository, PositionRepository,
+    QuantFactReadRepository, RecommendationReportRepository, ServingEvidenceRepository,
+    SourceSliceRepository, TradePolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, training::DatasetPlanRequest};
 use tokio::time::{Instant, sleep};
@@ -63,6 +63,8 @@ pub(crate) struct FeedbackSourceFreeze<'a> {
     pub runtime: &'a DecisionPolicySnapshot,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
+    pub fit_seal_id: HistoryFitSealId,
+    pub fit_seal_hash: ContentHash,
     pub research_program_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
@@ -84,6 +86,7 @@ pub struct CoreTrainingDatasetPort {
     runtime_config: Arc<dyn PolicyRepository>,
     bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     source_slice_repo: Arc<dyn SourceSliceRepository>,
+    exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
     clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     recommendation_report_repo: Arc<dyn RecommendationReportRepository>,
     serving_evidence_repo: Arc<dyn ServingEvidenceRepository>,
@@ -136,6 +139,7 @@ impl CoreTrainingDatasetPort {
             runtime_config,
             bias_table_repo,
             source_slice_repo: Arc::clone(&research.source_slice_repo),
+            exchange_history_repo: Arc::clone(&research.exchange_history_repo),
             clob_market_info_repo: Arc::clone(&research.clob_market_info_repo),
             recommendation_report_repo: Arc::clone(&research.recommendation_report_repo),
             serving_evidence_repo: Arc::clone(&research.serving_evidence_repo),
@@ -177,6 +181,7 @@ impl CoreTrainingDatasetPort {
                 model_registry: Arc::clone(&self.model_registry),
                 trade_policy_repo: Arc::clone(&self.trade_policy_repo),
                 calibration_repo: Arc::clone(&self.bias_table_repo),
+                exchange_history_repo: Arc::clone(&self.exchange_history_repo),
             },
             TrainingDatasetBuildConfig {
                 features: runtime.profile_artifacts.features.definition,
@@ -205,6 +210,12 @@ impl CoreTrainingDatasetPort {
         request: &DatasetPlanRequest,
         verify_object_bytes: bool,
     ) -> QuantResult<()> {
+        self.exchange_history_repo
+            .validate_fit_seal(
+                request.source_lineage.fit_seal_id,
+                request.source_lineage.fit_seal_hash,
+            )
+            .await?;
         let profile = request
             .source_lineage
             .research_profile_artifact_id
@@ -306,6 +317,7 @@ impl CoreTrainingDatasetPort {
                         calibration: Arc::clone(&self.bias_table_repo),
                         artifacts: Arc::clone(&self.artifact_store),
                         ledger: Arc::clone(&self.source_slice_repo),
+                        exchange_history: Arc::clone(&self.exchange_history_repo),
                     },
                     runtime.profile_artifacts.domain.definition.clone(),
                     StdDuration::from_millis(
@@ -439,6 +451,8 @@ impl CoreTrainingDatasetPort {
             pit_cutoff: source_slice.pit_cutoff,
             decision_policy_snapshot_id: source_slice.decision_policy_snapshot_id,
             runtime_config_hash: source_slice.runtime_config_hash,
+            fit_seal_id: source_slice.fit_seal_id,
+            fit_seal_hash: source_slice.fit_seal_hash,
             reader_contract_version: source_slice.reader_contract_version.clone(),
             schema_contract_version: source_slice.schema_contract_version.clone(),
             source_schema_hash: DatasetSourceLineage::derive_schema_hash(source_manifest).map_err(
@@ -469,6 +483,8 @@ impl CoreTrainingDatasetPort {
             research_program_hash: request.research_program_hash,
             decision_policy_snapshot_id: request.decision_policy_snapshot_id,
             runtime_config_hash: request.runtime_config_hash,
+            fit_seal_id: request.fit_seal_id,
+            fit_seal_hash: request.fit_seal_hash,
             window_start: request.window_start,
             window_end: request.window_end,
             pit_cutoff: request.pit_cutoff,
@@ -603,6 +619,7 @@ fn derive_dataset_source_identity(
             &profile.profile_ref,
             &body.model_spec_id,
             body.purpose,
+            (body.fit_seal_id, body.fit_seal_hash),
             &body.decision_policy_snapshot_id,
             runtime_config_hash,
             body.window_start,
@@ -661,6 +678,8 @@ fn derive_dataset_source_identity(
         research_program_hash,
         decision_policy_snapshot_id: body.decision_policy_snapshot_id,
         runtime_config_hash: *runtime_config_hash,
+        fit_seal_id: body.fit_seal_id,
+        fit_seal_hash: body.fit_seal_hash,
         window_start: source_window_start,
         window_end: source_window_end,
         pit_cutoff: body.pit_cutoff,

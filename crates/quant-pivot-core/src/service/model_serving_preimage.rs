@@ -1138,6 +1138,8 @@ impl ModelServingPreimageService {
             research_program_hash: ledger.research_program_hash,
             decision_policy_snapshot_id: ledger.decision_policy_snapshot_id,
             runtime_config_hash: ledger.runtime_config_hash,
+            fit_seal_id: ledger.fit_seal_id,
+            fit_seal_hash: ledger.fit_seal_hash,
             window_start: ledger.window_start,
             window_end: ledger.window_end,
             pit_cutoff: ledger.pit_cutoff,
@@ -1153,6 +1155,8 @@ impl ModelServingPreimageService {
             || ledger.research_program_hash != lineage.research_program_hash
             || ledger.decision_policy_snapshot_id != lineage.decision_policy_snapshot_id
             || ledger.runtime_config_hash != lineage.runtime_config_hash
+            || ledger.fit_seal_id != lineage.fit_seal_id
+            || ledger.fit_seal_hash != lineage.fit_seal_hash
             || ledger.window_start != lineage.source_window_start
             || ledger.window_end != lineage.source_window_end
             || ledger.pit_cutoff != lineage.pit_cutoff

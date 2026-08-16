@@ -48,7 +48,7 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use super::{
     funnel::{PublishedRecommendationRef, ReportFunnelInput, build_report_market_funnel},
     types::{
-        ComposedReport, EmptyReportContext, NotificationRecommendation,
+        ComposedReport, EconomicTierBuildRejection, EmptyReportContext, NotificationRecommendation,
         PlannedRecommendationContract, PlannedReportRecommendation, ReportNotificationPayload,
         ReportTierRejection, ReportTrigger,
     },
@@ -74,6 +74,7 @@ pub struct ComposeReportInput<'a> {
     pub tiers: &'a [ExecutableEconomicTier],
     pub planned: &'a [PlannedReportRecommendation],
     pub tier_rejections: &'a [ReportTierRejection],
+    pub tier_build_rejections: &'a [EconomicTierBuildRejection],
     pub feature_rejected: &'a [RejectedMarket],
     pub model_decisions: &'a [ModelMarketDecision],
     pub captures: &'a HashMap<MarketId, MarketDecisionCapture>,
@@ -203,6 +204,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             model_decisions: input.model_decisions,
             tiers: input.tiers,
             tier_rejections: input.tier_rejections,
+            tier_build_rejections: input.tier_build_rejections,
             recommendations: &published,
             event_time: input.published_at,
         })?;

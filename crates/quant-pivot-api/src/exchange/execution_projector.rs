@@ -25,8 +25,9 @@ use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use super::{
-    CanonicalExchangeLog, EXCHANGE_CONTRACTS, ExchangeContract, ExchangeVersion, order_filled_v1,
-    order_filled_v2, orders_matched_v1, orders_matched_v2, polygon_chain_id,
+    constants::{EXCHANGE_CONTRACTS, ExchangeContract, ExchangeVersion},
+    history_client::{CanonicalExchangeLog, polygon_chain_id},
+    order_filled_v1, order_filled_v2, orders_matched_v1, orders_matched_v2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -37,12 +38,6 @@ pub enum ExecutionProjectionError {
     ContractInterval,
     #[error("selected exchange log failed its declared event ABI")]
     DecodeFailure,
-    #[error("OrdersMatched is missing its immediately preceding aggregate taker OrderFilled")]
-    MissingAggregate,
-    #[error("OrdersMatched aggregate fields disagree with OrderFilled")]
-    AggregateMismatch,
-    #[error("OrdersMatched has no maker-level OrderFilled executions")]
-    MissingMaker,
     #[error(
         "exchange execution token {token_id} is absent from the complete Gamma identity catalog"
     )]
@@ -55,6 +50,17 @@ pub enum ExecutionProjectionError {
     InvalidTimestamp,
     #[error("removed log cannot enter the accepted semantic projection")]
     RemovedLog,
+    #[error(
+        "invalid {version} exchange transaction grammar for {contract} transaction {transaction_hash} at log {log_index}: expected {expected}, got {actual}"
+    )]
+    InvalidTransactionGrammar {
+        version: &'static str,
+        contract: String,
+        transaction_hash: String,
+        log_index: u64,
+        expected: &'static str,
+        actual: &'static str,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -107,21 +113,37 @@ pub fn project_history(
         policy_hash,
         chunk_id,
     };
-    let observations = ProviderObservations {
+    let provider_observations = ProviderObservations {
         hypersync_at: hypersync_observed_at,
         attestor_at: attestor_observed_at,
     };
-    let mut decoded = Vec::with_capacity(logs.len());
-    let mut raw_logs = Vec::with_capacity(logs.len());
+    let mut observations = Vec::with_capacity(logs.len());
     for log in logs {
         if log.removed {
             return Err(ExecutionProjectionError::RemovedLog);
         }
         let contract = log.exchange_contract()?;
         let raw_log_hash = log.canonical_hash();
-        raw_logs.push(raw_row(log, contract, raw_log_hash, observations, context)?);
-        decoded.push(decode_event(log, contract, raw_log_hash, context)?);
+        observations.push((
+            raw_row(log, contract, raw_log_hash, provider_observations, context)?,
+            decode_event(log, contract, raw_log_hash, context)?,
+        ));
     }
+    observations.sort_by(|left, right| {
+        let left = left.1.row();
+        let right = right.1.row();
+        (
+            left.contract_address.as_str(),
+            left.transaction_hash.as_str(),
+            left.log_index,
+        )
+            .cmp(&(
+                right.contract_address.as_str(),
+                right.transaction_hash.as_str(),
+                right.log_index,
+            ))
+    });
+    let (raw_logs, decoded): (Vec<_>, Vec<_>) = observations.into_iter().unzip();
 
     let mut aggregate_ids = BTreeSet::new();
     let mut matched_fills = BTreeMap::new();
@@ -269,20 +291,64 @@ fn correlate_transaction(
     matched_fills: &mut BTreeMap<ChDigest, MatchedFill>,
     match_rows: &mut Vec<ExchangeMatchRow>,
 ) -> Result<(), ExecutionProjectionError> {
+    let Some(first) = events.first() else {
+        return Ok(());
+    };
+    if events
+        .windows(2)
+        .any(|pair| pair[0].row().log_index >= pair[1].row().log_index)
+    {
+        return Err(transaction_grammar_error(
+            first,
+            "strictly increasing unique log indexes",
+            "duplicate or non-increasing log index",
+        ));
+    }
+    let has_match = events
+        .iter()
+        .any(|event| matches!(event, DecodedEvent::Matched(_)));
+    if !has_match {
+        return match first.row().exchange_version {
+            ChExchangeVersion::V1 => Ok(()),
+            ChExchangeVersion::V2 => Err(transaction_grammar_error(
+                first,
+                "one or more complete matchOrders groups",
+                "standalone OrderFilled",
+            )),
+        };
+    }
     let mut maker_start = 0_usize;
     for (match_index, event) in events.iter().enumerate() {
         let DecodedEvent::Matched(match_event) = event else {
             continue;
         };
-        let aggregate_index = match_index
-            .checked_sub(1)
-            .ok_or(ExecutionProjectionError::MissingAggregate)?;
+        let aggregate_index = match_index.checked_sub(1).ok_or_else(|| {
+            transaction_grammar_error(
+                event,
+                "maker fills followed by aggregate taker fill and OrdersMatched",
+                "OrdersMatched without aggregate fill",
+            )
+        })?;
         let DecodedEvent::Fill(aggregate) = &events[aggregate_index] else {
-            return Err(ExecutionProjectionError::MissingAggregate);
+            return Err(transaction_grammar_error(
+                event,
+                "aggregate taker OrderFilled immediately before OrdersMatched",
+                "non-fill event before OrdersMatched",
+            ));
         };
-        validate_aggregate(aggregate, match_event)?;
+        if !validate_aggregate(aggregate, match_event) {
+            return Err(transaction_grammar_error(
+                event,
+                "aggregate taker fill matching OrdersMatched identity and amounts",
+                "mismatched aggregate fill",
+            ));
+        }
         if aggregate_index == maker_start {
-            return Err(ExecutionProjectionError::MissingMaker);
+            return Err(transaction_grammar_error(
+                event,
+                "at least one maker fill before the aggregate taker fill",
+                "empty maker fill set",
+            ));
         }
         let match_id = digest_parts(
             b"quant-pivot/exchange-match/v1\0",
@@ -294,7 +360,11 @@ fn correlate_transaction(
         let mut maker_count = 0_u32;
         for maker_event in &events[maker_start..aggregate_index] {
             let DecodedEvent::Fill(fill) = maker_event else {
-                return Err(ExecutionProjectionError::MissingMaker);
+                return Err(transaction_grammar_error(
+                    maker_event,
+                    "only maker OrderFilled events inside a match group",
+                    "nested or ambiguous OrdersMatched",
+                ));
             };
             matched_fills.insert(
                 fill.row.event_id,
@@ -332,13 +402,36 @@ fn correlate_transaction(
         });
         maker_start = match_index.saturating_add(1);
     }
+    if maker_start != events.len() {
+        return Err(transaction_grammar_error(
+            &events[maker_start],
+            "all fills consumed by complete matchOrders groups",
+            "unconsumed trailing OrderFilled",
+        ));
+    }
     Ok(())
 }
 
-fn validate_aggregate(
-    fill: &DecodedFill,
-    matched: &DecodedMatch,
-) -> Result<(), ExecutionProjectionError> {
+fn transaction_grammar_error(
+    event: &DecodedEvent,
+    expected: &'static str,
+    actual: &'static str,
+) -> ExecutionProjectionError {
+    let row = event.row();
+    ExecutionProjectionError::InvalidTransactionGrammar {
+        version: match row.exchange_version {
+            ChExchangeVersion::V1 => "v1",
+            ChExchangeVersion::V2 => "v2",
+        },
+        contract: row.contract_address.clone(),
+        transaction_hash: row.transaction_hash.clone(),
+        log_index: row.log_index,
+        expected,
+        actual,
+    }
+}
+
+fn validate_aggregate(fill: &DecodedFill, matched: &DecodedMatch) -> bool {
     let same_order = fill.order_hash == matched.order_hash;
     let same_taker = fill.maker == matched.taker;
     let common = same_order
@@ -349,11 +442,7 @@ fn validate_aggregate(
         && fill.row.taker_amount == matched.taker_amount.to_string();
     let assets = fill.row.maker_asset_id == matched.maker_asset_id
         && fill.row.taker_asset_id == matched.taker_asset_id;
-    if common && assets {
-        Ok(())
-    } else {
-        Err(ExecutionProjectionError::AggregateMismatch)
-    }
+    common && assets
 }
 
 fn execution_from_fill(
@@ -927,6 +1016,7 @@ mod tests {
         b256!("0202020202020202020202020202020202020202020202020202020202020202");
     const TAKER_HASH: B256 =
         b256!("0303030303030303030303030303030303030303030303030303030303030303");
+    const TX_HASH: B256 = b256!("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
 
     #[test]
     fn canonical_topics_match() {
@@ -1168,7 +1258,15 @@ mod tests {
 
         assert!(matches!(
             project(&logs),
-            Err(ExecutionProjectionError::AggregateMismatch)
+            Err(ExecutionProjectionError::InvalidTransactionGrammar {
+                version: "v2",
+                contract,
+                transaction_hash,
+                log_index: 2,
+                expected: "aggregate taker fill matching OrdersMatched identity and amounts",
+                actual: "mismatched aggregate fill",
+            }) if contract == format!("{:#x}", CTF_EXCHANGE_V2.address)
+                && transaction_hash == format!("{TX_HASH:#x}")
         ));
     }
 
@@ -1207,10 +1305,7 @@ mod tests {
                 "{:#x}",
                 b256!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
             ),
-            transaction_hash: format!(
-                "{:#x}",
-                b256!("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
-            ),
+            transaction_hash: format!("{TX_HASH:#x}"),
             transaction_index: 4,
             log_index,
             topics: topics

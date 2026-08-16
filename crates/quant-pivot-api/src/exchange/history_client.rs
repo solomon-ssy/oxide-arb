@@ -23,7 +23,7 @@ use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use super::EXCHANGE_CONTRACTS;
+use super::constants::EXCHANGE_CONTRACTS;
 
 const CHAIN_ID: u64 = 137;
 
@@ -131,6 +131,7 @@ pub struct ExtractedHistoryChunk {
     pub archive_height: u64,
     pub first_block: CanonicalBlockHeader,
     pub last_block: CanonicalBlockHeader,
+    pub confirmation_anchor: CanonicalBlockHeader,
     pub logs: Vec<CanonicalExchangeLog>,
     pub digest: HistoryDigest,
     pub continuity_proof: HistoryContinuityProof,
@@ -143,6 +144,7 @@ pub struct AttestedHistoryChunk {
     pub to_block: u64,
     pub first_block: CanonicalBlockHeader,
     pub last_block: CanonicalBlockHeader,
+    pub confirmation_anchor: CanonicalBlockHeader,
     pub logs: Vec<CanonicalExchangeLog>,
     pub digest: HistoryDigest,
     pub observed_at_millis: i64,
@@ -209,6 +211,10 @@ pub enum HistoryClientError {
     },
     #[error("archive RPC block-by-hash attestation failed")]
     BlockHashMismatch,
+    #[error("{provider} log block hash disagrees with header at block {number}")]
+    LogBlockHashMismatch { provider: &'static str, number: u64 },
+    #[error("{provider} header parent chain is broken at block {number}")]
+    BrokenParentChain { provider: &'static str, number: u64 },
 }
 
 pub struct ExchangeHistoryExtractor {
@@ -253,7 +259,7 @@ impl ExchangeHistoryExtractor {
             .ok_or_else(|| {
                 HistoryClientError::InvalidConfig("confirmation range overflow".to_owned())
             })?;
-        let end_exclusive = confirmation_end
+        let log_end_exclusive = to_block
             .checked_add(1)
             .ok_or_else(|| HistoryClientError::InvalidConfig("query range overflow".to_owned()))?;
         let addresses = EXCHANGE_CONTRACTS
@@ -275,10 +281,10 @@ impl ExchangeHistoryExtractor {
         let mut archive_height = 0_u64;
         let mut logs = Vec::new();
         let mut continuity_proof = None;
-        while cursor < end_exclusive {
+        while cursor < log_end_exclusive {
             let query = Query::new()
                 .from_block(cursor)
-                .to_block_excl(end_exclusive)
+                .to_block_excl(log_end_exclusive)
                 .where_logs(log_filter.clone())
                 .select_log_fields([
                     LogField::Address,
@@ -328,13 +334,14 @@ impl ExchangeHistoryExtractor {
                     first_parent_hash: guard.first_parent_hash.to_string(),
                 });
             }
-            cursor = response.next_block.min(end_exclusive);
+            cursor = response.next_block.min(log_end_exclusive);
         }
         let (header_archive_height, header_blocks, header_proof) = self
             .fetch_headers(from_block, confirmation_end, to_block)
             .await?;
         archive_height = archive_height.max(header_archive_height);
         let blocks = header_blocks;
+        validate_header_chain(&blocks, from_block, confirmation_end, "HyperSync")?;
         if continuity_proof.is_none() {
             continuity_proof = header_proof;
         }
@@ -344,12 +351,12 @@ impl ExchangeHistoryExtractor {
                 required_block: confirmation_end,
             });
         }
-        logs.retain(|log| log.block_number <= to_block);
         hydrate_log_times(&mut logs, &blocks, self.confirmation_blocks, "HyperSync")?;
         canonical_sort(&mut logs);
         enforce_budget(&logs, self.max_response_bytes)?;
         let first_block = required_block(&blocks, from_block, "HyperSync")?.clone();
         let last_block = required_block(&blocks, to_block, "HyperSync")?.clone();
+        let confirmation_anchor = required_block(&blocks, confirmation_end, "HyperSync")?.clone();
         let continuity_proof = continuity_proof.unwrap_or_else(|| HistoryContinuityProof {
             basis: HistoryContinuityProofBasis::HyperSyncBoundaryHeaders,
             attested_block_number: last_block.number,
@@ -363,6 +370,7 @@ impl ExchangeHistoryExtractor {
             archive_height,
             first_block,
             last_block,
+            confirmation_anchor,
             digest: canonical_digest(&logs),
             logs,
             continuity_proof,
@@ -566,7 +574,13 @@ impl ExchangeHistoryAttestor {
         to_block: u64,
     ) -> Result<AttestedHistoryChunk, HistoryClientError> {
         let mut logs = self.fetch_logs(from_block, to_block).await?;
-        let mut required_blocks = BTreeSet::from([from_block, to_block]);
+        let confirmation_anchor_number = to_block
+            .checked_add(self.confirmation_blocks)
+            .ok_or_else(|| {
+                HistoryClientError::InvalidConfig("attestor confirmation range overflow".to_owned())
+            })?;
+        let mut required_blocks =
+            BTreeSet::from([from_block, to_block, confirmation_anchor_number]);
         for log in &logs {
             required_blocks.insert(log.block_number);
             required_blocks.insert(
@@ -595,11 +609,14 @@ impl ExchangeHistoryAttestor {
         canonical_sort(&mut logs);
         let first_block = required_block(&blocks, from_block, "archive RPC")?.clone();
         let last_block = required_block(&blocks, to_block, "archive RPC")?.clone();
+        let confirmation_anchor =
+            required_block(&blocks, confirmation_anchor_number, "archive RPC")?.clone();
         Ok(AttestedHistoryChunk {
             from_block,
             to_block,
             first_block,
             last_block,
+            confirmation_anchor,
             digest: canonical_digest(&logs),
             logs,
             observed_at_millis: Utc::now().timestamp_millis(),
@@ -794,6 +811,7 @@ pub fn chunks_agree(extracted: &ExtractedHistoryChunk, attested: &AttestedHistor
         && extracted.digest == attested.digest
         && extracted.first_block == attested.first_block
         && extracted.last_block == attested.last_block
+        && extracted.confirmation_anchor == attested.confirmation_anchor
         && extracted.continuity_proof.first_block_number == extracted.from_block
         && extracted.continuity_proof.first_parent_hash == extracted.first_block.parent_hash
         && extracted.continuity_proof.attested_block_number >= extracted.to_block
@@ -891,6 +909,12 @@ fn hydrate_log_times(
 ) -> Result<(), HistoryClientError> {
     for log in logs {
         let block = required_block(blocks, log.block_number, provider)?;
+        if log.block_hash != block.hash {
+            return Err(HistoryClientError::LogBlockHashMismatch {
+                provider,
+                number: log.block_number,
+            });
+        }
         log.block_timestamp = block.timestamp;
         log.parent_block_hash.clone_from(&block.parent_hash);
         let confirmation_number = log.block_number.checked_add(confirmation_blocks).ok_or(
@@ -901,6 +925,30 @@ fn hydrate_log_times(
         )?;
         log.model_available_timestamp =
             required_block(blocks, confirmation_number, provider)?.timestamp;
+    }
+    Ok(())
+}
+
+fn validate_header_chain(
+    blocks: &BTreeMap<u64, CanonicalBlockHeader>,
+    from_block: u64,
+    through_block: u64,
+    provider: &'static str,
+) -> Result<(), HistoryClientError> {
+    let mut number = from_block;
+    let mut previous = required_block(blocks, number, provider)?;
+    while number < through_block {
+        number = number
+            .checked_add(1)
+            .ok_or(HistoryClientError::InvalidField {
+                provider,
+                field: "header chain range",
+            })?;
+        let current = required_block(blocks, number, provider)?;
+        if current.parent_hash != previous.hash {
+            return Err(HistoryClientError::BrokenParentChain { provider, number });
+        }
+        previous = current;
     }
     Ok(())
 }
@@ -1292,12 +1340,14 @@ mod tests {
     #[test]
     fn divergence_is_detected() {
         let boundary = header(42, &format!("0x{:064x}", 42));
+        let confirmation_anchor = header(54, &format!("0x{:064x}", 54));
         let extracted = ExtractedHistoryChunk {
             from_block: 42,
             to_block: 42,
             archive_height: 54,
             first_block: boundary.clone(),
             last_block: boundary.clone(),
+            confirmation_anchor: confirmation_anchor.clone(),
             logs: Vec::new(),
             digest: HistoryDigest([1; 32]),
             continuity_proof: HistoryContinuityProof {
@@ -1314,6 +1364,7 @@ mod tests {
             to_block: 42,
             first_block: boundary.clone(),
             last_block: boundary,
+            confirmation_anchor,
             logs: Vec::new(),
             digest: HistoryDigest([2; 32]),
             observed_at_millis: 2,

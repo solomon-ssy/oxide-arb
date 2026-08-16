@@ -247,11 +247,13 @@ mod tests {
         },
         types::{
             CalibrationArtifactId, ContentHash, ExecutionAccountId, ExecutionOrderId,
-            OrderIntentId, PayoutRatio, RecommendationId, RecommendationReportId, ReconciliationId,
-            SchemaVersion, ServingAuthority, Shares, TradePolicyArtifactId, Usd,
+            HistoryServingHeadSealId, OrderIntentId, PayoutRatio, RecommendationId,
+            RecommendationReportId, ReconciliationId, SchemaVersion, ServingAuthority, Shares,
+            TradePolicyArtifactId, Usd,
         },
     };
     use rust_decimal_macros::dec;
+    use uuid::Uuid;
 
     use super::evaluate_feedback_cohort as evaluate_snapshot;
     use crate::test_fixtures::{
@@ -323,6 +325,9 @@ mod tests {
             pit_lineage_digest: hash('8'),
             serving_contract_digest: hash('9'),
             recommendation_contract_hash: hash('7'),
+            report_universe_plan_hash: hash('a'),
+            history_serving_head_seal_id: HistoryServingHeadSealId::new(Uuid::from_u128(11)),
+            history_serving_head_seal_hash: hash('b'),
             serving_authority: ServingAuthority::ExecutionEligible,
         };
         let route_run = ReportRouteRunInfo {

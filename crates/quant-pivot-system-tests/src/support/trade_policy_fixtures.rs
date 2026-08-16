@@ -840,6 +840,8 @@ impl PolicyEvidenceFixture {
                         selection: TradePolicyFitSelection {
                             profile_ref: context.profile.profile_ref.clone(),
                             pit_cutoff: context.source_dataset.pit_cutoff,
+                            fit_seal_id: context.source_dataset.source_lineage.fit_seal_id,
+                            fit_seal_hash: context.source_dataset.source_lineage.fit_seal_hash,
                         },
                         evaluation_track: ResearchEvaluationTrack::SemiAutoCandidate,
                         candidates: candidates.to_vec(),

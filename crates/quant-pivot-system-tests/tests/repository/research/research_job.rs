@@ -20,7 +20,7 @@ use quant_pivot_models::{
         ResearchJobKind, ResearchJobStatus,
     },
     types::{
-        DecisionPolicySnapshotId, FeatureParityRunId, FeedbackCycleId, ModelSpecId,
+        ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeedbackCycleId, ModelSpecId,
         ResearchJobError, ResearchJobId, ResearchJobParams, ResearchJobProgress, RoleCode,
         SchemaVersion, TrainingDatasetId, TrainingSampleSources, WorkerId,
     },
@@ -34,6 +34,7 @@ use quant_pivot_repository::{
 };
 use quant_pivot_system_tests::{postgres::setup_pg, support::execution_pg_seed};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, IntoActiveModel, Statement};
+use uuid::Uuid;
 
 use super::feedback_boot_schema::{FeedbackSchemaFixture, prepare_fixture};
 
@@ -62,6 +63,8 @@ fn new_job(job_id: ResearchJobId) -> NewResearchJob {
             sample_sources: TrainingSampleSources::default(),
             reason: "pg-research-job-it".to_owned(),
             training_dataset_id: Some(TrainingDatasetId::from_v7()),
+            fit_seal_id: Uuid::now_v7().into(),
+            fit_seal_hash: ContentHash::from_bytes([3; 32]),
         }),
         requested_by: None,
         acting_role: RoleCode::new("system"),

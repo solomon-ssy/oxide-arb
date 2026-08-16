@@ -182,6 +182,7 @@ impl OfflinePitSelector {
             features: self.features.clone(),
             model_requirements: self.model_requirements.clone(),
             knowledge_lag_secs: self.knowledge_lag_secs,
+            route_availability: None,
         }
     }
 }

@@ -2,6 +2,7 @@ pub mod account;
 pub mod backtest;
 pub mod basis_alert;
 pub mod bias_table_fit;
+pub(crate) mod bootstrap_cpcv_evidence;
 pub mod calibration_shared;
 pub mod catalog_lifecycle;
 pub mod catalog_readiness;

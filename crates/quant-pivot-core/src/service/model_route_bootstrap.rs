@@ -17,19 +17,16 @@ use quant_pivot_models::{
             ModelBootstrapValidationEvidence, ModelRouteBootstrapPreflight,
             ModelRouteBootstrapPreflightInput, ModelVersionInfo, PortfolioScenarioEvidenceRegime,
             PortfolioScenarioRouteModelLineage, RepresentedRouteSet, RouteCompatibilityDigests,
-            RouteContractHash,
+            RouteContractHash, TrainingDatasetInfo,
         },
     },
     enums::{model::ModelFamily, quant::QuantRuntimeMode, runtime_config::ConfigResourceKind},
     runtime_config::{ActivePolicyBundle, BuyModelRoute, PortfolioScenarioModelArtifactBinding},
-    types::{
-        DecisionPolicySnapshotId, ModelVersionId, ServingAuthority, TrainingDatasetId,
-        backtest::CpcvFoldValidationRegime,
-    },
+    types::{ModelVersionId, ServingAuthority, backtest::CpcvFoldValidationRegime},
 };
 use quant_pivot_repository::traits::{
     BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
-    FeedbackCycleRepository, TrainingDatasetRepository,
+    ExchangeHistoryRepository, FeedbackCycleRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -40,6 +37,7 @@ use quant_pivot_research::{
 };
 
 use crate::service::{
+    bootstrap_cpcv_evidence::BootstrapCpcvEvidence,
     model_route_evidence::ModelRouteEvidenceService, portfolio_context::PromotedRouteContract,
 };
 
@@ -66,6 +64,7 @@ impl ModelRouteBootstrapPlan {
 pub struct ModelRouteBootstrapServiceDeps {
     pub route_evidence: Arc<ModelRouteEvidenceService>,
     pub path_sets: Arc<dyn BacktestPathSetRepository>,
+    pub history: Arc<dyn ExchangeHistoryRepository>,
     pub backtests: Arc<dyn BacktestReportRepository>,
     pub cycles: Arc<dyn FeedbackCycleRepository>,
     pub model_governance: Arc<dyn ModelGovernancePort>,
@@ -158,12 +157,7 @@ impl ModelRouteBootstrapService {
             ));
         }
         let BootstrapQualityEvidence { path_set, quality } = self
-            .quality_evidence(
-                &model,
-                training_dataset_id,
-                bundle.decision_policy_snapshot_id,
-                evaluated_at,
-            )
+            .quality_evidence(&model, &dataset, &bundle, evaluated_at)
             .await?;
         if !quality.quality_gate_report.passed {
             return Err(Self::invalid(format!(
@@ -291,8 +285,8 @@ impl ModelRouteBootstrapService {
     async fn quality_evidence(
         &self,
         model: &ModelVersionInfo,
-        training_dataset_id: TrainingDatasetId,
-        policy_snapshot_id: DecisionPolicySnapshotId,
+        dataset: &TrainingDatasetInfo,
+        bundle: &ActivePolicyBundle,
         evaluated_at: DateTime<Utc>,
     ) -> QuantResult<BootstrapQualityEvidence> {
         let path_set = self
@@ -306,14 +300,6 @@ impl ModelRouteBootstrapService {
         path_set
             .verify_hash()
             .map_err(|error| Self::invalid(error.to_string()))?;
-        if path_set.model_version_id != model.model_version_id
-            || path_set.training_dataset_id != training_dataset_id
-            || path_set.decision_policy_snapshot_id != policy_snapshot_id
-        {
-            return Err(Self::invalid(
-                "latest CPCV path set differs from the candidate or current policy snapshot",
-            ));
-        }
         let fold_regime = path_set
             .fold_artifacts
             .validation_regime()
@@ -322,6 +308,29 @@ impl ModelRouteBootstrapService {
             .profile_ref
             .resolve_builtin_research_profile()
             .map_err(Self::invalid)?;
+        let required_regime = match profile.spec.serving_authority {
+            ServingAuthority::ReportOnlyWithLiveL2 => CpcvFoldValidationRegime::PredictiveUtility,
+            ServingAuthority::ExecutionEligible => CpcvFoldValidationRegime::PortfolioEconomics,
+        };
+        let fit_seal = self
+            .deps
+            .history
+            .validate_fit_seal(
+                dataset.source_lineage.fit_seal_id,
+                dataset.source_lineage.fit_seal_hash,
+            )
+            .await?;
+        BootstrapCpcvEvidence {
+            path_set: &path_set,
+            model,
+            dataset,
+            fit_seal: &fit_seal,
+            profile: &profile,
+            policy_snapshot_id: bundle.decision_policy_snapshot_id,
+            policy_snapshot_hash: bundle.snapshot_hash,
+            required_regime,
+        }
+        .validate()?;
         let validation_evidence = match profile.spec.serving_authority {
             ServingAuthority::ReportOnlyWithLiveL2 => {
                 if fold_regime != CpcvFoldValidationRegime::PredictiveUtility {
@@ -346,7 +355,9 @@ impl ModelRouteBootstrapService {
                     .list_by_model_version(&model.model_version_id)
                     .await?
                     .into_iter()
-                    .find(|report| report.decision_policy_snapshot_id == policy_snapshot_id)
+                    .find(|report| {
+                        report.decision_policy_snapshot_id == bundle.decision_policy_snapshot_id
+                    })
                     .ok_or_else(|| {
                         Self::invalid(
                             "execution-eligible bootstrap has no portfolio backtest for the current policy snapshot",

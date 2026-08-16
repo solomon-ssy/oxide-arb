@@ -10,13 +10,14 @@ use crate::{
     hashing::CanonicalDigest,
     types::{
         ArtifactUri, CapabilityRegistryHashes, CatalogSyncBatchId, ContentHash,
-        DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId, ReaderContractVersion,
-        ResearchEvaluationTrack, ResearchInformationRegime, ResearchProfileArtifact,
-        ResearchProfileDataSource, ResearchProfileRef, SchemaContractVersion,
+        DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId, HistoryFitSealId,
+        ReaderContractVersion, ResearchEvaluationTrack, ResearchInformationRegime,
+        ResearchProfileArtifact, ResearchProfileDataSource, ResearchProfileRef,
+        SchemaContractVersion,
     },
 };
 
-pub const SOURCE_SLICE_MANIFEST_FORMAT_VERSION: u32 = 4;
+pub const SOURCE_SLICE_MANIFEST_FORMAT_VERSION: u32 = 5;
 
 /// Immutable artifact-store location and content identity of one source slice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +122,8 @@ pub struct SourceSliceManifest {
     pub schema_contract_version: SchemaContractVersion,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
+    pub fit_seal_id: HistoryFitSealId,
+    pub fit_seal_hash: ContentHash,
     pub dataset_format_version: u32,
     pub capability_registry_hashes: CapabilityRegistryHashes,
     pub pit_cutoffs: Vec<SourceSlicePitCutoff>,
@@ -433,6 +436,8 @@ mod tests {
             .collect();
         let manifest = SourceSliceManifest {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
+            fit_seal_id: HistoryFitSealId::from_v7(),
+            fit_seal_hash: hash(205),
             profile_ref: profile.profile_ref.clone(),
             evaluation_track: ResearchEvaluationTrack::SemiAutoCandidate,
             research_program_hash: program_hash,
@@ -491,6 +496,8 @@ mod tests {
         };
         let manifest = SourceSliceManifest {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
+            fit_seal_id: HistoryFitSealId::from_v7(),
+            fit_seal_hash: hash,
             profile_ref: ResearchProfileRef {
                 id: ResearchProfileId::new("test"),
                 version: 1,

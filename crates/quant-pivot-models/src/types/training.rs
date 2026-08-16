@@ -18,19 +18,19 @@ use crate::{
     hashing::CanonicalDigest,
     types::{
         ArtifactUri, BookSnapshotRef, ContentHash, DecisionPolicySnapshotId, EventId,
-        FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelSpecId,
-        ModelVersionId, PayoutRatio, ReaderContractVersion, RecommendationId,
-        RecommendationReportId, ReportDataQualitySnapshotId, ResearchProfileArtifactId,
-        SchemaContractVersion, SchemaVersion, SourceSliceId, SourceSliceManifest,
-        SourceSliceManifestRef, TokenId, TradePolicyArtifactId, TrainingDatasetId,
-        TrainingExampleId, factor::FactorServingPlane,
+        FactorDefinitionId, FeatureVectorId, HistoryFitSealId, MarketId, MarketSelectionId,
+        ModelRunId, ModelSpecId, ModelVersionId, PayoutRatio, ReaderContractVersion,
+        RecommendationId, RecommendationReportId, ReportDataQualitySnapshotId,
+        ResearchProfileArtifactId, SchemaContractVersion, SchemaVersion, SourceSliceId,
+        SourceSliceManifest, SourceSliceManifestRef, TokenId, TradePolicyArtifactId,
+        TrainingDatasetId, TrainingExampleId, factor::FactorServingPlane,
     },
 };
 
 /// Breaking dataset artifact and manifest wire version.
-pub const DATASET_ARTIFACT_FORMAT_VERSION: u32 = 3;
+pub const DATASET_ARTIFACT_FORMAT_VERSION: u32 = 4;
 /// Immutable source-lineage document version.
-pub const DATASET_SOURCE_LINEAGE_FORMAT_VERSION: u32 = 1;
+pub const DATASET_SOURCE_LINEAGE_FORMAT_VERSION: u32 = 2;
 /// Immutable feedback-cohort manifest version.
 pub const DATASET_COHORT_MANIFEST_FORMAT_VERSION: u32 = 1;
 /// Immutable included-row artifact version for a `ModelLearning` cohort.
@@ -169,6 +169,8 @@ pub struct DatasetSourceLineage {
     pub pit_cutoff: DateTime<Utc>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
+    pub fit_seal_id: HistoryFitSealId,
+    pub fit_seal_hash: ContentHash,
     pub reader_contract_version: ReaderContractVersion,
     pub schema_contract_version: SchemaContractVersion,
     pub source_schema_hash: ContentHash,
@@ -189,6 +191,8 @@ struct DatasetSourceLineageDocument {
     pit_cutoff: DateTime<Utc>,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     runtime_config_hash: ContentHash,
+    fit_seal_id: HistoryFitSealId,
+    fit_seal_hash: ContentHash,
     reader_contract_version: ReaderContractVersion,
     schema_contract_version: SchemaContractVersion,
     source_schema_hash: ContentHash,
@@ -254,6 +258,8 @@ impl DatasetSourceLineage {
             || manifest.pit_cutoff != self.pit_cutoff
             || manifest.decision_policy_snapshot_id != self.decision_policy_snapshot_id
             || manifest.runtime_config_hash != self.runtime_config_hash
+            || manifest.fit_seal_id != self.fit_seal_id
+            || manifest.fit_seal_hash != self.fit_seal_hash
             || manifest.reader_contract_version != self.reader_contract_version
             || manifest.schema_contract_version != self.schema_contract_version
             || manifest.capability_registry_hashes != self.capability_registry_hashes
@@ -281,6 +287,8 @@ impl TryFrom<DatasetSourceLineageDocument> for DatasetSourceLineage {
             pit_cutoff: document.pit_cutoff,
             decision_policy_snapshot_id: document.decision_policy_snapshot_id,
             runtime_config_hash: document.runtime_config_hash,
+            fit_seal_id: document.fit_seal_id,
+            fit_seal_hash: document.fit_seal_hash,
             reader_contract_version: document.reader_contract_version,
             schema_contract_version: document.schema_contract_version,
             source_schema_hash: document.source_schema_hash,

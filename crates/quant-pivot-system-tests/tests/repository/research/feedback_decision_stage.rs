@@ -152,23 +152,24 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgBacktestPathSetRepository, PgBacktestReportRepository, PgCalibrationArtifactRepository,
-        PgFeatureParityRepository, PgFeedbackCycleRepository, PgModelCandidateManifestRepository,
-        PgModelGovernanceAuditRepository, PgModelRegistryRepository,
-        PgModelRouteBootstrapRepository, PgModelRoutePromotionRepository,
-        PgModelRouteShadowBindingRepository, PgModelRunRepository, PgPolicyRepository,
-        PgPromotionPermitRepository, PgResearchJobRepository, PgRuntimeControlRepository,
-        PgShadowComparisonRepository, PgTrainingDatasetRepository,
+        PgExchangeHistoryRepository, PgFeatureParityRepository, PgFeedbackCycleRepository,
+        PgModelCandidateManifestRepository, PgModelGovernanceAuditRepository,
+        PgModelRegistryRepository, PgModelRouteBootstrapRepository,
+        PgModelRoutePromotionRepository, PgModelRouteShadowBindingRepository, PgModelRunRepository,
+        PgPolicyRepository, PgPromotionPermitRepository, PgResearchJobRepository,
+        PgRuntimeControlRepository, PgShadowComparisonRepository, PgTrainingDatasetRepository,
     },
     traits::{
         BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
-        CpcvPathSetCommit, FeatureParityLatchActor, FeatureParityRepository, FeedbackCycleClaim,
-        FeedbackCycleGeneration, FeedbackCycleLeaseGuard, FeedbackCycleRepository,
-        ModelCandidateManifestRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
-        ModelRouteBootstrapRepository, ModelRoutePromotionCommit, ModelRoutePromotionOutcome,
-        ModelRoutePromotionRepository, ModelRouteShadowBindingRepository, ModelRunRepository,
-        PolicyRepository, PromotionPermitIssueOutcome, PromotionPermitRepository,
-        PromotionPermitRevokeOutcome, ResearchJobEnqueueOutcome, ResearchJobRepository,
-        RuntimeControlRepository, TrainingDatasetRepository,
+        CpcvPathSetCommit, ExchangeHistoryRepository, FeatureParityLatchActor,
+        FeatureParityRepository, FeedbackCycleClaim, FeedbackCycleGeneration,
+        FeedbackCycleLeaseGuard, FeedbackCycleRepository, ModelCandidateManifestRepository,
+        ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRouteBootstrapRepository,
+        ModelRoutePromotionCommit, ModelRoutePromotionOutcome, ModelRoutePromotionRepository,
+        ModelRouteShadowBindingRepository, ModelRunRepository, PolicyRepository,
+        PromotionPermitIssueOutcome, PromotionPermitRepository, PromotionPermitRevokeOutcome,
+        ResearchJobEnqueueOutcome, ResearchJobRepository, RuntimeControlRepository,
+        TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -3953,6 +3954,8 @@ impl PromotionHarness {
                 route_evidence: Arc::clone(&permit_fixture.route_evidence),
                 path_sets: Arc::new(PgBacktestPathSetRepository::new(case.db.clone()))
                     as Arc<dyn BacktestPathSetRepository>,
+                history: Arc::new(PgExchangeHistoryRepository::new(case.db.clone()))
+                    as Arc<dyn ExchangeHistoryRepository>,
                 backtests: Arc::new(PgBacktestReportRepository::new(case.db.clone()))
                     as Arc<dyn BacktestReportRepository>,
                 cycles: Arc::clone(&case.cycles) as Arc<dyn FeedbackCycleRepository>,

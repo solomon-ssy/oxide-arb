@@ -28,7 +28,7 @@ use quant_pivot_models::{
     },
     domain::{
         api::CalibrationArtifactListQuery,
-        data_plane::DecisionClock,
+        data_plane::{DecisionClock, HistorySealChunkRef},
         market::{
             EventRegistryInfo, MarketRegistryInfo, TokenInfo,
             book::{BookLevel, BookSnapshot},
@@ -75,7 +75,7 @@ use quant_pivot_system_tests::{
     support::{
         catalog_fixtures::{make_event, make_market},
         execution_history_fixtures::{
-            ConfigurableFactRead, live_history_config, live_history_repo,
+            ConfigurableFactRead, live_activation_head, live_history_config, live_history_repo,
             whale_concentration_by_market,
         },
         fact_sink::RecordingFactWriter,
@@ -290,6 +290,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn market_execution_window(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -310,6 +311,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn market_executions_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -320,6 +322,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn execution_participants_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -564,6 +567,7 @@ pub async fn insufficient_vectors_audited_input() {
 
     let domain = DomainConfig::default();
     let included = vec![market];
+    let execution_history_seal = live_activation_head();
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
@@ -580,6 +584,7 @@ pub async fn insufficient_vectors_audited_input() {
             pit: &live_pit,
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
+            execution_history_seal: Some(&execution_history_seal),
         })
         .await
         .expect("pipeline");
@@ -648,6 +653,7 @@ pub async fn create_feature_vector_find() {
         features: features.clone(),
         model_requirements: ModelFeatureRequirements::generic_only(vec![names::book::BEST_BID]),
         knowledge_lag_secs: 0,
+        route_availability: None,
     };
 
     let boundary = DecisionClock::new(0)
@@ -691,6 +697,7 @@ pub async fn create_feature_vector_find() {
         finalized_exchange_history: live_history_config(),
     });
 
+    let execution_history_seal = live_activation_head();
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &snapshot.included,
@@ -703,6 +710,7 @@ pub async fn create_feature_vector_find() {
             pit: candidate_batch.snapshot_source.as_ref(),
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
+            execution_history_seal: Some(&execution_history_seal),
         })
         .await
         .expect("pipeline");

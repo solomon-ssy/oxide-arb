@@ -1,8 +1,9 @@
 //! Durable control-plane contracts for finalized exchange-history reconstruction.
 
 use chrono::{DateTime, Utc};
+use quant_pivot_error::hashing::CanonicalDigestError;
 use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -10,14 +11,18 @@ use crate::{
     clickhouse::ExecutionParticipantFactRow,
     entities::{
         quant_exchange_history_chunk, quant_exchange_history_plan,
-        quant_exchange_history_quarantine,
+        quant_exchange_history_quarantine, quant_history_fit_seal, quant_history_serving_head_seal,
     },
     enums::{
         clickhouse::{ChExchangeSide, ChExecutionParticipantRole},
         common::Side,
     },
+    hashing::CanonicalDigest,
     runtime_config::BuyModelRoute,
-    types::{ContentHash, EvmBlockHash, MarketId, Price, Shares, TokenId, Usd},
+    types::{
+        ContentHash, EvmBlockHash, HistoryFitSealId, HistoryServingHeadSealId, MarketId, Price,
+        Shares, TokenId, Usd,
+    },
 };
 
 /// Participant role for a canonical economic execution. Every accepted
@@ -139,6 +144,7 @@ pub enum ExchangeHistoryStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ColdStartSloStatus {
+    WarmingUp,
     OnTrack,
     Warning,
     Violation,
@@ -238,7 +244,7 @@ impl ExchangeHistoryFrontierProgress {
     pub const fn fresh_boot(now: DateTime<Utc>) -> Self {
         Self {
             stage: ExchangeHistoryStage::StartupProbe,
-            slo_status: ColdStartSloStatus::OnTrack,
+            slo_status: ColdStartSloStatus::WarmingUp,
             started_at: now,
             activation_from_block: None,
             accepted_through_block: None,
@@ -275,8 +281,8 @@ crate::pg_enum! {
 }
 
 crate::pg_enum! {
-    type_name = "qp_exchange_history_quarantine_reason",
-    pub enum ExchangeHistoryQuarantineReason {
+    type_name = "qp_exchange_history_quarantine_kind",
+    pub enum ExchangeHistoryQuarantineKind {
         ProviderMismatch => "provider_mismatch",
         DecodeFailure => "decode_failure",
         UnknownToken => "unknown_token",
@@ -286,6 +292,38 @@ crate::pg_enum! {
         ContractMismatch => "contract_mismatch",
         ArchiveProbeFailure => "archive_probe_failure",
     }
+}
+
+/// Strict evidence schema for every immutable exchange-history quarantine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
+pub enum ExchangeHistoryQuarantineEvidence {
+    ProviderMismatch {
+        extractor_digest: ContentHash,
+        attestor_digest: ContentHash,
+        extractor_count: u64,
+        attestor_count: u64,
+    },
+    ContinuityMismatch {
+        from_block: u64,
+        to_block: u64,
+        expected: String,
+        actual: String,
+    },
+    ProjectionFailure {
+        version: Option<String>,
+        contract_address: Option<String>,
+        transaction_hash: Option<String>,
+        log_index: Option<u64>,
+        token_id: Option<TokenId>,
+        expected: Option<String>,
+        actual: String,
+    },
+    ArchiveProbeFailure {
+        provider_id: String,
+        block_number: u64,
+        actual: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel)]
@@ -308,6 +346,7 @@ pub struct ExchangeHistoryChunkInfo {
     pub continuity_block: Option<i64>,
     pub continuity_hash: Option<EvmBlockHash>,
     pub effective_through_at: Option<DateTime<Utc>>,
+    pub state_revision: Option<i64>,
     pub accepted_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -317,7 +356,7 @@ info_from_model!(ExchangeHistoryChunkInfo, quant_exchange_history_chunk::Model, 
     chunk_id, frontier, from_block, to_block, status, attempt_count, hypersync_count,
     attestor_count, hypersync_digest, attestor_digest, first_block_hash, last_block_hash,
     archive_height, continuity_basis, continuity_block, continuity_hash, effective_through_at,
-    accepted_at, created_at, updated_at,
+    state_revision, accepted_at, created_at, updated_at,
 });
 
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
@@ -343,9 +382,163 @@ pub struct NewExchangeHistoryChunk {
     pub continuity_block: Option<i64>,
     pub continuity_hash: Option<EvmBlockHash>,
     pub effective_through_at: Option<DateTime<Utc>>,
+    pub state_revision: Option<i64>,
     pub accepted_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Exact accepted `ClickHouse` revision bound into either history seal family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistorySealChunkRef {
+    pub chunk_id: Uuid,
+    pub frontier: ExchangeHistoryFrontier,
+    pub state_revision: i64,
+    pub from_block: i64,
+    pub to_block: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::quant_history_fit_seal::Entity")]
+pub struct HistoryFitSealInfo {
+    pub fit_seal_id: HistoryFitSealId,
+    pub seal_hash: ContentHash,
+    pub plan_id: Uuid,
+    pub window_from_block: i64,
+    pub window_to_block: i64,
+    pub policy_hash: ContentHash,
+    pub profile_hash: ContentHash,
+    pub cohort_hash: ContentHash,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(HistoryFitSealInfo, quant_history_fit_seal::Model, {
+    fit_seal_id, seal_hash, plan_id, window_from_block, window_to_block,
+    policy_hash, profile_hash, cohort_hash, created_at,
+});
+
+#[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
+#[sea_orm(
+    active_model = "crate::entities::quant_history_fit_seal::ActiveModel",
+    exhaustive
+)]
+pub struct NewHistoryFitSeal {
+    pub fit_seal_id: HistoryFitSealId,
+    pub seal_hash: ContentHash,
+    pub plan_id: Uuid,
+    pub window_from_block: i64,
+    pub window_to_block: i64,
+    pub policy_hash: ContentHash,
+    pub profile_hash: ContentHash,
+    pub cohort_hash: ContentHash,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateHistoryFitSeal {
+    pub seal: NewHistoryFitSeal,
+    pub chunks: Vec<HistorySealChunkRef>,
+}
+
+impl CreateHistoryFitSeal {
+    pub fn derive_hash(&self) -> Result<ContentHash, CanonicalDigestError> {
+        CanonicalDigest::content_hash_json(&(
+            "history_fit_seal_v1",
+            self.seal.fit_seal_id,
+            self.seal.plan_id,
+            self.seal.window_from_block,
+            self.seal.window_to_block,
+            self.seal.policy_hash,
+            self.seal.profile_hash,
+            self.seal.cohort_hash,
+            &self.chunks,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryFitSeal {
+    pub seal: HistoryFitSealInfo,
+    pub chunks: Vec<HistorySealChunkRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::quant_history_serving_head_seal::Entity")]
+pub struct HistoryServingHeadSealInfo {
+    pub serving_head_seal_id: HistoryServingHeadSealId,
+    pub seal_hash: ContentHash,
+    pub plan_id: Uuid,
+    pub frontier: ExchangeHistoryFrontier,
+    pub previous_seal_id: Option<HistoryServingHeadSealId>,
+    pub window_from_block: i64,
+    pub accepted_through_block: i64,
+    pub effective_through_at: DateTime<Utc>,
+    pub policy_hash: ContentHash,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    HistoryServingHeadSealInfo,
+    quant_history_serving_head_seal::Model,
+    {
+        serving_head_seal_id,
+        seal_hash,
+        plan_id,
+        frontier,
+        previous_seal_id,
+        window_from_block,
+        accepted_through_block,
+        effective_through_at,
+        policy_hash,
+        created_at,
+    }
+);
+
+#[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
+#[sea_orm(
+    active_model = "crate::entities::quant_history_serving_head_seal::ActiveModel",
+    exhaustive
+)]
+pub struct NewHistoryServingHeadSeal {
+    pub serving_head_seal_id: HistoryServingHeadSealId,
+    pub seal_hash: ContentHash,
+    pub plan_id: Uuid,
+    pub frontier: ExchangeHistoryFrontier,
+    pub previous_seal_id: Option<HistoryServingHeadSealId>,
+    pub window_from_block: i64,
+    pub accepted_through_block: i64,
+    pub effective_through_at: DateTime<Utc>,
+    pub policy_hash: ContentHash,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateHistoryServingHeadSeal {
+    pub seal: NewHistoryServingHeadSeal,
+    pub chunks: Vec<HistorySealChunkRef>,
+}
+
+impl CreateHistoryServingHeadSeal {
+    pub fn derive_hash(&self) -> Result<ContentHash, CanonicalDigestError> {
+        CanonicalDigest::content_hash_json(&(
+            "history_serving_head_seal_v1",
+            self.seal.serving_head_seal_id,
+            self.seal.plan_id,
+            self.seal.frontier,
+            self.seal.previous_seal_id,
+            self.seal.window_from_block,
+            self.seal.accepted_through_block,
+            self.seal.effective_through_at,
+            self.seal.policy_hash,
+            &self.chunks,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryServingHeadSeal {
+    pub seal: HistoryServingHeadSealInfo,
+    pub chunks: Vec<HistorySealChunkRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel)]
@@ -353,14 +546,14 @@ pub struct NewExchangeHistoryChunk {
 pub struct ExchangeHistoryQuarantineInfo {
     pub quarantine_id: Uuid,
     pub chunk_id: Uuid,
-    pub reason: ExchangeHistoryQuarantineReason,
+    pub kind: ExchangeHistoryQuarantineKind,
+    pub evidence: ExchangeHistoryQuarantineEvidence,
     pub evidence_hash: ContentHash,
-    pub detail: String,
     pub quarantined_at: DateTime<Utc>,
 }
 
 info_from_model!(ExchangeHistoryQuarantineInfo, quant_exchange_history_quarantine::Model, {
-    quarantine_id, chunk_id, reason, evidence_hash, detail, quarantined_at,
+    quarantine_id, chunk_id, kind, evidence, evidence_hash, quarantined_at,
 });
 
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
@@ -371,9 +564,9 @@ info_from_model!(ExchangeHistoryQuarantineInfo, quant_exchange_history_quarantin
 pub struct NewExchangeHistoryQuarantine {
     pub quarantine_id: Uuid,
     pub chunk_id: Uuid,
-    pub reason: ExchangeHistoryQuarantineReason,
+    pub kind: ExchangeHistoryQuarantineKind,
+    pub evidence: ExchangeHistoryQuarantineEvidence,
     pub evidence_hash: ContentHash,
-    pub detail: String,
     pub quarantined_at: DateTime<Utc>,
 }
 
@@ -433,4 +626,32 @@ pub struct ResolveAcceptedHistoryRange {
     pub evidence_hash: ContentHash,
     pub actor: String,
     pub resolved_at: DateTime<Utc>,
+}
+
+/// Lifecycle filter for operator quarantine reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExchangeHistoryQuarantineStatus {
+    #[default]
+    Active,
+    Resolved,
+    All,
+}
+
+/// Stable `UUIDv7` keyset read contract for quarantine evidence.
+#[derive(Debug, Clone, Copy)]
+pub struct ExchangeHistoryQuarantineRead {
+    pub status: ExchangeHistoryQuarantineStatus,
+    pub frontier: Option<ExchangeHistoryFrontier>,
+    pub kind: Option<ExchangeHistoryQuarantineKind>,
+    pub after: Option<Uuid>,
+    pub limit: u64,
+}
+
+/// One quarantine joined to its exact chunk and optional replacement proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExchangeHistoryQuarantineRecord {
+    pub quarantine: ExchangeHistoryQuarantineInfo,
+    pub chunk: ExchangeHistoryChunkInfo,
+    pub resolution: Option<ExchangeHistoryQuarantineResolutionInfo>,
 }

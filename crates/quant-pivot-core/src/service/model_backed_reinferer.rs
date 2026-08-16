@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::{
     QuantError, QuantResult,
+    report::ReportError,
     storage::{StorageError, entity::QUANT_FACTOR},
 };
 use quant_pivot_models::{
@@ -292,14 +293,24 @@ impl LiveFeatureBuildRequest<'_> {
             )
             .with_source_evidence(evidence, false));
         }
-        let accepted = self
+        let serving_head = self
             .exchange_history_repo
-            .latest_accepted(ExchangeHistoryFrontier::Activation)
+            .serving_head_at(
+                ExchangeHistoryFrontier::Activation,
+                self.boundary.decision_at(),
+            )
+            .await?
+            .ok_or_else(|| ReportError::HistoryServingHeadUnavailable {
+                detail: "exit re-inference has no serving head at its decision boundary".to_owned(),
+            })?;
+        self.exchange_history_repo
+            .validate_serving_head(
+                serving_head.seal.serving_head_seal_id,
+                serving_head.seal.seal_hash,
+            )
             .await?;
-        let accepted_block = accepted
-            .as_ref()
-            .and_then(|row| u64::try_from(row.to_block).ok());
-        let accepted_through_at = accepted.as_ref().and_then(|row| row.effective_through_at);
+        let accepted_block = u64::try_from(serving_head.seal.accepted_through_block).ok();
+        let accepted_through_at = Some(serving_head.seal.effective_through_at);
         let source_available = accepted_through_at.is_some_and(|through| {
             through >= self.boundary.cutoff_for(DecisionSource::FinalizedExecution)
         });
@@ -308,7 +319,12 @@ impl LiveFeatureBuildRequest<'_> {
         let lookback = Duration::from_secs(self.features.structural.execution_window_secs);
         let mut windows = self
             .window_provider
-            .load_execution_windows(slice::from_ref(self.market), self.boundary, lookback)
+            .load_execution_windows(
+                slice::from_ref(self.market),
+                self.boundary,
+                lookback,
+                &serving_head.chunks,
+            )
             .await?;
         windows
             .remove(&self.market.market_id)

@@ -13,6 +13,7 @@ use quant_pivot_models::{
         MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
         WeatherForecastFactRow, WeatherObservationFactRow,
     },
+    domain::data_plane::HistorySealChunkRef,
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
         RecommendationReportId, TokenId,
@@ -52,6 +53,81 @@ impl ChQuantFactReadRepository {
     pub const fn new(pool: Arc<ClickHousePool>) -> Self {
         Self { pool }
     }
+
+    async fn validate_history_chunks(
+        &self,
+        chunks: &[HistorySealChunkRef],
+    ) -> Result<Vec<Uuid>, StorageError> {
+        if chunks.is_empty() {
+            return Err(StorageError::invariant_violation(
+                Some("quant_exchange_history_acceptance"),
+                "sealed execution-history read requires at least one chunk",
+            ));
+        }
+        let expected = chunks
+            .iter()
+            .map(|chunk| {
+                let revision = u64::try_from(chunk.state_revision).map_err(|error| {
+                    StorageError::invariant_violation(
+                        Some("quant_exchange_history_acceptance"),
+                        format!(
+                            "sealed chunk {} has invalid state revision {}: {error}",
+                            chunk.chunk_id, chunk.state_revision
+                        ),
+                    )
+                })?;
+                Ok((chunk.chunk_id, revision))
+            })
+            .collect::<Result<HashMap<_, _>, StorageError>>()?;
+        if expected.len() != chunks.len() {
+            return Err(StorageError::invariant_violation(
+                Some("quant_exchange_history_acceptance"),
+                "sealed execution-history chunk set contains duplicate ids",
+            ));
+        }
+        let chunk_ids = canonical_values(expected.keys().copied().collect::<Vec<_>>());
+        let mut actual = HashMap::with_capacity(chunk_ids.len());
+        for ids in query_chunks(
+            &chunk_ids,
+            |_| UUID_INLINE_BYTES,
+            "quant_exchange_history_acceptance",
+        )? {
+            let rows = MARKET_EXECUTION_WINDOW
+                .query(
+                    self.pool.client(),
+                    "SELECT chunk_id, argMax(state_revision, state_revision) AS active_state_revision \
+                     FROM quant_exchange_history_acceptance \
+                     WHERE chunk_id IN ? \
+                     GROUP BY chunk_id \
+                     HAVING argMax(active, state_revision) = 1",
+                )
+                .bind(ids.to_vec())
+                .fetch_all::<ActiveHistoryRevisionRow>()
+                .await?;
+            for row in rows {
+                if actual
+                    .insert(row.chunk_id, row.active_state_revision)
+                    .is_some()
+                {
+                    return Err(StorageError::invariant_violation(
+                        Some("quant_exchange_history_acceptance"),
+                        format!(
+                            "active history revision query duplicated chunk {}",
+                            row.chunk_id
+                        ),
+                    ));
+                }
+            }
+        }
+        if actual != expected {
+            return Err(StorageError::state_conflict(
+                "quant_exchange_history_acceptance",
+                None::<&Uuid>,
+                "sealed execution-history revisions are no longer the complete active set",
+            ));
+        }
+        Ok(chunk_ids)
+    }
 }
 
 fn validate_market_resolution(row: &MarketResolutionRow) -> Result<(), StorageError> {
@@ -64,6 +140,15 @@ fn validate_market_resolution(row: &MarketResolutionRow) -> Result<(), StorageEr
 
 #[async_trait]
 impl QuantFactReadRepository for ChQuantFactReadRepository {
+    async fn validate_execution_history_chunks(
+        &self,
+        history_chunks: Vec<HistorySealChunkRef>,
+    ) -> Result<(), StorageError> {
+        self.validate_history_chunks(&history_chunks)
+            .await
+            .map(drop)
+    }
+
     async fn report_market_funnel_counts(
         &self,
         report_id: &RecommendationReportId,
@@ -587,6 +672,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
     async fn market_execution_window(
         &self,
         market_ids: Vec<MarketId>,
+        history_chunks: Vec<HistorySealChunkRef>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,
@@ -595,16 +681,22 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         if market_ids.is_empty() {
             return Ok(Vec::new());
         }
+        let history_chunk_ids = self.validate_history_chunks(&history_chunks).await?;
         let mut rows = Vec::new();
         for markets in query_chunks(
             &market_ids,
             |market| market.as_str().len(),
             "quant_market_execution",
         )? {
-            let page = MARKET_EXECUTION_WINDOW
-                .query(
-                    self.pool.client(),
-                    "SELECT e.execution_id AS execution_id, e.market_id AS market_id, \
+            for history_ids in query_chunks(
+                &history_chunk_ids,
+                |_| UUID_INLINE_BYTES,
+                "quant_exchange_history_acceptance",
+            )? {
+                let page = MARKET_EXECUTION_WINDOW
+                    .query(
+                        self.pool.client(),
+                        "SELECT e.execution_id AS execution_id, e.market_id AS market_id, \
                      e.token_id AS token_id, p.participant_address AS participant_address, \
                      p.participant_role AS participant_role, e.side AS side, e.price AS price, \
                      e.size_shares AS size_shares, e.notional_usd AS notional_usd, \
@@ -615,6 +707,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                      INNER JOIN quant_execution_participant AS p \
                      ON p.execution_id = e.execution_id AND p.chunk_id = e.chunk_id \
                      WHERE e.market_id IN ? \
+                     AND e.chunk_id IN ? \
                      AND e.chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1) \
                      AND e.effective_at >= fromUnixTimestamp64Milli(?) \
                      AND e.effective_at < fromUnixTimestamp64Milli(?) \
@@ -622,21 +715,24 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                      AND p.model_available_at <= fromUnixTimestamp64Milli(?) \
                      AND p.availability_policy_hash = e.availability_policy_hash \
                      ORDER BY e.market_id, e.effective_at, e.execution_id, p.participant_role",
-                )
-                .bind(markets.to_vec())
-                .bind(from_ms)
-                .bind(to_ms)
-                .bind(decision_at_ms)
-                .bind(decision_at_ms)
-                .fetch_all::<ExecutionParticipantFactRow>()
-                .await?;
-            extend_rows(
-                &mut rows,
-                page,
-                MARKET_EXECUTION_WINDOW,
-                "quant_market_execution",
-            )?;
+                    )
+                    .bind(markets.to_vec())
+                    .bind(history_ids.to_vec())
+                    .bind(from_ms)
+                    .bind(to_ms)
+                    .bind(decision_at_ms)
+                    .bind(decision_at_ms)
+                    .fetch_all::<ExecutionParticipantFactRow>()
+                    .await?;
+                extend_rows(
+                    &mut rows,
+                    page,
+                    MARKET_EXECUTION_WINDOW,
+                    "quant_market_execution",
+                )?;
+            }
         }
+        self.validate_history_chunks(&history_chunks).await?;
         rows.sort_by(|left, right| {
             (
                 left.market_id.as_str(),
@@ -657,82 +753,110 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
     async fn market_executions_between(
         &self,
         market_ids: Vec<MarketId>,
+        history_chunks: Vec<HistorySealChunkRef>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Vec<MarketExecutionRow>, StorageError> {
         let market_ids = canonical_values(market_ids);
+        if market_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let history_chunk_ids = self.validate_history_chunks(&history_chunks).await?;
         let mut rows = Vec::new();
         for markets in query_chunks(
             &market_ids,
             |market| market.as_str().len(),
             "quant_market_execution",
         )? {
-            let page = MARKET_EXECUTIONS_BETWEEN
-                .query(
-                    self.pool.client(),
-                    "SELECT ?fields FROM quant_market_execution \
+            for history_ids in query_chunks(
+                &history_chunk_ids,
+                |_| UUID_INLINE_BYTES,
+                "quant_exchange_history_acceptance",
+            )? {
+                let page = MARKET_EXECUTIONS_BETWEEN
+                    .query(
+                        self.pool.client(),
+                        "SELECT ?fields FROM quant_market_execution \
                      WHERE market_id IN ? \
+                     AND chunk_id IN ? \
                      AND chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1) \
                      AND effective_at >= fromUnixTimestamp64Milli(?) \
                      AND effective_at < fromUnixTimestamp64Milli(?) \
                      AND model_available_at <= fromUnixTimestamp64Milli(?) \
                      ORDER BY market_id, effective_at, execution_id",
-                )
-                .bind(markets.to_vec())
-                .bind(from_ms)
-                .bind(to_ms)
-                .bind(decision_at_ms)
-                .fetch_all::<MarketExecutionRow>()
-                .await?;
-            extend_rows(
-                &mut rows,
-                page,
-                MARKET_EXECUTIONS_BETWEEN,
-                "quant_market_execution",
-            )?;
+                    )
+                    .bind(markets.to_vec())
+                    .bind(history_ids.to_vec())
+                    .bind(from_ms)
+                    .bind(to_ms)
+                    .bind(decision_at_ms)
+                    .fetch_all::<MarketExecutionRow>()
+                    .await?;
+                extend_rows(
+                    &mut rows,
+                    page,
+                    MARKET_EXECUTIONS_BETWEEN,
+                    "quant_market_execution",
+                )?;
+            }
         }
+        self.validate_history_chunks(&history_chunks).await?;
         Ok(rows)
     }
 
     async fn execution_participants_between(
         &self,
         market_ids: Vec<MarketId>,
+        history_chunks: Vec<HistorySealChunkRef>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Vec<ExecutionParticipantRow>, StorageError> {
         let market_ids = canonical_values(market_ids);
+        if market_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let history_chunk_ids = self.validate_history_chunks(&history_chunks).await?;
         let mut rows = Vec::new();
         for markets in query_chunks(
             &market_ids,
             |market| market.as_str().len(),
             "quant_execution_participant",
         )? {
-            let page = EXECUTION_PARTICIPANTS_BETWEEN
-                .query(
-                    self.pool.client(),
-                    "SELECT ?fields FROM quant_execution_participant \
+            for history_ids in query_chunks(
+                &history_chunk_ids,
+                |_| UUID_INLINE_BYTES,
+                "quant_exchange_history_acceptance",
+            )? {
+                let page = EXECUTION_PARTICIPANTS_BETWEEN
+                    .query(
+                        self.pool.client(),
+                        "SELECT ?fields FROM quant_execution_participant \
                      WHERE market_id IN ? \
+                     AND chunk_id IN ? \
                      AND chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1) \
                      AND effective_at >= fromUnixTimestamp64Milli(?) \
                      AND effective_at < fromUnixTimestamp64Milli(?) \
                      AND model_available_at <= fromUnixTimestamp64Milli(?) \
                      ORDER BY market_id, effective_at, execution_id, participant_role",
-                )
-                .bind(markets.to_vec())
-                .bind(from_ms)
-                .bind(to_ms)
-                .bind(decision_at_ms)
-                .fetch_all::<ExecutionParticipantRow>()
-                .await?;
-            extend_rows(
-                &mut rows,
-                page,
-                EXECUTION_PARTICIPANTS_BETWEEN,
-                "quant_execution_participant",
-            )?;
+                    )
+                    .bind(markets.to_vec())
+                    .bind(history_ids.to_vec())
+                    .bind(from_ms)
+                    .bind(to_ms)
+                    .bind(decision_at_ms)
+                    .fetch_all::<ExecutionParticipantRow>()
+                    .await?;
+                extend_rows(
+                    &mut rows,
+                    page,
+                    EXECUTION_PARTICIPANTS_BETWEEN,
+                    "quant_execution_participant",
+                )?;
+            }
         }
+        self.validate_history_chunks(&history_chunks).await?;
         Ok(rows)
     }
 
@@ -1223,11 +1347,12 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         let rows = OBSERVED_MARKETS_BETWEEN
             .query(
                 self.pool.client(),
-                "SELECT DISTINCT market_id FROM quant_market_execution \
-                 WHERE effective_at >= fromUnixTimestamp64Milli(?) \
-                 AND chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1) \
-                 AND effective_at <= fromUnixTimestamp64Milli(?) \
-                 AND model_available_at <= fromUnixTimestamp64Milli(?) \
+                "SELECT DISTINCT assumeNotNull(market_id) AS market_id \
+                 FROM quant_book_l2_ledger \
+                 WHERE market_id IS NOT NULL \
+                 AND venue_event_time >= fromUnixTimestamp64Milli(?) \
+                 AND venue_event_time <= fromUnixTimestamp64Milli(?) \
+                 AND persisted_time <= fromUnixTimestamp64Milli(?) \
                  ORDER BY market_id",
             )
             .bind(from_ms)
@@ -1383,4 +1508,11 @@ struct ObservedMarketRow {
 #[derive(clickhouse::Row, serde::Deserialize)]
 struct FunnelTotalRow {
     row_count: u64,
+}
+
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct ActiveHistoryRevisionRow {
+    #[serde(with = "clickhouse::serde::uuid")]
+    chunk_id: Uuid,
+    active_state_revision: u64,
 }

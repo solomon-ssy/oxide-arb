@@ -163,6 +163,8 @@ const fn default_api_size_limit() -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HyperSyncConfig {
+    /// Stable identity of the primary extraction provider and failure domain.
+    pub provider_id: String,
     /// Primary finalized Polygon exchange-history extraction endpoint.
     pub endpoint: String,
     /// Bearer credential used only by the primary historical extraction adapter.
@@ -173,6 +175,7 @@ pub struct HyperSyncConfig {
 impl Default for HyperSyncConfig {
     fn default() -> Self {
         Self {
+            provider_id: "envio_hypersync_polygon".to_owned(),
             endpoint: "https://polygon.hypersync.xyz".to_owned(),
             api_token: SecretText::default(),
         }
@@ -183,6 +186,8 @@ impl Default for HyperSyncConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExchangeHistoryAttestorConfig {
+    /// Stable identity of the independent archive witness provider.
+    pub provider_id: String,
     /// JSON-RPC endpoint in a trust and failure domain independent of Envio.
     pub rpc_endpoint: PolygonRpcEndpoint,
     /// Maximum inclusive block span in one `eth_getLogs` request.
@@ -194,8 +199,9 @@ pub struct ExchangeHistoryAttestorConfig {
 impl Default for ExchangeHistoryAttestorConfig {
     fn default() -> Self {
         Self {
+            provider_id: "publicnode_polygon_archive".to_owned(),
             rpc_endpoint: PolygonRpcEndpoint::Public {
-                url: "https://polygon-rpc.com".to_owned(),
+                url: "https://polygon-bor-rpc.publicnode.com".to_owned(),
             },
             max_blocks_per_log_request: 10,
             max_concurrent_log_requests: 2,

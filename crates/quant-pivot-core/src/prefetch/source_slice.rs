@@ -29,6 +29,8 @@ use quant_pivot_models::{
     },
     enums::{
         clickhouse::{ChCanonicalBookEventType, ChExecutionParticipantRole},
+        common::MarketCategory,
+        domain::DomainFamily,
         quant::SourceSliceStatus,
     },
     hashing::CanonicalDigest,
@@ -43,7 +45,8 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
-    MarketLinkageRepository, QuantFactReadRepository, SourceSliceRepository,
+    ExchangeHistoryRepository, MarketLinkageRepository, QuantFactReadRepository,
+    SourceSliceRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -65,6 +68,7 @@ pub struct SourceSliceMaterializerDeps {
     pub calibration: Arc<dyn CalibrationArtifactRepository>,
     pub artifacts: Arc<dyn ArtifactStore>,
     pub ledger: Arc<dyn SourceSliceRepository>,
+    pub exchange_history: Arc<dyn ExchangeHistoryRepository>,
 }
 
 /// Materializes raw, immutable facts before Dataset/Fit/Validate may run.
@@ -565,12 +569,93 @@ impl SourceSliceMaterializer {
             .await
     }
 
+    async fn filter_cohort(
+        &self,
+        profile: &ResearchProfileArtifact,
+        boundary: &DecisionBoundary,
+        market_changes: Vec<CatalogMarketChangeInfo>,
+    ) -> QuantResult<(Vec<MarketId>, Vec<CatalogMarketChangeInfo>)> {
+        let required_category = profile.spec.cohort_contract.category();
+        let mut market_ids = Vec::with_capacity(market_changes.len());
+        let mut selected_changes = Vec::with_capacity(market_changes.len());
+        for version in market_changes {
+            let market =
+                serde_json::from_value::<MarketRegistryInfo>(version.payload.clone().into_inner())
+                    .map_err(|error| ResearchError::CohortMismatch {
+                        profile: profile.profile_ref.id.to_string(),
+                        detail: format!(
+                            "catalog market {} cannot be decoded for cohort selection: {error}",
+                            version.market_id
+                        ),
+                    })?;
+            if required_category.is_none_or(|category| market.categories.contains(category)) {
+                market_ids.push(version.market_id.clone());
+                selected_changes.push(version);
+            }
+        }
+        if let Some(category) = required_category {
+            let expected_family = match category {
+                MarketCategory::Crypto => DomainFamily::Crypto,
+                MarketCategory::Weather => DomainFamily::Weather,
+                _ => {
+                    return Err(ResearchError::CohortMismatch {
+                        profile: profile.profile_ref.id.to_string(),
+                        detail: format!("category {category:?} has no vertical linkage contract"),
+                    }
+                    .into());
+                }
+            };
+            let linked = self
+                .deps
+                .linkage
+                .ledger_for_markets(&market_ids, boundary)
+                .await?
+                .into_iter()
+                .filter_map(|info| {
+                    let market_id = info.market_id.clone();
+                    let linkage = MarketLinkage::from(info);
+                    (linkage.domain_family == expected_family && linkage.binding().is_some())
+                        .then_some(market_id)
+                })
+                .collect::<HashSet<_>>();
+            market_ids.retain(|market_id| linked.contains(market_id));
+            selected_changes.retain(|version| linked.contains(&version.market_id));
+        }
+        if market_ids.is_empty() {
+            return Err(ResearchError::CohortMismatch {
+                profile: profile.profile_ref.id.to_string(),
+                detail: "no market satisfies the explicit category and PIT linkage contract"
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok((market_ids, selected_changes))
+    }
+
     async fn load_inputs(
         &self,
         identity: &SourceSliceIdentity,
         profile: &ResearchProfileArtifact,
         cancel: &CancellationToken,
     ) -> QuantResult<SourceSliceInputs> {
+        let fit_seal = self
+            .deps
+            .exchange_history
+            .find_fit_seal(identity.fit_seal_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found("quant_history_fit_seal", identity.fit_seal_id)
+            })?;
+        if fit_seal.seal.seal_hash != identity.fit_seal_hash {
+            return Err(ResearchError::DatasetBuild {
+                detail: "Source Slice fit-seal hash does not match the immutable ledger".to_owned(),
+            }
+            .into());
+        }
+        self.deps
+            .exchange_history
+            .validate_fit_seal(identity.fit_seal_id, identity.fit_seal_hash)
+            .await?;
         let boundary = source_boundary(identity)?;
         let market_ids = self
             .deps
@@ -589,6 +674,9 @@ impl SourceSliceMaterializer {
         }
         let market_changes = self.deps.catalog.markets_at(&market_ids, &boundary).await?;
         require_catalog_coverage(&market_ids, &market_changes)?;
+        let (market_ids, market_changes) = self
+            .filter_cohort(profile, &boundary, market_changes)
+            .await?;
         let samples = replay_samples(&market_changes)?;
         if samples.is_empty() {
             return Err(ResearchError::DatasetBuild {
@@ -615,6 +703,8 @@ impl SourceSliceMaterializer {
                 max_horizon_secs: profile.spec.target_horizon_secs,
                 domain: self.domain.clone(),
                 feature_contract: profile.spec.feature_contract,
+                execution_history_chunks: fit_seal.chunks.clone(),
+                requires_execution_history: true,
             })
             .await?;
         ensure_not_cancelled(cancel, "after Source Slice prefetch")?;
@@ -658,6 +748,7 @@ impl SourceSliceMaterializer {
             .facts
             .market_executions_between(
                 market_ids.clone(),
+                fit_seal.chunks.clone(),
                 execution_from.timestamp_millis(),
                 identity.window_end.timestamp_millis(),
                 identity.pit_cutoff.timestamp_millis(),
@@ -668,6 +759,7 @@ impl SourceSliceMaterializer {
             .facts
             .execution_participants_between(
                 market_ids,
+                fit_seal.chunks,
                 execution_from.timestamp_millis(),
                 identity.window_end.timestamp_millis(),
                 identity.pit_cutoff.timestamp_millis(),
@@ -976,6 +1068,8 @@ impl SourceSliceMaterializer {
             schema_contract_version: identity.schema_contract_version.clone(),
             decision_policy_snapshot_id: identity.decision_policy_snapshot_id,
             runtime_config_hash: identity.runtime_config_hash,
+            fit_seal_id: identity.fit_seal_id,
+            fit_seal_hash: identity.fit_seal_hash,
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             capability_registry_hashes: inputs.capability_hashes()?,
             pit_cutoffs: profile
@@ -1619,6 +1713,8 @@ mod tests {
                 .expect("source schema hash");
         SourceSliceManifest {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
+            fit_seal_id: Uuid::from_u128(10).into(),
+            fit_seal_hash: hash('0'),
             profile_ref: profile.profile_ref,
             evaluation_track: ResearchEvaluationTrack::ResearchOnly,
             research_program_hash: hash('1'),

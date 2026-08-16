@@ -142,6 +142,26 @@ pub struct ReportTierRejection {
     pub code: TierAdmissionRejectionCode,
 }
 
+/// Typed reason why no executable economic tier could be built for a market.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EconomicTierBuildRejection {
+    InsufficientLiveDepth {
+        market_id: MarketId,
+        visible_usd: Usd,
+        required_usd: Usd,
+        limit_price: Price,
+    },
+}
+
+impl EconomicTierBuildRejection {
+    #[must_use]
+    pub const fn market_id(&self) -> &MarketId {
+        match self {
+            Self::InsufficientLiveDepth { market_id, .. } => market_id,
+        }
+    }
+}
+
 /// One recommendation summarized for an operator notification (`TopN` preview).
 #[derive(Debug, Clone)]
 pub struct NotificationRecommendation {

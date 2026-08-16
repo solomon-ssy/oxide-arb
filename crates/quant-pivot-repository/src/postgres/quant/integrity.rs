@@ -424,6 +424,8 @@ where
         research_program_hash: source.research_program_hash,
         decision_policy_snapshot_id: source.decision_policy_snapshot_id,
         runtime_config_hash: source.runtime_config_hash,
+        fit_seal_id: source.fit_seal_id,
+        fit_seal_hash: source.fit_seal_hash,
         window_start: source.window_start,
         window_end: source.window_end,
         pit_cutoff: source.pit_cutoff,
@@ -445,6 +447,8 @@ where
         || source.research_program_hash != lineage.research_program_hash
         || source.decision_policy_snapshot_id != lineage.decision_policy_snapshot_id
         || source.runtime_config_hash != lineage.runtime_config_hash
+        || source.fit_seal_id != lineage.fit_seal_id
+        || source.fit_seal_hash != lineage.fit_seal_hash
         || source.window_start != lineage.source_window_start
         || source.window_end != lineage.source_window_end
         || source.pit_cutoff != lineage.pit_cutoff

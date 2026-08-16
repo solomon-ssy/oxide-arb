@@ -67,6 +67,10 @@ pub mod quant_feedback_stage_event;
 pub mod quant_feedback_trigger_event;
 pub mod quant_fresh_boot_run;
 pub mod quant_fresh_boot_run_event;
+pub mod quant_history_fit_seal;
+pub mod quant_history_fit_seal_chunk;
+pub mod quant_history_serving_head_seal;
+pub mod quant_history_serving_head_seal_chunk;
 pub mod quant_market_linkage;
 pub mod quant_market_linkage_source;
 pub mod quant_market_selection;
@@ -176,6 +180,10 @@ pub const TABLES: &[&str] = &[
     "quant_exchange_history_plan",
     "quant_exchange_history_quarantine",
     "quant_exchange_history_quarantine_resolution",
+    "quant_history_fit_seal",
+    "quant_history_fit_seal_chunk",
+    "quant_history_serving_head_seal",
+    "quant_history_serving_head_seal_chunk",
     "quant_factor_definition",
     "quant_factor_value",
     "quant_feedback_cycle",
@@ -389,7 +397,7 @@ pub const ENUMS: &[&str] = &[
     "qp_exchange_history_continuity_basis",
     "qp_exchange_history_frontier",
     "qp_exchange_history_quarantine_disposition",
-    "qp_exchange_history_quarantine_reason",
+    "qp_exchange_history_quarantine_kind",
     "qp_trade_policy_governance_action",
     "qp_trade_policy_status",
     "qp_trade_policy_trial_scope",
@@ -451,6 +459,10 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_exchange_history_plan.rs"),
     include_bytes!("quant_exchange_history_quarantine.rs"),
     include_bytes!("quant_exchange_history_quarantine_resolution.rs"),
+    include_bytes!("quant_history_fit_seal.rs"),
+    include_bytes!("quant_history_fit_seal_chunk.rs"),
+    include_bytes!("quant_history_serving_head_seal.rs"),
+    include_bytes!("quant_history_serving_head_seal_chunk.rs"),
     include_bytes!("quant_factor_definition.rs"),
     include_bytes!("quant_factor_value.rs"),
     include_bytes!("quant_feedback_cycle.rs"),

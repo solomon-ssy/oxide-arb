@@ -26,7 +26,7 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storag
 use quant_pivot_models::{
     clickhouse::BookMicrostructureRow,
     domain::{
-        data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
+        data_plane::{DecisionBoundary, DecisionClock, DecisionSource, HistorySealChunkRef},
         market::{MarketInfo, MarketRegistryInfo, fee::MarketFeeSchedule},
         quant::{
             CompleteTrainingDatasetBuild, ExitTrainingLotRow, JobProgressSink,
@@ -57,8 +57,8 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
-    MarketLinkageRepository, MarketRepository, ModelRegistryRepository, PositionRepository,
-    QuantFactReadRepository, TradePolicyRepository, TrainingDatasetRepository,
+    ExchangeHistoryRepository, MarketLinkageRepository, MarketRepository, ModelRegistryRepository,
+    PositionRepository, QuantFactReadRepository, TradePolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -467,6 +467,8 @@ pub struct TrainingDatasetServiceDeps {
     pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
     /// Published frozen calibration artifacts consumed by PIT feature windows.
     pub calibration_repo: Arc<dyn CalibrationArtifactRepository>,
+    /// Immutable fit-seal ledger used by direct historical prefetch paths.
+    pub exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
 }
 
 /// Deploy + frozen-config bundle for wiring [`TrainingDatasetService`].
@@ -532,6 +534,7 @@ pub struct TrainingDatasetService {
     model_registry: Arc<dyn ModelRegistryRepository>,
     trade_policy_repo: Arc<dyn TradePolicyRepository>,
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
+    exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
     features: FeaturesConfig,
     factors: FactorsConfig,
     domain: DomainConfig,
@@ -925,6 +928,7 @@ impl TrainingDatasetService {
             model_registry: deps.model_registry,
             trade_policy_repo: deps.trade_policy_repo,
             calibration_repo: deps.calibration_repo,
+            exchange_history_repo: deps.exchange_history_repo,
             features: config.features,
             factors: config.factors,
             domain: config.domain,
@@ -1856,10 +1860,26 @@ impl TrainingDatasetService {
         }
         sink.report(ResearchJobProgress::indeterminate("prefetch", 0));
         let context = ReplayContext::new(&plan, &self.features)?;
+        let fit_seal = self
+            .exchange_history_repo
+            .find_fit_seal(plan.request.source_lineage.fit_seal_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found(
+                    "quant_history_fit_seal",
+                    plan.request.source_lineage.fit_seal_id,
+                )
+            })?;
+        self.exchange_history_repo
+            .validate_fit_seal(
+                fit_seal.seal.fit_seal_id,
+                plan.request.source_lineage.fit_seal_hash,
+            )
+            .await?;
         let loader = self.window_loader();
         // Prefetch is real ClickHouse I/O — stays on the async runtime.
         let window = loader
-            .load(&context.window_spec(&plan, &self.domain))
+            .load(&context.window_spec(&plan, &self.domain, fit_seal.chunks))
             .await?;
         Box::pin(self.materialize_window(plan, sink, cancel, window)).await
     }
@@ -2105,8 +2125,24 @@ impl TrainingDatasetService {
     ) -> QuantResult<TrainingDatasetArtifact> {
         let context = ReplayContext::new(&plan, &self.features)?;
         let loader = self.window_loader();
+        let fit_seal = self
+            .exchange_history_repo
+            .find_fit_seal(plan.request.source_lineage.fit_seal_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found(
+                    "quant_history_fit_seal",
+                    plan.request.source_lineage.fit_seal_id,
+                )
+            })?;
+        self.exchange_history_repo
+            .validate_fit_seal(
+                fit_seal.seal.fit_seal_id,
+                plan.request.source_lineage.fit_seal_hash,
+            )
+            .await?;
         let prefetched = loader
-            .prefetch(&context.window_spec(&plan, &self.domain))
+            .prefetch(&context.window_spec(&plan, &self.domain, fit_seal.chunks))
             .await?;
         let mut coverage = DatasetCoverage {
             planned_samples: planned_historical_samples(&plan),
@@ -3600,7 +3636,12 @@ impl ReplayContext {
     }
 
     /// The prefetch window spec for this build's sample set.
-    fn window_spec(&self, plan: &DatasetPlan, domain: &DomainConfig) -> WindowSpec {
+    fn window_spec(
+        &self,
+        plan: &DatasetPlan,
+        domain: &DomainConfig,
+        execution_history_chunks: Vec<HistorySealChunkRef>,
+    ) -> WindowSpec {
         WindowSpec {
             window_start: plan.request.window_start,
             window_end: plan.request.window_end,
@@ -3622,6 +3663,8 @@ impl ReplayContext {
             max_horizon_secs: self.max_horizon_secs,
             domain: domain.clone(),
             feature_contract: self.feature_contract,
+            execution_history_chunks,
+            requires_execution_history: true,
         }
     }
 }
@@ -3738,6 +3781,7 @@ mod feedback_plan_tests {
             SourceSliceId, TrainingDatasetId, TrainingSampleSource, TrainingSampleSources,
         },
     };
+    use uuid::Uuid;
 
     use super::{DatasetPlanRequest, TrainingDatasetService};
     use crate::test_fixtures::execution_pg_seed::{
@@ -3753,6 +3797,8 @@ mod feedback_plan_tests {
             CapabilityRegistryHashes::try_new(vec![content_hash('8')]).expect("capabilities");
         let source_lineage = DatasetSourceLineage {
             format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            fit_seal_id: Uuid::from_u128(14).into(),
+            fit_seal_hash: content_hash('b'),
             source_slice_id: SourceSliceId::from_v7(),
             source_slice_identity_hash: content_hash('3'),
             research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile_ref),
@@ -3838,6 +3884,7 @@ mod keep_rate_tests {
             TrainingSampleSources,
         },
     };
+    use uuid::Uuid;
 
     use super::{DatasetPlanRequest, KeepRateEstimate, KeepRateGrid};
     use crate::test_fixtures::execution_pg_seed::{
@@ -3852,6 +3899,8 @@ mod keep_rate_tests {
         let pit_cutoff = window_end + Duration::seconds(60);
         DatasetSourceLineage {
             format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            fit_seal_id: Uuid::from_u128(15).into(),
+            fit_seal_hash: content_hash('b'),
             source_slice_id: SourceSliceId::from_v7(),
             source_slice_identity_hash: content_hash('3'),
             research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile_ref),

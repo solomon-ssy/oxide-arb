@@ -277,6 +277,8 @@ impl CandidateRecipePlanExecutionService {
                     runtime: &bundle.snapshot,
                     decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
                     runtime_config_hash: bundle.snapshot_hash,
+                    fit_seal_id: preimage.training_dataset().source_lineage.fit_seal_id,
+                    fit_seal_hash: preimage.training_dataset().source_lineage.fit_seal_hash,
                     research_program_hash: plan.research_program_hash(),
                     window_start: plan.source_start(),
                     window_end: plan.label_cutoff(),

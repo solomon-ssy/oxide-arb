@@ -19,6 +19,7 @@ use quant_pivot_models::{
         MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
         WeatherForecastFactRow, WeatherObservationFactRow,
     },
+    domain::data_plane::HistorySealChunkRef,
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
         RecommendationReportId, TokenId,
@@ -30,6 +31,19 @@ use uuid::Uuid;
 /// point-in-time historical state.
 #[async_trait::async_trait]
 pub trait QuantFactReadRepository: Send + Sync {
+    /// Verify that every exact sealed chunk revision is still the active
+    /// `ClickHouse` acceptance revision. Production implementations must fail
+    /// closed when this capability is unavailable.
+    async fn validate_execution_history_chunks(
+        &self,
+        _history_chunks: Vec<HistorySealChunkRef>,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::invariant_violation(
+            Some("quant_exchange_history_acceptance"),
+            "fact reader does not implement sealed execution-history validation",
+        ))
+    }
+
     async fn report_market_funnel_counts(
         &self,
         _report_id: &RecommendationReportId,
@@ -185,6 +199,7 @@ pub trait QuantFactReadRepository: Send + Sync {
     async fn market_execution_window(
         &self,
         market_ids: Vec<MarketId>,
+        history_chunks: Vec<HistorySealChunkRef>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,
@@ -194,6 +209,7 @@ pub trait QuantFactReadRepository: Send + Sync {
     async fn market_executions_between(
         &self,
         market_ids: Vec<MarketId>,
+        history_chunks: Vec<HistorySealChunkRef>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,
@@ -203,6 +219,7 @@ pub trait QuantFactReadRepository: Send + Sync {
     async fn execution_participants_between(
         &self,
         market_ids: Vec<MarketId>,
+        history_chunks: Vec<HistorySealChunkRef>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,

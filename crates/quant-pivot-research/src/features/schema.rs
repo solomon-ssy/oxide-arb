@@ -766,8 +766,6 @@ fn trade_specs(out: &mut Vec<FeatureSpec>) {
         EMA_SLOPE,
         TRADE_MACD_NORM,
         SIGNED_NOTIONAL_IMBALANCE,
-        TRADE_PARTICIPANT_GINI,
-        TRADE_PARTICIPANT_HHI,
         EXECUTION_COVERAGE_RATIO,
     ];
     for name in ratio_names {
@@ -782,6 +780,21 @@ fn trade_specs(out: &mut Vec<FeatureSpec>) {
             )
             .unit(FeatureUnit::Ratio)
             .null_policy(NullPolicy::RejectMarket)
+            .build(),
+        );
+    }
+    for name in [TRADE_PARTICIPANT_GINI, TRADE_PARTICIPANT_HHI] {
+        out.push(
+            FeatureSpecBuilder::new(
+                name,
+                FeatureFamily::Trade,
+                FeatureValueKind::Decimal,
+                SourceRequirement::FinalizedExecutionWindow,
+                PitRule::FactAtOrBeforeSourceCutoff,
+                StalenessRule::MaxExecutionAge,
+            )
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::Penalize)
             .build(),
         );
     }

@@ -2,9 +2,10 @@
 
 use std::str::FromStr;
 
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::types::{NullReason, stable_name::FeatureName};
+use crate::types::{NullReason, Price, Usd, stable_name::FeatureName};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +69,7 @@ impl FromStr for ReportFunnelStage {
 pub enum ReportFunnelReason {
     NotOpen,
     CategoryDisabled,
+    RouteNotActivated,
     ResolutionAmbiguous,
     ManuallyBlocked,
     InsufficientLiquidity,
@@ -81,6 +83,7 @@ pub enum ReportFunnelReason {
     LowConfidence,
     NoPositiveSignal,
     ExecutableEntryUnavailable,
+    InsufficientLiveDepth,
     ScenarioExitCapacityInsufficient,
     NominalExpectedNetBelowFloor,
     RobustExpectedNetBelowFloor,
@@ -99,6 +102,7 @@ impl ReportFunnelReason {
         match self {
             Self::NotOpen => "not_open",
             Self::CategoryDisabled => "category_disabled",
+            Self::RouteNotActivated => "route_not_activated",
             Self::ResolutionAmbiguous => "resolution_ambiguous",
             Self::ManuallyBlocked => "manually_blocked",
             Self::InsufficientLiquidity => "insufficient_liquidity",
@@ -112,6 +116,7 @@ impl ReportFunnelReason {
             Self::LowConfidence => "low_confidence",
             Self::NoPositiveSignal => "no_positive_signal",
             Self::ExecutableEntryUnavailable => "executable_entry_unavailable",
+            Self::InsufficientLiveDepth => "insufficient_live_depth",
             Self::ScenarioExitCapacityInsufficient => "scenario_exit_capacity_insufficient",
             Self::NominalExpectedNetBelowFloor => "nominal_expected_net_below_floor",
             Self::RobustExpectedNetBelowFloor => "robust_expected_net_below_floor",
@@ -133,6 +138,7 @@ impl FromStr for ReportFunnelReason {
         [
             Self::NotOpen,
             Self::CategoryDisabled,
+            Self::RouteNotActivated,
             Self::ResolutionAmbiguous,
             Self::ManuallyBlocked,
             Self::InsufficientLiquidity,
@@ -146,6 +152,7 @@ impl FromStr for ReportFunnelReason {
             Self::LowConfidence,
             Self::NoPositiveSignal,
             Self::ExecutableEntryUnavailable,
+            Self::InsufficientLiveDepth,
             Self::ScenarioExitCapacityInsufficient,
             Self::NominalExpectedNetBelowFloor,
             Self::RobustExpectedNetBelowFloor,
@@ -181,6 +188,11 @@ pub enum ReportFunnelDiagnostics {
     PlannerRejection {
         detail: String,
     },
+    InsufficientLiveDepth {
+        visible_usd: Usd,
+        required_usd: Usd,
+        limit_price: Price,
+    },
 }
 
 impl ReportFunnelDiagnostics {
@@ -192,6 +204,7 @@ impl ReportFunnelDiagnostics {
                 reason,
                 ReportFunnelReason::ModelFeatureUnavailable
                     | ReportFunnelReason::FeatureDataQualityRejected
+                    | ReportFunnelReason::InsufficientLiveDepth
                     | ReportFunnelReason::ScenarioExitCapacityInsufficient
                     | ReportFunnelReason::NominalExpectedNetBelowFloor
                     | ReportFunnelReason::RobustExpectedNetBelowFloor
@@ -221,6 +234,15 @@ impl ReportFunnelDiagnostics {
                         | ReportFunnelReason::ExistingStructuralConflict
                         | ReportFunnelReason::NotSelectedByGlobalOptimum
                 ) && !detail.trim().is_empty()
+            }
+            Self::InsufficientLiveDepth {
+                visible_usd,
+                required_usd,
+                limit_price,
+            } => {
+                reason == ReportFunnelReason::InsufficientLiveDepth
+                    && visible_usd < required_usd
+                    && limit_price.inner() > Decimal::ZERO
             }
         };
         valid

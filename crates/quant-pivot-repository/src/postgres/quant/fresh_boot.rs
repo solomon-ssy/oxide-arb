@@ -170,9 +170,6 @@ impl PgFreshBootRepository {
         if let Some(value) = patch.bootstrap_policy_activation_id {
             active.bootstrap_policy_activation_id = Set(Some(value));
         }
-        if let Some(value) = patch.manual_report_ready_at {
-            active.manual_report_ready_at = Set(Some(value));
-        }
         if let Some(value) = patch.first_report_run_id {
             active.first_report_run_id = Set(Some(value));
         }

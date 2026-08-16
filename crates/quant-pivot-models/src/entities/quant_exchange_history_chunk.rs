@@ -32,6 +32,7 @@ pub struct Model {
     pub continuity_block: Option<i64>,
     pub continuity_hash: Option<EvmBlockHash>,
     pub effective_through_at: Option<DateTime<Utc>>,
+    pub state_revision: Option<i64>,
     pub accepted_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

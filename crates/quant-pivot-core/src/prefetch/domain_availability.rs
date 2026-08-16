@@ -486,7 +486,10 @@ mod tests {
         },
         domain::{
             api::MarketLinkageListQuery,
-            data_plane::{DecisionBoundary, DecisionClock, DecisionSource, DomainObservation},
+            data_plane::{
+                DecisionBoundary, DecisionClock, DecisionSource, DomainObservation,
+                HistorySealChunkRef,
+            },
             market::{CatalogWindowInfo, MarketInfo},
             pagination::Paginated,
             quant::{
@@ -854,6 +857,7 @@ mod tests {
         async fn market_execution_window(
             &self,
             _market_ids: Vec<MarketId>,
+            _history_chunks: Vec<HistorySealChunkRef>,
             _from_ms: i64,
             _to_ms: i64,
             _decision_at_ms: i64,
@@ -864,6 +868,7 @@ mod tests {
         async fn market_executions_between(
             &self,
             _market_ids: Vec<MarketId>,
+            _history_chunks: Vec<HistorySealChunkRef>,
             _from_ms: i64,
             _to_ms: i64,
             _decision_at_ms: i64,
@@ -874,6 +879,7 @@ mod tests {
         async fn execution_participants_between(
             &self,
             _market_ids: Vec<MarketId>,
+            _history_chunks: Vec<HistorySealChunkRef>,
             _from_ms: i64,
             _to_ms: i64,
             _decision_at_ms: i64,

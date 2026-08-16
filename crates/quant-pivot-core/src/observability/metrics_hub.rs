@@ -108,6 +108,12 @@ const FEEDBACK_RUN_BUCKETS_SECS: &[f64] = &[
     0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 30.0, 60.0, 300.0, 900.0, 3_600.0, 21_600.0, 86_400.0,
 ];
 
+/// Fresh-boot stage buckets in seconds (1 s … 7 d).
+const FRESH_BOOT_BUCKETS_SECS: &[f64] = &[
+    1.0, 5.0, 30.0, 60.0, 300.0, 900.0, 3_600.0, 21_600.0, 43_200.0, 86_400.0, 172_800.0,
+    259_200.0, 604_800.0,
+];
+
 /// Central Prometheus registry for live paths only.
 pub struct MetricsHub {
     pub registry: Registry,
@@ -176,6 +182,20 @@ pub struct MetricsHub {
     pub report_expire_swept_total: IntCounter,
     pub report_fact_settlement_claim_lost_total: IntCounterVec,
     pub report_fact_worker_errors_total: IntCounterVec,
+
+    // ── Fresh-boot/history correctness ────────────────────────────────
+    /// Active quarantines by bounded history frontier.
+    pub fresh_boot_active_quarantines: IntGaugeVec,
+    /// Seal invalidations by immutable seal kind (`fit`/`serving_head`).
+    pub fresh_boot_history_invalidations_total: IntCounterVec,
+    /// Candidates excluded because their serving route was not active.
+    pub fresh_boot_route_not_activated_total: IntCounter,
+    /// Positive real-account exposures that could not be modeled, by route.
+    pub fresh_boot_unmodeled_exposure_total: IntCounterVec,
+    /// Durable internal FSM stage durations by stage and terminal outcome.
+    pub fresh_boot_stage_duration_seconds: HistogramVec,
+    /// One-hot current/final activation SLO status.
+    pub fresh_boot_slo_status: IntGaugeVec,
 
     // ── Training/serving feature parity ────────────────────────
     /// Runs by controlled kind/status labels.
@@ -348,6 +368,15 @@ struct FeatureParityMetrics {
     comparisons: IntCounterVec,
     latch_open: IntGauge,
     containment: IntCounterVec,
+}
+
+struct FreshBootMetrics {
+    active_quarantines: IntGaugeVec,
+    history_invalidations: IntCounterVec,
+    route_not_activated: IntCounter,
+    unmodeled_exposure: IntCounterVec,
+    stage_duration: HistogramVec,
+    slo_status: IntGaugeVec,
 }
 
 struct ResearchFeedbackMetrics {
@@ -720,6 +749,47 @@ fn register_feature_parity_metrics(registry: &Registry) -> FeatureParityMetrics 
     }
 }
 
+fn register_fresh_boot_metrics(registry: &Registry) -> FreshBootMetrics {
+    FreshBootMetrics {
+        active_quarantines: register_gauge_vec!(
+            registry,
+            "quant_fresh_boot_active_quarantines",
+            "Active finalized exchange-history quarantines by frontier",
+            &["frontier"]
+        ),
+        history_invalidations: register_counter_vec!(
+            registry,
+            "quant_fresh_boot_history_window_invalidations_total",
+            "Immutable history windows rejected after revision or quarantine changes",
+            &["seal_kind"]
+        ),
+        route_not_activated: register_counter!(
+            registry,
+            "quant_fresh_boot_route_not_activated_exclusions_total",
+            "Report candidates excluded because their serving route was not active"
+        ),
+        unmodeled_exposure: register_counter_vec!(
+            registry,
+            "quant_fresh_boot_unmodeled_open_exposure_total",
+            "Reports failed closed for a positive real-account exposure without a model route",
+            &["route"]
+        ),
+        stage_duration: register_histogram_vec!(
+            registry,
+            "quant_fresh_boot_stage_duration_seconds",
+            "Durable fresh-boot internal FSM stage duration by terminal outcome",
+            &["stage", "status"],
+            FRESH_BOOT_BUCKETS_SECS
+        ),
+        slo_status: register_gauge_vec!(
+            registry,
+            "quant_fresh_boot_slo_status",
+            "One-hot current or final activation SLO status",
+            &["status"]
+        ),
+    }
+}
+
 fn register_research_feedback_metrics(registry: &Registry) -> ResearchFeedbackMetrics {
     ResearchFeedbackMetrics {
         cycle_total: register_counter_vec!(
@@ -965,6 +1035,7 @@ impl MetricsHub {
         let subscription = register_subscription_metrics(&registry);
         let infra = register_infra_metrics(&registry);
         let report = register_report_metrics(&registry);
+        let fresh_boot = register_fresh_boot_metrics(&registry);
         let feature_parity = register_feature_parity_metrics(&registry);
         let research_feedback = register_research_feedback_metrics(&registry);
         let data_quality_tokens = register_gauge_vec!(
@@ -1040,6 +1111,12 @@ impl MetricsHub {
             report_expire_swept_total: report.expire_swept,
             report_fact_settlement_claim_lost_total: report.fact_settlement_claim_lost,
             report_fact_worker_errors_total: report.fact_worker_errors,
+            fresh_boot_active_quarantines: fresh_boot.active_quarantines,
+            fresh_boot_history_invalidations_total: fresh_boot.history_invalidations,
+            fresh_boot_route_not_activated_total: fresh_boot.route_not_activated,
+            fresh_boot_unmodeled_exposure_total: fresh_boot.unmodeled_exposure,
+            fresh_boot_stage_duration_seconds: fresh_boot.stage_duration,
+            fresh_boot_slo_status: fresh_boot.slo_status,
             feature_parity_runs_total: feature_parity.runs,
             feature_parity_comparisons_total: feature_parity.comparisons,
             feature_parity_latch_open: feature_parity.latch_open,
@@ -1262,6 +1339,43 @@ impl MetricsHub {
             .inc();
     }
 
+    pub fn set_active_history_quarantines(&self, frontier: &str, count: u64) {
+        self.fresh_boot_active_quarantines
+            .with_label_values(&[frontier])
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
+    }
+
+    pub fn record_history_window_invalidation(&self, seal_kind: &str) {
+        self.fresh_boot_history_invalidations_total
+            .with_label_values(&[seal_kind])
+            .inc();
+    }
+
+    pub fn record_route_not_activated(&self, count: u32) {
+        self.fresh_boot_route_not_activated_total
+            .inc_by(u64::from(count));
+    }
+
+    pub fn record_unmodeled_exposure(&self, route: &str) {
+        self.fresh_boot_unmodeled_exposure_total
+            .with_label_values(&[route])
+            .inc();
+    }
+
+    pub fn observe_fresh_boot_stage(&self, stage: &str, status: &str, duration_secs: f64) {
+        self.fresh_boot_stage_duration_seconds
+            .with_label_values(&[stage, status])
+            .observe(duration_secs);
+    }
+
+    pub fn set_fresh_boot_slo(&self, status: &str) {
+        for candidate in ["warming_up", "on_track", "warning", "violation"] {
+            self.fresh_boot_slo_status
+                .with_label_values(&[candidate])
+                .set(i64::from(candidate == status));
+        }
+    }
+
     pub fn record_feature_parity_run(&self, kind: &str, status: &str) {
         self.feature_parity_runs_total
             .with_label_values(&[kind, status])
@@ -1446,6 +1560,35 @@ mod tests {
         }
         assert!(body.contains(r#"reason="build_failed""#));
         assert!(body.contains(r#"scope="global""#));
+    }
+
+    #[test]
+    fn fresh_boot_metrics_contract() {
+        let hub = MetricsHub::new();
+        hub.set_active_history_quarantines("activation", 2);
+        hub.record_history_window_invalidation("serving_head");
+        hub.record_route_not_activated(3);
+        hub.record_unmodeled_exposure("crypto");
+        hub.observe_fresh_boot_stage("cpcv_running", "advanced", 30.0);
+        hub.set_fresh_boot_slo("warning");
+
+        let (_, text) = hub.gather_prometheus_text().expect("gather");
+        let body = String::from_utf8(text).expect("utf8");
+        for name in [
+            "quant_fresh_boot_active_quarantines",
+            "quant_fresh_boot_history_window_invalidations_total",
+            "quant_fresh_boot_route_not_activated_exclusions_total",
+            "quant_fresh_boot_unmodeled_open_exposure_total",
+            "quant_fresh_boot_stage_duration_seconds",
+            "quant_fresh_boot_slo_status",
+        ] {
+            assert!(body.contains(name), "missing metric {name}");
+        }
+        assert!(body.contains(r#"frontier="activation""#));
+        assert!(body.contains(r#"seal_kind="serving_head""#));
+        assert!(body.contains(r#"route="crypto""#));
+        assert!(body.contains(r#"stage="cpcv_running""#));
+        assert!(body.contains(r#"status="warning""#));
     }
 
     #[test]

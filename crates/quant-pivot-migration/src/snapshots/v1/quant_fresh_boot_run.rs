@@ -41,7 +41,6 @@ pub struct Model {
     pub active_job_id: Option<Uuid>,
     pub last_job_id: Option<Uuid>,
     pub bootstrap_policy_activation_id: Option<Uuid>,
-    pub manual_report_ready_at: Option<DateTimeWithTimeZone>,
     pub first_report_run_id: Option<Uuid>,
     pub first_report_id: Option<Uuid>,
     pub next_scheduled_report_at: Option<DateTimeWithTimeZone>,

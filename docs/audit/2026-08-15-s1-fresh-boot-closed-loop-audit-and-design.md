@@ -1,5 +1,7 @@
 # S1 Fresh-Boot 闭环审计与优化设计（2026-08-15）
 
+> **Superseded**：本文件只保留为审计历史。当前实现合同以 runtime 类型、`docs/operations/runbook.md` §7.6 和最新 S1 生产闭环为准。
+
 > **范围**：审计原文 S1（200 天冷启动建立在错误前提上）的落地质量；对照 [`/Users/eason/Downloads/PLAN.md`](/Users/eason/Downloads/PLAN.md) 与当前仓库实现；给出可执行的破坏式优化设计。
 > **前序**：[`2026-08-13-full-system-deep-audit.md`](2026-08-13-full-system-deep-audit.md) §1。
 > **方法**：实现交叉验证 + Polymarket / Envio / Polygon 官方文档 + 特征存储/训练-服务偏斜文献。不接受“契约写了但未接线”。

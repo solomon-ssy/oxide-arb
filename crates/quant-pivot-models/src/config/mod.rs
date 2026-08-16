@@ -503,7 +503,7 @@ mod tests {
             .ensure_valid_common()
             .expect_err("a provider key in a public URL path must fail closed");
         let message = error.to_string();
-        assert!(message.contains("polymarket.onchain.rpc_endpoint"));
+        assert!(message.contains("polymarket.onchain"));
         assert!(!message.contains("provider-key"));
     }
 

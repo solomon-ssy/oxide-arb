@@ -1,20 +1,19 @@
 //! Source-slice materialization persistence DTOs.
 
-use chrono::{DateTime, Utc};
-use quant_pivot_error::hashing::CanonicalDigestError;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
-use serde::{Deserialize, Serialize};
-
 use crate::{
     entities::quant_source_slice,
     enums::quant::SourceSliceStatus,
     hashing::CanonicalDigest,
     types::{
-        ArtifactUri, ContentHash, DecisionPolicySnapshotId, ReaderContractVersion,
-        ResearchEvaluationTrack, ResearchProfileRef, SchemaContractVersion, SourceSliceId,
-        SourceSliceManifest, SourceSliceManifestRef,
+        ArtifactUri, ContentHash, DecisionPolicySnapshotId, HistoryFitSealId,
+        ReaderContractVersion, ResearchEvaluationTrack, ResearchProfileRef, SchemaContractVersion,
+        SourceSliceId, SourceSliceManifest, SourceSliceManifestRef,
     },
 };
+use chrono::{DateTime, Utc};
+use quant_pivot_error::hashing::CanonicalDigestError;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
 
 /// Server-derived semantic fields that determine one Source Slice identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +23,8 @@ pub struct SourceSliceIdentityInput {
     pub research_program_hash: ContentHash,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
+    pub fit_seal_id: HistoryFitSealId,
+    pub fit_seal_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub pit_cutoff: DateTime<Utc>,
@@ -38,6 +39,8 @@ pub struct SourceSliceIdentity {
     pub research_program_hash: ContentHash,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
+    pub fit_seal_id: HistoryFitSealId,
+    pub fit_seal_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub pit_cutoff: DateTime<Utc>,
@@ -53,6 +56,8 @@ impl SourceSliceIdentity {
             research_program_hash,
             decision_policy_snapshot_id,
             runtime_config_hash,
+            fit_seal_id,
+            fit_seal_hash,
             window_start,
             window_end,
             pit_cutoff,
@@ -65,6 +70,8 @@ impl SourceSliceIdentity {
             &research_program_hash,
             &decision_policy_snapshot_id,
             &runtime_config_hash,
+            fit_seal_id,
+            fit_seal_hash,
             window_start,
             window_end,
             pit_cutoff,
@@ -78,6 +85,8 @@ impl SourceSliceIdentity {
             research_program_hash,
             decision_policy_snapshot_id,
             runtime_config_hash,
+            fit_seal_id,
+            fit_seal_hash,
             window_start,
             window_end,
             pit_cutoff,
@@ -98,6 +107,8 @@ pub struct NewSourceSlice {
     pub research_program_hash: ContentHash,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
+    pub fit_seal_id: HistoryFitSealId,
+    pub fit_seal_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub pit_cutoff: DateTime<Utc>,
@@ -116,6 +127,8 @@ impl NewSourceSlice {
             research_program_hash: identity.research_program_hash,
             decision_policy_snapshot_id: identity.decision_policy_snapshot_id,
             runtime_config_hash: identity.runtime_config_hash,
+            fit_seal_id: identity.fit_seal_id,
+            fit_seal_hash: identity.fit_seal_hash,
             window_start: identity.window_start,
             window_end: identity.window_end,
             pit_cutoff: identity.pit_cutoff,
@@ -143,6 +156,8 @@ pub struct SourceSliceInfo {
     pub research_program_hash: ContentHash,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
+    pub fit_seal_id: HistoryFitSealId,
+    pub fit_seal_hash: ContentHash,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub pit_cutoff: DateTime<Utc>,
@@ -176,6 +191,8 @@ info_from_model!(
         research_program_hash,
         decision_policy_snapshot_id,
         runtime_config_hash,
+        fit_seal_id,
+        fit_seal_hash,
         window_start,
         window_end,
         pit_cutoff,

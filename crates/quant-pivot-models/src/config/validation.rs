@@ -415,10 +415,13 @@ fn validate_polygon_rpc(deploy: &DeployConfig, report: &mut ConfigValidationRepo
         (PolygonRpcEndpoint::Public { .. }, None) => false,
         (PolygonRpcEndpoint::Protected { .. }, _) => true,
     };
-    if !structurally_valid || !public_endpoint_is_non_secret {
+    if !provider_id_is_valid(&deploy.polymarket.onchain.provider_id)
+        || !structurally_valid
+        || !public_endpoint_is_non_secret
+    {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.onchain.rpc_endpoint",
-            detail: "must be an HTTP(S) URL; public endpoints cannot contain user-info, path credentials, query parameters, or fragments, and authenticated URLs must use a protected deploy-secret source".to_owned(),
+            field: "polymarket.onchain",
+            detail: "provider_id must be canonical and the endpoint must be HTTP(S); public endpoints cannot contain user-info, path credentials, query parameters, or fragments, and authenticated URLs must use a protected deploy-secret source".to_owned(),
         });
     }
     if deploy.polymarket.onchain.rpc_timeout_ms == 0 {
@@ -1014,6 +1017,21 @@ fn validate_market_data(deploy: &DeployConfig, report: &mut ConfigValidationRepo
             .iter()
             .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
     });
+    let settlement_url = Url::parse(deploy.polymarket.onchain.rpc_url()).ok();
+    let independent_provider_identities = provider_id_is_valid(&history.hypersync.provider_id)
+        && provider_id_is_valid(&history.attestor.provider_id)
+        && history.hypersync.provider_id != history.attestor.provider_id
+        && history.hypersync.provider_id != deploy.polymarket.onchain.provider_id
+        && history.attestor.provider_id != deploy.polymarket.onchain.provider_id;
+    let independent_provider_origins = extractor_url
+        .as_ref()
+        .zip(attestor_url.as_ref())
+        .zip(settlement_url.as_ref())
+        .is_some_and(|((extractor, attestor), settlement)| {
+            !same_origin(extractor, attestor)
+                && !same_origin(extractor, settlement)
+                && !same_origin(attestor, settlement)
+        });
     if history.enabled
         && (history.hypersync.api_token.is_empty()
             || !extractor_url.as_ref().is_some_and(|url| {
@@ -1023,11 +1041,13 @@ fn validate_market_data(deploy: &DeployConfig, report: &mut ConfigValidationRepo
             || !attestor_url.as_ref().is_some_and(|url| {
                 matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
             })
-            || !independent_attestor)
+            || !independent_attestor
+            || !independent_provider_identities
+            || !independent_provider_origins)
     {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "market_data.finalized_exchange_history",
-            detail: "enabled history requires a HyperSync token, a hypersync.xyz extractor endpoint, and a valid non-Envio archive RPC attestor".into(),
+            detail: "enabled history requires canonical, pairwise-distinct provider identities and normalized origins for settlement RPC, HyperSync extraction, and the non-Envio archive RPC attestor".into(),
         });
     }
     if history.connect_timeout_ms == 0
@@ -1059,6 +1079,23 @@ fn validate_market_data(deploy: &DeployConfig, report: &mut ConfigValidationRepo
             detail: "fresh-boot policy requires 12 model confirmations, a 200-block rollback buffer, a 33-day activation frontier, and at least 200 retention days".into(),
         });
     }
+}
+
+fn provider_id_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
+        })
+}
+
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme().eq_ignore_ascii_case(right.scheme())
+        && left
+            .host_str()
+            .zip(right.host_str())
+            .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+        && left.port_or_known_default() == right.port_or_known_default()
 }
 
 fn validate_cache_redis(deploy: &DeployConfig, report: &mut ConfigValidationReport) {

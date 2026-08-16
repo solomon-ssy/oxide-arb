@@ -169,6 +169,8 @@ pub enum BuyModelRoute {
 }
 
 impl BuyModelRoute {
+    pub const ALL: [Self; 3] = [Self::Pooled, Self::Crypto, Self::Weather];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

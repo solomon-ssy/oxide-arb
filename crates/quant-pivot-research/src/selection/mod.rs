@@ -30,7 +30,7 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::quant::MarketCandidate,
     enums::common::MarketCategory,
-    runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
+    runtime_config::{BuyModelRoute, DataQualityConfig, FeaturesConfig, SelectionConfig},
     types::{
         ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId,
         ModelInputContract, ModelInputRequiredness, SelectionExclusionSummary,
@@ -75,6 +75,23 @@ pub struct MarketSelectionBuildRequest {
     pub model_requirements: ModelFeatureRequirements,
     /// Source visibility delay, in seconds.
     pub knowledge_lag_secs: u64,
+    /// Report-only route availability pinned from one immutable serving generation.
+    /// Offline PIT selection leaves this absent and relies on its cohort contract.
+    pub route_availability: Option<RouteAvailabilityContract>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteAvailabilityContract {
+    pub primary_route: BuyModelRoute,
+    pub active_routes: Vec<BuyModelRoute>,
+    pub universe_plan_hash: ContentHash,
+}
+
+impl RouteAvailabilityContract {
+    #[must_use]
+    pub fn accepts(&self, category: MarketCategory) -> bool {
+        self.active_routes.contains(&BuyModelRoute::from(category))
+    }
 }
 
 /// Feature availability requirements imposed by the routed model(s) on selection.
@@ -299,6 +316,8 @@ pub enum ExclusionReason {
     ResolutionAmbiguous,
     /// Manually blocked by an operator.
     ManuallyBlocked,
+    /// The category-owned route is absent from the pinned serving generation.
+    RouteNotActivated,
     /// The model requires features unavailable for this market.
     ModelFeatureUnavailable {
         /// The missing required features.

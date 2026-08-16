@@ -2,7 +2,10 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{QpResearchEvaluationTrack, QpSourceSliceStatus};
+use super::{
+    quant_history_fit_seal,
+    sea_orm_active_enums::{QpResearchEvaluationTrack, QpSourceSliceStatus},
+};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -20,6 +23,8 @@ pub struct Model {
     pub decision_policy_snapshot_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub runtime_config_hash: String,
+    pub fit_seal_id: Uuid,
+    pub fit_seal_hash: String,
     pub window_start: DateTimeWithTimeZone,
     pub window_end: DateTimeWithTimeZone,
     pub pit_cutoff: DateTimeWithTimeZone,
@@ -43,6 +48,14 @@ pub struct Model {
         on_delete = "NoAction"
     )]
     pub decision_policy_snapshot: BelongsTo<super::decision_policy_snapshot::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "fit_seal_id",
+        to = "fit_seal_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub fit_seal: BelongsTo<quant_history_fit_seal::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

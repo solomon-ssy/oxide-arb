@@ -852,6 +852,8 @@ mod tests {
             .collect();
         SourceSliceManifest {
             format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
+            fit_seal_id: Uuid::from_u128(10).into(),
+            fit_seal_hash: hash('0'),
             profile_ref: profile.profile_ref,
             evaluation_track: ResearchEvaluationTrack::ResearchOnly,
             research_program_hash: hash('1'),

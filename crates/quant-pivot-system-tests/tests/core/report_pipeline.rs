@@ -11,6 +11,7 @@ use quant_pivot_models::{
     enums::quant::{
         AccountSource, EmptyReportReason, RecommendationReportStatus, RecommendationStatus,
     },
+    runtime_config::BuyModelRoute,
     types::{EquitySnapshotId, ReportTriggerKey, Usd},
 };
 use quant_pivot_repository::{
@@ -167,11 +168,18 @@ pub async fn pinned_route_uses_generation() {
         .list_route_runs(&report.recommendation_report_id)
         .await
         .expect("load pinned report Route runs");
-    assert_eq!(route_runs.len(), 1);
-    assert_eq!(
-        route_runs[0].model_version_id,
-        Some(harness.model_version_id)
+    assert_eq!(route_runs.len(), 2);
+    assert!(
+        route_runs
+            .iter()
+            .any(|route_run| route_run.route == BuyModelRoute::Pooled),
+        "the immutable report universe must retain its Pooled primary Route"
     );
+    let weather_run = route_runs
+        .iter()
+        .find(|route_run| route_run.route == BuyModelRoute::Weather)
+        .expect("the immutable report universe includes the selected Weather Route");
+    assert_eq!(weather_run.model_version_id, Some(harness.model_version_id));
     assert_eq!(
         MarketSelectionEntity::find()
             .count(&db)

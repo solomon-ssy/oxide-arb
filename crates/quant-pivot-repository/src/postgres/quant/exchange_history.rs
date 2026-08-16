@@ -1,14 +1,20 @@
 //! `PostgreSQL` control-plane repository for accepted history chunks and quarantine evidence.
 
+use std::{collections::HashMap, fmt::Display};
+
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::data_plane::{
-        ExchangeHistoryChunkInfo, ExchangeHistoryChunkStatus, ExchangeHistoryFrontier,
-        ExchangeHistoryPlanInfo, ExchangeHistoryQuarantineDisposition,
-        ExchangeHistoryQuarantineInfo, ExchangeHistoryQuarantineResolutionInfo,
-        NewExchangeHistoryChunk, NewExchangeHistoryPlan, NewExchangeHistoryQuarantine,
-        NewExchangeHistoryQuarantineResolution, ResolveAcceptedHistoryRange,
+        CreateHistoryFitSeal, CreateHistoryServingHeadSeal, ExchangeHistoryChunkInfo,
+        ExchangeHistoryChunkStatus, ExchangeHistoryFrontier, ExchangeHistoryPlanInfo,
+        ExchangeHistoryQuarantineDisposition, ExchangeHistoryQuarantineInfo,
+        ExchangeHistoryQuarantineRead, ExchangeHistoryQuarantineRecord,
+        ExchangeHistoryQuarantineResolutionInfo, ExchangeHistoryQuarantineStatus, HistoryFitSeal,
+        HistoryFitSealInfo, HistorySealChunkRef, HistoryServingHeadSeal,
+        HistoryServingHeadSealInfo, NewExchangeHistoryChunk, NewExchangeHistoryPlan,
+        NewExchangeHistoryQuarantine, NewExchangeHistoryQuarantineResolution,
+        ResolveAcceptedHistoryRange,
     },
     entities::{
         quant_exchange_history_chunk::{Column as ChunkColumn, Entity as ChunkEntity},
@@ -19,13 +25,25 @@ use quant_pivot_models::{
         quant_exchange_history_quarantine_resolution::{
             Column as ResolutionColumn, Entity as ResolutionEntity,
         },
+        quant_history_fit_seal::Entity as FitSealEntity,
+        quant_history_fit_seal_chunk::{
+            ActiveModel as FitChunkActive, Column as FitChunkColumn, Entity as FitChunkEntity,
+        },
+        quant_history_serving_head_seal::{
+            Column as ServingSealColumn, Entity as ServingSealEntity,
+        },
+        quant_history_serving_head_seal_chunk::{
+            ActiveModel as ServingChunkActive, Column as ServingChunkColumn,
+            Entity as ServingChunkEntity,
+        },
     },
+    types::{ContentHash, HistoryFitSealId, HistoryServingHeadSealId},
 };
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::Set,
-    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-    QuerySelect, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
     sea_query::{OnConflict, Query},
 };
 use uuid::Uuid;
@@ -137,6 +155,7 @@ impl ExchangeHistoryRepository for PgExchangeHistoryRepository {
                         ChunkColumn::ContinuityBlock,
                         ChunkColumn::ContinuityHash,
                         ChunkColumn::EffectiveThroughAt,
+                        ChunkColumn::StateRevision,
                         ChunkColumn::AcceptedAt,
                         ChunkColumn::UpdatedAt,
                     ])
@@ -263,6 +282,80 @@ impl ExchangeHistoryRepository for PgExchangeHistoryRepository {
             .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 
+    async fn page_quarantine(
+        &self,
+        query: ExchangeHistoryQuarantineRead,
+    ) -> Result<Vec<ExchangeHistoryQuarantineRecord>, StorageError> {
+        if query.limit == 0 || query.limit > 101 {
+            return Err(StorageError::invariant_violation(
+                Some("quant_exchange_history_quarantine"),
+                "quarantine page limit must be between 1 and 101",
+            ));
+        }
+        let resolved = Query::select()
+            .column(ResolutionColumn::QuarantineId)
+            .from(ResolutionEntity)
+            .to_owned();
+        let mut select = QuarantineEntity::find().find_also_related(ChunkEntity);
+        select = match query.status {
+            ExchangeHistoryQuarantineStatus::Active => {
+                select.filter(QuarantineColumn::QuarantineId.not_in_subquery(resolved.clone()))
+            }
+            ExchangeHistoryQuarantineStatus::Resolved => {
+                select.filter(QuarantineColumn::QuarantineId.in_subquery(resolved))
+            }
+            ExchangeHistoryQuarantineStatus::All => select,
+        };
+        if let Some(frontier) = query.frontier {
+            select = select.filter(ChunkColumn::Frontier.eq(frontier));
+        }
+        if let Some(kind) = query.kind {
+            select = select.filter(QuarantineColumn::Kind.eq(kind));
+        }
+        if let Some(after) = query.after {
+            select = select.filter(QuarantineColumn::QuarantineId.lt(after));
+        }
+        let rows = select
+            .order_by_desc(QuarantineColumn::QuarantineId)
+            .limit(query.limit)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        let quarantine_ids = rows
+            .iter()
+            .map(|(quarantine, _)| quarantine.quarantine_id)
+            .collect::<Vec<_>>();
+        let resolutions = if quarantine_ids.is_empty() {
+            Vec::new()
+        } else {
+            ResolutionEntity::find()
+                .filter(ResolutionColumn::QuarantineId.is_in(quarantine_ids))
+                .all(&self.db)
+                .await
+                .map_err(StorageError::from)?
+        };
+        let resolutions = resolutions
+            .into_iter()
+            .map(|resolution| (resolution.quarantine_id, resolution.into()))
+            .collect::<HashMap<Uuid, ExchangeHistoryQuarantineResolutionInfo>>();
+        rows.into_iter()
+            .map(|(quarantine, chunk)| {
+                let chunk = chunk.ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some("quant_exchange_history_quarantine"),
+                        "quarantine row has no referenced chunk",
+                    )
+                })?;
+                let resolution = resolutions.get(&quarantine.quarantine_id).cloned();
+                Ok(ExchangeHistoryQuarantineRecord {
+                    quarantine: quarantine.into(),
+                    chunk: chunk.into(),
+                    resolution,
+                })
+            })
+            .collect()
+    }
+
     async fn active_quarantine(
         &self,
         frontier: ExchangeHistoryFrontier,
@@ -293,6 +386,23 @@ impl ExchangeHistoryRepository for PgExchangeHistoryRepository {
             .await
             .map_err(StorageError::from)
             .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn count_active_quarantine(
+        &self,
+        frontier: ExchangeHistoryFrontier,
+    ) -> Result<u64, StorageError> {
+        let resolved = Query::select()
+            .column(ResolutionColumn::QuarantineId)
+            .from(ResolutionEntity)
+            .to_owned();
+        QuarantineEntity::find()
+            .inner_join(ChunkEntity)
+            .filter(ChunkColumn::Frontier.eq(frontier))
+            .filter(QuarantineColumn::QuarantineId.not_in_subquery(resolved))
+            .count(&self.db)
+            .await
+            .map_err(StorageError::from)
     }
 
     async fn resolve_quarantine(
@@ -448,4 +558,486 @@ impl ExchangeHistoryRepository for PgExchangeHistoryRepository {
         }
         Ok(outcomes)
     }
+
+    async fn create_fit_seal(
+        &self,
+        command: CreateHistoryFitSeal,
+    ) -> Result<HistoryFitSeal, StorageError> {
+        validate_fit_command(&command)?;
+        if let Some(existing) = self.find_fit_seal(command.seal.fit_seal_id).await? {
+            if existing.seal.seal_hash != command.seal.seal_hash
+                || existing.chunks != command.chunks
+            {
+                return Err(StorageError::state_conflict(
+                    "quant_history_fit_seal",
+                    Some(command.seal.fit_seal_id),
+                    "fit seal id was replayed with a different immutable preimage",
+                ));
+            }
+            return self
+                .validate_fit_seal(existing.seal.fit_seal_id, existing.seal.seal_hash)
+                .await;
+        }
+        let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        validate_plan(&transaction, command.seal.plan_id, command.seal.policy_hash).await?;
+        validate_seal_chunks(
+            &transaction,
+            None,
+            command.seal.window_from_block,
+            command.seal.window_to_block,
+            &command.chunks,
+        )
+        .await?;
+        ensure_seal_unquarantined(&transaction, &command.chunks).await?;
+        let fit_seal_id = command.seal.fit_seal_id;
+        FitSealEntity::insert(command.seal.into_active_model())
+            .exec_without_returning(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        for chunk in command.chunks {
+            FitChunkEntity::insert(FitChunkActive {
+                fit_seal_id: Set(fit_seal_id),
+                chunk_id: Set(chunk.chunk_id),
+                frontier: Set(chunk.frontier),
+                state_revision: Set(chunk.state_revision),
+                from_block: Set(chunk.from_block),
+                to_block: Set(chunk.to_block),
+            })
+            .exec_without_returning(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        }
+        transaction.commit().await.map_err(StorageError::from)?;
+        self.find_fit_seal(fit_seal_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found("quant_history_fit_seal", fit_seal_id))
+    }
+
+    async fn find_fit_seal(
+        &self,
+        fit_seal_id: HistoryFitSealId,
+    ) -> Result<Option<HistoryFitSeal>, StorageError> {
+        let Some(seal) = FitSealEntity::find_by_id(fit_seal_id)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Ok(None);
+        };
+        let chunks = FitChunkEntity::find()
+            .filter(FitChunkColumn::FitSealId.eq(fit_seal_id))
+            .order_by_asc(FitChunkColumn::FromBlock)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(|chunk| HistorySealChunkRef {
+                chunk_id: chunk.chunk_id,
+                frontier: chunk.frontier,
+                state_revision: chunk.state_revision,
+                from_block: chunk.from_block,
+                to_block: chunk.to_block,
+            })
+            .collect();
+        Ok(Some(HistoryFitSeal {
+            seal: HistoryFitSealInfo::from(seal),
+            chunks,
+        }))
+    }
+
+    async fn create_serving_head(
+        &self,
+        command: CreateHistoryServingHeadSeal,
+    ) -> Result<HistoryServingHeadSeal, StorageError> {
+        validate_serving_command(&command)?;
+        if let Some(existing) =
+            load_serving_head(&self.db, command.seal.serving_head_seal_id).await?
+        {
+            if existing.seal.seal_hash != command.seal.seal_hash
+                || existing.chunks != command.chunks
+            {
+                return Err(StorageError::state_conflict(
+                    "quant_history_serving_head_seal",
+                    Some(command.seal.serving_head_seal_id),
+                    "serving-head seal id was replayed with a different immutable preimage",
+                ));
+            }
+            return self
+                .validate_serving_head(existing.seal.serving_head_seal_id, existing.seal.seal_hash)
+                .await;
+        }
+        let latest = self.latest_serving_head(command.seal.frontier).await?;
+        if command.seal.previous_seal_id
+            != latest.as_ref().map(|head| head.seal.serving_head_seal_id)
+        {
+            return Err(StorageError::state_conflict(
+                "quant_history_serving_head_seal",
+                Some(command.seal.serving_head_seal_id),
+                "serving head predecessor is not the latest immutable head",
+            ));
+        }
+        if latest.as_ref().is_some_and(|head| {
+            command.seal.accepted_through_block < head.seal.accepted_through_block
+        }) {
+            return Err(StorageError::state_conflict(
+                "quant_history_serving_head_seal",
+                Some(command.seal.serving_head_seal_id),
+                "serving head cannot move backward",
+            ));
+        }
+        let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        validate_plan(&transaction, command.seal.plan_id, command.seal.policy_hash).await?;
+        validate_seal_chunks(
+            &transaction,
+            Some(command.seal.frontier),
+            command.seal.window_from_block,
+            command.seal.accepted_through_block,
+            &command.chunks,
+        )
+        .await?;
+        ensure_seal_unquarantined(&transaction, &command.chunks).await?;
+        let seal_id = command.seal.serving_head_seal_id;
+        ServingSealEntity::insert(command.seal.into_active_model())
+            .exec_without_returning(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        for chunk in command.chunks {
+            ServingChunkEntity::insert(ServingChunkActive {
+                serving_head_seal_id: Set(seal_id),
+                chunk_id: Set(chunk.chunk_id),
+                frontier: Set(chunk.frontier),
+                state_revision: Set(chunk.state_revision),
+                from_block: Set(chunk.from_block),
+                to_block: Set(chunk.to_block),
+            })
+            .exec_without_returning(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        }
+        transaction.commit().await.map_err(StorageError::from)?;
+        load_serving_head(&self.db, seal_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found("quant_history_serving_head_seal", seal_id))
+    }
+
+    async fn latest_serving_head(
+        &self,
+        frontier: ExchangeHistoryFrontier,
+    ) -> Result<Option<HistoryServingHeadSeal>, StorageError> {
+        let Some(seal) = ServingSealEntity::find()
+            .filter(ServingSealColumn::Frontier.eq(frontier))
+            .order_by_desc(ServingSealColumn::CreatedAt)
+            .order_by_desc(ServingSealColumn::ServingHeadSealId)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Ok(None);
+        };
+        load_serving_head(&self.db, seal.serving_head_seal_id).await
+    }
+
+    async fn serving_head_at(
+        &self,
+        frontier: ExchangeHistoryFrontier,
+        decision_at: DateTime<Utc>,
+    ) -> Result<Option<HistoryServingHeadSeal>, StorageError> {
+        let Some(seal) = ServingSealEntity::find()
+            .filter(ServingSealColumn::Frontier.eq(frontier))
+            .filter(ServingSealColumn::CreatedAt.lte(decision_at))
+            .order_by_desc(ServingSealColumn::CreatedAt)
+            .order_by_desc(ServingSealColumn::ServingHeadSealId)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Ok(None);
+        };
+        load_serving_head(&self.db, seal.serving_head_seal_id).await
+    }
+
+    async fn validate_fit_seal(
+        &self,
+        fit_seal_id: HistoryFitSealId,
+        seal_hash: ContentHash,
+    ) -> Result<HistoryFitSeal, StorageError> {
+        let seal = self
+            .find_fit_seal(fit_seal_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found("quant_history_fit_seal", fit_seal_id))?;
+        if seal.seal.seal_hash != seal_hash {
+            return Err(history_invalidated(fit_seal_id, "fit seal hash changed"));
+        }
+        validate_seal_chunks(
+            &self.db,
+            None,
+            seal.seal.window_from_block,
+            seal.seal.window_to_block,
+            &seal.chunks,
+        )
+        .await?;
+        ensure_seal_unquarantined(&self.db, &seal.chunks).await?;
+        Ok(seal)
+    }
+
+    async fn validate_serving_head(
+        &self,
+        serving_head_seal_id: HistoryServingHeadSealId,
+        seal_hash: ContentHash,
+    ) -> Result<HistoryServingHeadSeal, StorageError> {
+        let seal = load_serving_head(&self.db, serving_head_seal_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found("quant_history_serving_head_seal", serving_head_seal_id)
+            })?;
+        if seal.seal.seal_hash != seal_hash {
+            return Err(history_invalidated(
+                serving_head_seal_id,
+                "serving head seal hash changed",
+            ));
+        }
+        validate_seal_chunks(
+            &self.db,
+            Some(seal.seal.frontier),
+            seal.seal.window_from_block,
+            seal.seal.accepted_through_block,
+            &seal.chunks,
+        )
+        .await?;
+        ensure_seal_unquarantined(&self.db, &seal.chunks).await?;
+        Ok(seal)
+    }
+}
+
+fn validate_fit_command(command: &CreateHistoryFitSeal) -> Result<(), StorageError> {
+    let actual = command.derive_hash().map_err(|error| {
+        StorageError::invariant_violation(
+            Some("quant_history_fit_seal"),
+            format!("derive fit seal hash: {error}"),
+        )
+    })?;
+    if actual != command.seal.seal_hash {
+        return Err(StorageError::invariant_violation(
+            Some("quant_history_fit_seal"),
+            "fit seal hash does not match its immutable preimage",
+        ));
+    }
+    validate_ref_range(
+        command.seal.window_from_block,
+        command.seal.window_to_block,
+        &command.chunks,
+    )
+}
+
+fn validate_serving_command(command: &CreateHistoryServingHeadSeal) -> Result<(), StorageError> {
+    let actual = command.derive_hash().map_err(|error| {
+        StorageError::invariant_violation(
+            Some("quant_history_serving_head_seal"),
+            format!("derive serving-head seal hash: {error}"),
+        )
+    })?;
+    if actual != command.seal.seal_hash {
+        return Err(StorageError::invariant_violation(
+            Some("quant_history_serving_head_seal"),
+            "serving-head seal hash does not match its immutable preimage",
+        ));
+    }
+    validate_ref_range(
+        command.seal.window_from_block,
+        command.seal.accepted_through_block,
+        &command.chunks,
+    )
+}
+
+fn validate_ref_range(
+    from_block: i64,
+    to_block: i64,
+    chunks: &[HistorySealChunkRef],
+) -> Result<(), StorageError> {
+    if from_block < 0 || to_block < from_block || chunks.is_empty() {
+        return Err(StorageError::invariant_violation(
+            Some("quant_history_seal"),
+            "history seal requires a non-empty valid block range",
+        ));
+    }
+    let mut cursor = from_block;
+    for chunk in chunks {
+        if chunk.state_revision <= 0
+            || chunk.from_block != cursor
+            || chunk.to_block < chunk.from_block
+            || chunk.to_block > to_block
+        {
+            return Err(StorageError::invariant_violation(
+                Some("quant_history_seal"),
+                "history seal chunks must exactly and contiguously cover the window",
+            ));
+        }
+        cursor = chunk.to_block.checked_add(1).ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some("quant_history_seal"),
+                "history seal chunk cursor overflowed",
+            )
+        })?;
+    }
+    if cursor != to_block.saturating_add(1) {
+        return Err(StorageError::invariant_violation(
+            Some("quant_history_seal"),
+            "history seal chunks do not cover the declared upper bound",
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_plan<C>(
+    db: &C,
+    plan_id: Uuid,
+    policy_hash: ContentHash,
+) -> Result<(), StorageError>
+where
+    C: ConnectionTrait,
+{
+    let plan = PlanEntity::find_by_id(plan_id)
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| StorageError::not_found("quant_exchange_history_plan", plan_id))?;
+    if plan.policy_hash != policy_hash {
+        return Err(StorageError::state_conflict(
+            "quant_history_seal",
+            Some(plan_id),
+            "history seal policy hash differs from its immutable plan",
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_seal_chunks<C>(
+    db: &C,
+    frontier: Option<ExchangeHistoryFrontier>,
+    from_block: i64,
+    to_block: i64,
+    chunks: &[HistorySealChunkRef],
+) -> Result<(), StorageError>
+where
+    C: ConnectionTrait,
+{
+    validate_ref_range(from_block, to_block, chunks)?;
+    let ids = chunks
+        .iter()
+        .map(|chunk| chunk.chunk_id)
+        .collect::<Vec<_>>();
+    let stored = ChunkEntity::find()
+        .filter(ChunkColumn::ChunkId.is_in(ids))
+        .all(db)
+        .await
+        .map_err(StorageError::from)?
+        .into_iter()
+        .map(|chunk| (chunk.chunk_id, chunk))
+        .collect::<HashMap<_, _>>();
+    for chunk in chunks {
+        let row = stored.get(&chunk.chunk_id).ok_or_else(|| {
+            history_invalidated(chunk.chunk_id, "sealed history chunk is missing")
+        })?;
+        if frontier.is_some_and(|frontier| row.frontier != frontier)
+            || row.frontier != chunk.frontier
+            || row.status != ExchangeHistoryChunkStatus::Accepted
+            || row.state_revision != Some(chunk.state_revision)
+            || row.from_block != chunk.from_block
+            || row.to_block != chunk.to_block
+        {
+            return Err(history_invalidated(
+                chunk.chunk_id,
+                "sealed chunk revision, range, frontier, or active status changed",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_unquarantined<C>(
+    db: &C,
+    frontier: ExchangeHistoryFrontier,
+    from_block: i64,
+    to_block: i64,
+) -> Result<(), StorageError>
+where
+    C: ConnectionTrait,
+{
+    let resolved = Query::select()
+        .column(ResolutionColumn::QuarantineId)
+        .from(ResolutionEntity)
+        .to_owned();
+    let active = QuarantineEntity::find()
+        .inner_join(ChunkEntity)
+        .filter(ChunkColumn::Frontier.eq(frontier))
+        .filter(ChunkColumn::FromBlock.lte(to_block))
+        .filter(ChunkColumn::ToBlock.gte(from_block))
+        .filter(QuarantineColumn::QuarantineId.not_in_subquery(resolved))
+        .limit(1)
+        .one(db)
+        .await
+        .map_err(StorageError::from)?;
+    if let Some(quarantine) = active {
+        return Err(history_invalidated(
+            quarantine.quarantine_id,
+            "active quarantine overlaps the sealed history window",
+        ));
+    }
+    Ok(())
+}
+
+async fn ensure_seal_unquarantined<C>(
+    db: &C,
+    chunks: &[HistorySealChunkRef],
+) -> Result<(), StorageError>
+where
+    C: ConnectionTrait,
+{
+    for chunk in chunks {
+        ensure_unquarantined(db, chunk.frontier, chunk.from_block, chunk.to_block).await?;
+    }
+    Ok(())
+}
+
+async fn load_serving_head<C>(
+    db: &C,
+    seal_id: HistoryServingHeadSealId,
+) -> Result<Option<HistoryServingHeadSeal>, StorageError>
+where
+    C: ConnectionTrait,
+{
+    let Some(seal) = ServingSealEntity::find_by_id(seal_id)
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+    else {
+        return Ok(None);
+    };
+    let chunks = ServingChunkEntity::find()
+        .filter(ServingChunkColumn::ServingHeadSealId.eq(seal_id))
+        .order_by_asc(ServingChunkColumn::FromBlock)
+        .all(db)
+        .await
+        .map_err(StorageError::from)?
+        .into_iter()
+        .map(|chunk| HistorySealChunkRef {
+            chunk_id: chunk.chunk_id,
+            frontier: chunk.frontier,
+            state_revision: chunk.state_revision,
+            from_block: chunk.from_block,
+            to_block: chunk.to_block,
+        })
+        .collect();
+    Ok(Some(HistoryServingHeadSeal {
+        seal: HistoryServingHeadSealInfo::from(seal),
+        chunks,
+    }))
+}
+
+fn history_invalidated(id: impl Display, detail: &'static str) -> StorageError {
+    StorageError::state_conflict(
+        "quant_history_seal",
+        Some(id),
+        format!("HistoryWindowInvalidated: {detail}"),
+    )
 }

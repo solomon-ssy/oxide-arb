@@ -17,7 +17,7 @@ use quant_pivot_models::{
         ExecutionParticipantRow, MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow,
     },
     domain::{
-        data_plane::DecisionClock,
+        data_plane::{DecisionClock, HistorySealChunkRef},
         market::{
             EventRegistryInfo, MarketRegistryInfo, TokenInfo,
             book::{BookLevel, BookSnapshot},
@@ -144,6 +144,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn market_execution_window(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -164,6 +165,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn market_executions_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -174,6 +176,7 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn execution_participants_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -375,6 +378,7 @@ pub async fn provider_selector_mapper_trip() {
         features: FeaturesConfig::default(),
         model_requirements: ModelFeatureRequirements::default(),
         knowledge_lag_secs: 0,
+        route_availability: None,
     };
 
     let snapshot = selector

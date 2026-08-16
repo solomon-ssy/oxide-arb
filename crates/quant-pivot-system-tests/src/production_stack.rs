@@ -174,6 +174,8 @@ const COLLATERAL_IMPLEMENTATION_WORD: &str =
 const COLLATERAL_IMPLEMENTATION: &str = "0x6bbcef9f7ef3b6c592c99e0f206a0de94ad0925f";
 const STARTUP_TIMEOUT: Duration = Duration::from_mins(1);
 const OPERATIONAL_READINESS_TIMEOUT: Duration = Duration::from_mins(1);
+const BROWSER_SERIES_MIN_POINTS: usize = 8;
+const BROWSER_SERIES_READINESS_TIMEOUT: Duration = Duration::from_secs(90);
 // A parity attempt waiting on append-only evidence must release its worker slot
 // promptly so another queued parity run can establish its own pending clock.
 const SAMPLED_PARITY_START_TIMEOUT: Duration = Duration::from_mins(1);
@@ -186,6 +188,7 @@ const SAMPLED_PARITY_CONTAINMENT_TIMEOUT: Duration = Duration::from_mins(12);
 // minutes cover the single-worker lease hand-off without treating 900 seconds
 // as a correctness constant.
 const RUNTIME_PARITY_COMPLETION_TIMEOUT: Duration = Duration::from_mins(42);
+const BROWSER_ACTIVITY_STABILITY_TIMEOUT: Duration = Duration::from_mins(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const RECOVERY_POINT_TIMEOUT: Duration = Duration::from_mins(10);
 const LEASE_RECOVERY_TIMEOUT: Duration = Duration::from_mins(3);
@@ -1872,11 +1875,79 @@ impl ProductionStack {
         if evidence.await_settlement_discovery {
             await_browser_settlement_discovery(self.infrastructure.postgres.connection()).await?;
         }
+        if purpose == ProductionStackPurpose::BrowserEvidence
+            && matches!(
+                self.fixture,
+                ProductionStackFixture::Browser | ProductionStackFixture::GovernedFeedback
+            )
+        {
+            self.stabilize_browser_activity().await?;
+        }
         if let Some((fixture, outcome, report_universe)) = browser_closure {
             self.start_browser_closure_monitor(fixture, outcome, report_universe)?;
         }
         self.verify_clob_connection_bound().await?;
         Ok(())
+    }
+
+    async fn stabilize_browser_activity(&self) -> Result<()> {
+        let repository =
+            PgFeatureParityRepository::new(self.infrastructure.postgres.connection().clone());
+        let now = Utc::now();
+        let recent_cutoff = now - ChronoDuration::hours(24);
+        let mut latest = repository.latest_unbound_full().await?;
+        if !latest
+            .as_ref()
+            .is_some_and(|run| run.created_at > recent_cutoff && run.window_end >= recent_cutoff)
+        {
+            let (http, access_token) = self.governed_http_session().await?;
+            decode_http_json(
+                http.post(format!(
+                    "{}/api/research/feature-integrity/runs/full",
+                    self.base_url()
+                ))
+                .header("accept-api-version", "v1")
+                .header("x-acting-role", "super_admin")
+                .bearer_auth(&access_token)
+                .json(&json!({
+                    "window_start": null,
+                    "window_end": null,
+                    "reason": "freeze browser evidence after one real current 24-hour parity replay",
+                }))
+                .send()
+                .await
+                .context("enqueue browser-evidence full parity replay")?,
+                StatusCode::ACCEPTED,
+                "enqueue browser-evidence full parity replay",
+            )
+            .await?;
+            latest = repository.latest_unbound_full().await?;
+        }
+
+        let run_id = latest
+            .as_ref()
+            .context("browser-evidence full parity replay was not persisted")?
+            .run_id;
+        let deadline = Instant::now() + BROWSER_ACTIVITY_STABILITY_TIMEOUT;
+        loop {
+            let run = repository
+                .find_run(&run_id)
+                .await?
+                .context("browser-evidence full parity replay disappeared")?;
+            if run.status.is_terminal() {
+                println!(
+                    "browser activity state stabilized: parity_run_id={} status={}",
+                    run.run_id, run.status
+                );
+                return Ok(());
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "browser-evidence full parity replay {run_id} did not settle within {BROWSER_ACTIVITY_STABILITY_TIMEOUT:?}: status={}",
+                run.status
+            );
+            sleep(POLL_INTERVAL).await;
+        }
     }
 
     async fn verify_clob_connection_bound(&self) -> Result<()> {
@@ -1946,7 +2017,10 @@ impl ProductionStack {
             let subscribed_markets = data["active_markets"]
                 .as_u64()
                 .is_some_and(|markets| markets >= expected_markets);
-            if operational && market_data_ready && connected_shards && subscribed_markets {
+            let base_ready =
+                operational && market_data_ready && connected_shards && subscribed_markets;
+            if base_ready {
+                self.await_browser_series(&http, &access_token).await?;
                 println!(
                     "production-stack operational readiness passed: fixture={:?} active_markets={} ws_shards={} last_message_age_ms={}",
                     self.fixture,
@@ -1963,6 +2037,61 @@ impl ProductionStack {
             }
             sleep(POLL_INTERVAL).await;
         }
+    }
+
+    async fn await_browser_series(&self, http: &Client, access_token: &str) -> Result<()> {
+        if !matches!(
+            self.fixture,
+            ProductionStackFixture::Browser | ProductionStackFixture::GovernedFeedback
+        ) {
+            return Ok(());
+        }
+        let deadline = Instant::now() + BROWSER_SERIES_READINESS_TIMEOUT;
+        loop {
+            let (yes_points, no_points) = self.browser_series_counts(http, access_token).await?;
+            if yes_points >= BROWSER_SERIES_MIN_POINTS && no_points >= BROWSER_SERIES_MIN_POINTS {
+                return Ok(());
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "browser microstructure did not reach {BROWSER_SERIES_MIN_POINTS} points per side within {BROWSER_SERIES_READINESS_TIMEOUT:?}: yes={yes_points} no={no_points}"
+            );
+            sleep(REPORT_BOOK_REFRESH_INTERVAL).await;
+        }
+    }
+
+    async fn browser_series_counts(
+        &self,
+        http: &Client,
+        access_token: &str,
+    ) -> Result<(usize, usize)> {
+        let to = Utc::now();
+        let from = to - ChronoDuration::hours(1);
+        let response = decode_http_json(
+            http.get(format!(
+                "{}/api/markets/{}/microstructure",
+                self.base_url(),
+                synthetic_condition_id()
+            ))
+            .header("accept-api-version", "v1")
+            .bearer_auth(access_token)
+            .query(&[("from", from.to_rfc3339()), ("to", to.to_rfc3339())])
+            .send()
+            .await
+            .context("read browser microstructure readiness")?,
+            StatusCode::OK,
+            "browser microstructure readiness",
+        )
+        .await?;
+        let yes_points = response["data"]["yes"]
+            .as_array()
+            .context("browser microstructure readiness omitted yes series")?
+            .len();
+        let no_points = response["data"]["no"]
+            .as_array()
+            .context("browser microstructure readiness omitted no series")?
+            .len();
+        Ok((yes_points, no_points))
     }
 
     async fn governed_http_session(&self) -> Result<(Client, String)> {
@@ -3185,7 +3314,7 @@ async fn seed_browser_fixture(
         runtime_finalized_execution_evidence,
     }))
     .await?;
-    if closure.is_some() {
+    if closure.is_some() || fixture == ProductionStackFixture::GovernedFeedback {
         pause_feedback_schedulers(db).await?;
     }
     let governed_cancellation_cycle_id = fixture

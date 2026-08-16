@@ -216,8 +216,8 @@ expression: "TopNReportSnapshot::non_empty()"
           "cohort_key": {
             "profile_ref": {
               "id": "pooled_1h_control",
-              "version": 4,
-              "content_hash": "blake3:92654501879377a7e6373f52c030112a95dd4ce48539655497ce4ea207f3a953"
+              "version": 5,
+              "content_hash": "blake3:f99b2bb7b6a22ba717cfdb2a850e0b3d2a674e36f74826cb22f31d10d3c1faf0"
             },
             "category": "politics",
             "horizon_secs": 86400,
@@ -447,8 +447,8 @@ expression: "TopNReportSnapshot::non_empty()"
           "cohort_key": {
             "profile_ref": {
               "id": "pooled_1h_control",
-              "version": 4,
-              "content_hash": "blake3:92654501879377a7e6373f52c030112a95dd4ce48539655497ce4ea207f3a953"
+              "version": 5,
+              "content_hash": "blake3:f99b2bb7b6a22ba717cfdb2a850e0b3d2a674e36f74826cb22f31d10d3c1faf0"
             },
             "category": "politics",
             "horizon_secs": 86400,

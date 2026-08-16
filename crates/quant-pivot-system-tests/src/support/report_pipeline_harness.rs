@@ -54,7 +54,7 @@ use quant_pivot_models::{
     config::PortfolioSolverDeployConfig,
     domain::{
         api::{BasisAlertListQuery, MarketLinkageListQuery},
-        data_plane::DecisionBoundary,
+        data_plane::{DecisionBoundary, HistorySealChunkRef},
         governance::{NewOperationLog, lifecycle::OperationalPhase},
         market::{
             EventRegistryInfo, MarketRegistryInfo, TokenInfo,
@@ -106,10 +106,10 @@ use quant_pivot_models::{
         AccountPositions, BasisAlertId, CalibrationArtifactId, ConditionTruth, ContentHash,
         DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId, EconomicTierId,
         EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan, EventId, EvmAddress,
-        ExecutionAccountId, ExposureBreakdown, FeatureParityStateId, IcaoStation, MarketId,
-        MarketLinkageId, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, OperationDetailDocument, OperationLogId,
-        PolicyBundleGeneration, PortfolioPlanId, PortfolioScenarioArtifactId,
+        ExecutionAccountId, ExposureBreakdown, FeatureParityStateId, HistoryServingHeadSealId,
+        IcaoStation, MarketId, MarketLinkageId, MarketSelectionId, ModelInputContract, ModelRunId,
+        ModelSpecId, ModelTrainingContract, ModelVersionId, OperationDetailDocument,
+        OperationLogId, PolicyBundleGeneration, PortfolioPlanId, PortfolioScenarioArtifactId,
         PortfolioScenarioModelArtifactId, Price, Probability, RecommendationId,
         RecommendationReportId, ReportDataQualityTokens, ReportRouteRunId, ResearchProfileRef,
         ResolverVersion, RoleCode, SchemaVersion, SelectionExclusionSummary, ServingAuthority,
@@ -162,7 +162,8 @@ use super::{
     artifact_store::VersionedArtifactStoreFixture,
     catalog_fixtures::{make_event, make_market},
     execution_history_fixtures::{
-        WHALE_FIXTURE_EXECUTION_COUNT, live_history_config, live_history_repo, whale_execution_rows,
+        WHALE_FIXTURE_EXECUTION_COUNT, live_activation_head, live_history_config,
+        live_history_repo, whale_execution_rows,
     },
     execution_pg_seed::{fixture_profile_ref, seed_score_calibration},
     fact_sink::DiscardFactWriter,
@@ -173,7 +174,7 @@ use super::{
     },
     model_serving_runtime::ModelServingRegistryFixture,
     model_spec_fixtures::{
-        new_model_spec_fixture, pooled_horizon_secs, pooled_profile_ref, weather_horizon_secs,
+        new_model_spec_fixture, pooled_bootstrap_profile_ref, weather_horizon_secs,
     },
     pit::InMemoryDecisionSnapshotSource,
     policy_fixtures::bootstrap_policy_bundle,
@@ -565,6 +566,20 @@ struct ReportFactRead;
 
 #[async_trait]
 impl QuantFactReadRepository for ReportFactRead {
+    async fn validate_execution_history_chunks(
+        &self,
+        history_chunks: Vec<HistorySealChunkRef>,
+    ) -> Result<(), StorageError> {
+        if history_chunks != live_activation_head().chunks {
+            return Err(StorageError::state_conflict(
+                "quant_exchange_history_acceptance",
+                None::<&str>,
+                "report fixture received an unrecognized serving-head chunk set",
+            ));
+        }
+        Ok(())
+    }
+
     async fn weather_forecast_facts_between(
         &self,
         stations: Vec<String>,
@@ -638,6 +653,7 @@ impl QuantFactReadRepository for ReportFactRead {
     async fn market_execution_window(
         &self,
         market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         from_ms: i64,
         to_ms: i64,
         decision_at_ms: i64,
@@ -685,6 +701,7 @@ impl QuantFactReadRepository for ReportFactRead {
     async fn market_executions_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -695,6 +712,7 @@ impl QuantFactReadRepository for ReportFactRead {
     async fn execution_participants_between(
         &self,
         _market_ids: Vec<MarketId>,
+        _history_chunks: Vec<HistorySealChunkRef>,
         _from_ms: i64,
         _to_ms: i64,
         _decision_at_ms: i64,
@@ -799,7 +817,7 @@ impl ReportPipelineHarness {
         let factor_repo =
             Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
         let domain = DomainConfig::default();
-        for profile_ref in [pooled_profile_ref(), fixture_profile_ref()] {
+        for profile_ref in [pooled_bootstrap_profile_ref(), fixture_profile_ref()] {
             let profile = profile_ref
                 .resolve_builtin_research_profile()
                 .expect("resolve report factor profile");
@@ -852,7 +870,12 @@ impl ReportPipelineHarness {
 
         let decision_policy_snapshot_id = if options.bind_trade_policy {
             let scenario_visible_at = Utc::now() + ChronoDuration::seconds(1);
-            activate_report_portfolio(db, &store, [BuyModelRoute::Weather], scenario_visible_at)
+            let pooled = RepresentedRouteSet::from_routes([BuyModelRoute::Pooled])
+                .expect("pooled represented Route set");
+            let pooled_weather =
+                RepresentedRouteSet::from_routes([BuyModelRoute::Pooled, BuyModelRoute::Weather])
+                    .expect("pooled/Weather represented Route set");
+            activate_report_portfolio(db, &store, [pooled, pooled_weather], scenario_visible_at)
                 .await
                 .expect("activate report scenario-model graph")
         } else {
@@ -1445,6 +1468,11 @@ fn fixture_route_runs(
         pit_lineage_digest: lineage.pit_lineage_digest,
         serving_contract_digest: lineage.serving_contract_digest,
         recommendation_contract_hash: lineage.recommendation_contract_hash,
+        report_universe_plan_hash: fixture_content_hash("report-universe-plan"),
+        history_serving_head_seal_id: HistoryServingHeadSealId::new(
+            lineage.report_route_run_id.as_uuid(),
+        ),
+        history_serving_head_seal_hash: fixture_content_hash("history-serving-head"),
         serving_authority: ServingAuthority::ExecutionEligible,
     };
     vec![NewReportRouteRun {
@@ -1843,6 +1871,8 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
         runtime_controls: RuntimeControlsHandle::default(),
         readiness_gate: Arc::new(AlwaysOperationalGate),
         microstructure_commit: Arc::new(ImmediateCommitBarrier),
+        exchange_history_repo: live_history_repo(),
+        metrics: Arc::new(MetricsHub::new()),
     }))
 }
 
@@ -2266,26 +2296,9 @@ fn runtime_config_for_pipeline(
     factors: &FactorsConfig,
     features: &FeaturesConfig,
 ) -> DecisionPolicySnapshot {
-    let pooled_route = !matches!(
-        selection.enabled_categories.as_slice(),
-        [MarketCategory::Crypto | MarketCategory::Weather]
-    );
     let bound_at = Utc::now();
-    let mut buy_routes = BTreeMap::from([(
-        BuyModelRoute::Weather,
-        BuyRouteBinding {
-            champion: ModelBinding::new(
-                *weather_model_version_id,
-                ModelBindingSource::Bootstrap,
-                bound_at,
-                PolicyBundleGeneration::FIRST,
-                1,
-            ),
-            shadow: None,
-        },
-    )]);
-    if pooled_route {
-        buy_routes.insert(
+    let buy_routes = BTreeMap::from([
+        (
             BuyModelRoute::Pooled,
             BuyRouteBinding {
                 champion: ModelBinding::new(
@@ -2297,8 +2310,21 @@ fn runtime_config_for_pipeline(
                 ),
                 shadow: None,
             },
-        );
-    }
+        ),
+        (
+            BuyModelRoute::Weather,
+            BuyRouteBinding {
+                champion: ModelBinding::new(
+                    *weather_model_version_id,
+                    ModelBindingSource::Bootstrap,
+                    bound_at,
+                    PolicyBundleGeneration::FIRST,
+                    1,
+                ),
+                shadow: None,
+            },
+        ),
+    ]);
     let mut config = DecisionPolicySnapshot::default();
     config.recommendation.selection = selection;
     config.profile_artifacts.scoring.definition = factors.clone();
@@ -2396,7 +2422,13 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
 }
 
 async fn publish_pooled_model(input: &PooledModelFixture<'_>) {
-    let profile_ref = pooled_profile_ref();
+    let prepared = prepare_pooled_model(input).await;
+    let source_model_version_id = persist_pooled_source(input, &prepared).await;
+    persist_pooled_calibration(input, &prepared, source_model_version_id).await;
+}
+
+async fn prepare_pooled_model(input: &PooledModelFixture<'_>) -> PreparedWeightedModel {
+    let profile_ref = pooled_bootstrap_profile_ref();
     let profile = profile_ref
         .resolve_builtin_research_profile()
         .expect("resolve pooled ResearchProfile");
@@ -2414,21 +2446,14 @@ async fn publish_pooled_model(input: &PooledModelFixture<'_>) {
             .expect("pooled feature schema"),
     )
     .expect("pooled feature schema hash");
-    let model_spec_id = ModelSpecId::from_v7();
-    let input_contract = ModelInputContract::single_required("book.mid");
-    let spec = new_model_spec_fixture(
-        model_spec_id,
-        "report-pipeline-pooled-control",
-        ModelFamily::WeightedFactor,
-        pooled_horizon_secs(),
-        input_contract.clone(),
-        ModelTrainingContract::outcome_default(),
-    );
-    let model_spec_definition_hash = spec.definition_hash;
-    PgModelRegistryRepository::new(input.db.clone())
-        .create_model_spec(spec)
+    let registry = PgModelRegistryRepository::new(input.db.clone());
+    let spec = registry
+        .ensure_bootstrap_spec(&profile)
         .await
-        .expect("create pooled model spec");
+        .expect("ensure pooled bootstrap model spec");
+    let model_spec_id = spec.model_spec_id;
+    let model_spec_definition_hash = spec.definition_hash;
+    let input_contract = spec.input_contract;
     let window_end = Utc::now() - ChronoDuration::days(60);
     let window_start = window_end - ChronoDuration::days(1);
     let dataset = ModelDatasetLedgerFixture::persist(
@@ -2467,32 +2492,127 @@ async fn publish_pooled_model(input: &PooledModelFixture<'_>) {
         dataset.training_dataset_id,
     ))
     .expect("pooled training input hash");
-    let payload = ModelPayloadFixture::weighted(
-        factor_plane,
-        &input.factors.factor_head,
+
+    PreparedWeightedModel {
+        factor_plane: factor_plane.clone(),
         input_contract,
+        model_spec_id,
+        training_dataset_id: dataset.training_dataset_id,
+        training_input_hash,
+    }
+}
+
+async fn persist_pooled_source(
+    input: &PooledModelFixture<'_>,
+    prepared: &PreparedWeightedModel,
+) -> ModelVersionId {
+    let source_model_version_id = ModelVersionId::from_v7();
+    let source_payload = ModelPayloadFixture::weighted(
+        &prepared.factor_plane,
+        &input.factors.factor_head,
+        prepared.input_contract.clone(),
         ReturnModelSpec::heuristic_default(),
         input.factors.cross_section.clone(),
     )
-    .expect("pooled weighted model payload");
-    let fixture = SealedModelFixture::seal(
+    .expect("pooled source model payload");
+    let source_fixture = SealedModelFixture::seal(
         input.db,
         ModelArtifactFixtureSeed {
-            model_version_id: input.model_version_id,
-            training_dataset_id: dataset.training_dataset_id,
-            payload,
-            training_input_hash,
+            model_version_id: source_model_version_id,
+            training_dataset_id: prepared.training_dataset_id,
+            payload: source_payload,
+            training_input_hash: prepared.training_input_hash,
             category_scope: None,
             calibration: None,
             bias_table: None,
         },
     )
     .await
-    .expect("seal pooled control model");
+    .expect("seal pooled source model");
+    source_fixture
+        .store(input.store)
+        .await
+        .expect("store pooled source artifact");
+    let source_contract = source_fixture.serving_contract().clone();
+    let source_bindings = source_contract.bindings();
+    let source_category_scope = source_bindings.model.category_scope;
+    let source_profile_ref = source_bindings.model.profile_ref.clone();
+    let source_training_dataset_id = source_bindings.dataset.manifest.training_dataset_id;
+    PgModelRegistryRepository::new(input.db.clone())
+        .create_model_version(NewModelVersion {
+            model_version_id: source_model_version_id,
+            model_spec_id: prepared.model_spec_id,
+            version: 1,
+            artifact_hash: source_fixture.artifact_hash(),
+            serving_contract: source_contract,
+            category_scope: source_category_scope,
+            profile_ref: source_profile_ref,
+            training_dataset_id: Some(source_training_dataset_id),
+            trade_policy_artifact_id: None,
+            trade_policy_hash: None,
+            derivation: NewModelVersion::training_derivation(),
+            metrics: ModelVersionMetrics::not_measured("pooled calibrated fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("pooled calibrated fixture"),
+        })
+        .await
+        .expect("persist pooled source model");
+
+    source_model_version_id
+}
+
+async fn persist_pooled_calibration(
+    input: &PooledModelFixture<'_>,
+    prepared: &PreparedWeightedModel,
+    source_model_version_id: ModelVersionId,
+) {
+    let calibration_id = Box::pin(seed_score_calibration(
+        input.db,
+        input.store,
+        &source_model_version_id,
+    ))
+    .await;
+    let calibration_repo = PgCalibrationArtifactRepository::new(input.db.clone());
+    calibration_repo
+        .mark_active(&calibration_id)
+        .await
+        .expect("activate pooled calibration");
+    let calibration = calibration_repo
+        .find_by_id(&calibration_id)
+        .await
+        .expect("load pooled calibration")
+        .expect("pooled calibration row");
+    let payload = ModelPayloadFixture::weighted(
+        &prepared.factor_plane,
+        &input.factors.factor_head,
+        prepared.input_contract.clone(),
+        ReturnModelSpec::Calibrated(CalibratedReturnModel {
+            calibrator_ref: calibration_id,
+            downside_source: DownsideSource::MfeMae,
+        }),
+        input.factors.cross_section.clone(),
+    )
+    .expect("pooled calibrated model payload");
+    let fixture = SealedModelFixture::seal(
+        input.db,
+        ModelArtifactFixtureSeed {
+            model_version_id: input.model_version_id,
+            training_dataset_id: prepared.training_dataset_id,
+            payload,
+            training_input_hash: prepared.training_input_hash,
+            category_scope: None,
+            calibration: Some(ModelBindingFixture::score_calibration(
+                calibration_id,
+                calibration.content_hash,
+            )),
+            bias_table: None,
+        },
+    )
+    .await
+    .expect("seal pooled calibrated model");
     fixture
         .store(input.store)
         .await
-        .expect("store pooled control artifact");
+        .expect("store pooled calibrated artifact");
     let serving_contract = fixture.serving_contract().clone();
     let bindings = serving_contract.bindings();
     let category_scope = bindings.model.category_scope;
@@ -2502,8 +2622,8 @@ async fn publish_pooled_model(input: &PooledModelFixture<'_>) {
         input.db,
         NewModelVersion {
             model_version_id: input.model_version_id,
-            model_spec_id,
-            version: 1,
+            model_spec_id: prepared.model_spec_id,
+            version: 2,
             artifact_hash: fixture.artifact_hash(),
             serving_contract,
             category_scope,
@@ -2511,9 +2631,12 @@ async fn publish_pooled_model(input: &PooledModelFixture<'_>) {
             training_dataset_id: Some(training_dataset_id),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
-            derivation: NewModelVersion::training_derivation(),
-            metrics: ModelVersionMetrics::not_measured("pooled control fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("pooled control fixture"),
+            derivation: ModelVersionDerivation::ReturnCalibration {
+                parent_model_version_id: source_model_version_id,
+                calibration_artifact_id: calibration_id,
+            },
+            metrics: ModelVersionMetrics::not_measured("pooled calibrated fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("pooled calibrated fixture"),
         },
     )
     .await

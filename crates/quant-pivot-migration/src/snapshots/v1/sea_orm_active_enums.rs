@@ -751,8 +751,8 @@ pub enum QpFreshBootStage {
     BootstrapPreflight,
     #[sea_orm(string_value = "bootstrap_committed")]
     BootstrapCommitted,
-    #[sea_orm(string_value = "report_eligible")]
-    ReportEligible,
+    #[sea_orm(string_value = "first_report_queued")]
+    FirstReportQueued,
     #[sea_orm(string_value = "first_report_published")]
     FirstReportPublished,
 }
@@ -1690,9 +1690,9 @@ pub enum QpExchangeHistoryChunkStatus {
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
-    enum_name = "qp_exchange_history_quarantine_reason"
+    enum_name = "qp_exchange_history_quarantine_kind"
 )]
-pub enum QpExchangeHistoryQuarantineReason {
+pub enum QpExchangeHistoryQuarantineKind {
     #[sea_orm(string_value = "provider_mismatch")]
     ProviderMismatch,
     #[sea_orm(string_value = "decode_failure")]

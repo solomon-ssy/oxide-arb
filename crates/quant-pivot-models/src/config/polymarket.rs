@@ -67,6 +67,8 @@ const fn default_market_refresh_secs() -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OnchainConfig {
+    /// Stable identity of the settlement/read RPC provider and failure domain.
+    pub provider_id: String,
     /// Typed Polygon JSON-RPC endpoint source.
     pub rpc_endpoint: PolygonRpcEndpoint,
     /// RPC request timeout (ms). Default: `10000`.
@@ -76,6 +78,7 @@ pub struct OnchainConfig {
 impl Default for OnchainConfig {
     fn default() -> Self {
         Self {
+            provider_id: "polygon_public_rpc".to_owned(),
             rpc_endpoint: PolygonRpcEndpoint::default(),
             rpc_timeout_ms: default_rpc_timeout(),
         }
@@ -263,6 +266,7 @@ mod rpc_endpoint_tests {
     fn endpoint_source_explicitly_tagged() {
         let public: OnchainConfig = toml::from_str(
             r#"
+provider_id = "settlement_public"
 rpc_timeout_ms = 5000
 rpc_endpoint = { source = "public", url = "https://polygon-rpc.com" }
 "#,
@@ -275,6 +279,7 @@ rpc_endpoint = { source = "public", url = "https://polygon-rpc.com" }
 
         let protected: OnchainConfig = toml::from_str(
             r#"
+provider_id = "settlement_protected"
 rpc_timeout_ms = 5000
 rpc_endpoint = { source = "protected", url = "https://provider.invalid/v2/private-provider-key" }
 "#,
