@@ -11,11 +11,13 @@ use chrono::{Duration, TimeZone, Utc};
 use quant_pivot_models::{
     domain::{
         api::{FeatureParityJobParams, RunFullFeatureParityRequest},
+        market::fee::ImmediateExecutionCost,
         quant::{
-            CapitalOccupancyBucket, EntryEconomics, ExecutableEconomicTier, NewFeatureParityRun,
-            NewRecommendationReport, NewReportFactDelivery, NewReportFeatureParity, NewResearchJob,
-            RecommendationEconomics, RecommendationInfo, RecommendationReportInfo,
-            RepresentedRouteSet, ScenarioCashflow,
+            EntryExecutionEconomics, ExecutableEconomicTier, HardReservationBucket,
+            NewFeatureParityRun, NewRecommendationReport, NewReportFactDelivery,
+            NewReportFeatureParity, NewResearchJob, PassiveEntryEconomics, RecommendationEconomics,
+            RecommendationInfo, RecommendationReportInfo, RepresentedRouteSet,
+            ScenarioCapitalOccupancySlice, ScenarioEntryExecution, ScenarioExecutionCashflow,
         },
     },
     enums::{
@@ -36,13 +38,14 @@ use quant_pivot_models::{
         EntryOrderPolicy, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility,
         ExitPlan, FactorBreakdownEntry, FeatureParityRunId, FeatureVectorId, MarketContext,
         MarketId, MarketSelectionId, ModelRunId, ModelVersionId, OpportunisticExitPolicy,
-        PortfolioPlanId, PortfolioScenarioArtifactId, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, RecommendationTradePlan, ReportDataQualitySnapshotId,
-        ReportRouteRunId, ReportRunId, ReportSummary, ResearchJobId, ResearchJobParams,
-        RiskEnvelope, RoleCode, Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy,
-        TokenId, TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
-        TradePolicyCohortProvenance, Usd, UsdHours, builtin_research_profiles,
+        PassiveFillDistribution, PassiveFillState, PassiveFillStateKind, PortfolioPlanId,
+        PortfolioScenarioArtifactId, Price, Probability, RecommendationFactorBreakdown,
+        RecommendationId, RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
+        ReportDataQualitySnapshotId, ReportRouteRunId, ReportRunId, ReportSummary, ResearchJobId,
+        ResearchJobParams, RiskEnvelope, RoleCode, Shares, SignalCandidateId, SizingPlan,
+        ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId, TradePolicyCohortDimension,
+        TradePolicyCohortKey, TradePolicyCohortProvenance, TradePolicyEntryRoute, Usd, UsdHours,
+        builtin_research_profiles,
     },
 };
 use rust_decimal_macros::dec;
@@ -287,6 +290,10 @@ fn economic_tier(
     economics: RecommendationEconomics,
 ) -> ExecutableEconomicTier {
     let lineage_hash = content_hash();
+    let limit_price = Price::new(dec!(0.43));
+    let requested_shares = Shares::new(suggested_usd.inner() / limit_price.inner());
+    let full_fill_cost = ImmediateExecutionCost::new(suggested_usd, Usd::ZERO, Usd::ZERO)
+        .expect("valid passive full-fill cost");
     ExecutableEconomicTier {
         economic_tier_id: EconomicTierId::from_content_hash(&lineage_hash),
         report_route_run_id: ReportRouteRunId::from_v7(),
@@ -298,29 +305,75 @@ fn economic_tier(
         category: MarketCategory::Politics,
         token_id: TokenId::new(format!("token-{market}")),
         outcome_side: side,
-        shares: Shares::new(dec!(500)),
-        entry: EntryEconomics {
-            notional_usd: suggested_usd,
-            entry_vwap: Price::new(dec!(0.43)),
-            fee_usd: Usd::new(dec!(1.25)),
-            slippage_usd: Usd::new(dec!(2.50)),
+        entry_execution: EntryExecutionEconomics::Passive(Box::new(PassiveEntryEconomics {
+            requested_shares,
+            limit_price,
+            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            good_til_secs: 3_600,
+            hard_reserved_cash_usd: suggested_usd,
+            expected_filled_shares: requested_shares,
+            full_fill_cost,
+            fill_distribution: PassiveFillDistribution {
+                sample_count: 100,
+                source_evidence_hash: content_hash(),
+                states: vec![PassiveFillState {
+                    kind: PassiveFillStateKind::FullFill,
+                    probability_bps: 10_000,
+                    fill_ratio_bps: 10_000,
+                    fill_latency_ms: 1_000,
+                    post_fill_markout_bps: Bps::ZERO,
+                }],
+            },
+            maker_rebate_schedule: None,
+            full_fill_maker_rebate: None,
+            expected_maker_rebate_usd: Usd::ZERO,
             visible_liquidity_usd: Usd::new(dec!(5000)),
-        },
+        })),
         profit_probability_lower_bps: 5_800,
         probability_interval_width_bps: 800,
         scenario_cashflows: vec![
-            ScenarioCashflow {
+            ScenarioExecutionCashflow {
                 scenario_index: 0,
+                entry_execution: ScenarioEntryExecution::PassiveFullFill {
+                    fill_latency_ms: 1_000,
+                    post_fill_markout_bps: Bps::ZERO,
+                },
+                filled_shares: requested_shares,
+                immediate_cash_outlay_usd: suggested_usd,
+                discounted_exit_cash_usd: suggested_usd + Usd::new(dec!(90)),
+                delayed_maker_rebate_usd: Usd::ZERO,
+                discounted_maker_rebate_usd: Usd::ZERO,
+                capital_cost_usd: Usd::ZERO,
+                capital_occupancy: vec![ScenarioCapitalOccupancySlice {
+                    locked_cash_usd: suggested_usd,
+                    duration_secs: 86_400,
+                }],
                 discounted_net_usd: Usd::new(dec!(90)),
+                risk_net_usd: Usd::new(dec!(90)),
             },
-            ScenarioCashflow {
+            ScenarioExecutionCashflow {
                 scenario_index: 1,
+                entry_execution: ScenarioEntryExecution::PassiveFullFill {
+                    fill_latency_ms: 1_000,
+                    post_fill_markout_bps: Bps::ZERO,
+                },
+                filled_shares: requested_shares,
+                immediate_cash_outlay_usd: suggested_usd,
+                discounted_exit_cash_usd: suggested_usd - Usd::new(dec!(120)),
+                delayed_maker_rebate_usd: Usd::ZERO,
+                discounted_maker_rebate_usd: Usd::ZERO,
+                capital_cost_usd: Usd::ZERO,
+                capital_occupancy: vec![ScenarioCapitalOccupancySlice {
+                    locked_cash_usd: suggested_usd,
+                    duration_secs: 86_400,
+                }],
                 discounted_net_usd: Usd::new(dec!(-120)),
+                risk_net_usd: Usd::new(dec!(-120)),
             },
         ],
-        capital_occupancy: vec![CapitalOccupancyBucket {
+        hard_reservation_envelope: vec![HardReservationBucket {
             end_secs: 86_400,
-            locked_usd: suggested_usd,
+            reserved_cash_usd: suggested_usd,
         }],
         economics,
         lineage_hash,
@@ -348,9 +401,13 @@ fn sizing_plan(suggested_usd: Usd) -> SizingPlan {
     let tier_id = EconomicTierId::from_content_hash(&content_hash());
     SizingPlan {
         economic_tier_id: tier_id,
-        suggested_usd,
-        suggested_shares: Shares::new(dec!(500)),
-        entry_vwap: Price::new(dec!(0.43)),
+        requested_shares: Shares::new(suggested_usd.inner() / dec!(0.43)),
+        expected_filled_shares: Shares::new(suggested_usd.inner() / dec!(0.43)),
+        hard_reserved_cash_usd: suggested_usd,
+        immediate_fee_usd: Usd::ZERO,
+        expected_maker_rebate_usd: Usd::ZERO,
+        maker_rebate_schedule: None,
+        reference_entry_price: Price::new(dec!(0.43)),
         portfolio_weight_pct: dec!(0.05),
         market_exposure_after_usd: suggested_usd,
         event_exposure_after_usd: suggested_usd,
@@ -410,6 +467,7 @@ fn trade_policy_provenance() -> TradePolicyCohortProvenance {
                 .profile_ref,
             category: MarketCategory::Politics,
             horizon_secs: 86_400,
+            entry_route: TradePolicyEntryRoute::Aggressive,
             entry_price_min: Price::new(dec!(0.01)),
             entry_price_max: Price::new(dec!(0.99)),
             cash_budget_tier: Usd::new(dec!(250)),

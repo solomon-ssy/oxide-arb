@@ -90,6 +90,7 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
         Entity::find()
             .filter(Column::State.is_in([
                 ExecutionOrderState::Submitted,
+                ExecutionOrderState::PartiallyFilled,
                 ExecutionOrderState::Ambiguous,
             ]))
             .order_by_asc(Column::SubmittedAt)

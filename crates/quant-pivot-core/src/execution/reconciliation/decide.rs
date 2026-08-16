@@ -51,6 +51,10 @@ pub struct ReconciliationDecision {
     pub result: ReconciliationResult,
     pub filled_shares: Shares,
     pub avg_price: Option<Price>,
+    /// Whether the venue has removed the order and no further fill can occur.
+    pub venue_terminal: bool,
+    /// Whether a terminal removal was caused by the GTD deadline.
+    pub expired: bool,
 }
 
 impl ReconcileFacts {
@@ -71,9 +75,18 @@ impl ReconcileFacts {
                 // yet. The service attempts a cancel before deciding when stale; if
                 // we are still here past the deadline we cannot terminate safely —
                 // freeze for an operator (fail-closed). Otherwise retry next sweep.
-                VenuePresence::Unattributable | VenuePresence::Resting => {
+                VenuePresence::Unattributable => {
                     if self.past_stale_deadline {
                         ReconciliationResult::Unresolvable
+                    } else {
+                        ReconciliationResult::Pending
+                    }
+                }
+                VenuePresence::Resting => {
+                    if self.past_stale_deadline {
+                        ReconciliationResult::Unresolvable
+                    } else if filled.is_positive() {
+                        ReconciliationResult::PartiallyFilled
                     } else {
                         ReconciliationResult::Pending
                     }
@@ -97,6 +110,8 @@ impl ReconcileFacts {
             result,
             filled_shares: filled,
             avg_price: self.avg_price,
+            venue_terminal: self.presence == VenuePresence::Settled,
+            expired: self.gtd_expired,
         }
     }
 }
@@ -172,6 +187,15 @@ mod tests {
         let mut f = facts(dec!(0), dec!(100));
         f.presence = VenuePresence::Resting;
         assert_eq!(f.decide().result, ReconciliationResult::Pending);
+    }
+
+    #[test]
+    fn partial_is_actionable_progress() {
+        let mut f = facts(dec!(40), dec!(100));
+        f.presence = VenuePresence::Resting;
+        let decision = f.decide();
+        assert_eq!(decision.result, ReconciliationResult::PartiallyFilled);
+        assert!(!decision.venue_terminal);
     }
 
     #[test]

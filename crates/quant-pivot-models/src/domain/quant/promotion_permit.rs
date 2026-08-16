@@ -10,7 +10,11 @@ use super::{
     model_candidate_manifest::{scenario_model_bindings_hash, validate_scenario_model_bindings},
 };
 use crate::{
-    enums::{common::MarketCategory, model::ModelFamily, quant::QuantRuntimeMode},
+    enums::{
+        common::MarketCategory,
+        model::{ModelFamily, ServingEligibility},
+        quant::QuantRuntimeMode,
+    },
     hashing::CanonicalDigest,
     runtime_config::{
         ActivePolicyBundle, BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot,
@@ -878,10 +882,8 @@ impl PromotionServingConstraints {
         let scenario_bindings_hash = scenario_model_bindings_hash(&self.scenario_model_bindings)
             .map_err(|error| invalid_preflight(error.to_string()))?;
         if self.format_version != PROMOTION_SERVING_VERSION
-            || !matches!(
-                self.candidate_model_family,
-                ModelFamily::WeightedFactor | ModelFamily::ClassicalGradientBoostedTrees
-            )
+            || self.candidate_model_family.serving_eligibility()
+                != ServingEligibility::ActiveBuyCapable
             || self.candidate_manifest_id
                 != ModelCandidateManifestId::from_content_hash(&self.candidate_manifest_hash)
             || profile.spec.category != Some(self.category)

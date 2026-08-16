@@ -11,7 +11,7 @@ use std::{convert::TryFrom, str::FromStr, sync::Arc, time::Duration};
 
 use alloy::signers::Signer;
 pub use book::OrderbookSnapshot;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 pub use convert::{ClobSide, SdkSideConversionError};
 use num_traits::ToPrimitive;
 pub use orders::{CancelAllResult, CancelResult, ClobMakerOrder, ClobOrder, ClobTrade, OpenOrder};
@@ -50,15 +50,15 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         Bps, ClobFeeDetails, ClobMarketInfoVersion, ClobMarketInfoVersionId, ClobTokenDescriptor,
-        EvmTransactionHash, MarketId, OrderId, Price, Shares, TokenId, Usd, VenueOrderAmount,
-        VenueTradeId,
+        EvmAddress, EvmTransactionHash, MarketId, OrderId, Price, Shares, TokenId, Usd,
+        VenueOrderAmount, VenueTradeId,
     },
 };
 pub use rate_limiter::RateLimiter;
 use reqwest::Client;
 use rust_decimal::Decimal;
 pub use sdk_error::SdkClobError;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use token::WireTokenId;
 
@@ -69,6 +69,7 @@ use crate::{
     },
     keystore::OrderSigner,
     wallet::WalletTopology,
+    wire::decimal::de_decimal,
     ws::BookLevelRejectHook,
 };
 
@@ -169,6 +170,26 @@ struct RawClobFeeDetails {
     exponent: u32,
     #[serde(rename = "to")]
     taker_only: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMakerRebateAward {
+    date: NaiveDate,
+    condition_id: String,
+    asset_address: String,
+    maker_address: String,
+    #[serde(deserialize_with = "de_decimal")]
+    rebated_fees_usdc: Decimal,
+}
+
+/// Venue-awarded maker rebate at the canonical market/day dimension.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MakerRebateAward {
+    pub program_date: NaiveDate,
+    pub market_id: MarketId,
+    pub asset_address: EvmAddress,
+    pub maker_address: EvmAddress,
+    pub amount_usd: Usd,
 }
 
 /// Venue-owned order metadata re-read immediately before admission.
@@ -422,6 +443,7 @@ fn map_trade_response(trade: TradeResponse) -> Result<ClobTrade, ApiError> {
     };
     Ok(ClobTrade {
         trade_id: VenueTradeId::new(trade.id),
+        bucket_index: trade.bucket_index,
         order_id,
         market_id: MarketId::new(format!("{:#x}", trade.market)),
         token_id,
@@ -438,6 +460,31 @@ fn map_trade_response(trade: TradeResponse) -> Result<ClobTrade, ApiError> {
 }
 
 impl ClobClient {
+    /// Fetch the venue's market/day maker-rebate awards. The endpoint is
+    /// keyless, but the response identity is still validated against the exact
+    /// requested wallet and date.
+    pub async fn maker_rebate_awards(
+        &self,
+        date: NaiveDate,
+        maker_address: &EvmAddress,
+    ) -> Result<Vec<MakerRebateAward>, ApiError> {
+        self.rate_limiter.acquire("GET /rebates/current").await;
+        let url = format!(
+            "{}/rebates/current?date={date}&maker_address={maker_address}",
+            self.clob_base_url.trim_end_matches('/')
+        );
+        let raw_body = get_text_with_retry(&self.http, &RetryPolicy::clob_default(), &url).await?;
+        let raw = serde_json::from_str::<Vec<RawMakerRebateAward>>(&raw_body).map_err(|error| {
+            ApiError::Deserialize {
+                context: "CLOB maker rebate awards".to_owned(),
+                detail: error.to_string(),
+            }
+        })?;
+        raw.into_iter()
+            .map(|award| normalize_maker_rebate_award(award, date, maker_address))
+            .collect()
+    }
+
     /// Capture one append-only V2 CLOB market-info observation.
     #[tracing::instrument(skip(self), fields(market_id = %market_id))]
     pub async fn clob_market_info_version(
@@ -1156,6 +1203,46 @@ impl ClobClient {
         })
         .await
     }
+}
+
+fn normalize_maker_rebate_award(
+    raw: RawMakerRebateAward,
+    expected_date: NaiveDate,
+    expected_maker: &EvmAddress,
+) -> Result<MakerRebateAward, ApiError> {
+    let asset_address =
+        EvmAddress::parse(raw.asset_address.to_ascii_lowercase()).map_err(|error| {
+            ApiError::Deserialize {
+                context: "CLOB maker rebate asset address".to_owned(),
+                detail: error.to_string(),
+            }
+        })?;
+    let maker_address =
+        EvmAddress::parse(raw.maker_address.to_ascii_lowercase()).map_err(|error| {
+            ApiError::Deserialize {
+                context: "CLOB maker rebate maker address".to_owned(),
+                detail: error.to_string(),
+            }
+        })?;
+    if raw.date != expected_date || &maker_address != expected_maker {
+        return Err(ApiError::Deserialize {
+            context: "CLOB maker rebate identity".to_owned(),
+            detail: "response date or maker differs from request".to_owned(),
+        });
+    }
+    if raw.rebated_fees_usdc < Decimal::ZERO {
+        return Err(ApiError::Deserialize {
+            context: "CLOB maker rebate amount".to_owned(),
+            detail: "negative venue award".to_owned(),
+        });
+    }
+    Ok(MakerRebateAward {
+        program_date: raw.date,
+        market_id: MarketId::new(raw.condition_id),
+        asset_address,
+        maker_address,
+        amount_usd: Usd::new(raw.rebated_fees_usdc),
+    })
 }
 
 #[cfg(test)]

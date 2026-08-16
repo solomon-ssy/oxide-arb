@@ -6,7 +6,7 @@
 /// migration instead of replaying historical ALTER/data-repair waves.
 pub(super) const BOOTSTRAP_SOURCES: &[&str] = &[include_str!("sql/bootstrap.sql")];
 
-pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 30] = [
+pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 31] = [
     "book_microstructure_1m",
     "book_microstructure_1m_mv",
     "book_microstructure_1s",
@@ -19,6 +19,7 @@ pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 30] = [
     "quant_domain_observation",
     "quant_entry_condition_evaluation_event",
     "quant_exchange_event",
+    "quant_exchange_fee_charge",
     "quant_exchange_history_acceptance",
     "quant_exchange_log_raw",
     "quant_exchange_match",

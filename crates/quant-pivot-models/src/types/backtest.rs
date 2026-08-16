@@ -1668,7 +1668,7 @@ pub struct ExpectedVsRealized {
 pub struct CategoryMetric {
     pub category: MarketCategory,
     pub sample_count: u64,
-    pub rank_ic: Decimal,
+    pub realized_return_rank_correlation: Decimal,
     pub hit_rate: Probability,
     pub mean_realized_bps: Decimal,
 }
@@ -1900,7 +1900,7 @@ pub struct BacktestReportHashInput<'a> {
     pub coverage: Decimal,
     pub sample_count: u64,
     pub missing_feature_count: u64,
-    pub rank_ic: Decimal,
+    pub realized_return_rank_correlation: Decimal,
     pub sharpe: Decimal,
     pub hit_rate: Probability,
     pub expected_vs_realized: &'a ExpectedVsRealized,
@@ -1954,7 +1954,7 @@ pub struct BacktestPath {
     /// every path containing `None`; optimizer `PnL` is never substituted.
     pub scenario_residuals: Vec<Option<Decimal>>,
     pub sharpe: Decimal,
-    pub rank_ic: Decimal,
+    pub target_rank_ic: Decimal,
     pub max_drawdown: Decimal,
     pub tail_loss: Decimal,
     pub turnover: Option<Decimal>,
@@ -1991,35 +1991,39 @@ impl IntoIterator for BacktestPaths {
 /// One category's candidate-versus-baseline rank-IC delta.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CategoryRankIcDelta {
+pub struct CategoryRealizedReturnRankCorrelationDelta {
     pub category: MarketCategory,
-    pub baseline_rank_ic: Decimal,
-    pub candidate_rank_ic: Decimal,
-    pub rank_ic_delta: Decimal,
+    pub baseline_realized_return_rank_correlation: Decimal,
+    pub candidate_realized_return_rank_correlation: Decimal,
+    pub realized_return_rank_correlation_delta: Decimal,
 }
 
 /// Typed category comparison collection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(transparent)]
-pub struct CategoryRankIcDeltas(Vec<CategoryRankIcDelta>);
+pub struct CategoryRealizedReturnRankCorrelationDeltas(
+    Vec<CategoryRealizedReturnRankCorrelationDelta>,
+);
 
-impl From<Vec<CategoryRankIcDelta>> for CategoryRankIcDeltas {
-    fn from(values: Vec<CategoryRankIcDelta>) -> Self {
+impl From<Vec<CategoryRealizedReturnRankCorrelationDelta>>
+    for CategoryRealizedReturnRankCorrelationDeltas
+{
+    fn from(values: Vec<CategoryRealizedReturnRankCorrelationDelta>) -> Self {
         Self(values)
     }
 }
 
-impl Deref for CategoryRankIcDeltas {
-    type Target = [CategoryRankIcDelta];
+impl Deref for CategoryRealizedReturnRankCorrelationDeltas {
+    type Target = [CategoryRealizedReturnRankCorrelationDelta];
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl IntoIterator for CategoryRankIcDeltas {
-    type IntoIter = IntoIter<CategoryRankIcDelta>;
-    type Item = CategoryRankIcDelta;
+impl IntoIterator for CategoryRealizedReturnRankCorrelationDeltas {
+    type IntoIter = IntoIter<CategoryRealizedReturnRankCorrelationDelta>;
+    type Item = CategoryRealizedReturnRankCorrelationDelta;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -2033,13 +2037,13 @@ pub struct ModelComparisonHashInput<'a> {
     pub candidate_model_version_id: &'a ModelVersionId,
     pub baseline_report_hash: &'a ContentHash,
     pub candidate_report_hash: &'a ContentHash,
-    pub rank_ic_delta: Decimal,
+    pub realized_return_rank_correlation_delta: Decimal,
     pub hit_rate_delta: Decimal,
     pub realized_pnl_delta: Decimal,
     pub score_correlation: Decimal,
     pub side_disagreement_rate: Decimal,
     pub common_samples: u64,
-    pub category_breakdown_diff: &'a [CategoryRankIcDelta],
+    pub category_breakdown_diff: &'a [CategoryRealizedReturnRankCorrelationDelta],
 }
 
 impl ModelComparisonHashInput<'_> {

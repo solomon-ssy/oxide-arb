@@ -84,7 +84,7 @@ impl PgBacktestPathSetRepository {
         let calibration = bindings.model.calibration.as_ref();
         let valid_fold_policy = match (model.model_family, derivation, calibration, fold_policy) {
             (
-                ModelFamily::ClassicalGradientBoostedTrees,
+                ModelFamily::ClassicalLogisticRegression,
                 ModelVersionDerivation::Training,
                 None,
                 CpcvFoldCalibrationPolicy::NotApplicable,

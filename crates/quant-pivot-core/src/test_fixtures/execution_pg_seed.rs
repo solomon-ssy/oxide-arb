@@ -68,6 +68,7 @@ pub fn prepared_order(
             builder_taker_fee_bps: Bps::ZERO,
             builder_attribution: BuilderFeeAttribution::NoBuilderCode,
         },
+        maker_rebate_schedule: None,
         prepared_at: now,
         valid_until: now + Duration::hours(1),
     }

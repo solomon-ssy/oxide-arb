@@ -29,6 +29,9 @@ pub struct AccountBundle {
     pub provider_factory: Arc<AccountProviderFactory>,
     /// Immutable boot-verified identity referenced by all persisted snapshots.
     pub execution_account: ExecutionAccountInfo,
+    /// Shared keyless Data API client used by account reads and incentive
+    /// wallet-credit reconciliation.
+    pub data_api: Arc<DataApiClient>,
 }
 
 /// Dependencies for [`AccountBundle::assemble`].
@@ -50,8 +53,10 @@ impl AccountBundle {
     /// Assemble the account subsystem from the shared authenticated CLOB client.
     pub fn assemble(deps: AccountBundleDeps<'_>) -> QuantResult<Self> {
         let data_api = Arc::new(DataApiClient::new(deps.deploy.market_data.data_api.clone()));
-        let client: Arc<dyn PolymarketAccountClient> =
-            Arc::new(VenuePolymarketAccountClient::new(deps.clob, data_api));
+        let client: Arc<dyn PolymarketAccountClient> = Arc::new(VenuePolymarketAccountClient::new(
+            deps.clob,
+            Arc::clone(&data_api),
+        ));
 
         let reserved_repo: Arc<dyn ReservedCapitalRepository> =
             Arc::clone(&deps.infra.repos.reserved_capital) as Arc<dyn ReservedCapitalRepository>;
@@ -68,6 +73,7 @@ impl AccountBundle {
         Ok(Self {
             provider_factory: Arc::new(factory),
             execution_account: deps.execution_account,
+            data_api,
         })
     }
 }

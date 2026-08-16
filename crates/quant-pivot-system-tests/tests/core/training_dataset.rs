@@ -29,10 +29,10 @@ use quant_pivot_models::{
     domain::{
         data_plane::{DecisionBoundary, DecisionSource, HistorySealChunkRef},
         market::{
-            CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit, CatalogEventCandidate,
-            CatalogMarketCandidate, EventRegistryInfo, MarketRegistryInfo, NewCatalogEventChange,
-            NewCatalogEventObject, NewCatalogMarketObject, NewCatalogSyncBatch, UpsertEvent,
-            UpsertMarket, book::BookLevel, registry::TokenInfo,
+            CATALOG_OBJECT_HASH_VERSION, CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit,
+            CatalogEventCandidate, CatalogMarketCandidate, EventRegistryInfo, MarketRegistryInfo,
+            NewCatalogEventChange, NewCatalogEventObject, NewCatalogMarketObject,
+            NewCatalogSyncBatch, UpsertEvent, UpsertMarket, book::BookLevel, registry::TokenInfo,
         },
         quant::{
             CryptoSubject, GroundingProof, JobProgressSink, LinkageOutcome,
@@ -822,6 +822,7 @@ fn book_row(token: &str, event_time_ms: i64) -> BookL2LedgerRow {
         trade_side: None,
         trade_size: None,
         fee_rate_bps: None,
+        trade_transaction_hash: None,
         venue_event_time: event_time_ms,
         ingress_time: event_time_ms,
         persisted_time: event_time_ms,
@@ -1045,6 +1046,7 @@ fn market_registry_payload(
         min_order_size: Decimal::ONE,
         liquidity_usd: Some(Usd::new(dec!(1000))),
         volume_24h: Some(Usd::new(dec!(1000))),
+        maker_rebate_schedule: None,
         start_date: Some(context.source_effective_at),
         end_date: Some(context.end_date),
         resolved_at: None,
@@ -1061,12 +1063,15 @@ fn durable_catalog_commit(
     let market_payload = market_registry_payload(context, category);
     let event_payload = serde_json::to_value(&event_payload).expect("event payload");
     let market_payload = serde_json::to_value(&market_payload).expect("market payload");
-    let event_hash =
-        CanonicalDigest::content_hash_typed("quant-pivot/catalog-event-object", 1, &event_payload)
-            .expect("event content identity");
+    let event_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/catalog-event-object",
+        CATALOG_OBJECT_HASH_VERSION,
+        &event_payload,
+    )
+    .expect("event content identity");
     let market_hash = CanonicalDigest::content_hash_typed(
         "quant-pivot/catalog-market-object",
-        1,
+        CATALOG_OBJECT_HASH_VERSION,
         &market_payload,
     )
     .expect("market content identity");

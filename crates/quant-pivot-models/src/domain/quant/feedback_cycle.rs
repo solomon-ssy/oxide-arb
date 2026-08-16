@@ -1825,7 +1825,7 @@ fn expected_assessment(
     let exceeded = match metric {
         FeedbackDriftMetric::KolmogorovSmirnovPValue => value <= threshold,
         FeedbackDriftMetric::PopulationStabilityIndex
-        | FeedbackDriftMetric::RankIcDrop
+        | FeedbackDriftMetric::TargetRankIcDrop
         | FeedbackDriftMetric::JensenShannonDivergence => value >= threshold,
     };
     if exceeded {
@@ -1948,7 +1948,7 @@ mod tests {
                 champion_serving_contract_hash: hash(5),
                 champion_model_spec_id: ModelSpecId::from_v7(),
                 champion_model_spec_definition_hash: hash(6),
-                champion_model_family: ModelFamily::ClassicalGradientBoostedTrees,
+                champion_model_family: ModelFamily::WeightedFactor,
                 route: BuyModelRoute::Crypto,
                 decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
                 decision_policy_snapshot_hash: hash(7),

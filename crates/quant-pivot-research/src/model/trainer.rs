@@ -1990,7 +1990,7 @@ mod tests {
         // weight than the 0.5 seed.
         let factor_trainer = WeightedFactorTrainer::new();
         for rank_loss in [
-            RankLossKind::RankIcWeightedRanknet,
+            RankLossKind::TargetRankIcWeightedRanknet,
             RankLossKind::PairwiseRanknet,
         ] {
             let mut request = request(momentum_dataset());

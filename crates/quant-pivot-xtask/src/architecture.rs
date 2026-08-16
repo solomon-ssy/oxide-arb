@@ -335,6 +335,7 @@ fn validate_execution_history_queries(workspace_root: &Path) -> Result<Vec<Strin
     const EXECUTION_TABLES: &[&str] = &[
         "quant_exchange_log_raw",
         "quant_exchange_event",
+        "quant_exchange_fee_charge",
         "quant_exchange_match",
         "quant_market_execution",
         "quant_execution_participant",

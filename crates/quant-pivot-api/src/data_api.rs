@@ -14,11 +14,15 @@
 //!
 //! [`OpenAPI`]: https://polymarket-docs.copilot.markets/api-reference/core/get-current-positions-for-a-user
 
+use chrono::{DateTime, Utc};
 use quant_pivot_error::api::ApiError;
-use quant_pivot_models::config::DataApiConfig;
+use quant_pivot_models::{
+    config::DataApiConfig,
+    types::{EvmAddress, EvmTransactionHash, MarketId, Usd},
+};
 use reqwest::Client;
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     infra::{
@@ -27,6 +31,49 @@ use crate::{
     },
     wire::decimal::de_decimal,
 };
+
+const ACTIVITY_PAGE_MAX: u32 = 500;
+const ACTIVITY_OFFSET_MAX: u32 = 5_000;
+
+/// Wallet-credit incentive type exposed by the venue activity API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum VenueIncentiveCreditKind {
+    MakerRebate,
+    TakerRebate,
+}
+
+/// Wallet-confirmed incentive credit. It remains at the dimensions supplied by
+/// the venue and is never backfilled into trade economics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VenueIncentiveCredit {
+    pub proxy_wallet: EvmAddress,
+    pub occurred_at: DateTime<Utc>,
+    pub market_id: Option<MarketId>,
+    pub kind: VenueIncentiveCreditKind,
+    pub amount_usd: Usd,
+    pub transaction_hash: EvmTransactionHash,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum RawIncentiveCreditKind {
+    #[serde(rename = "MAKER_REBATE")]
+    MakerRebate,
+    #[serde(rename = "TAKER_REBATE")]
+    TakerRebate,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawIncentiveCredit {
+    proxy_wallet: String,
+    timestamp: i64,
+    condition_id: String,
+    #[serde(rename = "type")]
+    kind: RawIncentiveCreditKind,
+    #[serde(deserialize_with = "de_decimal")]
+    usdc_size: Decimal,
+    transaction_hash: String,
+}
 
 /// A single venue position as returned by the Data API.
 ///
@@ -140,6 +187,52 @@ impl DataApiClient {
         Ok(all)
     }
 
+    /// Fetch wallet-confirmed maker/taker rebate credits in a closed epoch-
+    /// second window. Stable ascending pagination is mandatory; reaching the
+    /// venue's offset cap fails closed so credits cannot be silently skipped.
+    pub async fn incentive_credits(
+        &self,
+        funder: &EvmAddress,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<VenueIncentiveCredit>, ApiError> {
+        if start < 0 || end < start {
+            return Err(ApiError::Deserialize {
+                context: "data-api incentive activity window".to_owned(),
+                detail: "expected 0 <= start <= end".to_owned(),
+            });
+        }
+        let limit = self.config.page_size.clamp(1, ACTIVITY_PAGE_MAX);
+        let mut offset = 0_u32;
+        let mut credits = Vec::new();
+        loop {
+            let page = self
+                .fetch_incentive_page(funder, start, end, limit, offset)
+                .await?;
+            let page_len = u32::try_from(page.len()).unwrap_or(u32::MAX);
+            for raw in page {
+                credits.push(normalize_incentive_credit(raw, funder)?);
+            }
+            if page_len < limit {
+                break;
+            }
+            offset = offset
+                .checked_add(limit)
+                .ok_or_else(|| ApiError::Deserialize {
+                    context: "data-api incentive activity pagination".to_owned(),
+                    detail: "offset overflow".to_owned(),
+                })?;
+            if offset > ACTIVITY_OFFSET_MAX {
+                return Err(ApiError::Deserialize {
+                    context: "data-api incentive activity pagination".to_owned(),
+                    detail: "activity window exceeds venue offset cap; split the time window"
+                        .to_owned(),
+                });
+            }
+        }
+        Ok(credits)
+    }
+
     /// Fetch one positions page.
     async fn fetch_page(
         &self,
@@ -190,11 +283,114 @@ impl DataApiClient {
         })
         .await
     }
+
+    async fn fetch_incentive_page(
+        &self,
+        funder: &EvmAddress,
+        start: i64,
+        end: i64,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<RawIncentiveCredit>, ApiError> {
+        let base_url = self.config.base_url.trim_end_matches('/');
+        let url = format!(
+            "{base_url}/activity?user={funder}&type=MAKER_REBATE,TAKER_REBATE&start={start}&end={end}&sortBy=TIMESTAMP&sortDirection=ASC&limit={limit}&offset={offset}"
+        );
+        retry::retry_with_policy(&self.retry_policy, || {
+            let http = self.http.clone();
+            let url = url.clone();
+            async move {
+                let response = http
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|error| ApiError::Http {
+                        method: "GET",
+                        url: url.clone(),
+                        status: 0,
+                        body: error.to_string(),
+                        retryable: true,
+                    })?;
+                let status = response.status();
+                if !status.is_success() {
+                    let code = status.as_u16();
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(ApiError::Http {
+                        method: "GET",
+                        url: url.clone(),
+                        status: code,
+                        body,
+                        retryable: is_retryable_status(code),
+                    });
+                }
+                response
+                    .json::<Vec<RawIncentiveCredit>>()
+                    .await
+                    .map_err(|error| ApiError::Deserialize {
+                        context: "data-api incentive activity".to_owned(),
+                        detail: error.to_string(),
+                    })
+            }
+        })
+        .await
+    }
+}
+
+fn normalize_incentive_credit(
+    raw: RawIncentiveCredit,
+    expected_wallet: &EvmAddress,
+) -> Result<VenueIncentiveCredit, ApiError> {
+    let proxy_wallet =
+        EvmAddress::parse(raw.proxy_wallet.to_ascii_lowercase()).map_err(|error| {
+            ApiError::Deserialize {
+                context: "data-api incentive proxy wallet".to_owned(),
+                detail: error.to_string(),
+            }
+        })?;
+    if &proxy_wallet != expected_wallet {
+        return Err(ApiError::Deserialize {
+            context: "data-api incentive proxy wallet".to_owned(),
+            detail: "response wallet differs from requested wallet".to_owned(),
+        });
+    }
+    if raw.usdc_size < Decimal::ZERO {
+        return Err(ApiError::Deserialize {
+            context: "data-api incentive amount".to_owned(),
+            detail: "negative wallet credit".to_owned(),
+        });
+    }
+    let occurred_at =
+        DateTime::from_timestamp(raw.timestamp, 0).ok_or_else(|| ApiError::Deserialize {
+            context: "data-api incentive timestamp".to_owned(),
+            detail: "timestamp is outside chrono range".to_owned(),
+        })?;
+    let transaction_hash = EvmTransactionHash::parse(raw.transaction_hash.to_ascii_lowercase())
+        .map_err(|error| ApiError::Deserialize {
+            context: "data-api incentive transaction hash".to_owned(),
+            detail: error.to_string(),
+        })?;
+    Ok(VenueIncentiveCredit {
+        proxy_wallet,
+        occurred_at,
+        market_id: (!raw.condition_id.is_empty()).then(|| MarketId::new(raw.condition_id)),
+        kind: match raw.kind {
+            RawIncentiveCreditKind::MakerRebate => VenueIncentiveCreditKind::MakerRebate,
+            RawIncentiveCreditKind::TakerRebate => VenueIncentiveCreditKind::TakerRebate,
+        },
+        amount_usd: Usd::new(raw.usdc_size),
+        transaction_hash,
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use quant_pivot_models::{config::DataApiConfig, types::EvmAddress};
+    use reqwest::Client;
     use rust_decimal_macros::dec;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param},
+    };
 
     use super::*;
 
@@ -249,5 +445,85 @@ mod tests {
         let error = serde_json::from_value::<VenuePosition>(json)
             .expect_err("missing critical account evidence must fail closed");
         assert!(error.to_string().contains("size"));
+    }
+
+    #[tokio::test]
+    async fn incentive_contract_is_strict() {
+        let server = MockServer::start().await;
+        let wallet = EvmAddress::parse(format!("0x{}", "1".repeat(40))).expect("wallet");
+        let market = format!("0x{}", "2".repeat(64));
+        let maker_tx = format!("0x{}", "3".repeat(64));
+        let taker_tx = format!("0x{}", "4".repeat(64));
+        Mock::given(method("GET"))
+            .and(path("/activity"))
+            .and(query_param("user", wallet.as_str()))
+            .and(query_param("type", "MAKER_REBATE,TAKER_REBATE"))
+            .and(query_param("start", "100"))
+            .and(query_param("end", "200"))
+            .and(query_param("sortBy", "TIMESTAMP"))
+            .and(query_param("sortDirection", "ASC"))
+            .and(query_param("limit", "500"))
+            .and(query_param("offset", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "proxyWallet": wallet.as_str(),
+                    "timestamp": 101,
+                    "conditionId": market.clone(),
+                    "type": "MAKER_REBATE",
+                    "usdcSize": "1.25",
+                    "transactionHash": maker_tx
+                },
+                {
+                    "proxyWallet": wallet.as_str(),
+                    "timestamp": 102,
+                    "conditionId": "",
+                    "type": "TAKER_REBATE",
+                    "usdcSize": 0.5,
+                    "transactionHash": taker_tx
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = DataApiClient::new(DataApiConfig {
+            base_url: server.uri(),
+            page_size: 500,
+            size_threshold: 1,
+        })
+        .with_http_client(Client::builder().no_proxy().build().expect("HTTP client"));
+
+        let credits = client
+            .incentive_credits(&wallet, 100, 200)
+            .await
+            .expect("incentive credits");
+
+        assert_eq!(credits.len(), 2);
+        assert_eq!(credits[0].kind, VenueIncentiveCreditKind::MakerRebate);
+        assert_eq!(
+            credits[0].market_id.as_ref().map(ToString::to_string),
+            Some(market)
+        );
+        assert_eq!(credits[0].amount_usd, Usd::new(dec!(1.25)));
+        assert_eq!(credits[1].kind, VenueIncentiveCreditKind::TakerRebate);
+        assert!(credits[1].market_id.is_none());
+        assert_eq!(credits[1].amount_usd, Usd::new(dec!(0.5)));
+    }
+
+    #[test]
+    fn incentive_rejects_wrong_wallet() {
+        let expected = EvmAddress::parse(format!("0x{}", "1".repeat(40))).expect("wallet");
+        let raw = RawIncentiveCredit {
+            proxy_wallet: format!("0x{}", "2".repeat(40)),
+            timestamp: 101,
+            condition_id: String::new(),
+            kind: RawIncentiveCreditKind::MakerRebate,
+            usdc_size: dec!(1),
+            transaction_hash: format!("0x{}", "3".repeat(64)),
+        };
+
+        let error = normalize_incentive_credit(raw, &expected)
+            .expect_err("wrong response wallet must fail closed");
+
+        assert!(error.to_string().contains("differs from requested wallet"));
     }
 }

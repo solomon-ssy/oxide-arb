@@ -324,6 +324,11 @@ pub struct QuantWorkersConfig {
     /// snapshot synchronously. This worker only adds heartbeat/history points
     /// between reports.
     pub equity_snapshot_secs: u64,
+    /// Venue maker-award and wallet-credit reconciliation cadence.
+    pub venue_incentive_reconciliation_secs: u64,
+    /// Closed UTC days re-read on every incentive pass. Re-reading is
+    /// intentional because venue awards can arrive after the program day.
+    pub venue_incentive_lookback_days: u32,
 }
 
 impl Default for QuantWorkersConfig {
@@ -339,6 +344,8 @@ impl Default for QuantWorkersConfig {
             execution_dispatch_secs: default_execution_dispatch_secs(),
             execution_breaker_tick_secs: default_breaker_tick_secs(),
             equity_snapshot_secs: default_equity_snapshot_secs(),
+            venue_incentive_reconciliation_secs: default_incentive_reconciliation_secs(),
+            venue_incentive_lookback_days: default_incentive_lookback_days(),
         }
     }
 }
@@ -378,6 +385,14 @@ const fn default_breaker_tick_secs() -> u64 {
 
 const fn default_equity_snapshot_secs() -> u64 {
     300
+}
+
+const fn default_incentive_reconciliation_secs() -> u64 {
+    3_600
+}
+
+const fn default_incentive_lookback_days() -> u32 {
+    35
 }
 
 #[cfg(test)]

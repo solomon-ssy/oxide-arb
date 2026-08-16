@@ -107,6 +107,7 @@ impl E2eCatalog {
             min_order_size: Decimal::ONE,
             liquidity_usd: Some(Usd::new(Decimal::from(20_000))),
             volume_24h: Some(Usd::new(Decimal::from(8_000))),
+            maker_rebate_schedule: None,
             start_date: Some(Utc::now()),
             end_date: Some(Utc::now() + Duration::days(7)),
             resolved_at: None,

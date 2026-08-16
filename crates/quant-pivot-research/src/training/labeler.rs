@@ -1,7 +1,7 @@
 //! Forward-looking label implementations (pure, point-in-time correct).
 //!
-//! Four labels are horizon-dependent (`return_to_horizon`,
-//! `max_favorable_excursion_bps`, `max_adverse_excursion_bps`,
+//! Three labels are horizon-dependent (`max_favorable_excursion_bps`,
+//! `max_adverse_excursion_bps`,
 //! `liquidity_exit_possible`); `token_payout_ratio` is horizon-independent and
 //! reads the selected token's authoritative payout ratio. All forward data is
 //! pre-fetched into [`LabelBuildInput::forward`]; a labeler never reads a database.
@@ -20,8 +20,6 @@ use crate::{
     execution_semantics::{LiquidityRole, PitFeeSchedule, walk_sell_exact_shares},
     training::{DecisionBook, hold_terminal_proceeds},
 };
-/// `return_to_horizon`: signed mid-price return from entry to the horizon, bps.
-pub const RETURN_TO_HORIZON: LabelName = LabelName::from_static("return_to_horizon");
 /// `max_favorable_excursion_bps`: best favorable move reached within the horizon.
 pub const MAX_FAVORABLE_EXCURSION_BPS: LabelName =
     LabelName::from_static("max_favorable_excursion_bps");
@@ -56,9 +54,7 @@ pub fn label_definitions(names: &[LabelName]) -> QuantResult<Vec<LabelDefinition
     let mut definitions = names
         .iter()
         .map(|name| {
-            let (semantic_version, semantic_key) = if *name == RETURN_TO_HORIZON {
-                (1, "mid-return-at-horizon-bps@1")
-            } else if *name == MAX_FAVORABLE_EXCURSION_BPS {
+            let (semantic_version, semantic_key) = if *name == MAX_FAVORABLE_EXCURSION_BPS {
                 (1, "max-executable-bid-high-excursion-bps@1")
             } else if *name == MAX_ADVERSE_EXCURSION_BPS {
                 (1, "min-executable-bid-low-excursion-bps@1")
@@ -109,7 +105,6 @@ pub fn label_definitions(names: &[LabelName]) -> QuantResult<Vec<LabelDefinition
 #[must_use]
 pub fn label_names() -> Vec<LabelName> {
     vec![
-        RETURN_TO_HORIZON,
         MAX_FAVORABLE_EXCURSION_BPS,
         MAX_ADVERSE_EXCURSION_BPS,
         LIQUIDITY_EXIT_POSSIBLE,
@@ -173,59 +168,6 @@ fn horizon_end(input: &LabelBuildInput<'_>) -> Result<DateTime<Utc>, String> {
                 input.horizon_secs, input.decision_at
             )
         })
-}
-
-/// `return_to_horizon` labeler.
-pub struct ReturnToHorizonLabeler;
-
-impl Labeler for ReturnToHorizonLabeler {
-    fn label_name(&self) -> LabelName {
-        RETURN_TO_HORIZON
-    }
-
-    fn build_label(&self, input: &LabelBuildInput<'_>) -> LabelBuildOutput {
-        let Some(entry) = input.entry_price else {
-            return LabelBuildOutput::Unavailable {
-                reason: MissingLabelReason::NoEntryPrice,
-            };
-        };
-        let cutoff = match horizon_end(input) {
-            Ok(cutoff) => cutoff,
-            Err(detail) => return LabelBuildOutput::Invalid { detail },
-        };
-        if input.forward.data_available_until < cutoff {
-            return LabelBuildOutput::NotMature {
-                available_after: cutoff,
-                reason: LabelDelayReason::HorizonNotElapsed,
-            };
-        }
-        let exit = input
-            .forward
-            .samples
-            .iter()
-            .filter(|s| s.at <= cutoff)
-            .filter_map(|s| s.mid_close)
-            .next_back();
-        let Some(exit) = exit else {
-            return LabelBuildOutput::Unavailable {
-                reason: MissingLabelReason::NoExitPrice,
-            };
-        };
-        return_bps(entry.inner(), exit.inner()).map_or(
-            LabelBuildOutput::Unavailable {
-                reason: MissingLabelReason::NoEntryPrice,
-            },
-            |value| {
-                LabelBuildOutput::Available(TrainingLabel {
-                    label_name: self.label_name(),
-                    horizon_secs: input.horizon_secs,
-                    value,
-                    is_resolved: true,
-                    matured_at: cutoff,
-                })
-            },
-        )
-    }
 }
 
 /// `max_favorable_excursion_bps` labeler (best-bid high within the horizon).
@@ -452,7 +394,8 @@ impl Labeler for HoldVsExitProceedsLabeler {
                 ),
             };
         }
-        let exit_proceeds = fill.gross_order_amount.inner() - fill.expected_fee.inner();
+        let exit_proceeds =
+            fill.immediate_cost.principal_usd.inner() - fill.immediate_cost.total_fee_usd().inner();
         let hold_all = hold_terminal_proceeds(&ctx.terminal, input.decision_at).inner();
         let residual_shares = total_shares - filled_shares;
         let hold_residual = hold_all * residual_shares / total_shares;
@@ -628,50 +571,6 @@ mod tests {
                 )]),
             }),
         }
-    }
-
-    #[test]
-    fn return_horizon_resolves_mature() {
-        let market = MarketId::new("m");
-        let token = TokenId::new("t");
-        let window = forward(vec![sample(60, "0.55", "0.56", "0.54")], 120, None);
-        let out = ReturnToHorizonLabeler.build_label(&input(
-            &market,
-            &token,
-            Some(price("0.50")),
-            60,
-            &window,
-        ));
-        match out {
-            LabelBuildOutput::Available(label) => {
-                // (0.55 - 0.50) / 0.50 * 10_000 = 1000 bps.
-                assert_eq!(label.value, Decimal::from(1000));
-                assert!(label.is_resolved);
-            }
-            other => panic!("expected available, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn labeler_waits_for_maturity() {
-        let market = MarketId::new("m");
-        let token = TokenId::new("t");
-        // Data only reaches +30s but the horizon needs +60s.
-        let window = forward(vec![sample(30, "0.55", "0.56", "0.54")], 30, None);
-        let out = ReturnToHorizonLabeler.build_label(&input(
-            &market,
-            &token,
-            Some(price("0.50")),
-            60,
-            &window,
-        ));
-        assert!(matches!(
-            out,
-            LabelBuildOutput::NotMature {
-                reason: LabelDelayReason::HorizonNotElapsed,
-                ..
-            }
-        ));
     }
 
     #[test]
@@ -915,23 +814,5 @@ mod tests {
             out,
             LabelBuildOutput::Available(l) if l.value == Decimal::ONE
         ));
-    }
-
-    #[test]
-    fn horizon_invalid_not_saturated() {
-        let market = MarketId::new("m");
-        let token = TokenId::new("t");
-        let window = forward(Vec::new(), 120, None);
-        let out = ReturnToHorizonLabeler.build_label(&input(
-            &market,
-            &token,
-            Some(price("0.50")),
-            u64::MAX,
-            &window,
-        ));
-
-        assert!(
-            matches!(out, LabelBuildOutput::Invalid { detail } if detail.contains("does not fit chrono seconds"))
-        );
     }
 }

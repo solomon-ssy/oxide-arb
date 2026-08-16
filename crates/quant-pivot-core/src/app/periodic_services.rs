@@ -7,20 +7,59 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::ports::PolicySnapshotPort, enums::system::CapabilityId, types::Usd,
 };
-use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
+use quant_pivot_repository::traits::{
+    EquitySnapshotRepository, PositionRepository, VenueIncentiveRepository,
+};
 
 use super::AppContext;
 use crate::{
     app::{capability_gate::wait_for_capability, task_id::TaskId, task_registry::AppRunner},
     infra::periodic_task::PeriodicTask,
     ingest::data_quality::DataQualityService,
-    service::{equity::EquitySnapshotService, feature_integrity::AutomaticFullParityOutcome},
+    service::{
+        equity::EquitySnapshotService, feature_integrity::AutomaticFullParityOutcome,
+        venue_incentive::VenueIncentiveReconciliationService,
+    },
 };
 
 /// Interval between data-quality snapshot refreshes into Prometheus.
 const DATA_QUALITY_REFRESH_SECS: u64 = 5;
 
 impl AppContext {
+    pub fn register_venue_incentive_worker(&self, runner: &mut AppRunner) {
+        let service = Arc::new(VenueIncentiveReconciliationService::new(
+            Arc::clone(&self.execution.clob),
+            Arc::clone(&self.account.data_api),
+            Arc::clone(&self.infra.repos.venue_incentive) as Arc<dyn VenueIncentiveRepository>,
+            self.account.execution_account.execution_account_id,
+            self.account.execution_account.funder_address.clone(),
+        ));
+        let poll = Duration::from_secs(
+            self.config
+                .quant
+                .workers
+                .venue_incentive_reconciliation_secs,
+        );
+        let lookback_days = self.config.quant.workers.venue_incentive_lookback_days;
+        runner.spawn(
+            TaskId::VenueIncentiveReconciliation,
+            move |token| async move {
+                let _ = PeriodicTask::run(
+                    "venue-incentive-reconciliation",
+                    move || poll,
+                    0.0,
+                    true,
+                    token,
+                    move || {
+                        let service = Arc::clone(&service);
+                        async move { service.reconcile_pass(Utc::now(), lookback_days).await }
+                    },
+                )
+                .await;
+            },
+        );
+    }
+
     pub fn register_periodic_services(&self, runner: &mut AppRunner) {
         let gamma = Arc::clone(&self.data.gamma_service);
         let linkage_gamma = Arc::clone(&gamma);
@@ -80,6 +119,7 @@ impl AppContext {
         let equity_service = Arc::new(EquitySnapshotService::new(
             Arc::clone(&self.infra.repos.equity_snapshot) as Arc<dyn EquitySnapshotRepository>,
             Arc::clone(&self.infra.repos.position) as Arc<dyn PositionRepository>,
+            Arc::clone(&self.infra.repos.venue_incentive) as Arc<dyn VenueIncentiveRepository>,
             self.account.execution_account.execution_account_id,
         ));
         let interval_secs = self.config.quant.workers.equity_snapshot_secs;

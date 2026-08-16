@@ -43,12 +43,12 @@ pub struct BacktestPathSetInfo {
     pub path_count: i64,
     /// `C(N, k)` — the number of purge/embargo/train/evaluate folds run.
     pub combination_count: i64,
-    /// Median of the paths' own rank IC — the hard `RankIc` gate's
+    /// Median of the paths' target-aligned rank IC — the hard `TargetRankIc` gate's
     /// data source.
-    pub median_rank_ic: Decimal,
+    pub median_target_rank_ic: Decimal,
     /// Sharpe and risk-evidence distribution across complete CPCV paths.
     pub sharpe_distribution: SharpeDistribution,
-    /// `Vec<BacktestPath>` (`path_index`, `group_returns`, `sharpe`, `rank_ic`,
+    /// `Vec<BacktestPath>` (`path_index`, `group_returns`, `sharpe`, `target_rank_ic`,
     /// `max_drawdown`, `tail_loss`, `turnover`) — the full reconstructed path detail.
     pub paths: BacktestPaths,
     /// The Deflated Sharpe Ratio (`PSR` evaluated at the trial-grid-corrected
@@ -98,7 +98,7 @@ info_from_model!(
         fold_artifacts,
         path_count,
         combination_count,
-        median_rank_ic,
+        median_target_rank_ic,
         sharpe_distribution,
         paths,
         deflated_sharpe,
@@ -164,7 +164,7 @@ pub struct NewBacktestPathSetInput {
     pub fold_artifacts: CpcvFoldArtifacts,
     pub path_count: i64,
     pub combination_count: i64,
-    pub median_rank_ic: Decimal,
+    pub median_target_rank_ic: Decimal,
     pub sharpe_distribution: SharpeDistribution,
     pub paths: BacktestPaths,
     pub deflated_sharpe: Decimal,
@@ -195,7 +195,7 @@ pub struct NewBacktestPathSet {
     pub fold_artifacts: CpcvFoldArtifacts,
     pub path_count: i64,
     pub combination_count: i64,
-    pub median_rank_ic: Decimal,
+    pub median_target_rank_ic: Decimal,
     pub sharpe_distribution: SharpeDistribution,
     pub paths: BacktestPaths,
     pub deflated_sharpe: Decimal,
@@ -243,7 +243,7 @@ impl NewBacktestPathSet {
             fold_artifacts: input.fold_artifacts,
             path_count: input.path_count,
             combination_count: input.combination_count,
-            median_rank_ic: input.median_rank_ic,
+            median_target_rank_ic: input.median_target_rank_ic,
             sharpe_distribution: input.sharpe_distribution,
             paths: input.paths,
             deflated_sharpe: input.deflated_sharpe,
@@ -308,7 +308,7 @@ struct BacktestPathSetHashInput<'a> {
     fold_artifacts: &'a CpcvFoldArtifacts,
     path_count: i64,
     combination_count: i64,
-    median_rank_ic: Decimal,
+    median_target_rank_ic: Decimal,
     sharpe_distribution: &'a SharpeDistribution,
     paths: &'a BacktestPaths,
     deflated_sharpe: Decimal,
@@ -337,7 +337,7 @@ impl<'a> BacktestPathSetHashInput<'a> {
             fold_artifacts: &input.fold_artifacts,
             path_count: input.path_count,
             combination_count: input.combination_count,
-            median_rank_ic: input.median_rank_ic.normalize(),
+            median_target_rank_ic: input.median_target_rank_ic.normalize(),
             sharpe_distribution: &input.sharpe_distribution,
             paths: &input.paths,
             deflated_sharpe: input.deflated_sharpe.normalize(),
@@ -367,7 +367,7 @@ impl<'a> BacktestPathSetHashInput<'a> {
             fold_artifacts: &info.fold_artifacts,
             path_count: info.path_count,
             combination_count: info.combination_count,
-            median_rank_ic: info.median_rank_ic.normalize(),
+            median_target_rank_ic: info.median_target_rank_ic.normalize(),
             sharpe_distribution: &info.sharpe_distribution,
             paths: &info.paths,
             deflated_sharpe: info.deflated_sharpe.normalize(),
@@ -398,7 +398,7 @@ impl<'a> From<&'a NewBacktestPathSet> for BacktestPathSetHashInput<'a> {
             fold_artifacts: &input.fold_artifacts,
             path_count: input.path_count,
             combination_count: input.combination_count,
-            median_rank_ic: input.median_rank_ic.normalize(),
+            median_target_rank_ic: input.median_target_rank_ic.normalize(),
             sharpe_distribution: &input.sharpe_distribution,
             paths: &input.paths,
             deflated_sharpe: input.deflated_sharpe.normalize(),
@@ -891,7 +891,7 @@ mod tests {
                 .expect("fold artifacts"),
                 path_count: 1,
                 combination_count: 1,
-                median_rank_ic: dec!(0.1),
+                median_target_rank_ic: dec!(0.1),
                 sharpe_distribution: SharpeDistribution {
                     min: dec!(0.2),
                     p25: dec!(0.3),
@@ -914,7 +914,7 @@ mod tests {
                         Some(dec!(-0.005)),
                     ],
                     sharpe: dec!(0.4),
-                    rank_ic: dec!(0.1),
+                    target_rank_ic: dec!(0.1),
                     max_drawdown: dec!(0.005),
                     tail_loss: dec!(-0.005),
                     turnover: Some(dec!(0.2)),
@@ -946,7 +946,7 @@ mod tests {
     #[test]
     fn hash_uses_persistence_scalars() {
         let mut sealed = NewBacktestPathSet::test_fixture();
-        sealed.median_rank_ic = dec!(0.1000);
+        sealed.median_target_rank_ic = dec!(0.1000);
         sealed.deflated_sharpe = dec!(0.95000);
         sealed.dsr_benchmark_sharpe = dec!(0.10000);
         sealed.pbo = dec!(0.00000);

@@ -23,7 +23,8 @@ use crate::{
     },
 };
 
-pub const CATALOG_OBJECT_SCHEMA_VERSION: i32 = 1;
+pub const CATALOG_OBJECT_SCHEMA_VERSION: i32 = 2;
+pub const CATALOG_OBJECT_HASH_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromQueryResult)]
 pub struct CatalogSyncBatchInfo {

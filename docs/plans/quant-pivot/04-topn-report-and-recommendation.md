@@ -292,6 +292,25 @@ Sizing 不是展示值。执行模式启用时，`OrderIntent` 只能在 sizing 
 
 `*_exposure_after_usd` 与 `binding_constraint` 由 portfolio planner 结合 `AccountSnapshot`（资本基数 + 当前持仓/敞口净额）计算，统一抽象见 [09 — 账户、资本、持仓与对账设计](09-account-capital-position-reconciliation.md)。**所有 mode 的资本基数均取真实 venue equity**（净清算价值 `min` `portfolio.budget` 护栏，credential-gated）；`report_only` ≠ dry-run，同样需要真实余额/持仓，凭证缺失则报告不生成（fail closed）。
 
+### 9.1 Route-specific execution economics
+
+`ExecutableEconomicTier` 不再持有语义含混的顶层 shares/entry/occupancy。每个 tier 必须冻结一个
+`EntryExecutionEconomics`：
+
+- aggressive：真实 L2 walk 的 requested/filled shares、limit、VWAP 与拆分后的
+  `principal_usd` / `venue_fee_usd` / `builder_fee_usd` / `cash_outlay_usd`；
+- passive：post-only limit、GTD、requested shares、完整 limit notional 的 hard reservation、OOS
+  `PassiveFillDistribution`、expected filled shares，以及可选的 PIT maker-rebate schedule。
+
+组合 scenario 联合枚举 payout/exit 与 `AggressiveFill`、`PassiveNoFill`、`PassivePartialFill`、
+`PassiveFullFill`。no-fill 的交易现金流和 rebate 严格为零，但保留 GTD 期间全额资金占用成本；partial/full
+只按场景实际 fills 计算 principal、fee、exit 与 delayed rebate。硬现金、最大损失、CVaR 和 tail-risk
+cashflow 一律令未到账 rebate 为零。aggressive/passive tiers 共享 candidate identity，因此 MILP 最多选择其一。
+
+Report/API 对执行经济学必须显式输出：`requested_shares`、`expected_filled_shares`、
+`hard_reserved_cash_usd`、`immediate_fee_usd`、`expected_maker_rebate_usd`。Decimal 金额继续以 string wire
+编码；不得用 expected fill 或 rebate 放松资金约束。
+
 ## 10. Exit Plan
 
 必须回答什么时候卖、卖多少。

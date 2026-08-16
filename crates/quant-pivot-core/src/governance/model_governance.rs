@@ -1089,9 +1089,9 @@ fn validation_thresholds_from_config(
 ) -> ValidationGateThresholds {
     ValidationGateThresholds {
         min_cpcv_paths: u64::from(config.min_cpcv_paths),
-        rank_ic_min: parse_threshold(
-            &config.rank_ic_min.value,
-            "research.validation.gates.rank_ic_min",
+        target_rank_ic_min: parse_threshold(
+            &config.target_rank_ic_min.value,
+            "research.validation.gates.target_rank_ic_min",
         ),
         dsr_significance: parse_threshold(
             &config.dsr_significance.value,
@@ -1137,7 +1137,7 @@ fn path_set_gate_input(info: &BacktestPathSetInfo) -> QuantResult<CpcvPathSetGat
         })?,
         path_count,
         combination_count,
-        median_rank_ic: info.median_rank_ic,
+        median_target_rank_ic: info.median_target_rank_ic,
         deflated_sharpe: info.deflated_sharpe,
         pbo: info.pbo,
         min_track_record_length_secs: info.min_track_record_length_secs,
@@ -1158,7 +1158,10 @@ const fn sell_thresholds_from_config(config: &QualityGateConfig) -> SellQualityG
             &config.sell.min_label_coverage.value,
             "sell.min_label_coverage",
         ),
-        rank_ic_min: parse_threshold(&config.sell.rank_ic_min.value, "sell.rank_ic_min"),
+        target_rank_ic_min: parse_threshold(
+            &config.sell.target_rank_ic_min.value,
+            "sell.target_rank_ic_min",
+        ),
         max_pbo: parse_threshold(&config.sell.max_pbo.value, "sell.max_pbo"),
         min_l2_book_fidelity_ratio: parse_threshold(
             &config.sell.min_l2_book_fidelity_ratio.value,
@@ -1195,7 +1198,7 @@ fn backtest_report_from_info(info: BacktestReportInfo) -> QuantResult<BacktestRe
                 detail: format!("backtest missing_feature_count is negative or invalid: {error}"),
             }
         })?,
-        rank_ic: info.rank_ic,
+        realized_return_rank_correlation: info.realized_return_rank_correlation,
         sharpe: info.sharpe,
         hit_rate: info.hit_rate,
         expected_vs_realized,
@@ -1371,7 +1374,7 @@ mod path_set_gate_input_tests {
             combination_count: 6,
             paths: BacktestPaths::default(),
             sharpe_distribution,
-            median_rank_ic: dec!(0.1),
+            median_target_rank_ic: dec!(0.1),
             deflated_sharpe: dec!(0.95),
             dsr_benchmark_sharpe: dec!(0.1),
             pbo: cscv_selection_evidence.pbo,

@@ -624,6 +624,7 @@ mod tests {
             min_order_size: dec!(1),
             liquidity_usd: None,
             volume_24h: None,
+            maker_rebate_schedule: None,
             start_date: None,
             end_date: None,
             resolved_at: None,
@@ -655,6 +656,7 @@ mod tests {
             end_date: None,
             created_at: Some(as_of),
             fee_schedule: None,
+            maker_rebate_schedule: None,
         };
         let selected = SelectedMarket {
             market_id: MarketId::new("0xm"),

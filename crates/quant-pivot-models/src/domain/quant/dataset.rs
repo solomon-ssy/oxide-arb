@@ -506,7 +506,7 @@ mod tests {
                 source_lineage,
                 cohort_manifest: Some(cohort_manifest),
                 model_spec_id: ModelSpecId::from_v7(),
-                model_family: ModelFamily::ClassicalRandomForest,
+                model_family: ModelFamily::ClassicalLogisticRegression,
                 model_spec_definition_hash: hash('b'),
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,

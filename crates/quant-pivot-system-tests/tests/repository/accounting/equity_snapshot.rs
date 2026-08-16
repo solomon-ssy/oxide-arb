@@ -34,6 +34,7 @@ fn new_equity_snapshot(
         reserved_usd: Usd::ZERO,
         realized_pnl_cumulative_usd: Usd::ZERO,
         unrealized_pnl_usd: Usd::ZERO,
+        incentive_credit_cumulative_usd: Usd::ZERO,
         high_water_mark_usd,
         drawdown_pct: EquitySnapshotInfo::drawdown(capital_base_usd, high_water_mark_usd),
         account_snapshot_ref,

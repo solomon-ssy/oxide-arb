@@ -1,12 +1,26 @@
 mod support;
 
-use quant_pivot_error::QuantResult;
+use chrono::{TimeZone, Utc};
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    domain::quant::{ExecutableEconomicTier, ScenarioMarketOutcome, ScenarioPayoutState},
-    types::{PortfolioScenarioArtifactId, Shares, Usd},
+    domain::{
+        market::{book::BookLevel, fee::BuilderFeeAttribution},
+        quant::{
+            EntryExecutionEconomics, ExecutableEconomicTier, ScenarioMarketOutcome,
+            ScenarioPayoutState,
+        },
+    },
+    types::{
+        Bps, PortfolioScenarioArtifactId, Price, Shares, Usd,
+        trade_policy::{PassiveFillDistribution, PassiveFillState, PassiveFillStateKind},
+    },
 };
-use quant_pivot_research::portfolio::{
-    EconomicTierFactory, ExecutableTierSeed, SealedPortfolioScenarioArtifact,
+use quant_pivot_research::{
+    execution_semantics::{PitFeeSchedule, PitMakerRebateSchedule, PitMarketExecutionEconomics},
+    portfolio::{
+        EconomicTierFactory, ExecutablePassiveTierSeedFactory, ExecutablePassiveTierSeedInput,
+        ExecutableTierSeed, SealedPortfolioScenarioArtifact,
+    },
 };
 use rust_decimal_macros::dec;
 
@@ -60,18 +74,18 @@ fn outcomes_form_exact_tier() -> QuantResult<()> {
 
     assert_eq!(
         tier.scenario_cashflows[0].discounted_net_usd,
-        Usd::new(dec!(100))
+        Usd::new(dec!(98))
     );
     assert_eq!(
         tier.scenario_cashflows[1].discounted_net_usd,
-        Usd::new(dec!(20))
+        Usd::new(dec!(18))
     );
     assert_eq!(
         tier.scenario_cashflows[2].discounted_net_usd,
-        Usd::new(dec!(-20))
+        Usd::new(dec!(-22))
     );
-    assert_eq!(tier.economics.nominal_expected_net_usd, Usd::new(dec!(64)));
-    assert_eq!(tier.economics.robust_expected_net_usd, Usd::new(dec!(40)));
+    assert_eq!(tier.economics.nominal_expected_net_usd, Usd::new(dec!(62)));
+    assert_eq!(tier.economics.robust_expected_net_usd, Usd::new(dec!(38)));
     assert_eq!(tier.profit_probability_lower_bps, 7_000);
     assert_eq!(tier.probability_interval_width_bps, 2_000);
     Ok(())
@@ -103,6 +117,106 @@ fn missing_leg_fails_closed() -> QuantResult<()> {
     Ok(())
 }
 
+#[test]
+fn rebate_uses_fill_expectation() -> QuantResult<()> {
+    let fixture = GlobalFixture::build()?;
+    let template = fixture.tiers[0].clone();
+    let decision_at = Utc
+        .timestamp_opt(1_750_000_000, 0)
+        .single()
+        .ok_or_else(|| QuantError::config("invalid passive fixture timestamp"))?;
+    let bids = [
+        BookLevel::from_decimal(Price::new(dec!(0.5)), Shares::new(dec!(1_000)))
+            .map_err(|_| QuantError::config("invalid passive fixture bid"))?,
+    ];
+    let economics = PitMarketExecutionEconomics {
+        fee_schedule: PitFeeSchedule {
+            schedule_hash: template.lineage_hash,
+            effective_at: decision_at,
+            available_at: decision_at,
+            platform_rate: dec!(0.04),
+            exponent: dec!(1),
+            taker_only: true,
+            builder_maker_fee_bps: Bps::ZERO,
+            builder_taker_fee_bps: Bps::ZERO,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+        },
+        maker_rebate_schedule: Some(PitMakerRebateSchedule {
+            schedule_hash: template.lineage_hash,
+            catalog_change_hash: template.lineage_hash,
+            effective_at: decision_at,
+            available_at: decision_at,
+            fees_enabled: true,
+            platform_rate: dec!(0.04),
+            exponent: dec!(1),
+            taker_only: true,
+            rebate_rate: dec!(0.20),
+        }),
+        composite_hash: template.lineage_hash,
+    };
+    let seed = ExecutablePassiveTierSeedFactory::build(ExecutablePassiveTierSeedInput {
+        report_route_run_id: template.report_route_run_id,
+        candidate_id: template.candidate_id,
+        tier_ordinal: template.tier_ordinal,
+        route: template.route,
+        market_id: template.market_id,
+        event_id: template.event_id,
+        category: template.category,
+        token_id: template.token_id,
+        outcome_side: template.outcome_side,
+        bids: &bids,
+        execution_economics: &economics,
+        decision_at,
+        limit_price: Price::new(dec!(0.5)),
+        requested_shares: Shares::new(dec!(100)),
+        cash_budget: Usd::new(dec!(50)),
+        good_til_secs: 3_600,
+        fill_distribution: PassiveFillDistribution {
+            sample_count: 100,
+            source_evidence_hash: template.lineage_hash,
+            states: vec![
+                PassiveFillState {
+                    kind: PassiveFillStateKind::NoFill,
+                    probability_bps: 5_000,
+                    fill_ratio_bps: 0,
+                    fill_latency_ms: 0,
+                    post_fill_markout_bps: Bps::ZERO,
+                },
+                PassiveFillState {
+                    kind: PassiveFillStateKind::PartialFill,
+                    probability_bps: 2_500,
+                    fill_ratio_bps: 5_000,
+                    fill_latency_ms: 1_000,
+                    post_fill_markout_bps: Bps::new(dec!(-100)),
+                },
+                PassiveFillState {
+                    kind: PassiveFillStateKind::FullFill,
+                    probability_bps: 2_500,
+                    fill_ratio_bps: 10_000,
+                    fill_latency_ms: 2_000,
+                    post_fill_markout_bps: Bps::new(dec!(-200)),
+                },
+            ],
+        },
+        source_lineage_hash: template.lineage_hash,
+    })?;
+
+    let EntryExecutionEconomics::Passive(entry) = seed.entry_execution else {
+        return Err(QuantError::config("passive seed changed route"));
+    };
+    assert_eq!(entry.hard_reserved_cash_usd, Usd::new(dec!(50)));
+    assert_eq!(entry.expected_filled_shares, Shares::new(dec!(37.5)));
+    assert_eq!(
+        entry
+            .full_fill_maker_rebate
+            .ok_or_else(|| QuantError::config("missing full-fill rebate"))?
+            .expected_rebate_usd,
+        Usd::new(dec!(0.2))
+    );
+    assert_eq!(entry.expected_maker_rebate_usd, Usd::new(dec!(0.075)));
+    Ok(())
+}
+
 fn seed(template: &ExecutableEconomicTier) -> ExecutableTierSeed {
     ExecutableTierSeed {
         report_route_run_id: template.report_route_run_id,
@@ -114,9 +228,8 @@ fn seed(template: &ExecutableEconomicTier) -> ExecutableTierSeed {
         category: template.category,
         token_id: template.token_id.clone(),
         outcome_side: template.outcome_side,
-        shares: template.shares,
         observed_exit_capacity_shares: Shares::new(dec!(500)),
-        entry: template.entry.clone(),
+        entry_execution: template.entry_execution.clone(),
         source_lineage_hash: template.lineage_hash,
     }
 }

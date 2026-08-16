@@ -58,6 +58,8 @@ pub struct Model {
     #[sea_orm(has_many)]
     pub quant_execution_trade_refs: HasMany<super::quant_execution_trade_ref::Entity>,
     #[sea_orm(has_many)]
+    pub quant_execution_fills: HasMany<super::quant_execution_fill::Entity>,
+    #[sea_orm(has_many)]
     pub quant_execution_transaction_refs: HasMany<super::quant_execution_transaction_ref::Entity>,
 }
 

@@ -169,6 +169,8 @@ pub struct TradePolicyCandidateTrialRow {
     pub terminal_at: Option<DateTime<Utc>>,
     pub terminal_reason: Option<ExitReason>,
     pub entry_fill_ratio: Decimal,
+    pub entry_fill_latency_ms: Option<u64>,
+    pub post_fill_markout_bps: Option<Bps>,
     pub exit_fill_ratio: Decimal,
     pub entry_filled_shares: Shares,
     pub exited_shares: Shares,

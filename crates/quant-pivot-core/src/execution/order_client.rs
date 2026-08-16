@@ -28,7 +28,7 @@ use quant_pivot_models::{
         execution::{ReconciliationResult, VenueOrderStatus},
     },
     types::{
-        ContentHash, EvmTransactionHash, FeeEvidence, MarketId, OrderId, Price, Shares, TokenId,
+        ContentHash, EvmTransactionHash, FeeMeasurement, MarketId, OrderId, Price, Shares, TokenId,
         Usd, VenueOrderAmount, VenueTradeId,
     },
 };
@@ -174,11 +174,7 @@ pub struct VenueSubmitResult {
     /// suitable for conservative capital accounting, but is never presented as
     /// venue-observed truth.
     pub expected_fee: Usd,
-    /// Exact or reconstructed venue fee. Submit responses do not carry enough
-    /// evidence, so this remains `None` until authenticated-trade or on-chain
-    /// reconciliation supplies it.
-    pub observed_fee: Option<Usd>,
-    pub fee_evidence: FeeEvidence,
+    pub fee_evidence: FeeMeasurement,
     pub trade_ids: Vec<VenueTradeId>,
     pub transaction_hashes: Vec<EvmTransactionHash>,
     /// Human-readable detail (error message for ambiguous / rejected outcomes).
@@ -222,8 +218,7 @@ impl VenueSubmitResult {
             filled_shares: resp.filled_shares,
             avg_fill_price: resp.avg_fill_price,
             expected_fee,
-            observed_fee: None,
-            fee_evidence: FeeEvidence::PreparedScheduleExpected {
+            fee_evidence: FeeMeasurement::PreparedExpected {
                 schedule_hash: fee_schedule_hash,
                 expected_fee,
             },
@@ -247,8 +242,7 @@ impl VenueSubmitResult {
             filled_shares: Shares::ZERO,
             avg_fill_price: None,
             expected_fee,
-            observed_fee: None,
-            fee_evidence: FeeEvidence::PreparedScheduleExpected {
+            fee_evidence: FeeMeasurement::PreparedExpected {
                 schedule_hash: fee_schedule_hash,
                 expected_fee,
             },
@@ -353,7 +347,7 @@ mod tests {
     use quant_pivot_models::{
         domain::order::OrderResponse,
         enums::{common::OrderType, execution::VenueOrderStatus},
-        types::{ContentHash, FeeEvidence, OrderId, Shares, Usd, VenueTradeId},
+        types::{ContentHash, FeeMeasurement, OrderId, Shares, Usd, VenueTradeId},
     };
     use rust_decimal_macros::dec;
 
@@ -395,8 +389,7 @@ mod tests {
             filled_shares: Shares::ZERO,
             avg_fill_price: None,
             expected_fee: Usd::ZERO,
-            observed_fee: None,
-            fee_evidence: FeeEvidence::PreparedScheduleExpected {
+            fee_evidence: FeeMeasurement::PreparedExpected {
                 schedule_hash: ContentHash::parse(
                     "blake3:0000000000000000000000000000000000000000000000000000000000000000",
                 )

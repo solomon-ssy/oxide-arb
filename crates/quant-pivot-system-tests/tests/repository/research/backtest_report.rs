@@ -216,7 +216,7 @@ fn new_report(
         coverage: dec!(1),
         sample_count: 10,
         missing_feature_count: 0,
-        rank_ic: dec!(0.42),
+        realized_return_rank_correlation: dec!(0.42),
         sharpe: dec!(0.9),
         hit_rate: Probability::new(dec!(0.6)),
         expected_vs_realized: ExpectedVsRealized {
@@ -265,7 +265,7 @@ pub async fn quant_backtest_report_crud() {
         .await
         .expect("create");
     assert_eq!(created.backtest_report_id, report_id);
-    assert_eq!(created.rank_ic, dec!(0.42));
+    assert_eq!(created.realized_return_rank_correlation, dec!(0.42));
     assert_eq!(created.sample_count, 10);
     created.verify_hash().expect("persisted canonical hash");
 

@@ -19,10 +19,10 @@ use crate::{
         CoreExitDispatcher, DefaultAdmissionEngine, DispatchWake, EvidenceCollector,
         ExecutionBreaker, ExecutionDispatcherDeps, ExecutionOrderLifecyclePublisher,
         ExitDispatcherDeps, ExitMonitorHealthHandle, ExitMonitorService, ExitMonitorServiceDeps,
-        ExitSignalEvaluator, IntentLifecyclePublisher, OutcomeReconciliationService,
-        OutcomeReconciliationServiceDeps, PolymarketOrderClient, ReconciliationService,
-        ReconciliationServiceDeps, SettlementLifecyclePublisher, VenueEvidenceCollector,
-        VenueReconciliationReader,
+        ExitSignalEvaluator, IntentLifecyclePublisher, OnChainFeeSettlementService,
+        OutcomeReconciliationService, OutcomeReconciliationServiceDeps, PolymarketOrderClient,
+        ReconciliationService, ReconciliationServiceDeps, SettlementLifecyclePublisher,
+        VenueEvidenceCollector, VenueReconciliationReader,
         settlement_discovery::SettlementDiscoveryService,
         settlement_discovery_wake::SettlementDiscoveryWake,
         settlement_executor::ProductionSettlementExecutor,
@@ -118,6 +118,8 @@ pub struct ExecutionBundle {
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
     /// Reconciliation engine: resolves in-flight orders to venue truth.
     pub reconciliation: Arc<ReconciliationService>,
+    /// Independent late-arriving finalized fee upgrade path.
+    pub fee_settlement: Arc<OnChainFeeSettlementService>,
     /// Produces orthogonal resolution and execution outcome truth.
     pub outcome_reconciliation: Arc<OutcomeReconciliationService>,
     /// Exit-monitor engine: scans open lots and drives the exit ladder.
@@ -198,6 +200,8 @@ impl ExecutionBundle {
             Arc::new(ClobReconciliationReader::new(Arc::clone(&clob)));
         let collector: Arc<dyn EvidenceCollector> = Arc::new(VenueEvidenceCollector::new(
             reader,
+            Arc::clone(&infra.quant_fact_read),
+            deps.wallet,
             Arc::clone(&deps.data.book_store),
         ));
         let reconciliation = Arc::new(ReconciliationService::new(ReconciliationServiceDeps {
@@ -221,6 +225,11 @@ impl ExecutionBundle {
             order_lifecycle: Arc::clone(&order_lifecycle),
             events: deps.intent_lifecycle.publisher(),
         }));
+        let fee_settlement = Arc::new(OnChainFeeSettlementService::new(
+            Arc::clone(&submission),
+            Arc::clone(&infra.quant_fact_read),
+            deps.account.execution_account.funder_address.clone(),
+        ));
 
         // Exit-monitor engine: model-driven signal seam + exit dispatcher
         // + per-lot sweep service.
@@ -247,6 +256,7 @@ impl ExecutionBundle {
             breaker,
             submission,
             reconciliation,
+            fee_settlement,
             outcome_reconciliation,
             exit_monitor,
             exit_monitor_health,

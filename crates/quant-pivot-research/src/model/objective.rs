@@ -6,7 +6,7 @@
 //! optimization proxy. The backtest replay remains the authoritative
 //! capital/allocation check.
 //!
-//! `RankIcWeightedRanknet` is a **simplex black-box surrogate** (`RankNet` pairs
+//! `TargetRankIcWeightedRanknet` is a **simplex black-box surrogate** (`RankNet` pairs
 //! weighted by the closed-form `RankIC` swap delta). It is **not** an `XGBoost` /
 //! `LightGBM` `LambdaMART` λ-gradient implementation.
 
@@ -104,7 +104,7 @@ impl ObjectiveComponentReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RankingDiagnostics {
     /// Mean Spearman `Rank IC` across evaluated query groups.
-    pub mean_rank_ic: Decimal,
+    pub mean_target_rank_ic: Decimal,
     /// Mean NDCG@`ndcg_k` across evaluated query groups.
     pub mean_ndcg_at_k: Decimal,
     /// Truncation `k` used for NDCG.
@@ -118,7 +118,7 @@ impl RankingDiagnostics {
     #[must_use]
     pub fn rounded(&self) -> Self {
         Self {
-            mean_rank_ic: self.mean_rank_ic.round_dp(RESEARCH_DECIMAL_SCALE),
+            mean_target_rank_ic: self.mean_target_rank_ic.round_dp(RESEARCH_DECIMAL_SCALE),
             mean_ndcg_at_k: self.mean_ndcg_at_k.round_dp(RESEARCH_DECIMAL_SCALE),
             ndcg_k: self.ndcg_k,
             group_count: self.group_count,
@@ -283,7 +283,7 @@ impl ObjectiveEvaluator {
     ) -> QuantResult<RankingDiagnostics> {
         if groups.is_empty() {
             return Ok(RankingDiagnostics {
-                mean_rank_ic: Decimal::ZERO,
+                mean_target_rank_ic: Decimal::ZERO,
                 mean_ndcg_at_k: Decimal::ZERO,
                 ndcg_k: self.spec.ndcg_k,
                 group_count: 0,
@@ -294,16 +294,16 @@ impl ObjectiveEvaluator {
                 detail: format!("objective ndcg_k exceeds usize: {error}"),
             }
         })?;
-        let mut rank_ics = Vec::with_capacity(groups.len());
+        let mut target_rank_ics = Vec::with_capacity(groups.len());
         let mut ndcgs = Vec::with_capacity(groups.len());
         for group in groups {
             let scores: Vec<Decimal> = group.rows.iter().map(|row| row.net(weights)).collect();
             let labels: Vec<Decimal> = group.rows.iter().map(|row| row.label).collect();
-            rank_ics.push(stats::spearman(&scores, &labels));
+            target_rank_ics.push(stats::spearman(&scores, &labels));
             ndcgs.push(ndcg_at_k(&scores, &labels, ndcg_k)?);
         }
         Ok(RankingDiagnostics {
-            mean_rank_ic: stats::mean(&rank_ics),
+            mean_target_rank_ic: stats::mean(&target_rank_ics),
             mean_ndcg_at_k: stats::mean(&ndcgs),
             ndcg_k: self.spec.ndcg_k,
             group_count: u64::try_from(groups.len()).map_err(|error| {
@@ -332,7 +332,7 @@ impl ObjectiveEvaluator {
                 }
                 let pair_weight = match self.spec.rank_loss {
                     RankLossKind::PairwiseRanknet => Decimal::ONE,
-                    RankLossKind::RankIcWeightedRanknet => rank_pair_weight(
+                    RankLossKind::TargetRankIcWeightedRanknet => rank_pair_weight(
                         score_ranks[i],
                         score_ranks[j],
                         group.label_ranks[i],
@@ -729,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn rank_ic_matches_floor() {
+    fn target_rank_ic_floor() {
         let weight = rank_pair_weight(dec!(1), dec!(3), dec!(2), dec!(4), 3);
         assert_eq!(weight.round_dp(6), dec!(2));
         // Tied score ranks still get |Δr̂|_eff = 1.
@@ -779,7 +779,7 @@ mod tests {
         ];
         for rank_loss in [
             RankLossKind::PairwiseRanknet,
-            RankLossKind::RankIcWeightedRanknet,
+            RankLossKind::TargetRankIcWeightedRanknet,
         ] {
             let evaluator = ObjectiveEvaluator::new(TrainingObjectiveSpec {
                 rank_loss,
@@ -873,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn rank_ic_weighted_pairwise() {
+    fn target_rank_pairwise_weighting() {
         let group = group(vec![
             row("m:a", dec!(3), dec!(30)),
             row("m:b", dec!(2), dec!(10)),
@@ -889,7 +889,7 @@ mod tests {
         .evaluate(&[dec!(1)], slice::from_ref(&group))
         .expect("pairwise");
         let weighted = ObjectiveEvaluator::new(TrainingObjectiveSpec {
-            rank_loss: RankLossKind::RankIcWeightedRanknet,
+            rank_loss: RankLossKind::TargetRankIcWeightedRanknet,
             lambda_tail: Decimal::ZERO,
             lambda_turnover: Decimal::ZERO,
             lambda_l2: Decimal::ZERO,

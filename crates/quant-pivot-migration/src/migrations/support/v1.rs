@@ -242,12 +242,7 @@ BEGIN
     END IF;
 
     definition_count := jsonb_array_length(plane->'definitions');
-    IF model_family_name = ANY (ARRAY[
-           'classical_gradient_boosted_trees',
-           'classical_random_forest', 'classical_extra_trees',
-           'classical_logistic_regression', 'classical_ridge',
-           'classical_lasso', 'classical_elastic_net'
-       ])
+    IF model_family_name = 'classical_logistic_regression'
     THEN
         IF definition_count <> 0 THEN
             RETURN FALSE;

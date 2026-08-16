@@ -247,6 +247,7 @@ wire_enum! {
     pub enum ReconciliationEvidenceKind {
         ClobOrderStatus => "clob_order_status",
         ClobTrades => "clob_trades",
+        OnChainSettlement => "on_chain_settlement",
         TokenBalanceDelta => "token_balance_delta",
         AccountBalanceDelta => "account_balance_delta",
         BookContext => "book_context",

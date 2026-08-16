@@ -8,28 +8,38 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
+    str::FromStr,
     sync::Arc,
 };
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_api::clob::ClobTrade;
+use quant_pivot_api::{
+    clob::ClobTrade, exchange::constants::EXCHANGE_CONTRACTS, wallet::WalletTopology,
+};
 use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
+    clickhouse::ExchangeEventRow,
     domain::quant::{
         ExecutionIdentityEnrichment, ExecutionOrderIdentityRefs, ExecutionOrderInfo,
         ExecutionTradeObservation,
     },
     enums::{
+        clickhouse::{ChExchangeEventKind, ChExchangeSide, ChExchangeVersion},
         common::Side,
         execution::{ReconciliationEvidenceKind, VenueTradeStatus},
         fee::FeeLiquidityRole,
     },
     types::{
-        FeeEvidence, OrderId, Price, ReconciliationEvidence, Shares, TokenId, Usd, VenueTradeId,
+        EvmAddress, EvmTransactionHash, FeeMeasurement, OrderId, Price, ReconciliationEvidence,
+        Shares, TokenId, Usd, VenueTradeId,
     },
 };
-use quant_pivot_research::execution_semantics::{LiquidityRole, PitFeeSchedule};
+use quant_pivot_repository::traits::QuantFactReadRepository;
+use quant_pivot_research::execution_semantics::{
+    LiquidityRole, PitFeeSchedule, PitMakerRebateSchedule,
+};
+use rust_decimal::Decimal;
 
 use super::{ReconcileFacts, VenuePresence, VenueReconciliationReader};
 use crate::ingest::book_store::BookStore;
@@ -60,6 +70,8 @@ pub trait EvidenceCollector: Send + Sync {
 /// [`EvidenceCollector`] backed by the venue reader + the in-memory book store.
 pub struct VenueEvidenceCollector {
     reader: Arc<dyn VenueReconciliationReader>,
+    fact_read: Arc<dyn QuantFactReadRepository>,
+    wallet: WalletTopology,
     book_store: Arc<BookStore>,
 }
 
@@ -76,9 +88,16 @@ impl VenueEvidenceCollector {
     #[must_use]
     pub const fn new(
         reader: Arc<dyn VenueReconciliationReader>,
+        fact_read: Arc<dyn QuantFactReadRepository>,
+        wallet: WalletTopology,
         book_store: Arc<BookStore>,
     ) -> Self {
-        Self { reader, book_store }
+        Self {
+            reader,
+            fact_read,
+            wallet,
+            book_store,
+        }
     }
 
     /// Evidence #5 — the current published book snapshot for price sanity
@@ -230,24 +249,36 @@ impl VenueEvidenceCollector {
 fn authenticated_fee_evidence(
     order: &ExecutionOrderInfo,
     trade: &ClobTrade,
-) -> QuantResult<FeeEvidence> {
+) -> QuantResult<FeeMeasurement> {
     let prepared = &order.prepared_order_json.fee_schedule;
     let role = match trade.trader_side {
         FeeLiquidityRole::Maker => LiquidityRole::Maker,
         FeeLiquidityRole::Taker => LiquidityRole::Taker,
     };
-    let schedule = PitFeeSchedule {
+    let expected_schedule = PitFeeSchedule {
         schedule_hash: prepared.schedule_hash,
         effective_at: prepared.effective_at,
         available_at: prepared.available_at,
-        platform_rate: trade.fee_rate_bps.to_fraction(),
+        platform_rate: prepared.platform_rate,
         exponent: prepared.exponent,
         taker_only: prepared.taker_only,
         builder_maker_fee_bps: prepared.builder_maker_fee_bps,
         builder_taker_fee_bps: prepared.builder_taker_fee_bps,
         builder_attribution: prepared.builder_attribution,
     };
-    let reconstructed_fee = schedule
+    let expected_fee = expected_schedule
+        .fee(role, trade.price, trade.size, trade.matched_at)
+        .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+            reason: format!(
+                "authenticated trade {} expected fee reconstruction failed: {error:?}",
+                trade.trade_id
+            ),
+        })?;
+    let derived_schedule = PitFeeSchedule {
+        platform_rate: trade.fee_rate_bps.to_fraction(),
+        ..expected_schedule
+    };
+    let derived_fee = derived_schedule
         .fee(role, trade.price, trade.size, trade.matched_at)
         .map_err(|error| ExecutionError::ReconciliationUnresolvable {
             reason: format!(
@@ -255,12 +286,46 @@ fn authenticated_fee_evidence(
                 trade.trade_id
             ),
         })?;
-    Ok(FeeEvidence::AuthenticatedTradeReconstructed {
+    let expected_maker_rebate = order
+        .prepared_order_json
+        .maker_rebate_schedule
+        .map(|schedule| PitMakerRebateSchedule {
+            schedule_hash: schedule.schedule_hash,
+            catalog_change_hash: schedule.catalog_change_hash,
+            effective_at: schedule.effective_at,
+            available_at: schedule.available_at,
+            fees_enabled: schedule.fees_enabled,
+            platform_rate: schedule.platform_rate,
+            exponent: schedule.exponent,
+            taker_only: schedule.taker_only,
+            rebate_rate: schedule.rebate_rate,
+        })
+        .map(|schedule| {
+            schedule.expected_incentive(
+                &expected_schedule,
+                role,
+                trade.price,
+                trade.size,
+                trade.matched_at,
+            )
+        })
+        .transpose()
+        .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+            reason: format!(
+                "authenticated trade {} maker-rebate accrual failed: {error:?}",
+                trade.trade_id
+            ),
+        })?
+        .flatten();
+    Ok(FeeMeasurement::AuthenticatedTradeDerived {
         trade_id: trade.trade_id.clone(),
+        bucket_index: trade.bucket_index,
         order_id: trade.order_id.clone(),
         liquidity_role: trade.trader_side,
         fee_rate_bps: trade.fee_rate_bps,
-        reconstructed_fee,
+        expected_fee,
+        derived_fee,
+        expected_maker_rebate,
         transaction_hash: trade.transaction_hash.clone(),
         matched_at: trade.matched_at,
         maker_order_ids: trade
@@ -269,6 +334,174 @@ fn authenticated_fee_evidence(
             .map(|maker| maker.order_id.clone())
             .collect(),
     })
+}
+
+fn on_chain_fee_evidence(
+    order: &ExecutionOrderInfo,
+    trade: &ClobTrade,
+    events: &[ExchangeEventRow],
+    wallet: &WalletTopology,
+    now: DateTime<Utc>,
+) -> QuantResult<Option<ReconciliationEvidence>> {
+    let Some(authenticated_transaction_hash) = trade.transaction_hash.as_ref() else {
+        return Ok(None);
+    };
+    let account_address = format!("{:#x}", wallet.funder);
+    let matches = events
+        .iter()
+        .filter(|event| {
+            event.order_hash == trade.order_id.as_str()
+                && event.transaction_hash == authenticated_transaction_hash.as_str()
+        })
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    if matches.len() != 1 {
+        return Err(ExecutionError::ReconciliationUnresolvable {
+            reason: format!(
+                "order {} trade {} maps to {} finalized V2 OrderFilled events",
+                trade.order_id,
+                trade.trade_id,
+                matches.len()
+            ),
+        }
+        .into());
+    }
+    let event = matches[0];
+    let expected_side = match order.side {
+        Side::Buy => ChExchangeSide::Buy,
+        Side::Sell => ChExchangeSide::Sell,
+    };
+    let allowed_contract = EXCHANGE_CONTRACTS
+        .iter()
+        .any(|contract| format!("{:#x}", contract.address) == event.contract_address);
+    if event.chain_id != 137
+        || event.event_kind != ChExchangeEventKind::OrderFilled
+        || event.exchange_version != ChExchangeVersion::V2
+        || event.schema_version != ExchangeEventRow::SCHEMA_VERSION
+        || !allowed_contract
+        || event.maker != account_address
+        || event.token_id.as_deref() != Some(order.token_id.as_str())
+        || event.side != expected_side
+    {
+        return Err(ExecutionError::ReconciliationUnresolvable {
+            reason: format!(
+                "finalized V2 OrderFilled identity disagrees with governed order {} and account {}",
+                trade.order_id, account_address
+            ),
+        }
+        .into());
+    }
+    let maker_amount = v2_asset_amount(&event.maker_amount, event)?;
+    let taker_amount = v2_asset_amount(&event.taker_amount, event)?;
+    let (principal, shares) = match order.side {
+        Side::Buy => (maker_amount, taker_amount),
+        Side::Sell => (taker_amount, maker_amount),
+    };
+    if shares <= Decimal::ZERO
+        || Shares::new(shares) != trade.size
+        || Price::new(principal / shares) != trade.price
+    {
+        return Err(ExecutionError::ReconciliationUnresolvable {
+            reason: format!(
+                "finalized V2 OrderFilled amounts disagree with authenticated trade {}",
+                trade.trade_id
+            ),
+        }
+        .into());
+    }
+    let available_at =
+        DateTime::from_timestamp_millis(event.model_available_at).ok_or_else(|| {
+            ExecutionError::ReconciliationUnresolvable {
+                reason: format!(
+                    "finalized V2 OrderFilled {:?} has invalid availability timestamp",
+                    event.event_id
+                ),
+            }
+        })?;
+    if available_at > now {
+        return Ok(None);
+    }
+    let matched_at = DateTime::from_timestamp_millis(event.block_timestamp).ok_or_else(|| {
+        ExecutionError::ReconciliationUnresolvable {
+            reason: format!(
+                "finalized V2 OrderFilled {:?} has invalid block timestamp",
+                event.event_id
+            ),
+        }
+    })?;
+    let raw_fee =
+        event
+            .fee_amount
+            .as_deref()
+            .ok_or_else(|| ExecutionError::ReconciliationUnresolvable {
+                reason: format!(
+                    "finalized V2 OrderFilled {:?} has no fee amount",
+                    event.event_id
+                ),
+            })?;
+    let fee_raw =
+        Decimal::from_str(raw_fee).map_err(|error| ExecutionError::ReconciliationUnresolvable {
+            reason: format!(
+                "finalized V2 OrderFilled {:?} fee is not decimal: {error}",
+                event.event_id
+            ),
+        })?;
+    let exchange_address = EvmAddress::parse(event.contract_address.clone()).map_err(|error| {
+        ExecutionError::ReconciliationUnresolvable {
+            reason: format!("finalized exchange address is invalid: {error}"),
+        }
+    })?;
+    let transaction_hash =
+        EvmTransactionHash::parse(event.transaction_hash.clone()).map_err(|error| {
+            ExecutionError::ReconciliationUnresolvable {
+                reason: format!("finalized transaction hash is invalid: {error}"),
+            }
+        })?;
+    let zero_builder = format!("0x{}", "0".repeat(64));
+    Ok(Some(ReconciliationEvidence {
+        kind: ReconciliationEvidenceKind::OnChainSettlement,
+        observed_at: available_at,
+        detail: format!(
+            "V2 OrderFilled block={} log_index={} order_hash={}",
+            event.block_number, event.log_index, event.order_hash
+        ),
+        venue_ref: Some(event.transaction_hash.clone()),
+        shares: Some(trade.size),
+        price: Some(trade.price),
+        fee_evidence: Some(FeeMeasurement::OnChainSettled {
+            venue_trade_id: trade.trade_id.clone(),
+            chain_id: 137,
+            protocol_version: 2,
+            exchange_address,
+            order_id: trade.order_id.clone(),
+            liquidity_role: trade.trader_side,
+            transaction_hash,
+            log_index: event.log_index,
+            matched_at,
+            available_at,
+            settled_fee: Usd::new(fee_raw / Decimal::from(1_000_000_u64)),
+            builder_code: event
+                .builder
+                .clone()
+                .filter(|builder| builder != &zero_builder),
+        }),
+    }))
+}
+
+fn v2_asset_amount(raw: &str, event: &ExchangeEventRow) -> QuantResult<Decimal> {
+    Decimal::from_str(raw)
+        .map(|value| value / Decimal::from(1_000_000_u64))
+        .map_err(|error| {
+            ExecutionError::ReconciliationUnresolvable {
+                reason: format!(
+                    "finalized V2 OrderFilled {:?} asset amount is not decimal: {error}",
+                    event.event_id
+                ),
+            }
+            .into()
+        })
 }
 
 fn trade_matches_ambiguous_order(order: &ExecutionOrderInfo, trade: &ClobTrade) -> bool {
@@ -345,6 +578,12 @@ impl EvidenceCollector for VenueEvidenceCollector {
         let still_working = resolved.still_working;
         let used_account_discovery = resolved.used_account_discovery;
         let mut evidence = Vec::with_capacity(8 + trades_by_id.len());
+        let exact_order_ids = trades_by_id
+            .values()
+            .filter(|trade| trade_is_final_fill(trade.status))
+            .map(|trade| trade.order_id.clone())
+            .collect::<Vec<_>>();
+        let settled_events = self.fact_read.order_filled_events(exact_order_ids).await?;
 
         // 1 — exact CLOB order identity/status. No account-wide open-order scan.
         evidence.push(ReconciliationEvidence {
@@ -394,6 +633,12 @@ impl EvidenceCollector for VenueEvidenceCollector {
                     None
                 },
             });
+            if confirmed
+                && let Some(settled) =
+                    on_chain_fee_evidence(order, trade, &settled_events, &self.wallet, now)?
+            {
+                evidence.push(settled);
+            }
         }
         let avg_price = if filled_shares.is_positive() {
             Some(Price::new(filled_cost.inner() / filled_shares.inner()))

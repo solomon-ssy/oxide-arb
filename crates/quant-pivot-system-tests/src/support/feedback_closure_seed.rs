@@ -40,8 +40,8 @@ use quant_pivot_core::{
 };
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChAssetAmount, ChBps,
-        ChDecimal64, ChDigest, ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow,
+        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChBps, ChDecimal64, ChDigest,
+        ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow,
         ExchangeHistoryAcceptanceRow, ExecutionParticipantRow, MarketExecutionRow,
         MarketResolutionFactInput, MarketResolutionRow, QuantFeatureEventRow,
         QuantModelInputEventRow, QuantReportRecommendationFactRow,
@@ -54,8 +54,8 @@ use quant_pivot_models::{
             ExchangeHistoryFrontier, HistorySealChunkRef,
         },
         market::{
-            BookLevel, CATALOG_OBJECT_SCHEMA_VERSION, EventRegistryInfo, EventTags,
-            MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
+            BookLevel, CATALOG_OBJECT_HASH_VERSION, CATALOG_OBJECT_SCHEMA_VERSION,
+            EventRegistryInfo, EventTags, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
         },
         ports::{
             FeedbackRecipeCalibrationSpec, FeedbackRecipeCpcvSpec, FeedbackRecipeDiagnosticSpec,
@@ -617,12 +617,12 @@ impl ReportBuildOptions {
         let total_suggested_usd = self
             .recommendations
             .iter()
-            .map(|recommendation| recommendation.trade_plan.sizing.suggested_usd)
+            .map(|recommendation| recommendation.trade_plan.sizing.hard_reserved_cash_usd)
             .sum();
         let max_single_recommendation_usd = self
             .recommendations
             .iter()
-            .map(|recommendation| recommendation.trade_plan.sizing.suggested_usd)
+            .map(|recommendation| recommendation.trade_plan.sizing.hard_reserved_cash_usd)
             .max()
             .unwrap_or(Usd::ZERO);
         let mut category_allocation = BTreeMap::new();
@@ -633,11 +633,12 @@ impl ReportBuildOptions {
             let sizing = &recommendation.trade_plan.sizing;
             *category_allocation
                 .entry(recommendation.identity.category)
-                .or_default() += sizing.suggested_usd;
+                .or_default() += sizing.hard_reserved_cash_usd;
             *event_allocation
                 .entry(recommendation.event_id.clone())
-                .or_default() += sizing.suggested_usd;
-            *route_allocation.entry(recommendation.route).or_default() += sizing.suggested_usd;
+                .or_default() += sizing.hard_reserved_cash_usd;
+            *route_allocation.entry(recommendation.route).or_default() +=
+                sizing.hard_reserved_cash_usd;
             if recommendation
                 .execution_eligibility
                 .is_eligible(QuantRuntimeMode::ReportOnly)
@@ -742,7 +743,7 @@ fn closure_report_recommendations(
                     economics.capital_occupancy_usd_hours.inner(),
                 )),
                 marginal_portfolio_value_usd: ChUsd::from(economics.marginal_portfolio_value_usd),
-                suggested_usd: ChUsd::from(recommendation.trade_plan.sizing.suggested_usd),
+                suggested_usd: ChUsd::from(recommendation.trade_plan.sizing.hard_reserved_cash_usd),
                 valid_until: recommendation.valid_until.timestamp_millis(),
             })
         })
@@ -985,14 +986,18 @@ impl ClosureCatalogMarketBuild<'_> {
             min_order_size: dec!(1),
             liquidity_usd: Some(metrics.visible_liquidity_usd),
             volume_24h: Some(Usd::new(dec!(10000))),
+            maker_rebate_schedule: None,
             start_date: Some(self.market_created_at),
             end_date: Some(resolution_at),
             resolved_at: None,
             created_at: Some(self.market_created_at),
             updated_at: self.decision_at - Duration::minutes(2),
         };
-        let content_hash =
-            CanonicalDigest::content_hash_typed("quant-pivot/catalog-market-object", 1, &info)?;
+        let content_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-market-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            &info,
+        )?;
         Ok(ClosureCatalogMarket {
             change_id: CatalogMarketChangeId::new(seeded_uuid(&format!(
                 "feedback-closure:{market_id}:{}:catalog-market-change",
@@ -1057,8 +1062,11 @@ impl ClosureCatalogFacts {
             created_at: market_created_at,
             updated_at: effective_at,
         };
-        let event_content_hash =
-            CanonicalDigest::content_hash_typed("quant-pivot/catalog-event-object", 1, &event)?;
+        let event_content_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-event-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            &event,
+        )?;
         let event_object_id = CatalogEventObjectId::from_content_hash(&event_content_hash);
         // Historical event objects must retain only the membership visible at
         // their decision boundary. The mutable registry projection, however,
@@ -1081,7 +1089,7 @@ impl ClosureCatalogFacts {
         registry_event.end_date = resolutions.values().copied().max();
         let registry_event_content_hash = CanonicalDigest::content_hash_typed(
             "quant-pivot/catalog-event-object",
-            1,
+            CATALOG_OBJECT_HASH_VERSION,
             &registry_event,
         )?;
         let batch_id = CatalogSyncBatchId::new(seeded_uuid(&format!(
@@ -4338,8 +4346,10 @@ fn closure_execution_history_rows(
             maker_order_filled_event_id: ChDigest::from(execution_hash),
             market_id: source.market_id.clone(),
             token_id: token_id.clone(),
+            order_hash: format!("0x{:064x}", tx_seed.wrapping_add(1)),
             contract_key: "ctf_exchange_v2".to_owned(),
             exchange_version: ChExchangeVersion::V2,
+            contract_address: "0xE111180000d2663C0091e4f400237545B87B996B".to_owned(),
             transaction_hash: format!("0x{tx_seed:064x}"),
             block_number,
             transaction_index: 0,
@@ -4350,8 +4360,8 @@ fn closure_execution_history_rows(
             price: ChPrice::from(price),
             size_shares: ChShares::from(shares),
             notional_usd: ChUsd::from(notional),
-            fee_amount: ChAssetAmount::from(Decimal::ZERO),
-            fee_asset_id: "0".to_owned(),
+            fee_usd: ChUsd::from(Usd::ZERO),
+            builder: None,
             effective_at: event_at.timestamp_millis(),
             observed_at: observed_at.timestamp_millis(),
             model_available_at: observed_at.timestamp_millis(),
@@ -4479,6 +4489,7 @@ fn closure_book_row(
         trade_side: None,
         trade_size: None,
         fee_rate_bps: None,
+        trade_transaction_hash: None,
         venue_event_time: effective_at.timestamp_millis(),
         ingress_time: effective_at.timestamp_millis(),
         persisted_time: effective_at.timestamp_millis(),
@@ -5109,7 +5120,7 @@ async fn seed_recipe(
         responsive_triggers: vec![
             FeedbackDriftMetric::PopulationStabilityIndex,
             FeedbackDriftMetric::KolmogorovSmirnovPValue,
-            FeedbackDriftMetric::RankIcDrop,
+            FeedbackDriftMetric::TargetRankIcDrop,
             FeedbackDriftMetric::JensenShannonDivergence,
         ],
         catalog_priority: 100,
@@ -6743,8 +6754,11 @@ mod tests {
     use quant_pivot_core::prefetch::historical_window::ReplaySample;
     use quant_pivot_models::{
         config::GammaConfig,
-        domain::quant::{
-            GroundingKind, LinkageOutcome, MarketSubject, PriceComparator, ResolutionOracle,
+        domain::{
+            market::CATALOG_OBJECT_HASH_VERSION,
+            quant::{
+                GroundingKind, LinkageOutcome, MarketSubject, PriceComparator, ResolutionOracle,
+            },
         },
         enums::{
             common::MarketCategory,
@@ -6909,8 +6923,11 @@ mod tests {
         });
 
         let actual = client.get_market(&market_id).await?;
-        let actual_hash =
-            CanonicalDigest::content_hash_typed("quant-pivot/catalog-market-object", 1, &actual)?;
+        let actual_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-market-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            &actual,
+        )?;
 
         assert_eq!(
             serde_json::to_value(&actual)?,

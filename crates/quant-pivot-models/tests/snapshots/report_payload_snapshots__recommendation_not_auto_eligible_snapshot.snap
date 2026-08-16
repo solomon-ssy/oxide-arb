@@ -34,12 +34,36 @@ expression: recommendation_not_auto_eligible()
     "category": "politics",
     "token_id": "token-0xmarketA",
     "outcome_side": "yes",
-    "shares": "500",
-    "entry": {
-      "notional_usd": "250",
-      "entry_vwap": "0.43",
-      "fee_usd": "1.25",
-      "slippage_usd": "2.50",
+    "entry_execution": {
+      "kind": "passive",
+      "requested_shares": "581.39534883720930232558139535",
+      "limit_price": "0.43",
+      "decision_at": "2023-11-14T22:13:20Z",
+      "good_til_secs": 3600,
+      "hard_reserved_cash_usd": "250",
+      "expected_filled_shares": "581.39534883720930232558139535",
+      "full_fill_cost": {
+        "principal_usd": "250",
+        "venue_fee_usd": "0",
+        "builder_fee_usd": "0",
+        "cash_outlay_usd": "250"
+      },
+      "fill_distribution": {
+        "sample_count": 100,
+        "source_evidence_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+        "states": [
+          {
+            "kind": "full_fill",
+            "probability_bps": 10000,
+            "fill_ratio_bps": 10000,
+            "fill_latency_ms": 1000,
+            "post_fill_markout_bps": "0"
+          }
+        ]
+      },
+      "maker_rebate_schedule": null,
+      "full_fill_maker_rebate": null,
+      "expected_maker_rebate_usd": "0",
       "visible_liquidity_usd": "5000"
     },
     "profit_probability_lower_bps": 5800,
@@ -47,17 +71,53 @@ expression: recommendation_not_auto_eligible()
     "scenario_cashflows": [
       {
         "scenario_index": 0,
-        "discounted_net_usd": "90"
+        "entry_execution": {
+          "kind": "passive_full_fill",
+          "fill_latency_ms": 1000,
+          "post_fill_markout_bps": "0"
+        },
+        "filled_shares": "581.39534883720930232558139535",
+        "immediate_cash_outlay_usd": "250",
+        "discounted_exit_cash_usd": "340",
+        "delayed_maker_rebate_usd": "0",
+        "discounted_maker_rebate_usd": "0",
+        "capital_cost_usd": "0",
+        "capital_occupancy": [
+          {
+            "locked_cash_usd": "250",
+            "duration_secs": 86400
+          }
+        ],
+        "discounted_net_usd": "90",
+        "risk_net_usd": "90"
       },
       {
         "scenario_index": 1,
-        "discounted_net_usd": "-120"
+        "entry_execution": {
+          "kind": "passive_full_fill",
+          "fill_latency_ms": 1000,
+          "post_fill_markout_bps": "0"
+        },
+        "filled_shares": "581.39534883720930232558139535",
+        "immediate_cash_outlay_usd": "250",
+        "discounted_exit_cash_usd": "130",
+        "delayed_maker_rebate_usd": "0",
+        "discounted_maker_rebate_usd": "0",
+        "capital_cost_usd": "0",
+        "capital_occupancy": [
+          {
+            "locked_cash_usd": "250",
+            "duration_secs": 86400
+          }
+        ],
+        "discounted_net_usd": "-120",
+        "risk_net_usd": "-120"
       }
     ],
-    "capital_occupancy": [
+    "hard_reservation_envelope": [
       {
         "end_secs": 86400,
-        "locked_usd": "250"
+        "reserved_cash_usd": "250"
       }
     ],
     "economics": {
@@ -100,10 +160,11 @@ expression: recommendation_not_auto_eligible()
         "profile_ref": {
           "id": "pooled_1h_control",
           "version": 5,
-          "content_hash": "blake3:f99b2bb7b6a22ba717cfdb2a850e0b3d2a674e36f74826cb22f31d10d3c1faf0"
+          "content_hash": "blake3:c758bfc3d6307f58aea8db2b153f7cf120cb1e29584c9d0c3465241e248be2f3"
         },
         "category": "politics",
         "horizon_secs": 86400,
+        "entry_route": "aggressive",
         "entry_price_min": "0.01",
         "entry_price_max": "0.99",
         "cash_budget_tier": "250",
@@ -138,9 +199,13 @@ expression: recommendation_not_auto_eligible()
     },
     "sizing": {
       "economic_tier_id": "c41cf043-099a-5ad9-ba89-8d152d27b9e8",
-      "suggested_usd": "250",
-      "suggested_shares": "500",
-      "entry_vwap": "0.43",
+      "requested_shares": "581.39534883720930232558139535",
+      "expected_filled_shares": "581.39534883720930232558139535",
+      "hard_reserved_cash_usd": "250",
+      "immediate_fee_usd": "0",
+      "expected_maker_rebate_usd": "0",
+      "maker_rebate_schedule": null,
+      "reference_entry_price": "0.43",
       "portfolio_weight_pct": "0.05",
       "market_exposure_after_usd": "250",
       "event_exposure_after_usd": "250",

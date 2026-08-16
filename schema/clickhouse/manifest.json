@@ -929,7 +929,7 @@
       "sorting_key": "token_id, stream_session_id, token_sequence",
       "primary_key": "token_id, stream_session_id, token_sequence",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_book_l2_ledger (`stream_session_id` UUID, `shard_id` UInt32, `token_id` String, `market_id` Nullable(String), `token_sequence` UInt64, `event_type` Enum8('Snapshot' = 1, 'Delta' = 2, 'TickSizeChange' = 3, 'Gap' = 4, 'LastTrade' = 5), `bid_prices` Array(Decimal(18, 8)), `bid_sizes` Array(Decimal(38, 18)), `ask_prices` Array(Decimal(18, 8)), `ask_sizes` Array(Decimal(38, 18)), `old_tick_size` Nullable(Decimal(18, 8)), `new_tick_size` Nullable(Decimal(18, 8)), `trade_price` Nullable(Decimal(18, 8)), `trade_side` Nullable(Enum8('Unknown' = 0, 'Buy' = 1, 'Sell' = 2)), `trade_size` Nullable(Decimal(38, 18)), `fee_rate_bps` Nullable(Decimal(18, 4)), `venue_event_time` DateTime64(3, 'UTC'), `ingress_time` DateTime64(3, 'UTC'), `persisted_time` DateTime64(3, 'UTC'), `event_hash` FixedString(32), `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(venue_event_time)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (token_id, stream_session_id, token_sequence) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_book_l2_ledger (`stream_session_id` UUID, `shard_id` UInt32, `token_id` String, `market_id` Nullable(String), `token_sequence` UInt64, `event_type` Enum8('Snapshot' = 1, 'Delta' = 2, 'TickSizeChange' = 3, 'Gap' = 4, 'LastTrade' = 5), `bid_prices` Array(Decimal(18, 8)), `bid_sizes` Array(Decimal(38, 18)), `ask_prices` Array(Decimal(18, 8)), `ask_sizes` Array(Decimal(38, 18)), `old_tick_size` Nullable(Decimal(18, 8)), `new_tick_size` Nullable(Decimal(18, 8)), `trade_price` Nullable(Decimal(18, 8)), `trade_side` Nullable(Enum8('Unknown' = 0, 'Buy' = 1, 'Sell' = 2)), `trade_size` Nullable(Decimal(38, 18)), `fee_rate_bps` Nullable(Decimal(18, 4)), `trade_transaction_hash` Nullable(String), `venue_event_time` DateTime64(3, 'UTC'), `ingress_time` DateTime64(3, 'UTC'), `persisted_time` DateTime64(3, 'UTC'), `event_hash` FixedString(32), `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(venue_event_time)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (token_id, stream_session_id, token_sequence) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -1061,6 +1061,14 @@
         },
         {
           "position": 17,
+          "name": "trade_transaction_hash",
+          "column_type": "Nullable(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 18,
           "name": "venue_event_time",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -1068,7 +1076,7 @@
           "compression_codec": ""
         },
         {
-          "position": 18,
+          "position": 19,
           "name": "ingress_time",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -1076,7 +1084,7 @@
           "compression_codec": ""
         },
         {
-          "position": 19,
+          "position": 20,
           "name": "persisted_time",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -1084,7 +1092,7 @@
           "compression_codec": ""
         },
         {
-          "position": 20,
+          "position": 21,
           "name": "event_hash",
           "column_type": "FixedString(32)",
           "default_kind": "",
@@ -1092,7 +1100,7 @@
           "compression_codec": ""
         },
         {
-          "position": 21,
+          "position": 22,
           "name": "schema_version",
           "column_type": "UInt32",
           "default_kind": "",
@@ -1100,7 +1108,7 @@
           "compression_codec": ""
         },
         {
-          "position": 22,
+          "position": 23,
           "name": "event_date",
           "column_type": "Date",
           "default_kind": "MATERIALIZED",
@@ -1789,7 +1797,7 @@
       "sorting_key": "contract_address, block_number, transaction_index, log_index",
       "primary_key": "contract_address, block_number, transaction_index, log_index",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_exchange_event (`event_id` FixedString(32), `raw_log_hash` FixedString(32), `event_kind` Enum8('OrderFilled' = 1, 'OrdersMatched' = 2), `contract_key` LowCardinality(String), `exchange_version` Enum8('V1' = 1, 'V2' = 2), `contract_address` String, `block_number` UInt64, `block_hash` String, `block_timestamp` DateTime64(3, 'UTC'), `transaction_hash` String, `transaction_index` UInt64, `log_index` UInt64, `order_hash` String, `maker` String, `taker` Nullable(String), `side` Enum8('Unknown' = 0, 'Buy' = 1, 'Sell' = 2), `token_id` Nullable(String), `maker_asset_id` Nullable(String), `taker_asset_id` Nullable(String), `maker_amount` String, `taker_amount` String, `fee_amount` Nullable(String), `builder` Nullable(String), `metadata` Nullable(String), `observed_at` DateTime64(3, 'UTC'), `model_available_at` DateTime64(3, 'UTC'), `availability_policy_hash` FixedString(32), `chunk_id` UUID, `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(block_timestamp)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (contract_address, block_number, transaction_index, log_index) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_exchange_event (`event_id` FixedString(32), `raw_log_hash` FixedString(32), `chain_id` UInt64, `event_kind` Enum8('OrderFilled' = 1, 'OrdersMatched' = 2), `contract_key` LowCardinality(String), `exchange_version` Enum8('V2' = 2), `contract_address` String, `block_number` UInt64, `block_hash` String, `block_timestamp` DateTime64(3, 'UTC'), `transaction_hash` String, `transaction_index` UInt64, `log_index` UInt64, `order_hash` String, `maker` String, `taker` Nullable(String), `side` Enum8('Unknown' = 0, 'Buy' = 1, 'Sell' = 2), `token_id` Nullable(String), `maker_asset_id` Nullable(String), `taker_asset_id` Nullable(String), `maker_amount` String, `taker_amount` String, `fee_amount` Nullable(String), `builder` Nullable(String), `metadata` Nullable(String), `observed_at` DateTime64(3, 'UTC'), `model_available_at` DateTime64(3, 'UTC'), `availability_policy_hash` FixedString(32), `chunk_id` UUID, `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(block_timestamp)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (contract_address, block_number, transaction_index, log_index) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -1809,8 +1817,268 @@
         },
         {
           "position": 3,
+          "name": "chain_id",
+          "column_type": "UInt64",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 4,
           "name": "event_kind",
           "column_type": "Enum8('OrderFilled' = 1, 'OrdersMatched' = 2)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 5,
+          "name": "contract_key",
+          "column_type": "LowCardinality(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 6,
+          "name": "exchange_version",
+          "column_type": "Enum8('V2' = 2)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 7,
+          "name": "contract_address",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 8,
+          "name": "block_number",
+          "column_type": "UInt64",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 9,
+          "name": "block_hash",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 10,
+          "name": "block_timestamp",
+          "column_type": "DateTime64(3, 'UTC')",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 11,
+          "name": "transaction_hash",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 12,
+          "name": "transaction_index",
+          "column_type": "UInt64",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 13,
+          "name": "log_index",
+          "column_type": "UInt64",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 14,
+          "name": "order_hash",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 15,
+          "name": "maker",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 16,
+          "name": "taker",
+          "column_type": "Nullable(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 17,
+          "name": "side",
+          "column_type": "Enum8('Unknown' = 0, 'Buy' = 1, 'Sell' = 2)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 18,
+          "name": "token_id",
+          "column_type": "Nullable(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 19,
+          "name": "maker_asset_id",
+          "column_type": "Nullable(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 20,
+          "name": "taker_asset_id",
+          "column_type": "Nullable(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 21,
+          "name": "maker_amount",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 22,
+          "name": "taker_amount",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 23,
+          "name": "fee_amount",
+          "column_type": "Nullable(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 24,
+          "name": "builder",
+          "column_type": "Nullable(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 25,
+          "name": "metadata",
+          "column_type": "Nullable(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 26,
+          "name": "observed_at",
+          "column_type": "DateTime64(3, 'UTC')",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 27,
+          "name": "model_available_at",
+          "column_type": "DateTime64(3, 'UTC')",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 28,
+          "name": "availability_policy_hash",
+          "column_type": "FixedString(32)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 29,
+          "name": "chunk_id",
+          "column_type": "UUID",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 30,
+          "name": "schema_version",
+          "column_type": "UInt32",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 31,
+          "name": "event_date",
+          "column_type": "Date",
+          "default_kind": "MATERIALIZED",
+          "default_expression": "toDate(block_timestamp)",
+          "compression_codec": ""
+        }
+      ]
+    },
+    {
+      "name": "quant_exchange_fee_charge",
+      "engine": "MergeTree",
+      "engine_full": "MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (contract_address, block_number, transaction_index, log_index) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
+      "partition_key": "toYYYYMM(event_date)",
+      "sorting_key": "contract_address, block_number, transaction_index, log_index",
+      "primary_key": "contract_address, block_number, transaction_index, log_index",
+      "sampling_key": "",
+      "create_table_query": "CREATE TABLE quant_exchange_fee_charge (`fee_charge_id` FixedString(32), `raw_log_hash` FixedString(32), `chain_id` UInt64, `contract_key` LowCardinality(String), `exchange_version` Enum8('V2' = 2), `contract_address` String, `block_number` UInt64, `block_hash` String, `block_timestamp` DateTime64(3, 'UTC'), `transaction_hash` String, `transaction_index` UInt64, `log_index` UInt64, `receiver` String, `amount_usd` Decimal(38, 18), `observed_at` DateTime64(3, 'UTC'), `model_available_at` DateTime64(3, 'UTC'), `availability_policy_hash` FixedString(32), `chunk_id` UUID, `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(block_timestamp)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (contract_address, block_number, transaction_index, log_index) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
+      "columns": [
+        {
+          "position": 1,
+          "name": "fee_charge_id",
+          "column_type": "FixedString(32)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 2,
+          "name": "raw_log_hash",
+          "column_type": "FixedString(32)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 3,
+          "name": "chain_id",
+          "column_type": "UInt64",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
@@ -1826,7 +2094,7 @@
         {
           "position": 5,
           "name": "exchange_version",
-          "column_type": "Enum8('V1' = 1, 'V2' = 2)",
+          "column_type": "Enum8('V2' = 2)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
@@ -1889,7 +2157,7 @@
         },
         {
           "position": 13,
-          "name": "order_hash",
+          "name": "receiver",
           "column_type": "String",
           "default_kind": "",
           "default_expression": "",
@@ -1897,94 +2165,14 @@
         },
         {
           "position": 14,
-          "name": "maker",
-          "column_type": "String",
+          "name": "amount_usd",
+          "column_type": "Decimal(38, 18)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
           "position": 15,
-          "name": "taker",
-          "column_type": "Nullable(String)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 16,
-          "name": "side",
-          "column_type": "Enum8('Unknown' = 0, 'Buy' = 1, 'Sell' = 2)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 17,
-          "name": "token_id",
-          "column_type": "Nullable(String)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 18,
-          "name": "maker_asset_id",
-          "column_type": "Nullable(String)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 19,
-          "name": "taker_asset_id",
-          "column_type": "Nullable(String)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 20,
-          "name": "maker_amount",
-          "column_type": "String",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 21,
-          "name": "taker_amount",
-          "column_type": "String",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 22,
-          "name": "fee_amount",
-          "column_type": "Nullable(String)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 23,
-          "name": "builder",
-          "column_type": "Nullable(String)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 24,
-          "name": "metadata",
-          "column_type": "Nullable(String)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 25,
           "name": "observed_at",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -1992,7 +2180,7 @@
           "compression_codec": ""
         },
         {
-          "position": 26,
+          "position": 16,
           "name": "model_available_at",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -2000,7 +2188,7 @@
           "compression_codec": ""
         },
         {
-          "position": 27,
+          "position": 17,
           "name": "availability_policy_hash",
           "column_type": "FixedString(32)",
           "default_kind": "",
@@ -2008,7 +2196,7 @@
           "compression_codec": ""
         },
         {
-          "position": 28,
+          "position": 18,
           "name": "chunk_id",
           "column_type": "UUID",
           "default_kind": "",
@@ -2016,7 +2204,7 @@
           "compression_codec": ""
         },
         {
-          "position": 29,
+          "position": 19,
           "name": "schema_version",
           "column_type": "UInt32",
           "default_kind": "",
@@ -2024,7 +2212,7 @@
           "compression_codec": ""
         },
         {
-          "position": 30,
+          "position": 20,
           "name": "event_date",
           "column_type": "Date",
           "default_kind": "MATERIALIZED",
@@ -2157,7 +2345,7 @@
       "sorting_key": "contract_address, block_number, transaction_index, log_index",
       "primary_key": "contract_address, block_number, transaction_index, log_index",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_exchange_log_raw (`chain_id` UInt64, `contract_key` LowCardinality(String), `exchange_version` Enum8('V1' = 1, 'V2' = 2), `contract_address` String, `block_number` UInt64, `block_hash` String, `parent_block_hash` String, `block_timestamp` DateTime64(3, 'UTC'), `transaction_hash` String, `transaction_index` UInt64, `log_index` UInt64, `topic0` String, `topic1` Nullable(String), `topic2` Nullable(String), `topic3` Nullable(String), `data` String CODEC(ZSTD(3)), `removed` Bool, `hypersync_observed_at` DateTime64(3, 'UTC'), `attestor_observed_at` DateTime64(3, 'UTC'), `observed_at` DateTime64(3, 'UTC'), `model_available_at` DateTime64(3, 'UTC'), `availability_basis` Enum8('BlockConfirmation' = 1), `availability_policy_hash` FixedString(32), `chunk_id` UUID, `raw_log_hash` FixedString(32), `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(block_timestamp)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (contract_address, block_number, transaction_index, log_index) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_exchange_log_raw (`chain_id` UInt64, `contract_key` LowCardinality(String), `exchange_version` Enum8('V2' = 2), `contract_address` String, `block_number` UInt64, `block_hash` String, `parent_block_hash` String, `block_timestamp` DateTime64(3, 'UTC'), `transaction_hash` String, `transaction_index` UInt64, `log_index` UInt64, `topic0` String, `topic1` Nullable(String), `topic2` Nullable(String), `topic3` Nullable(String), `data` String CODEC(ZSTD(3)), `removed` Bool, `hypersync_observed_at` DateTime64(3, 'UTC'), `attestor_observed_at` DateTime64(3, 'UTC'), `observed_at` DateTime64(3, 'UTC'), `model_available_at` DateTime64(3, 'UTC'), `availability_basis` Enum8('BlockConfirmation' = 1), `availability_policy_hash` FixedString(32), `chunk_id` UUID, `raw_log_hash` FixedString(32), `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(block_timestamp)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (contract_address, block_number, transaction_index, log_index) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -2178,7 +2366,7 @@
         {
           "position": 3,
           "name": "exchange_version",
-          "column_type": "Enum8('V1' = 1, 'V2' = 2)",
+          "column_type": "Enum8('V2' = 2)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
@@ -2385,7 +2573,7 @@
       "sorting_key": "block_number, transaction_hash, match_id",
       "primary_key": "block_number, transaction_hash, match_id",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_exchange_match (`match_id` FixedString(32), `orders_matched_event_id` FixedString(32), `aggregate_taker_event_id` FixedString(32), `contract_key` LowCardinality(String), `exchange_version` Enum8('V1' = 1, 'V2' = 2), `transaction_hash` String, `block_number` UInt64, `block_timestamp` DateTime64(3, 'UTC'), `taker_order_hash` String, `taker_address` String, `side` Enum8('Unknown' = 0, 'Buy' = 1, 'Sell' = 2), `token_id` Nullable(String), `maker_asset_id` Nullable(String), `taker_asset_id` Nullable(String), `maker_amount` String, `taker_amount` String, `maker_execution_count` UInt32, `observed_at` DateTime64(3, 'UTC'), `model_available_at` DateTime64(3, 'UTC'), `availability_policy_hash` FixedString(32), `chunk_id` UUID, `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(block_timestamp)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (block_number, transaction_hash, match_id) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_exchange_match (`match_id` FixedString(32), `orders_matched_event_id` FixedString(32), `aggregate_taker_event_id` FixedString(32), `contract_key` LowCardinality(String), `exchange_version` Enum8('V2' = 2), `transaction_hash` String, `block_number` UInt64, `block_timestamp` DateTime64(3, 'UTC'), `taker_order_hash` String, `taker_address` String, `side` Enum8('Unknown' = 0, 'Buy' = 1, 'Sell' = 2), `token_id` Nullable(String), `maker_asset_id` Nullable(String), `taker_asset_id` Nullable(String), `maker_amount` String, `taker_amount` String, `maker_execution_count` UInt32, `observed_at` DateTime64(3, 'UTC'), `model_available_at` DateTime64(3, 'UTC'), `availability_policy_hash` FixedString(32), `chunk_id` UUID, `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(block_timestamp)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (block_number, transaction_hash, match_id) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -2422,7 +2610,7 @@
         {
           "position": 5,
           "name": "exchange_version",
-          "column_type": "Enum8('V1' = 1, 'V2' = 2)",
+          "column_type": "Enum8('V2' = 2)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
@@ -3533,7 +3721,7 @@
       "sorting_key": "market_id, token_id, effective_at, block_number, transaction_index, log_index",
       "primary_key": "market_id, token_id, effective_at, block_number, transaction_index, log_index",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_market_execution (`execution_id` FixedString(32), `match_id` Nullable(FixedString(32)), `maker_order_filled_event_id` FixedString(32), `market_id` String, `token_id` String, `contract_key` LowCardinality(String), `exchange_version` Enum8('V1' = 1, 'V2' = 2), `transaction_hash` String, `block_number` UInt64, `transaction_index` UInt64, `log_index` UInt64, `maker_address` String, `taker_address` String, `side` Enum8('Buy' = 1, 'Sell' = 2), `price` Decimal(18, 8), `size_shares` Decimal(38, 18), `notional_usd` Decimal(38, 18), `fee_amount` Decimal(38, 18), `fee_asset_id` String, `effective_at` DateTime64(3, 'UTC'), `observed_at` DateTime64(3, 'UTC'), `model_available_at` DateTime64(3, 'UTC'), `availability_basis` Enum8('BlockConfirmation' = 1), `availability_policy_hash` FixedString(32), `chunk_id` UUID, `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(effective_at)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (market_id, token_id, effective_at, block_number, transaction_index, log_index) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_market_execution (`execution_id` FixedString(32), `match_id` Nullable(FixedString(32)), `maker_order_filled_event_id` FixedString(32), `market_id` String, `token_id` String, `order_hash` String, `contract_key` LowCardinality(String), `exchange_version` Enum8('V2' = 2), `contract_address` String, `transaction_hash` String, `block_number` UInt64, `transaction_index` UInt64, `log_index` UInt64, `maker_address` String, `taker_address` String, `side` Enum8('Buy' = 1, 'Sell' = 2), `price` Decimal(18, 8), `size_shares` Decimal(38, 18), `notional_usd` Decimal(38, 18), `fee_usd` Decimal(38, 18), `builder` Nullable(String), `effective_at` DateTime64(3, 'UTC'), `observed_at` DateTime64(3, 'UTC'), `model_available_at` DateTime64(3, 'UTC'), `availability_basis` Enum8('BlockConfirmation' = 1), `availability_policy_hash` FixedString(32), `chunk_id` UUID, `schema_version` UInt32, `event_date` Date MATERIALIZED toDate(effective_at)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (market_id, token_id, effective_at, block_number, transaction_index, log_index) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -3577,6 +3765,14 @@
         },
         {
           "position": 6,
+          "name": "order_hash",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 7,
           "name": "contract_key",
           "column_type": "LowCardinality(String)",
           "default_kind": "",
@@ -3584,15 +3780,23 @@
           "compression_codec": ""
         },
         {
-          "position": 7,
+          "position": 8,
           "name": "exchange_version",
-          "column_type": "Enum8('V1' = 1, 'V2' = 2)",
+          "column_type": "Enum8('V2' = 2)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
-          "position": 8,
+          "position": 9,
+          "name": "contract_address",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 10,
           "name": "transaction_hash",
           "column_type": "String",
           "default_kind": "",
@@ -3600,7 +3804,7 @@
           "compression_codec": ""
         },
         {
-          "position": 9,
+          "position": 11,
           "name": "block_number",
           "column_type": "UInt64",
           "default_kind": "",
@@ -3608,7 +3812,7 @@
           "compression_codec": ""
         },
         {
-          "position": 10,
+          "position": 12,
           "name": "transaction_index",
           "column_type": "UInt64",
           "default_kind": "",
@@ -3616,7 +3820,7 @@
           "compression_codec": ""
         },
         {
-          "position": 11,
+          "position": 13,
           "name": "log_index",
           "column_type": "UInt64",
           "default_kind": "",
@@ -3624,7 +3828,7 @@
           "compression_codec": ""
         },
         {
-          "position": 12,
+          "position": 14,
           "name": "maker_address",
           "column_type": "String",
           "default_kind": "",
@@ -3632,7 +3836,7 @@
           "compression_codec": ""
         },
         {
-          "position": 13,
+          "position": 15,
           "name": "taker_address",
           "column_type": "String",
           "default_kind": "",
@@ -3640,7 +3844,7 @@
           "compression_codec": ""
         },
         {
-          "position": 14,
+          "position": 16,
           "name": "side",
           "column_type": "Enum8('Buy' = 1, 'Sell' = 2)",
           "default_kind": "",
@@ -3648,7 +3852,7 @@
           "compression_codec": ""
         },
         {
-          "position": 15,
+          "position": 17,
           "name": "price",
           "column_type": "Decimal(18, 8)",
           "default_kind": "",
@@ -3656,7 +3860,7 @@
           "compression_codec": ""
         },
         {
-          "position": 16,
+          "position": 18,
           "name": "size_shares",
           "column_type": "Decimal(38, 18)",
           "default_kind": "",
@@ -3664,7 +3868,7 @@
           "compression_codec": ""
         },
         {
-          "position": 17,
+          "position": 19,
           "name": "notional_usd",
           "column_type": "Decimal(38, 18)",
           "default_kind": "",
@@ -3672,23 +3876,23 @@
           "compression_codec": ""
         },
         {
-          "position": 18,
-          "name": "fee_amount",
+          "position": 20,
+          "name": "fee_usd",
           "column_type": "Decimal(38, 18)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
-          "position": 19,
-          "name": "fee_asset_id",
-          "column_type": "String",
+          "position": 21,
+          "name": "builder",
+          "column_type": "Nullable(String)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
-          "position": 20,
+          "position": 22,
           "name": "effective_at",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -3696,7 +3900,7 @@
           "compression_codec": ""
         },
         {
-          "position": 21,
+          "position": 23,
           "name": "observed_at",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -3704,7 +3908,7 @@
           "compression_codec": ""
         },
         {
-          "position": 22,
+          "position": 24,
           "name": "model_available_at",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -3712,7 +3916,7 @@
           "compression_codec": ""
         },
         {
-          "position": 23,
+          "position": 25,
           "name": "availability_basis",
           "column_type": "Enum8('BlockConfirmation' = 1)",
           "default_kind": "",
@@ -3720,7 +3924,7 @@
           "compression_codec": ""
         },
         {
-          "position": 24,
+          "position": 26,
           "name": "availability_policy_hash",
           "column_type": "FixedString(32)",
           "default_kind": "",
@@ -3728,7 +3932,7 @@
           "compression_codec": ""
         },
         {
-          "position": 25,
+          "position": 27,
           "name": "chunk_id",
           "column_type": "UUID",
           "default_kind": "",
@@ -3736,7 +3940,7 @@
           "compression_codec": ""
         },
         {
-          "position": 26,
+          "position": 28,
           "name": "schema_version",
           "column_type": "UInt32",
           "default_kind": "",
@@ -3744,7 +3948,7 @@
           "compression_codec": ""
         },
         {
-          "position": 27,
+          "position": 29,
           "name": "event_date",
           "column_type": "Date",
           "default_kind": "MATERIALIZED",

@@ -8,7 +8,9 @@ use quant_pivot_models::{
     domain::quant::{EquitySnapshotInfo, NewAccountSnapshot, NewEquitySnapshot, PositionInfo},
     types::{AccountPositions, AccountSnapshotId, EquitySnapshotId, ExecutionAccountId, Usd},
 };
-use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
+use quant_pivot_repository::traits::{
+    EquitySnapshotRepository, PositionRepository, VenueIncentiveRepository,
+};
 use quant_pivot_research::portfolio::{AccountDrawdown, AccountSnapshot};
 
 /// Drawdown resolution used for sizing and persisted equity snapshots.
@@ -51,6 +53,7 @@ pub trait DrawdownProvider: Send + Sync {
 pub struct EquitySnapshotService {
     equity_snapshots: Arc<dyn EquitySnapshotRepository>,
     positions: Arc<dyn PositionRepository>,
+    incentives: Arc<dyn VenueIncentiveRepository>,
     execution_account_id: ExecutionAccountId,
 }
 
@@ -59,11 +62,13 @@ impl EquitySnapshotService {
     pub const fn new(
         equity_snapshots: Arc<dyn EquitySnapshotRepository>,
         positions: Arc<dyn PositionRepository>,
+        incentives: Arc<dyn VenueIncentiveRepository>,
         execution_account_id: ExecutionAccountId,
     ) -> Self {
         Self {
             equity_snapshots,
             positions,
+            incentives,
             execution_account_id,
         }
     }
@@ -88,6 +93,10 @@ impl EquitySnapshotService {
             .resolve_drawdown_from_ledger(account, AccountDrawdown::neutral())
             .await?;
         let realized_pnl_cumulative_usd = self.positions.realized_pnl_cumulative_usd().await?;
+        let incentive_credit_cumulative_usd = self
+            .incentives
+            .credited_cumulative(&self.execution_account_id, account.as_of)
+            .await?;
         let open_lots = self.positions.find_open_lots().await?;
         let unrealized_pnl_usd = unrealized_pnl_usd(&open_lots, account)?;
 
@@ -115,6 +124,7 @@ impl EquitySnapshotService {
             available_usd: account.available_usd,
             reserved_usd: account.reserved_usd,
             realized_pnl_cumulative_usd,
+            incentive_credit_cumulative_usd,
             unrealized_pnl_usd,
             high_water_mark_usd: resolution.high_water_mark_usd,
             drawdown_pct: resolution.drawdown.current_ratio,

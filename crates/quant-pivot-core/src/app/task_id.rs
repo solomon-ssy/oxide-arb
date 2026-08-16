@@ -85,6 +85,8 @@ pub enum TaskId {
     /// Self-heals the execution breaker (`Degraded → Healthy` after cooldown).
     ExecutionBreakerTick,
     ReconciliationWorker,
+    /// Reconciles market/day maker awards and wallet-confirmed incentive credits.
+    VenueIncentiveReconciliation,
     /// Seals resolution and execution outcome truth in all runtime modes.
     OutcomeReconciliationWorker,
     /// Discovers resolved account-scoped cases from durable `PostgreSQL` truth.
@@ -193,6 +195,7 @@ impl TaskId {
             | Self::EntryConditionWorker
             | Self::ExecutionBreakerTick
             | Self::ReconciliationWorker
+            | Self::VenueIncentiveReconciliation
             | Self::OutcomeReconciliationWorker
             | Self::SettlementDiscovery
             | Self::SettlementPreflight

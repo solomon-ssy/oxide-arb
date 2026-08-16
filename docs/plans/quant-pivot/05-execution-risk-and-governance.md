@@ -247,8 +247,8 @@ Admission 不是旧 `RiskPipeline` 的兼容层，而是新执行前置门。
 
 第一版支持：
 
-- limit order。
-- FOK only when recommendation explicitly requires immediate liquidity。
+- aggressive BUY：由冻结 tier 明确选择 FOK/FAK 与 worst-price cap；
+- passive BUY：post-only GTD limit；
 - cancel-on-timeout。
 
 不再默认 FOK-only。FOK 是 execution tactic，不是产品架构。
@@ -268,6 +268,40 @@ Admission 不是旧 `RiskPipeline` 的兼容层，而是新执行前置门。
 - `ambiguous`
 
 `ambiguous` 进入 reconciliation，但不自动计为失败。
+
+### 5.3 Passive post-only 闭环
+
+- passive 只能来自 MILP 已选择的独立 passive tier；post-only reject、quote stale、market state 变化、
+  recommendation invalidation 或 GTD 到期均取消剩余订单，不自动降级为 aggressive；
+- 提交期间为 requested shares 的完整 limit notional 保留资金；每笔 authenticated partial fill 原子写入
+  append-only fill ledger、结算对应预留并创建可立即被 exit monitor 管理的 lot；
+- 剩余订单继续存活到 full fill、cancel 或 expiry；cancel/expiry 重放必须幂等并释放未使用预留；
+- liquidity role 只接受 authenticated trade truth。GTC/GTD/post-only 是订单意图，不足以证明 maker。
+
+历史 passive evidence 只来自 canonical `quant_book_l2_ledger` 的完整 `LastTrade`。同 session 内只有 opposing
+SELL print 可消耗 passive BUY 的 queue ahead；gap、reset、乱序、重复冲突、缺 side/size 或跨 session 均为
+coverage failure。L2 cancel 不减少 queue ahead，因为无法证明取消排在本订单之前。replay 必须持续到 requested
+shares 全部成交或 GTD 到期，保存所有 partial-fill slices；cohort 未达到 95% OOS evidence coverage 不得发布。
+
+### 5.4 Fee measurement 与 incentive ledger
+
+即时费用、延迟 maker incentive 与实际 venue credit 分账：
+
+- `MarketFeeSchedule` 只保存 CLOB 权威即时 fee；`MarketMakerRebateSchedule` 只保存 Gamma 权威 maker
+  incentive，两者使用独立 source/content hash；同 decision boundary 下 fee 开关或曲线不一致则拒绝 candidate；
+- `PreparedExpected` 与 `AuthenticatedTradeDerived` 都是 provisional measurement；只有校验 chain 137、V2
+  exchange、order/account/token/side、transaction/log identity 及 BUY/SELL asset conservation 的
+  `OnChainSettled` 才是 exact fee；
+- 实际 maker fill 才创建 `EstimatedAccrual`，金额为
+  `shares × platform_rate × (price × (1-price))^exponent × rebate_rate`；无成交严格为零，且不进入
+  `cash_outlay`、hard reservation、max loss 或 spendable balance；
+- daily `/rebates/current` 记录 market/day `VenueAwarded`；Data API `MAKER_REBATE` / `TAKER_REBATE`
+  activity 记录 `WalletCredited`。只有 wallet credit 进入账户 incentive-credit cash component；Taker rebate
+  从不进入 recommendation、MILP、CPCV 或资金可用量。
+
+所有 fill、fee measurement 与 incentive event 都是 append-only、identity-keyed、PIT 可查询事实。venue award
+的同一 account/market/day partition 允许以新 evidence identity 追加修订，读取时按 `available_at` 选择最新事实；
+不得修改旧 recommendation economics 或反向伪造 taker order attribution。
 
 ## 6. Exit Lifecycle
 

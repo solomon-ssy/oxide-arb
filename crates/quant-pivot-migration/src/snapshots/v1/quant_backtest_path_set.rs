@@ -22,7 +22,7 @@ pub struct Model {
     pub fold_artifacts: Json,
     pub path_count: i64,
     pub combination_count: i64,
-    pub median_rank_ic: Decimal,
+    pub median_target_rank_ic: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
     pub sharpe_distribution: Json,
     #[sea_orm(column_type = "JsonBinary")]

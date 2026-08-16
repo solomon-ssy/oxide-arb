@@ -98,10 +98,10 @@ use quant_pivot_models::{
         FeedbackEvaluationUseId, FeedbackLearningStageArtifactId, FeedbackValidationArtifactId,
         MarketId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
         ModelTrainingTarget, ModelVersionId, OrderIntentId, POOLED_1H_CONTROL_PROFILE_ID,
-        POOLED_1H_HORIZON_SECS, PositionId, Price, Probability, ResearchEvaluationTrack,
-        ResearchJobId, ResearchJobProgress, ResearchProfileRef, SchemaVersion, Shares,
-        SourceSliceManifest, TokenId, TradePolicyEvidenceBundleManifest, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource, TrainingSampleSources, Usd,
+        PositionId, Price, Probability, ResearchEvaluationTrack, ResearchJobId,
+        ResearchJobProgress, ResearchProfileRef, SchemaVersion, Shares, SourceSliceManifest,
+        TokenId, TradePolicyEvidenceBundleManifest, TrainingDatasetId, TrainingExampleId,
+        TrainingSampleSource, TrainingSampleSources, Usd,
         calibration::ModelScoreCalibrationPayload,
         factor::{
             FactorContextEffect, FactorDefinitionRef, FactorExplanation, FactorOutputSemantics,
@@ -147,8 +147,8 @@ use quant_pivot_research::{
     training::{
         DatasetHashContract, DatasetParquetCodec, HOLD_VS_EXIT_ALPHA_BPS, LabelName,
         LotTrainingContext, POLICY_ENTRY_FILL_RATIO, POLICY_EXIT_FILL_RATIO, POLICY_NET_POSITIVE,
-        POLICY_NET_RETURN_BPS, RETURN_TO_HORIZON, TrainingDatasetArtifact, TrainingExample,
-        TrainingLabel, dataset_source_fingerprint, label_names_for_sources,
+        POLICY_NET_RETURN_BPS, TrainingDatasetArtifact, TrainingExample, TrainingLabel,
+        dataset_source_fingerprint, label_names_for_sources,
     },
 };
 use quant_pivot_system_tests::{
@@ -643,18 +643,13 @@ fn shift_examples(examples: Vec<TrainingExample>, shift: ChronoDuration) -> Vec<
 struct ClassicalDatasetFixture {
     rows: Vec<TrainingExample>,
     label_name: LabelName,
-    label_horizon_secs: u64,
 }
 
 impl ClassicalDatasetFixture {
     fn for_family(family: ModelFamily) -> Self {
-        let logistic = family == ModelFamily::ClassicalLogisticRegression;
-        let label_name = if logistic {
-            settlement()
-        } else {
-            RETURN_TO_HORIZON
-        };
-        let label_horizon_secs = if logistic { 0 } else { POOLED_1H_HORIZON_SECS };
+        assert_eq!(family, ModelFamily::ClassicalLogisticRegression);
+        let label_name = settlement();
+        let label_horizon_secs = 0;
         let rows = examples()
             .into_iter()
             .map(|mut example| {
@@ -666,16 +661,10 @@ impl ClassicalDatasetFixture {
                 example.labels = vec![TrainingLabel {
                     label_name: label_name.clone(),
                     horizon_secs: label_horizon_secs,
-                    value: if logistic {
-                        if positive {
-                            Decimal::ONE
-                        } else {
-                            Decimal::ZERO
-                        }
-                    } else if positive {
-                        dec!(100)
+                    value: if positive {
+                        Decimal::ONE
                     } else {
-                        dec!(-100)
+                        Decimal::ZERO
                     },
                     is_resolved: true,
                     matured_at: example.decision_at()
@@ -686,11 +675,7 @@ impl ClassicalDatasetFixture {
                 example
             })
             .collect();
-        Self {
-            rows,
-            label_name,
-            label_horizon_secs,
-        }
+        Self { rows, label_name }
     }
 }
 
@@ -735,7 +720,7 @@ fn exit_examples() -> Vec<TrainingExample> {
 /// Governed training knobs exercised through `TrainingObjectiveSpec::from_runtime_config`.
 const fn e2e_research_training() -> ResearchTrainingConfig {
     ResearchTrainingConfig {
-        rank_loss: RankLossKind::RankIcWeightedRanknet,
+        rank_loss: RankLossKind::TargetRankIcWeightedRanknet,
         optimizer: TrainingOptimizerKind::CoordinateSearch,
         lambda_tail: DecimalValue::new(rust_decimal_macros::dec!(0.5)),
         tail_fraction: DecimalValue::new(rust_decimal_macros::dec!(0.10)),
@@ -873,7 +858,7 @@ fn e2e_runtime_config() -> DecisionPolicySnapshot {
         .research
         .validation
         .trials
-        .rank_loss_kinds = vec![RankLossKind::RankIcWeightedRanknet];
+        .rank_loss_kinds = vec![RankLossKind::TargetRankIcWeightedRanknet];
     config
         .profile_artifacts
         .research_method
@@ -1665,7 +1650,7 @@ impl WeightedVersionContract<'_> {
         else {
             panic!("weighted training must persist a learning-to-rank objective");
         };
-        assert_eq!(spec.rank_loss, RankLossKind::RankIcWeightedRanknet);
+        assert_eq!(spec.rank_loss, RankLossKind::TargetRankIcWeightedRanknet);
         assert_eq!(spec.optimizer, TrainingOptimizerKind::CoordinateSearch);
         assert_eq!(spec.ndcg_k, 5);
         assert_eq!(spec.pseudo_top_n, 3);
@@ -2031,7 +2016,7 @@ impl TrainerContractMatrix {
     async fn reject_family_drift(&self) {
         let mut input =
             TrainInputFixture::for_dataset(&self.weighted_spec, self.weighted_dataset.id);
-        input.model_spec.model_family = ModelFamily::ClassicalRandomForest;
+        input.model_spec.model_family = ModelFamily::HoldVsExitWeighted;
         let cancellation = CancellationToken::new();
         let Err(error) =
             Box::pin(self.trainer.train(input, &NoopProgressSink, &cancellation)).await
@@ -2042,7 +2027,7 @@ impl TrainerContractMatrix {
             matches!(
                 &error,
                 QuantError::Research(ResearchError::InvalidModelArtifact { detail })
-                    if detail.contains("cannot emit a calibrated outcome-payout forecast")
+                    if detail.contains("hold-vs-exit model families cannot use a Buy target")
             ),
             "family tamper must fail at the typed training-target contract, got {error}"
         );
@@ -2756,28 +2741,12 @@ impl TrainerContractMatrix {
     async fn verify_classical_contracts(&self) {
         // Classical validation is feature-only and never constructs or registers a
         // factor plane from the otherwise factor-enabled frozen policy snapshot.
-        for family in [
-            ModelFamily::ClassicalRandomForest,
-            ModelFamily::ClassicalExtraTrees,
-            ModelFamily::ClassicalLogisticRegression,
-            ModelFamily::ClassicalRidge,
-            ModelFamily::ClassicalLasso,
-            ModelFamily::ClassicalElasticNet,
-        ] {
-            let ClassicalDatasetFixture {
-                rows,
-                label_name,
-                label_horizon_secs,
-            } = ClassicalDatasetFixture::for_family(family);
+        for family in [ModelFamily::ClassicalLogisticRegression] {
+            let ClassicalDatasetFixture { rows, label_name } =
+                ClassicalDatasetFixture::for_family(family);
             let input_contract = ModelInputContract::single_required("book.visible_liquidity_usd");
             let training_contract = ModelTrainingContract {
-                target: if label_horizon_secs == 0 {
-                    ModelTrainingTarget::OutcomePayout
-                } else {
-                    ModelTrainingTarget::ForwardReturn {
-                        horizon_secs: label_horizon_secs,
-                    }
-                },
+                target: ModelTrainingTarget::OutcomePayout,
                 validation_folds: 3,
                 evaluation_trade_policy_artifact_id: None,
             };

@@ -407,6 +407,20 @@ impl PgCapitalAllocationRepository {
                     true,
                 ),
             },
+            CapitalReconcileSettlement::SettlePartial { spent_usd } => match cap.state {
+                CapitalAllocationState::Locked | CapitalAllocationState::Impaired => (
+                    CapitalAllocationState::Locked,
+                    *spent_usd,
+                    cap.released_usd,
+                    false,
+                ),
+                _ => (
+                    CapitalAllocationState::Impaired,
+                    cap.spent_usd,
+                    cap.released_usd,
+                    true,
+                ),
+            },
             CapitalReconcileSettlement::Release => match cap.state {
                 CapitalAllocationState::Released => return Ok(()),
                 CapitalAllocationState::Locked | CapitalAllocationState::Impaired => (

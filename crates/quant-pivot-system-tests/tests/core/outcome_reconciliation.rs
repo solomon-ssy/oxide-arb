@@ -41,7 +41,7 @@ use sea_orm::DatabaseConnection;
 async fn outcome_reconciliation_source_contracts() {
     Box::pin(postgres::with_postgres_suite(async {
         immediate_confirmed_fill_truth().await;
-        closed_execution_source_reconciled().await;
+        Box::pin(closed_execution_source_reconciled()).await;
     }))
     .await
     .expect("start outcome-reconciliation PostgreSQL suite");
@@ -354,7 +354,7 @@ fn assert_partial_not_full(graph: &ExecutionAttemptSourceGraph) {
         .expect("entry reconciliation");
     entry_reconciliation.result = ReconciliationResult::PartiallyFilled;
     entry_reconciliation.venue_filled_shares = Some(Shares::new(dec!(20)));
-    entry_reconciliation.observed_fee_usd = Some(Usd::new(dec!(0.5)));
+    entry_reconciliation.settled_fee_usd = Some(Usd::new(dec!(0.5)));
     let entry_evidence = entry_reconciliation
         .evidence_json
         .0
@@ -393,6 +393,17 @@ fn assert_partial_not_full(graph: &ExecutionAttemptSourceGraph) {
         .as_mut()
         .expect("terminal position")
         .realized_pnl_usd = Usd::new(dec!(-1.5));
+
+    assert_deferred(
+        partial.clone(),
+        ExecutionAttemptDeferredReason::EntryOrderNotTerminal,
+    );
+    partial
+        .orders
+        .iter_mut()
+        .find(|order| order.execution_order_id == entry_order_id)
+        .expect("entry order")
+        .state = ExecutionOrderState::Cancelled;
 
     let outcome = expect_ready(partial);
     assert_eq!(

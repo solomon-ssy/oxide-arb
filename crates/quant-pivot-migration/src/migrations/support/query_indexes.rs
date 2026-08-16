@@ -1032,6 +1032,112 @@ const INDEXES: &[IndexSpec] = &[
         predicate: Some("transaction_hash IS NOT NULL"),
     },
     IndexSpec {
+        name: "idx_quant_execution_fill_order",
+        table: "quant_execution_fill",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "execution_order_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "matched_at",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_execution_fill_account",
+        table: "quant_execution_fill",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "execution_account_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "matched_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_execution_fee_measurement_stage",
+        table: "quant_execution_fee_measurement",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "execution_fill_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "stage",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_venue_incentive_account_date",
+        table: "quant_venue_incentive_event",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "execution_account_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "program_date",
+                direction: IndexDirection::Desc,
+            },
+            IndexColumnSpec {
+                name: "stage",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_venue_incentive_market_date",
+        table: "quant_venue_incentive_event",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "market_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "program_date",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: Some("market_id IS NOT NULL"),
+    },
+    IndexSpec {
+        name: "idx_quant_venue_incentive_latest",
+        table: "quant_venue_incentive_event",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "source_partition",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "available_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
         name: "uq_quant_execution_transaction_ref_order_hash",
         table: "quant_execution_transaction_ref",
         method: IndexMethod::BTree,

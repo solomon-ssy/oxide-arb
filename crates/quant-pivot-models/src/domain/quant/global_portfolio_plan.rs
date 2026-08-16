@@ -6,7 +6,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{ContentHash, EconomicTierId, PortfolioPlanId, Usd, UsdHours};
 
-use super::{CapitalOccupancyBucket, ScenarioCashflow};
+/// Discounted net cash flow of the already-open portfolio in one promoted scenario.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult,
+)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioCashflow {
+    pub scenario_index: u32,
+    pub discounted_net_usd: Usd,
+}
+
+/// Capital already locked by existing positions through one governed time bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CapitalOccupancyBucket {
+    pub end_secs: u64,
+    pub locked_usd: Usd,
+}
 
 /// Frozen existing-position economics evaluated under the promoted joint scenarios.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]

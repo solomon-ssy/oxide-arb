@@ -236,23 +236,18 @@ impl FeedbackRecipeCpcvSpec {
             .len()
             .checked_mul(trials.rank_loss_kinds.len())
             .ok_or_else(|| invalid_recipe("weighted CPCV trial-grid size overflow"))?;
-        let classical_trials = trials
-            .forest_n_trees_multipliers
-            .len()
-            .checked_add(trials.linear_alpha_multipliers.len())
-            .ok_or_else(|| invalid_recipe("classical CPCV trial-grid size overflow"))?;
+        let classical_trials = trials.logistic_alpha_multipliers.len();
         let trial_bound = usize::try_from(trials.max_trials).map_err(|error| {
             invalid_recipe(format!("CPCV max_trials does not fit usize: {error}"))
         })?;
         let multipliers_valid = trials
             .lambda_multipliers
             .iter()
-            .chain(&trials.forest_n_trees_multipliers)
-            .chain(&trials.linear_alpha_multipliers)
+            .chain(&trials.logistic_alpha_multipliers)
             .all(|value| value.value >= Decimal::ZERO);
         let ratios_valid = self.validation.purge.embargo_pct.value >= Decimal::ZERO
             && self.validation.purge.embargo_pct.value < Decimal::ONE
-            && gates.rank_ic_min.value >= Decimal::ZERO
+            && gates.target_rank_ic_min.value >= Decimal::ZERO
             && gates.dsr_significance.value >= Decimal::ZERO
             && gates.dsr_significance.value < Decimal::ONE
             && gates.max_pbo.value >= Decimal::ZERO
@@ -267,8 +262,7 @@ impl FeedbackRecipeCpcvSpec {
             || !self.validation.pbo.block_count.is_multiple_of(2)
             || trials.lambda_multipliers.is_empty()
             || trials.rank_loss_kinds.is_empty()
-            || trials.forest_n_trees_multipliers.is_empty()
-            || trials.linear_alpha_multipliers.is_empty()
+            || trials.logistic_alpha_multipliers.is_empty()
             || weighted_trials.max(classical_trials) > trial_bound
             || !multipliers_valid
             || !ratios_valid

@@ -96,8 +96,7 @@ use quant_pivot_research::{
         artifact::ClassicalModelPayload,
     },
     training::{
-        RETURN_TO_HORIZON, TOKEN_PAYOUT_RATIO, TrainingMatrix, build_borrowed_matrix,
-        matrix_spec_from_contract,
+        TOKEN_PAYOUT_RATIO, TrainingMatrix, build_borrowed_matrix, matrix_spec_from_contract,
     },
 };
 use tokio::runtime::Handle;
@@ -1364,7 +1363,7 @@ const fn objective_component_metrics(
 
 const fn ranking_diagnostics_metrics(value: &RankingDiagnostics) -> RankingDiagnosticsMetrics {
     RankingDiagnosticsMetrics {
-        mean_rank_ic: value.mean_rank_ic,
+        mean_target_rank_ic: value.mean_target_rank_ic,
         mean_ndcg_at_k: value.mean_ndcg_at_k,
         ndcg_k: value.ndcg_k,
         group_count: value.group_count,
@@ -1581,7 +1580,7 @@ impl ModelTrainerService {
             feature_count: output.metrics.feature_count,
         };
         let validation_metrics =
-            validation_metrics(&validation, HeldOutMetricKind::MeanRollingFoldRankIc);
+            validation_metrics(&validation, HeldOutMetricKind::MeanRollingFoldTargetRankIc);
         let feature_importances = output
             .metrics
             .feature_importances
@@ -1604,7 +1603,6 @@ impl ModelTrainerService {
                 serialized_model_hash: output.model_bytes_hash,
                 serialization_format: ModelSerializationFormat::Bincode,
                 input_transform: output.input_transform,
-                tree_shap: output.tree_shap,
                 metrics: output.metrics,
             })),
             transform: ModelServingTransformBinding {
@@ -1644,18 +1642,6 @@ pub(crate) fn classical_output_semantics(
             detail: format!(
                 "logistic classical model requires `{TOKEN_PAYOUT_RATIO}` target, got `{}`",
                 label.name
-            ),
-        }
-        .into()),
-        _ if label.name == RETURN_TO_HORIZON
-            && label.horizon_secs == prediction_horizon_secs =>
-        {
-            Ok(ClassicalOutputSemantics::ForwardReturnBps)
-        }
-        _ => Err(ResearchError::DatasetBuild {
-            detail: format!(
-                "classical regressor requires `{RETURN_TO_HORIZON}` at the model prediction horizon {prediction_horizon_secs}s, got `{}` at {}s",
-                label.name, label.horizon_secs
             ),
         }
         .into()),

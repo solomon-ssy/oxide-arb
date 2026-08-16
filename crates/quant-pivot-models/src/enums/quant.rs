@@ -1166,14 +1166,14 @@ pg_enum! {
 }
 
 impl ExecutionOrderState {
-    /// Whether capital and position are already settled — reconciliation must
-    /// leave terminal orders untouched (idempotency).
+    /// Whether the venue order can no longer receive another fill.
+    ///
+    /// `PartiallyFilled` is deliberately non-terminal: for a resting GTC/GTD
+    /// order it means that a positive cumulative fill has been applied while
+    /// the unfilled remainder is still live at the venue.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Filled | Self::PartiallyFilled | Self::Cancelled | Self::Failed
-        )
+        matches!(self, Self::Filled | Self::Cancelled | Self::Failed)
     }
 }
 
@@ -1436,7 +1436,7 @@ pg_enum! {
     pub enum FeedbackDriftMetric {
         PopulationStabilityIndex => "population_stability_index",
         KolmogorovSmirnovPValue => "kolmogorov_smirnov_p_value",
-        RankIcDrop => "rank_ic_drop",
+        TargetRankIcDrop => "target_rank_ic_drop",
         JensenShannonDivergence => "jensen_shannon_divergence",
     }
 }
@@ -1448,7 +1448,7 @@ impl FeedbackDriftMetric {
             Self::PopulationStabilityIndex | Self::KolmogorovSmirnovPValue => {
                 FeedbackDriftKind::Data
             }
-            Self::RankIcDrop => FeedbackDriftKind::Concept,
+            Self::TargetRankIcDrop => FeedbackDriftKind::Concept,
             Self::JensenShannonDivergence => FeedbackDriftKind::Label,
         }
     }

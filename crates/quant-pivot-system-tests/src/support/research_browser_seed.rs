@@ -1269,7 +1269,7 @@ async fn seed_backtest_report(
         coverage: dec!(0.975609756098),
         sample_count: 80,
         missing_feature_count: 0,
-        rank_ic: dec!(0.143),
+        realized_return_rank_correlation: dec!(0.143),
         sharpe: dec!(1.18),
         hit_rate: Probability::new(dec!(0.625)),
         expected_vs_realized: ExpectedVsRealized {
@@ -1284,7 +1284,7 @@ async fn seed_backtest_report(
         category_breakdown: CategoryMetrics::from(vec![CategoryMetric {
             category: MarketCategory::Weather,
             sample_count: 80,
-            rank_ic: dec!(0.143),
+            realized_return_rank_correlation: dec!(0.143),
             hit_rate: Probability::new(dec!(0.625)),
             mean_realized_bps: dec!(84),
         }]),

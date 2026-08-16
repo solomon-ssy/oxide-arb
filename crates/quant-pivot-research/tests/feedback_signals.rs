@@ -4,7 +4,7 @@ use quant_pivot_models::types::{
 use quant_pivot_research::feedback::{
     ConceptDriftDetail, CoverageGateInput, CoverageGateOutcome, CoverageNoActionReason,
     FeatureDriftDetail, LabelDriftDetail, PopulationBinKind, drift_observations, jensen_shannon,
-    numeric_drift, rank_ic_drift,
+    numeric_drift, target_rank_ic_drift,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -68,7 +68,7 @@ fn drift_metrics_are_typed() {
     let baseline_labels = [dec!(0), dec!(0), dec!(1), dec!(1)];
     let evaluation_scores = [dec!(0.4), dec!(0.3), dec!(0.2), dec!(0.1)];
     let evaluation_labels = [dec!(0), dec!(0), dec!(1), dec!(1)];
-    let concept = rank_ic_drift(
+    let concept = target_rank_ic_drift(
         &baseline_scores,
         &baseline_labels,
         &evaluation_scores,
@@ -76,8 +76,8 @@ fn drift_metrics_are_typed() {
     )
     .expect("valid rank-IC samples")
     .expect("non-degenerate rank-IC samples");
-    assert_eq!(concept.baseline_rank_ic, dec!(0.894427191));
-    assert_eq!(concept.evaluation_rank_ic, dec!(-0.894427191));
+    assert_eq!(concept.baseline_target_rank_ic, dec!(0.894427191));
+    assert_eq!(concept.evaluation_target_rank_ic, dec!(-0.894427191));
     assert_eq!(concept.observed_drop, Decimal::ONE);
 
     assert_eq!(
@@ -163,7 +163,7 @@ fn drift_headers_reproduce_detail() {
     let concept = ConceptDriftDetail {
         baseline_scored_count: 4,
         evaluation_scored_count: 4,
-        summary: rank_ic_drift(
+        summary: target_rank_ic_drift(
             &[dec!(0.1), dec!(0.2), dec!(0.3), dec!(0.4)],
             &[dec!(0), dec!(0), dec!(1), dec!(1)],
             &[dec!(0.4), dec!(0.3), dec!(0.2), dec!(0.1)],

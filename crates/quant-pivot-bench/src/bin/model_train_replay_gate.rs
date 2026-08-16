@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let peak_rss_label = peak_rss.map_or_else(|| "unavailable".to_owned(), |rss| rss.to_string());
 
     println!(
-        "model_train_replay_gate rows={rows} kind=ridge train_seconds={:.3} replay_seconds={:.3} total_seconds={total_seconds:.3} prediction_count={} prediction_checksum={:.9} peak_rss_bytes={peak_rss_label}",
+        "model_train_replay_gate rows={rows} kind=logistic_regression train_seconds={:.3} replay_seconds={:.3} total_seconds={total_seconds:.3} prediction_count={} prediction_checksum={:.9} peak_rss_bytes={peak_rss_label}",
         result.train_seconds,
         result.replay_seconds,
         result.prediction_count,
@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 fn run_gate(rows: usize) -> QuantResult<GateResult> {
     let matrix = training_matrix_fixture(rows)?;
-    let adapter = ClassicalAdapterRegistry::adapter_for(ClassicalKind::Ridge);
+    let adapter = ClassicalAdapterRegistry::adapter_for(ClassicalKind::LogisticRegression);
     let train_started = Instant::now();
     let output = adapter.train(&matrix)?;
     let train_seconds = train_started.elapsed().as_secs_f64();

@@ -651,7 +651,7 @@ impl SignalStageHarness {
             vec![
                 FeedbackDriftMetric::PopulationStabilityIndex,
                 FeedbackDriftMetric::KolmogorovSmirnovPValue,
-                FeedbackDriftMetric::RankIcDrop,
+                FeedbackDriftMetric::TargetRankIcDrop,
                 FeedbackDriftMetric::JensenShannonDivergence,
             ]
         );

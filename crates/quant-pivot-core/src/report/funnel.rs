@@ -155,6 +155,14 @@ struct IncludedFunnelState<'a> {
     recommendation: Option<&'a PublishedRecommendationRef>,
 }
 
+struct IncludedRowOutcome {
+    terminal_stage: ReportFunnelStage,
+    primary_reason: ReportFunnelReason,
+    diagnostics: ReportFunnelDiagnostics,
+    signal_candidate_id: Option<SignalCandidateId>,
+    recommendation_id: Option<RecommendationId>,
+}
+
 impl IncludedFunnelState<'_> {
     fn validated_route(self) -> QuantResult<BuyModelRoute> {
         let route = BuyModelRoute::from(self.market.category);
@@ -170,10 +178,28 @@ impl IncludedFunnelState<'_> {
         }
         Ok(route)
     }
+
+    fn sealed(self, outcome: IncludedRowOutcome) -> QuantResult<ReportMarketFunnelRow> {
+        let lineage = self.route_run.lineage_json.as_ref();
+        sealed_row(RowInput {
+            report: self.input,
+            market_id: self.market.market_id.clone(),
+            event_id: self.market.event_id.clone(),
+            primary_token_id: self.market.primary_token_id.clone(),
+            route_run: Some(self.route_run),
+            model_version_id: lineage.map(|lineage| lineage.model_version_id),
+            model_run_id: lineage.and_then(|lineage| lineage.model_run_id),
+            terminal_stage: outcome.terminal_stage,
+            primary_reason: outcome.primary_reason,
+            diagnostics: outcome.diagnostics,
+            feature_vector_id: self.feature_vector_id,
+            signal_candidate_id: outcome.signal_candidate_id,
+            recommendation_id: outcome.recommendation_id,
+        })
+    }
 }
 
 fn included_row(state: IncludedFunnelState<'_>) -> QuantResult<ReportMarketFunnelRow> {
-    let lineage = state.route_run.lineage_json.as_ref();
     let route = state.validated_route()?;
 
     let mut signal_candidate_id = state
@@ -244,6 +270,12 @@ fn included_row(state: IncludedFunnelState<'_>) -> QuantResult<ReportMarketFunne
             )
         } else if state.tiers.is_empty() {
             match state.tier_build_rejection {
+                Some(EconomicTierBuildRejection::ExecutionEconomicsUnavailable { .. }) => (
+                    ReportFunnelStage::PolicyReady,
+                    ReportFunnelReason::ExecutionEconomicsUnavailable,
+                    ReportFunnelDiagnostics::None {},
+                    None,
+                ),
                 Some(EconomicTierBuildRejection::InsufficientLiveDepth {
                     visible_usd,
                     required_usd,
@@ -305,18 +337,10 @@ fn included_row(state: IncludedFunnelState<'_>) -> QuantResult<ReportMarketFunne
             }
         };
 
-    sealed_row(RowInput {
-        report: state.input,
-        market_id: state.market.market_id.clone(),
-        event_id: state.market.event_id.clone(),
-        primary_token_id: state.market.primary_token_id.clone(),
-        route_run: Some(state.route_run),
-        model_version_id: lineage.map(|lineage| lineage.model_version_id),
-        model_run_id: lineage.and_then(|lineage| lineage.model_run_id),
+    state.sealed(IncludedRowOutcome {
         terminal_stage,
         primary_reason,
         diagnostics,
-        feature_vector_id: state.feature_vector_id,
         signal_candidate_id,
         recommendation_id,
     })

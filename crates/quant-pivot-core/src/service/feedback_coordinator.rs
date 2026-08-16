@@ -325,7 +325,7 @@ impl FeedbackStageSuccess {
         let expected = [
             FeedbackDriftMetric::PopulationStabilityIndex,
             FeedbackDriftMetric::KolmogorovSmirnovPValue,
-            FeedbackDriftMetric::RankIcDrop,
+            FeedbackDriftMetric::TargetRankIcDrop,
             FeedbackDriftMetric::JensenShannonDivergence,
         ];
         if !reports.is_empty()

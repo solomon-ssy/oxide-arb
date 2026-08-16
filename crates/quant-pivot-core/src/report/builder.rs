@@ -1,7 +1,7 @@
 //! Atomic global report orchestration across every represented model Route.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry},
     iter::once,
     sync::Arc,
 };
@@ -17,10 +17,11 @@ use quant_pivot_models::{
         },
         governance::DecisionPolicySnapshotInfo,
         quant::{
-            ExecutableEconomicTier, ExistingPortfolioState, FeatureVectorInfo, MarketCandidate,
-            NewPortfolioPlan, NewReportDataQualitySnapshot, NewReportRouteRun,
-            PortfolioDecisionResult, PortfolioScenarioVisibility, RepresentedRouteSet,
-            RouteCandidateFunnel, RouteModelLineage, RouteRunOutcome, TradePolicyArtifactInfo,
+            EntryExecutionEconomics, ExecutableEconomicTier, ExistingPortfolioState,
+            FeatureVectorInfo, MarketCandidate, NewPortfolioPlan, NewReportDataQualitySnapshot,
+            NewReportRouteRun, PortfolioDecisionResult, PortfolioScenarioVisibility,
+            RepresentedRouteSet, RouteCandidateFunnel, RouteModelLineage, RouteRunOutcome,
+            TradePolicyArtifactInfo,
         },
     },
     enums::quant::{EmptyReportReason, FillRequirement, OutcomeSide, TradePolicyStatus},
@@ -39,13 +40,16 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    execution_semantics::{PitFeeSchedule, aggressive_buy_limit},
+    execution_semantics::{
+        PitFeeSchedule, PitMarketExecutionEconomics, aggressive_buy_limit, passive_buy_limit,
+    },
     features::{FeatureVector, MarketDecisionCapture, ResolvedBook},
     hashing::ResearchHasher,
     model::{CalibrationArtifactLoader, ModelArtifact, SignalCandidate},
     portfolio::{
         AccountSnapshot, EconomicTierFactory, ExecutableCashTierSeedFactory,
-        ExecutableCashTierSeedInput, ExecutableTierSeed, ExistingPortfolioFactory,
+        ExecutableCashTierSeedInput, ExecutablePassiveTierSeedFactory,
+        ExecutablePassiveTierSeedInput, ExecutableTierSeed, ExistingPortfolioFactory,
         GlobalPortfolioInput, GlobalPortfolioPlanner, GlobalPortfolioResult, PlannedEconomicTier,
         PortfolioScenarioGenerationInput, PortfolioScenarioGenerator, PortfolioScenarioLegInput,
         SealedPortfolioScenarioArtifact, TierAdmissionRejection, VerifiedPortfolioScenarioModel,
@@ -55,7 +59,7 @@ use quant_pivot_research::{
         ModelFeatureRequirements, RouteAvailabilityContract, SelectedMarket,
     },
 };
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use serde::Serialize;
 
 use super::{
@@ -1063,15 +1067,18 @@ fn candidate_tiers(
                 stage: "economic_tier",
                 detail: format!("market {} has no PIT fee schedule", market.market_id),
             })?;
-    let fee_schedule = PitFeeSchedule::from_market_fee_schedule(fee).map_err(|error| {
-        ReportError::InvariantViolation {
-            stage: "economic_tier",
-            detail: format!(
-                "market {} fee schedule is invalid: {error:?}",
-                market.market_id
-            ),
-        }
-    })?;
+    let Ok(execution_economics) = PitMarketExecutionEconomics::resolve(
+        fee,
+        capture.market.maker_rebate_schedule.as_ref(),
+        context.boundary.decision_at(),
+    ) else {
+        return Ok(CandidateTierBuild {
+            admitted: Vec::new(),
+            rejection: Some(EconomicTierBuildRejection::ExecutionEconomicsUnavailable {
+                market_id: market.market_id.clone(),
+            }),
+        });
+    };
     let best_ask = book
         .asks
         .first()
@@ -1092,7 +1099,7 @@ fn candidate_tiers(
             route,
             portfolio,
             book,
-            fee_schedule: &fee_schedule,
+            fee_schedule: &execution_economics.fee_schedule,
             best_ask,
             horizon,
         });
@@ -1113,7 +1120,7 @@ fn candidate_tiers(
         portfolio,
         policy,
         book,
-        fee_schedule: &fee_schedule,
+        execution_economics: &execution_economics,
         best_ask,
         horizon,
     })?;
@@ -1133,9 +1140,141 @@ struct FullL2TierInput<'a> {
     portfolio: &'a PromotedPortfolioContext,
     policy: &'a TradePolicyArtifactInfo,
     book: &'a ResolvedBook,
-    fee_schedule: &'a PitFeeSchedule,
+    execution_economics: &'a PitMarketExecutionEconomics,
     best_ask: Price,
     horizon: u64,
+}
+
+fn policy_tier_seed(
+    input: FullL2TierInput<'_>,
+    cohort: &TradePolicyCohort,
+    tier_ordinal: u32,
+    lineage_hash: ContentHash,
+) -> QuantResult<Option<(ExecutableTierSeed, Price, Price)>> {
+    let FullL2TierInput {
+        context,
+        market,
+        capture,
+        routed,
+        book,
+        execution_economics,
+        best_ask,
+        ..
+    } = input;
+    match &cohort.entry_order {
+        EntryOrderTemplate::Aggressive {
+            fill_requirement,
+            max_slippage_bps,
+            max_book_age_ms,
+        } => {
+            if cohort.max_slippage_bps != *max_slippage_bps
+                || cohort.max_book_age_ms != *max_book_age_ms
+            {
+                return Err(ReportError::RouteReadiness {
+                    route: routed.route.as_str().to_owned(),
+                    detail: "Trade Policy aggressive cohort has inconsistent entry limits"
+                        .to_owned(),
+                }
+                .into());
+            }
+            let limit_price = aggressive_buy_limit(best_ask, *max_slippage_bps);
+            let Some(seed) = ExecutableCashTierSeedFactory::build(ExecutableCashTierSeedInput {
+                report_route_run_id: routed.report_route_run_id,
+                candidate_id: routed.candidate.signal_candidate_id,
+                tier_ordinal,
+                route: routed.route,
+                market_id: market.market_id.clone(),
+                event_id: market.event_id.clone(),
+                category: market.category,
+                token_id: routed.candidate.token_id.clone(),
+                outcome_side: routed.candidate.outcome_side,
+                bids: &book.bids,
+                asks: &book.asks,
+                fee_schedule: &execution_economics.fee_schedule,
+                fill_at: context.boundary.decision_at(),
+                limit_price,
+                cash_budget: cohort.key.cash_budget_tier,
+                fill_requirement: *fill_requirement,
+                source_lineage_hash: lineage_hash,
+            })?
+            else {
+                return Ok(None);
+            };
+            let entry_vwap = match &seed.entry_execution {
+                EntryExecutionEconomics::Aggressive(entry) => entry.entry_vwap,
+                EntryExecutionEconomics::Passive(_) => {
+                    return Err(ReportError::InvariantViolation {
+                        stage: "economic_tier",
+                        detail: "aggressive seed factory returned a passive entry".to_owned(),
+                    }
+                    .into());
+                }
+            };
+            Ok(Some((seed, entry_vwap, limit_price)))
+        }
+        EntryOrderTemplate::PassivePostOnly {
+            placement,
+            good_til_secs,
+            max_book_age_ms,
+        } => {
+            if cohort.max_slippage_bps != Bps::ZERO || cohort.max_book_age_ms != *max_book_age_ms {
+                return Err(ReportError::RouteReadiness {
+                    route: routed.route.as_str().to_owned(),
+                    detail: "Trade Policy passive cohort has inconsistent entry limits".to_owned(),
+                }
+                .into());
+            }
+            let distribution = cohort.passive_fill_distribution.clone().ok_or_else(|| {
+                ReportError::RouteReadiness {
+                    route: routed.route.as_str().to_owned(),
+                    detail: "passive cohort has no published OOS fill distribution".to_owned(),
+                }
+            })?;
+            let best_bid = book
+                .bids
+                .first()
+                .map(|level| level.price_decimal())
+                .ok_or_else(|| ReportError::InvariantViolation {
+                    stage: "economic_tier",
+                    detail: "passive candidate has no best bid".to_owned(),
+                })?;
+            let limit_price = passive_buy_limit(
+                best_bid,
+                best_ask,
+                *placement,
+                capture.market_context.tick_size,
+            )
+            .map_err(|error| ReportError::InvariantViolation {
+                stage: "economic_tier",
+                detail: format!("passive post-only price is invalid: {error:?}"),
+            })?;
+            let requested_shares = Shares::new(
+                (cohort.key.cash_budget_tier.inner() / limit_price.inner())
+                    .round_dp_with_strategy(6, RoundingStrategy::ToZero),
+            );
+            let seed = ExecutablePassiveTierSeedFactory::build(ExecutablePassiveTierSeedInput {
+                report_route_run_id: routed.report_route_run_id,
+                candidate_id: routed.candidate.signal_candidate_id,
+                tier_ordinal,
+                route: routed.route,
+                market_id: market.market_id.clone(),
+                event_id: market.event_id.clone(),
+                category: market.category,
+                token_id: routed.candidate.token_id.clone(),
+                outcome_side: routed.candidate.outcome_side,
+                bids: &book.bids,
+                execution_economics,
+                decision_at: context.boundary.decision_at(),
+                limit_price,
+                requested_shares,
+                cash_budget: cohort.key.cash_budget_tier,
+                good_til_secs: *good_til_secs,
+                fill_distribution: distribution,
+                source_lineage_hash: lineage_hash,
+            })?;
+            Ok(Some((seed, limit_price, limit_price)))
+        }
+    }
 }
 
 fn full_l2_candidate_tiers(
@@ -1149,9 +1288,9 @@ fn full_l2_candidate_tiers(
         route,
         portfolio,
         policy,
-        book,
-        fee_schedule,
-        best_ask,
+        book: _,
+        execution_economics,
+        best_ask: _,
         horizon,
     } = input;
     let mut by_budget = BTreeMap::<Usd, Vec<(ExecutableTierSeed, TierSource)>>::new();
@@ -1166,22 +1305,6 @@ fn full_l2_candidate_tiers(
         {
             continue;
         }
-        let (fill_requirement, max_slippage_bps, max_book_age_ms) = match &cohort.entry_order {
-            EntryOrderTemplate::Aggressive {
-                fill_requirement,
-                max_slippage_bps,
-                max_book_age_ms,
-            } => (*fill_requirement, *max_slippage_bps, *max_book_age_ms),
-            EntryOrderTemplate::PassivePostOnly { .. } => continue,
-        };
-        if cohort.max_slippage_bps != max_slippage_bps || cohort.max_book_age_ms != max_book_age_ms
-        {
-            return Err(ReportError::RouteReadiness {
-                route: routed.route.as_str().to_owned(),
-                detail: "Trade Policy cohort duplicates inconsistent entry limits".to_owned(),
-            }
-            .into());
-        }
         let cohort_index = u32::try_from(index).map_err(|error| ReportError::NumericOverflow {
             field: "trade_policy.cohort_index",
             detail: error.to_string(),
@@ -1193,7 +1316,6 @@ fn full_l2_candidate_tiers(
                     field: "economic_tier.tier_ordinal",
                     detail: "cohort index overflowed u32".to_owned(),
                 })?;
-        let limit_price = aggressive_buy_limit(best_ask, max_slippage_bps);
         let lineage_hash = tier_lineage_hash(&TierLineageInput {
             context,
             capture,
@@ -1201,32 +1323,14 @@ fn full_l2_candidate_tiers(
             route,
             cohort,
             cohort_index,
-            fee_schedule,
+            execution_economics,
             portfolio,
         })?;
-        let Some(seed) = ExecutableCashTierSeedFactory::build(ExecutableCashTierSeedInput {
-            report_route_run_id: routed.report_route_run_id,
-            candidate_id: routed.candidate.signal_candidate_id,
-            tier_ordinal,
-            route: routed.route,
-            market_id: market.market_id.clone(),
-            event_id: market.event_id.clone(),
-            category: market.category,
-            token_id: routed.candidate.token_id.clone(),
-            outcome_side: routed.candidate.outcome_side,
-            bids: &book.bids,
-            asks: &book.asks,
-            fee_schedule,
-            fill_at: context.boundary.decision_at(),
-            limit_price,
-            cash_budget: cohort.key.cash_budget_tier,
-            fill_requirement,
-            source_lineage_hash: lineage_hash,
-        })?
+        let Some((seed, price, limit_price)) =
+            policy_tier_seed(input, cohort, tier_ordinal, lineage_hash)?
         else {
             continue;
         };
-        let price = seed.entry.entry_vwap;
         if price < cohort.key.entry_price_min
             || price > cohort.key.entry_price_max
             || (price == cohort.key.entry_price_max && price != Price::ONE)
@@ -1264,7 +1368,7 @@ fn full_l2_candidate_tiers(
                 },
             ));
     }
-    unique_budget_tiers(by_budget, routed)
+    route_unique_budget_tiers(by_budget, routed)
 }
 
 #[derive(Clone, Copy)]
@@ -1453,31 +1557,35 @@ fn validate_candidate_route(
     Ok(horizon)
 }
 
-fn unique_budget_tiers(
+fn route_unique_budget_tiers(
     by_budget: BTreeMap<Usd, Vec<(ExecutableTierSeed, TierSource)>>,
     routed: &RoutedCandidate,
 ) -> QuantResult<Vec<(ExecutableTierSeed, TierSource)>> {
     let mut result = Vec::new();
-    for (budget, mut matches) in by_budget {
-        if matches.len() != 1 {
-            return Err(ReportError::RouteReadiness {
-                route: routed.route.as_str().to_owned(),
-                detail: format!(
-                    "candidate {} cash tier {budget} resolves to {} Trade Policy cohorts",
-                    routed.candidate.signal_candidate_id,
-                    matches.len()
-                ),
-            }
-            .into());
-        }
-        result.push(
-            matches
-                .pop()
-                .ok_or_else(|| ReportError::InvariantViolation {
+    for (budget, matches) in by_budget {
+        let mut seen_routes = BTreeSet::new();
+        for (seed, source) in matches {
+            let PlannedRecommendationContract::FullL2 { cohort, .. } = &source.contract else {
+                return Err(ReportError::InvariantViolation {
                     stage: "economic_tier",
-                    detail: "unique Trade Policy cohort disappeared".to_owned(),
-                })?,
-        );
+                    detail: "Trade Policy tier has no FullL2 cohort contract".to_owned(),
+                }
+                .into());
+            };
+            if cohort.key.entry_route != cohort.entry_order.route()
+                || !seen_routes.insert(cohort.key.entry_route)
+            {
+                return Err(ReportError::RouteReadiness {
+                    route: routed.route.as_str().to_owned(),
+                    detail: format!(
+                        "candidate {} cash tier {budget} has duplicate or inconsistent {:?} Trade Policy route",
+                        routed.candidate.signal_candidate_id, cohort.key.entry_route
+                    ),
+                }
+                .into());
+            }
+            result.push((seed, source));
+        }
     }
     Ok(result)
 }
@@ -1489,7 +1597,7 @@ struct TierLineageInput<'a> {
     route: &'a ReadyRoute,
     cohort: &'a TradePolicyCohort,
     cohort_index: u32,
-    fee_schedule: &'a PitFeeSchedule,
+    execution_economics: &'a PitMarketExecutionEconomics,
     portfolio: &'a PromotedPortfolioContext,
 }
 
@@ -1504,7 +1612,7 @@ fn tier_lineage_hash(input: &TierLineageInput<'_>) -> QuantResult<ContentHash> {
         model_run_id: ModelRunId,
         signal_candidate_id: SignalCandidateId,
         book_snapshot_hash: ContentHash,
-        fee_schedule_hash: ContentHash,
+        execution_economics_hash: ContentHash,
         trade_policy_hash: ContentHash,
         cohort_index: u32,
         cohort: &'a TradePolicyCohort,
@@ -1527,7 +1635,7 @@ fn tier_lineage_hash(input: &TierLineageInput<'_>) -> QuantResult<ContentHash> {
         })?;
     Ok(CanonicalDigest::content_hash_typed(
         "quant-pivot/economic-tier-source",
-        1,
+        2,
         &Preimage {
             decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id,
             decision_at: input.context.boundary.decision_at(),
@@ -1537,7 +1645,7 @@ fn tier_lineage_hash(input: &TierLineageInput<'_>) -> QuantResult<ContentHash> {
             model_run_id,
             signal_candidate_id: input.routed.candidate.signal_candidate_id,
             book_snapshot_hash,
-            fee_schedule_hash: input.fee_schedule.schedule_hash,
+            execution_economics_hash: input.execution_economics.composite_hash,
             trade_policy_hash: input
                 .route
                 .trade_policy

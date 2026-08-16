@@ -73,7 +73,7 @@ pub enum ModelTrainingObjectiveDefinition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClassicalValidationMetric {
-    MeanRollingFoldRankIc,
+    MeanRollingFoldTargetRankIc,
 }
 
 /// Versioned, typed JSONB document containing exact training provenance.
@@ -99,7 +99,7 @@ impl ModelTrainingObjective {
             format_version: MODEL_TRAINING_OBJECTIVE_FORMAT_VERSION,
             definition: ModelTrainingObjectiveDefinition::ClassicalPointwise {
                 model_kind,
-                validation_metric: ClassicalValidationMetric::MeanRollingFoldRankIc,
+                validation_metric: ClassicalValidationMetric::MeanRollingFoldTargetRankIc,
             },
         }
     }

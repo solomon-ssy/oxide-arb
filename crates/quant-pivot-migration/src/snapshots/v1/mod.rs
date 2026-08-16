@@ -45,6 +45,8 @@ pub mod quant_exchange_history_quarantine_resolution;
 pub mod quant_execution_account;
 pub mod quant_execution_attempt_outcome;
 pub mod quant_execution_attempt_reconciliation_task;
+pub mod quant_execution_fee_measurement;
+pub mod quant_execution_fill;
 pub mod quant_execution_order;
 pub mod quant_execution_rollup_reconciliation_task;
 pub mod quant_execution_trade_ref;
@@ -118,6 +120,7 @@ pub mod quant_trade_policy_trial_attempt;
 pub mod quant_trade_policy_validation;
 pub mod quant_trade_policy_validation_row;
 pub mod quant_training_dataset;
+pub mod quant_venue_incentive_event;
 pub mod quant_weather_daily_temperature_projection;
 pub mod quant_weather_observation_current;
 pub mod research_profile_artifact;
@@ -173,6 +176,8 @@ pub const TABLES: &[&str] = &[
     "quant_equity_snapshot",
     "quant_execution_account",
     "quant_execution_attempt_reconciliation_task",
+    "quant_execution_fill",
+    "quant_execution_fee_measurement",
     "quant_execution_order",
     "quant_execution_trade_ref",
     "quant_execution_transaction_ref",
@@ -251,6 +256,7 @@ pub const TABLES: &[&str] = &[
     "quant_trade_policy_validation",
     "quant_trade_policy_validation_row",
     "quant_training_dataset",
+    "quant_venue_incentive_event",
     "quant_weather_daily_temperature_projection",
     "quant_weather_observation_current",
     "research_profile_artifact",
@@ -291,6 +297,8 @@ pub const ENUMS: &[&str] = &[
     "qp_execution_order_phase",
     "qp_execution_order_state",
     "qp_execution_wallet_kind",
+    "qp_fee_liquidity_role",
+    "qp_fee_measurement_stage",
     "qp_exit_settlement_mode",
     "qp_exit_reason",
     "qp_exit_state",
@@ -406,6 +414,8 @@ pub const ENUMS: &[&str] = &[
     "qp_training_dataset_status",
     "qp_user_status",
     "qp_venue_order_status",
+    "qp_venue_incentive_kind",
+    "qp_venue_incentive_stage",
     "qp_venue_trade_status",
     "qp_weather_temperature_statistic",
 ];
@@ -452,6 +462,8 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_equity_snapshot.rs"),
     include_bytes!("quant_execution_account.rs"),
     include_bytes!("quant_execution_attempt_reconciliation_task.rs"),
+    include_bytes!("quant_execution_fill.rs"),
+    include_bytes!("quant_execution_fee_measurement.rs"),
     include_bytes!("quant_execution_order.rs"),
     include_bytes!("quant_execution_trade_ref.rs"),
     include_bytes!("quant_execution_transaction_ref.rs"),
@@ -530,6 +542,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_trade_policy_validation.rs"),
     include_bytes!("quant_trade_policy_validation_row.rs"),
     include_bytes!("quant_training_dataset.rs"),
+    include_bytes!("quant_venue_incentive_event.rs"),
     include_bytes!("quant_weather_daily_temperature_projection.rs"),
     include_bytes!("quant_weather_observation_current.rs"),
     include_bytes!("research_profile_artifact.rs"),

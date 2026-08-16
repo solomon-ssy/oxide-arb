@@ -6,6 +6,8 @@
 //! is returned as a typed coverage gap; raw trajectory labels are never used as
 //! a fill or barrier substitute.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
@@ -15,7 +17,6 @@ use quant_pivot_models::{
         execution::ExitReason,
         quant::{ExitSettlementMode, FillRequirement, OutcomeSide},
     },
-    hashing::CanonicalDigest,
     types::{
         Bps, ConditionTruth, ContentHash, EntryConditionTemplate, EntryOrderTemplate,
         PassivePlacement, PayoutRatio, Price, Shares, TokenId, TradePolicyCandidateSpec,
@@ -27,8 +28,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::execution_semantics::{
-    BookWalkFill, BookWalkOutcome, LiquidityRole, PassiveQueueAvailability, PassiveQueueState,
-    PassiveTrade, PitFeeSchedule, walk_buy_cash_budget, walk_sell_exact_shares,
+    BookWalkFill, BookWalkOutcome, LiquidityRole, PassiveQueueState, PassiveTrade, PitFeeSchedule,
+    walk_buy_cash_budget, walk_sell_exact_shares,
 };
 
 /// Versioned identity of the pure replay semantics sealed into evidence.
@@ -59,12 +60,13 @@ pub struct PolicyReplaySignal {
     pub opportunistic_p_exit_better: Option<Decimal>,
 }
 
-/// One accepted finalized execution available to a passive queue simulation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One authenticated market-stream print available to a passive queue simulation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyReplayTrade {
     pub event_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub stream_session_id: Uuid,
+    pub token_sequence: u64,
     pub side: Side,
     pub price: Price,
     pub shares: Shares,
@@ -154,6 +156,8 @@ pub struct PolicyReplayOutcome {
     pub terminal_at: Option<DateTime<Utc>>,
     pub terminal_reason: Option<ExitReason>,
     pub entry_fill_ratio: Decimal,
+    pub entry_fill_latency_ms: Option<u64>,
+    pub post_fill_markout_bps: Option<Bps>,
     pub exit_fill_ratio: Decimal,
     pub entry_filled_shares: Shares,
     pub exited_shares: Shares,
@@ -189,6 +193,8 @@ impl PolicyReplayOutcome {
             terminal_at: None,
             terminal_reason: None,
             entry_fill_ratio: Decimal::ZERO,
+            entry_fill_latency_ms: None,
+            post_fill_markout_bps: None,
             exit_fill_ratio: Decimal::ZERO,
             entry_filled_shares: Shares::ZERO,
             exited_shares: Shares::ZERO,
@@ -202,13 +208,55 @@ impl PolicyReplayOutcome {
             fills: Vec::new(),
         }
     }
+
+    fn passive_no_fill(
+        candidate: &TradePolicyCandidateSpec,
+        outcome_side: OutcomeSide,
+        cash_budget: Usd,
+        latency: PolicyReplayLatency,
+        triggered_at: DateTime<Utc>,
+        expired_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            candidate_id: candidate.candidate_id.clone(),
+            outcome_side,
+            cash_budget,
+            latency,
+            entry_triggered_at: Some(triggered_at),
+            entered_at: None,
+            terminal_at: Some(expired_at),
+            terminal_reason: None,
+            entry_fill_ratio: Decimal::ZERO,
+            entry_fill_latency_ms: None,
+            post_fill_markout_bps: None,
+            exit_fill_ratio: Decimal::ZERO,
+            entry_filled_shares: Shares::ZERO,
+            exited_shares: Shares::ZERO,
+            total_fees: Usd::ZERO,
+            net_return_bps: Some(Decimal::ZERO),
+            ambiguous_touch: false,
+            full_l2: true,
+            fee_covered: true,
+            passive_reconciled_trade_covered: Some(true),
+            gap: None,
+            fills: Vec::new(),
+        }
+    }
+}
+
+enum EntryAttempt {
+    Filled(EntryResult),
+    PassiveNoFill {
+        triggered_at: DateTime<Utc>,
+        expired_at: DateTime<Utc>,
+    },
 }
 
 struct EntryResult {
     triggered_at: DateTime<Utc>,
     entered_at: DateTime<Utc>,
     fill_ratio: Decimal,
-    fill: PolicyReplayFill,
+    fills: Vec<PolicyReplayFill>,
     passive_coverage: Option<bool>,
 }
 
@@ -227,6 +275,65 @@ struct PassiveEntryRequest<'a> {
     tick_size: TickSize,
     delay: Duration,
     observations: &'a [PolicyReplayObservation],
+}
+
+struct PassiveTradeWindow<'a> {
+    observations: &'a [PolicyReplayObservation],
+    placement_at: DateTime<Utc>,
+    coverage_through: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    stream_session_id: Uuid,
+}
+
+impl<'a> PassiveTradeWindow<'a> {
+    fn covered_trades(&self) -> Result<Vec<&'a PolicyReplayTrade>, TradePolicyReplayGap> {
+        if self.observations.iter().any(|observation| {
+            observation.at >= self.placement_at
+                && observation.at <= self.coverage_through
+                && !observation.passive_trade_coverage
+        }) {
+            return Err(TradePolicyReplayGap::PassiveTradeCoverageUnavailable);
+        }
+        let mut trades = self
+            .observations
+            .iter()
+            .filter(|observation| observation.at >= self.placement_at)
+            .flat_map(|observation| {
+                observation
+                    .passive_trades
+                    .iter()
+                    .filter(|trade| trade.available_at <= observation.at)
+            })
+            .filter(|trade| {
+                let occurs_after_placement = trade.event_at >= self.placement_at;
+                let causally_available = trade.event_at <= trade.available_at;
+                let available_before_expiry = trade.available_at <= self.expires_at;
+                occurs_after_placement && causally_available && available_before_expiry
+            })
+            .collect::<Vec<_>>();
+        trades.sort_by(|left, right| {
+            (
+                left.token_sequence,
+                left.event_at,
+                left.available_at,
+                &left.source_event_id,
+            )
+                .cmp(&(
+                    right.token_sequence,
+                    right.event_at,
+                    right.available_at,
+                    &right.source_event_id,
+                ))
+        });
+        let mut source_event_ids = BTreeSet::new();
+        if trades.iter().any(|trade| {
+            trade.stream_session_id != self.stream_session_id
+                || !source_event_ids.insert(&trade.source_event_id)
+        }) {
+            return Err(TradePolicyReplayGap::PassiveTradeCoverageUnavailable);
+        }
+        Ok(trades)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -295,15 +402,28 @@ pub fn replay_policy_candidate(
             ));
         }
     };
-    replay_open_position(
-        candidate,
-        token_side,
-        cash_budget,
-        latency,
-        delay,
-        observations,
-        entry,
-    )
+    match entry {
+        EntryAttempt::Filled(entry) => replay_open_position(
+            candidate,
+            token_side,
+            cash_budget,
+            latency,
+            delay,
+            observations,
+            entry,
+        ),
+        EntryAttempt::PassiveNoFill {
+            triggered_at,
+            expired_at,
+        } => Ok(PolicyReplayOutcome::passive_no_fill(
+            candidate,
+            token_side,
+            cash_budget,
+            latency,
+            triggered_at,
+            expired_at,
+        )),
+    }
 }
 
 fn validate_observations(observations: &[PolicyReplayObservation]) -> QuantResult<()> {
@@ -338,7 +458,7 @@ fn find_entry(
     tick_size: TickSize,
     delay: Duration,
     observations: &[PolicyReplayObservation],
-) -> QuantResult<Result<EntryResult, TradePolicyReplayGap>> {
+) -> QuantResult<Result<EntryAttempt, TradePolicyReplayGap>> {
     let mut satisfied_since = None;
     let mut prior_at = None;
     let mut saw_unavailable = false;
@@ -400,7 +520,8 @@ fn find_entry(
                 cash_budget,
                 delay,
                 observations,
-            ),
+            )
+            .map(|result| result.map(EntryAttempt::Filled)),
             EntryOrderTemplate::PassivePostOnly {
                 placement,
                 good_til_secs,
@@ -486,14 +607,14 @@ fn aggressive_entry(
         entered_at: observation.at,
         fill_ratio: ((fill.gross_amount.inner() + fill.fee.inner()) / cash_budget.inner())
             .min(Decimal::ONE),
-        fill,
+        fills: vec![fill],
         passive_coverage: None,
     }))
 }
 
 fn passive_entry(
     request: PassiveEntryRequest<'_>,
-) -> QuantResult<Result<EntryResult, TradePolicyReplayGap>> {
+) -> QuantResult<Result<EntryAttempt, TradePolicyReplayGap>> {
     let PassiveEntryRequest {
         triggered_at,
         placement,
@@ -544,31 +665,23 @@ fn passive_entry(
             |error| methodology(format!("passive GTD does not fit chrono: {error}")),
         )?))
         .ok_or_else(|| methodology("passive GTD overflows chrono".to_owned()))?;
-    if observations.iter().any(|observation| {
-        observation.at >= placement_observation.at
-            && observation.at <= expires_at
-            && !observation.passive_trade_coverage
-    }) {
+    let Some(expiration_observation) = observation_at_or_after(observations, expires_at) else {
         return Ok(Err(TradePolicyReplayGap::PassiveTradeCoverageUnavailable));
-    }
-    let mut trades = observations
-        .iter()
-        .filter(|observation| observation.at >= placement_observation.at)
-        .flat_map(|observation| &observation.passive_trades)
-        .filter(|trade| trade.event_at >= placement_observation.at && trade.event_at <= expires_at)
-        .collect::<Vec<_>>();
-    trades.sort_by(|left, right| {
-        (left.event_at, left.available_at, &left.source_event_id).cmp(&(
-            right.event_at,
-            right.available_at,
-            &right.source_event_id,
-        ))
-    });
-    trades.dedup_by(|left, right| left.source_event_id == right.source_event_id);
-    let mut fill_at = None;
-    let mut source_event_hash = None;
+    };
+    let trades = match (PassiveTradeWindow {
+        observations,
+        placement_at: placement_observation.at,
+        coverage_through: expiration_observation.at,
+        expires_at,
+        stream_session_id: book.stream_session_id,
+    })
+    .covered_trades()
+    {
+        Ok(trades) => trades,
+        Err(gap) => return Ok(Err(gap)),
+    };
+    let mut fill_slices = Vec::new();
     for trade in trades {
-        queue.reset_session(trade.stream_session_id);
         let filled = queue.apply_trade(PassiveTrade {
             stream_session_id: trade.stream_session_id,
             side: trade.side,
@@ -576,54 +689,58 @@ fn passive_entry(
             shares: trade.shares,
         });
         if filled > Shares::ZERO {
-            fill_at = Some(trade.event_at);
-            source_event_hash = Some(
-                CanonicalDigest::content_hash_json(&trade.source_event_id)
-                    .map_err(|error| methodology(format!("passive trade hash failed: {error}")))?,
-            );
-            break;
+            let fee = schedule
+                .fee(LiquidityRole::Maker, price, filled, trade.event_at)
+                .map_err(|error| methodology(format!("passive fee failed: {error:?}")))?;
+            let gross = filled * price;
+            let leg_ordinal = u32::try_from(fill_slices.len()).map_err(|error| {
+                methodology(format!("passive fill ordinal does not fit u32: {error}"))
+            })?;
+            let source_event_hash =
+                ContentHash::parse(&trade.source_event_id).map_err(|error| {
+                    methodology(format!("passive trade event hash is invalid: {error}"))
+                })?;
+            fill_slices.push(PolicyReplayFill {
+                leg_ordinal,
+                side: Side::Buy,
+                exit_reason: None,
+                triggered_at,
+                filled_at: trade.event_at,
+                liquidity_role: LiquidityRole::Maker,
+                outcome: if queue.remaining_shares == Shares::ZERO {
+                    BookWalkOutcome::Filled
+                } else {
+                    BookWalkOutcome::Partial
+                },
+                requested_shares: Some(requested),
+                filled_shares: filled,
+                vwap: Some(price),
+                gross_amount: gross,
+                fee,
+                cash_delta: -(gross.inner() + fee.inner()),
+                fee_schedule_hash: Some(schedule.schedule_hash),
+                stream_session_id: Some(trade.stream_session_id),
+                token_sequence: Some(trade.token_sequence),
+                source_event_hash: Some(source_event_hash),
+            });
+            if queue.remaining_shares == Shares::ZERO {
+                break;
+            }
         }
     }
-    if queue.availability != PassiveQueueAvailability::Available {
-        return Ok(Err(TradePolicyReplayGap::PassiveTradeCoverageUnavailable));
-    }
-    let Some(filled_at) = fill_at else {
-        return Ok(Err(TradePolicyReplayGap::EntryDepthInsufficient));
+    let Some(entered_at) = fill_slices.first().map(|fill| fill.filled_at) else {
+        return Ok(Ok(EntryAttempt::PassiveNoFill {
+            triggered_at,
+            expired_at: expires_at,
+        }));
     };
-    let fee = schedule
-        .fee(LiquidityRole::Maker, price, queue.filled_shares, filled_at)
-        .map_err(|error| methodology(format!("passive fee failed: {error:?}")))?;
-    let gross = queue.filled_shares * price;
-    let fill = PolicyReplayFill {
-        leg_ordinal: 0,
-        side: Side::Buy,
-        exit_reason: None,
+    Ok(Ok(EntryAttempt::Filled(EntryResult {
         triggered_at,
-        filled_at,
-        liquidity_role: LiquidityRole::Maker,
-        outcome: if queue.filled_shares == requested {
-            BookWalkOutcome::Filled
-        } else {
-            BookWalkOutcome::Partial
-        },
-        requested_shares: Some(requested),
-        filled_shares: queue.filled_shares,
-        vwap: Some(price),
-        gross_amount: gross,
-        fee,
-        cash_delta: -(gross.inner() + fee.inner()),
-        fee_schedule_hash: Some(schedule.schedule_hash),
-        stream_session_id: Some(book.stream_session_id),
-        token_sequence: Some(book.token_sequence),
-        source_event_hash,
-    };
-    Ok(Ok(EntryResult {
-        triggered_at,
-        entered_at: filled_at,
+        entered_at,
         fill_ratio: queue.filled_shares.inner() / requested.inner(),
-        fill,
+        fills: fill_slices,
         passive_coverage: Some(true),
-    }))
+    })))
 }
 
 fn passive_price(
@@ -706,12 +823,23 @@ fn open_position_state(
     entry: EntryResult,
     initial_signal: Option<PolicyReplaySignal>,
 ) -> QuantResult<OpenPositionState> {
-    let entry_shares = entry.fill.filled_shares;
-    let entry_cash = -entry.fill.cash_delta;
-    let entry_price = entry
-        .fill
-        .vwap
-        .ok_or_else(|| methodology("filled entry has no VWAP".to_owned()))?;
+    let entry_shares: Shares = entry.fills.iter().map(|fill| fill.filled_shares).sum();
+    let entry_cash = -entry
+        .fills
+        .iter()
+        .map(|fill| fill.cash_delta)
+        .sum::<Decimal>();
+    let entry_principal = entry
+        .fills
+        .iter()
+        .map(|fill| fill.gross_amount.inner())
+        .sum::<Decimal>();
+    if !entry_shares.is_positive() || entry_principal <= Decimal::ZERO {
+        return Err(methodology(
+            "entry fill slices contain no executed shares".to_owned(),
+        ));
+    }
+    let entry_price = Price::new(entry_principal / entry_shares.inner());
     Ok(OpenPositionState {
         entry_triggered_at: entry.triggered_at,
         entered_at: entry.entered_at,
@@ -721,7 +849,7 @@ fn open_position_state(
         entry_cash,
         entry_price,
         initial_signal,
-        fills: vec![entry.fill],
+        fills: entry.fills,
         remaining: entry_shares,
         exited: Shares::ZERO,
         exit_cash: Decimal::ZERO,
@@ -983,6 +1111,26 @@ fn finalize_open_position(
             fill.fee_schedule_hash.is_some()
                 || fill.exit_reason == Some(ExitReason::ResolutionRedeem)
         });
+    let entry_fill_latency_ms = state
+        .entered_at
+        .signed_duration_since(state.entry_triggered_at)
+        .num_milliseconds()
+        .try_into()
+        .ok();
+    let post_fill_markout_bps = observations
+        .iter()
+        .filter(|observation| observation.at > state.entered_at)
+        .filter_map(|observation| observation.book.as_ref())
+        .find_map(|book| {
+            let bid = book.bids.first()?.price_decimal();
+            let ask = book.asks.first()?.price_decimal();
+            let mid = (bid.inner() + ask.inner()) / Decimal::TWO;
+            Some(Bps::new(
+                ((mid - state.entry_price.inner()) / state.entry_price.inner()
+                    * Decimal::from(10_000))
+                .round_dp(8),
+            ))
+        });
     PolicyReplayOutcome {
         candidate_id: candidate.candidate_id.clone(),
         outcome_side: token_side,
@@ -993,6 +1141,8 @@ fn finalize_open_position(
         terminal_at: state.terminal_at,
         terminal_reason: state.terminal_reason,
         entry_fill_ratio: state.entry_fill_ratio,
+        entry_fill_latency_ms,
+        post_fill_markout_bps,
         exit_fill_ratio,
         entry_filled_shares: state.entry_shares,
         exited_shares: state.exited,
@@ -1143,10 +1293,7 @@ fn execute_exit(
     Ok(ExitExecution { fills, gap })
 }
 
-const fn replay_fill_from_walk(
-    context: ReplayFillContext<'_>,
-    walk: &BookWalkFill,
-) -> PolicyReplayFill {
+fn replay_fill_from_walk(context: ReplayFillContext<'_>, walk: &BookWalkFill) -> PolicyReplayFill {
     PolicyReplayFill {
         leg_ordinal: context.leg_ordinal,
         side: context.side,
@@ -1158,9 +1305,9 @@ const fn replay_fill_from_walk(
         requested_shares: context.requested_shares,
         filled_shares: walk.filled_shares,
         vwap: walk.vwap,
-        gross_amount: walk.gross_order_amount,
-        fee: walk.expected_fee,
-        cash_delta: walk.total_cash_delta,
+        gross_amount: walk.immediate_cost.principal_usd,
+        fee: walk.immediate_cost.total_fee_usd(),
+        cash_delta: walk.account_cash_delta_usd,
         fee_schedule_hash: Some(context.schedule.schedule_hash),
         stream_session_id: Some(context.book.stream_session_id),
         token_sequence: Some(context.book.token_sequence),
@@ -1235,7 +1382,7 @@ mod tests {
         PolicyReplayObservation, PolicyReplayResolution, PolicyReplaySignal, PolicyReplayTrade,
         replay_policy_candidate,
     };
-    use crate::execution_semantics::PitFeeSchedule;
+    use crate::execution_semantics::{BookWalkOutcome, PitFeeSchedule};
 
     fn hash(seed: char) -> ContentHash {
         ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
@@ -1500,10 +1647,11 @@ mod tests {
             event_at: at(1),
             available_at: at(1),
             stream_session_id: Uuid::nil(),
+            token_sequence: 2,
             side: Side::Sell,
             price: Price::new(dec!(0.49)),
             shares: Shares::new(dec!(1_100)),
-            source_event_id: "matched-passive-fill".to_owned(),
+            source_event_id: format!("blake3:{}", "1".repeat(64)),
         });
         let outcome = replay_policy_candidate(
             &passive,
@@ -1521,6 +1669,140 @@ mod tests {
         assert_eq!(outcome.entered_at, Some(at(1)));
         assert_eq!(outcome.passive_reconciled_trade_covered, Some(true));
         assert_eq!(outcome.terminal_reason, Some(ExitReason::TimeExit));
+    }
+
+    #[test]
+    fn no_fill_is_covered() {
+        let mut passive = candidate(FillRequirement::AllowPartial);
+        passive.entry_execution = EntryOrderTemplate::PassivePostOnly {
+            placement: PassivePlacement::JoinBestBid,
+            good_til_secs: 60,
+            max_book_age_ms: 5_000,
+        };
+
+        let outcome = replay_policy_candidate(
+            &passive,
+            OutcomeSide::Yes,
+            Usd::new(dec!(25)),
+            TickSize::Hundredth,
+            PolicyReplayLatency {
+                base_delay_ms: 0,
+                stress_multiplier: Decimal::ONE,
+            },
+            &[
+                observation(0, dec!(0.49), dec!(0.50)),
+                observation(61, dec!(0.49), dec!(0.50)),
+            ],
+        )
+        .expect("passive replay");
+
+        assert_eq!(outcome.entry_triggered_at, Some(at(0)));
+        assert_eq!(outcome.terminal_at, Some(at(60)));
+        assert_eq!(outcome.entry_fill_ratio, Decimal::ZERO);
+        assert_eq!(outcome.net_return_bps, Some(Decimal::ZERO));
+        assert_eq!(outcome.passive_reconciled_trade_covered, Some(true));
+        assert!(outcome.gap.is_none());
+    }
+
+    #[test]
+    fn passive_accumulates_partial_slices() {
+        let mut passive = candidate(FillRequirement::AllowPartial);
+        passive.entry_execution = EntryOrderTemplate::PassivePostOnly {
+            placement: PassivePlacement::JoinBestBid,
+            good_til_secs: 60,
+            max_book_age_ms: 5_000,
+        };
+        let first = observation(0, dec!(0.49), dec!(0.50));
+        let mut partial = observation(1, dec!(0.49), dec!(0.50));
+        partial.passive_trades.push(PolicyReplayTrade {
+            event_at: at(1),
+            available_at: at(1),
+            stream_session_id: Uuid::nil(),
+            token_sequence: 2,
+            side: Side::Sell,
+            price: Price::new(dec!(0.49)),
+            shares: Shares::new(dec!(1_010)),
+            source_event_id: format!("blake3:{}", "1".repeat(64)),
+        });
+        let mut completed = observation(2, dec!(0.49), dec!(0.50));
+        completed.passive_trades.push(PolicyReplayTrade {
+            event_at: at(2),
+            available_at: at(2),
+            stream_session_id: Uuid::nil(),
+            token_sequence: 3,
+            side: Side::Sell,
+            price: Price::new(dec!(0.48)),
+            shares: Shares::new(dec!(100)),
+            source_event_id: format!("blake3:{}", "2".repeat(64)),
+        });
+
+        let outcome = replay_policy_candidate(
+            &passive,
+            OutcomeSide::Yes,
+            Usd::new(dec!(25)),
+            TickSize::Hundredth,
+            PolicyReplayLatency {
+                base_delay_ms: 0,
+                stress_multiplier: Decimal::ONE,
+            },
+            &[
+                first,
+                partial,
+                completed,
+                observation(122, dec!(0.49), dec!(0.50)),
+            ],
+        )
+        .expect("passive replay");
+        let entry_fills = outcome
+            .fills
+            .iter()
+            .filter(|fill| fill.exit_reason.is_none())
+            .collect::<Vec<_>>();
+
+        assert_eq!(entry_fills.len(), 2);
+        assert_eq!(entry_fills[0].filled_shares, Shares::new(dec!(10)));
+        assert_eq!(entry_fills[1].outcome, BookWalkOutcome::Filled);
+        assert_eq!(outcome.entry_fill_ratio, Decimal::ONE);
+    }
+
+    #[test]
+    fn passive_rejects_session_reset() {
+        let mut passive = candidate(FillRequirement::AllowPartial);
+        passive.entry_execution = EntryOrderTemplate::PassivePostOnly {
+            placement: PassivePlacement::JoinBestBid,
+            good_til_secs: 60,
+            max_book_age_ms: 5_000,
+        };
+        let first = observation(0, dec!(0.49), dec!(0.50));
+        let mut reset = observation(1, dec!(0.49), dec!(0.50));
+        reset.passive_trades.push(PolicyReplayTrade {
+            event_at: at(1),
+            available_at: at(1),
+            stream_session_id: Uuid::now_v7(),
+            token_sequence: 2,
+            side: Side::Sell,
+            price: Price::new(dec!(0.49)),
+            shares: Shares::new(dec!(1_100)),
+            source_event_id: format!("blake3:{}", "3".repeat(64)),
+        });
+
+        let outcome = replay_policy_candidate(
+            &passive,
+            OutcomeSide::Yes,
+            Usd::new(dec!(25)),
+            TickSize::Hundredth,
+            PolicyReplayLatency {
+                base_delay_ms: 0,
+                stress_multiplier: Decimal::ONE,
+            },
+            &[first, reset, observation(61, dec!(0.49), dec!(0.50))],
+        )
+        .expect("passive replay");
+
+        assert_eq!(
+            outcome.gap,
+            Some(TradePolicyReplayGap::PassiveTradeCoverageUnavailable)
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use quant_pivot_models::{
     types::{EquitySnapshotId, Usd},
 };
 use quant_pivot_repository::{
-    postgres::{PgEquitySnapshotRepository, PgPositionRepository},
+    postgres::{PgEquitySnapshotRepository, PgPositionRepository, PgVenueIncentiveRepository},
     traits::EquitySnapshotRepository,
 };
 use quant_pivot_research::portfolio::{AccountDrawdown, AccountSnapshot};
@@ -44,6 +44,7 @@ async fn seed_peak(db: &DatabaseConnection, capital: Usd, as_of: DateTime<Utc>) 
         reserved_usd: Usd::ZERO,
         realized_pnl_cumulative_usd: Usd::ZERO,
         unrealized_pnl_usd: Usd::ZERO,
+        incentive_credit_cumulative_usd: Usd::ZERO,
         high_water_mark_usd: capital,
         drawdown_pct: dec!(0),
         account_snapshot_ref: None,
@@ -58,7 +59,8 @@ pub async fn account_no_history_drawdown() {
     let execution_account_id = ensure_fixture_execution_account(&db).await;
     let service = EquitySnapshotService::new(
         Arc::new(PgEquitySnapshotRepository::new(db.clone())),
-        Arc::new(PgPositionRepository::new(db)),
+        Arc::new(PgPositionRepository::new(db.clone())),
+        Arc::new(PgVenueIncentiveRepository::new(db)),
         execution_account_id,
     );
     let as_of = Utc::now();
@@ -82,6 +84,7 @@ pub async fn resolve_drawdown_concurrent_history() {
     let service = EquitySnapshotService::new(
         Arc::clone(&equity_repo),
         Arc::new(PgPositionRepository::new(db.clone())),
+        Arc::new(PgVenueIncentiveRepository::new(db.clone())),
         execution_account_id,
     );
 
@@ -110,6 +113,7 @@ pub async fn equity_snapshot_real_pnl() {
     let service = EquitySnapshotService::new(
         Arc::new(PgEquitySnapshotRepository::new(db.clone())),
         Arc::new(PgPositionRepository::new(db.clone())),
+        Arc::new(PgVenueIncentiveRepository::new(db.clone())),
         execution_account_id,
     );
 

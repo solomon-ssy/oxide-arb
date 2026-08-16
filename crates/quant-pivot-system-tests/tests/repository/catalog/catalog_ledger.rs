@@ -8,10 +8,11 @@ use quant_pivot_models::{
     domain::{
         data_plane::DecisionClock,
         market::{
-            CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit, CatalogBatchFailure,
-            CatalogEventCandidate, CatalogMarketCandidate, CatalogSnapshotInfo, EventRegistryInfo,
-            EventTags, MarketRegistryInfo, NewCatalogEventChange, NewCatalogEventObject,
-            NewCatalogMarketObject, NewCatalogSyncBatch, TokenInfo, UpsertEvent, UpsertMarket,
+            CATALOG_OBJECT_HASH_VERSION, CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit,
+            CatalogBatchFailure, CatalogEventCandidate, CatalogMarketCandidate,
+            CatalogSnapshotInfo, EventRegistryInfo, EventTags, MarketRegistryInfo,
+            NewCatalogEventChange, NewCatalogEventObject, NewCatalogMarketObject,
+            NewCatalogSyncBatch, TokenInfo, UpsertEvent, UpsertMarket,
         },
     },
     entities::{
@@ -611,9 +612,12 @@ fn set_market_disposition(
     source.status = status;
     source.filter_reasons = filter_reasons;
     let payload = serde_json::to_value(&source).expect("encode typed market fixture");
-    let content_hash =
-        CanonicalDigest::content_hash_typed("quant-pivot/catalog-market-object", 1, &payload)
-            .expect("hash typed market fixture");
+    let content_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/catalog-market-object",
+        CATALOG_OBJECT_HASH_VERSION,
+        &payload,
+    )
+    .expect("hash typed market fixture");
     candidate.object.market_object_id = CatalogMarketObjectId::from_content_hash(&content_hash);
     candidate.object.content_hash = content_hash;
     candidate.object.payload = payload.into();
@@ -646,9 +650,12 @@ fn event_object_fixture(
         .as_object_mut()
         .expect("event fixture object")
         .insert("revision".to_owned(), revision.into());
-    let content_hash =
-        CanonicalDigest::content_hash_typed("quant-pivot/catalog-event-object", 1, &payload)
-            .expect("hash typed event fixture");
+    let content_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/catalog-event-object",
+        CATALOG_OBJECT_HASH_VERSION,
+        &payload,
+    )
+    .expect("hash typed event fixture");
     let event_object_id = CatalogEventObjectId::from_content_hash(&content_hash);
     (
         UpsertEvent {
@@ -712,6 +719,7 @@ fn market_object_fixture(
         min_order_size: Decimal::ONE,
         liquidity_usd: None,
         volume_24h: None,
+        maker_rebate_schedule: None,
         start_date: None,
         end_date: None,
         resolved_at: None,
@@ -723,9 +731,12 @@ fn market_object_fixture(
         .as_object_mut()
         .expect("market fixture object")
         .insert("revision".to_owned(), revision.into());
-    let content_hash =
-        CanonicalDigest::content_hash_typed("quant-pivot/catalog-market-object", 1, &payload)
-            .expect("hash typed market fixture");
+    let content_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/catalog-market-object",
+        CATALOG_OBJECT_HASH_VERSION,
+        &payload,
+    )
+    .expect("hash typed market fixture");
     let market_object_id = CatalogMarketObjectId::from_content_hash(&content_hash);
     let mut projection = UpsertMarket::from_registry(&source).expect("normalize market fixture");
     projection.content_hash = content_hash;

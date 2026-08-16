@@ -7,7 +7,7 @@ use sea_orm::entity::prelude::*;
 use super::{quant_backtest_report, quant_model_run, quant_model_version};
 use crate::types::{
     BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
-    backtest::CategoryRankIcDeltas,
+    backtest::CategoryRealizedReturnRankCorrelationDeltas,
 };
 
 #[sea_orm::model]
@@ -21,14 +21,14 @@ pub struct Model {
     pub baseline_report_id: BacktestReportId,
     pub candidate_report_id: BacktestReportId,
     pub model_run_id: ModelRunId,
-    pub rank_ic_delta: Decimal,
+    pub realized_return_rank_correlation_delta: Decimal,
     pub hit_rate_delta: Decimal,
     pub realized_pnl_delta: Decimal,
     pub score_correlation: Decimal,
     pub side_disagreement_rate: Decimal,
     pub common_samples: i64,
     #[sea_orm(column_type = "JsonBinary")]
-    pub category_breakdown_diff: CategoryRankIcDeltas,
+    pub category_breakdown_diff: CategoryRealizedReturnRankCorrelationDeltas,
     pub comparison_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 

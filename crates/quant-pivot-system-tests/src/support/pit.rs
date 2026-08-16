@@ -258,6 +258,7 @@ impl PointInTimeSnapshotSource for InMemoryDecisionSnapshotSource {
             end_date: market.end_date,
             created_at: market.created_at,
             fee_schedule: self.fee_schedules.get(market_id).cloned(),
+            maker_rebate_schedule: None,
         };
         Ok(Some(ResolvedMarketSnapshot {
             boundary: boundary.clone(),

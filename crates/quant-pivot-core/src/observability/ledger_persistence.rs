@@ -416,6 +416,7 @@ mod tests {
             trade_side: None,
             trade_size: None,
             fee_rate_bps: None,
+            trade_transaction_hash: None,
             venue_event_time: i64::from(partition),
             ingress_time: i64::from(partition),
             persisted_time: i64::from(partition),

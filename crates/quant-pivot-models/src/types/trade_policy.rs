@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
@@ -28,8 +29,8 @@ use crate::{
 };
 
 /// Breaking wire version for the standalone policy artifact family.
-pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 1;
-pub const TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION: u32 = 1;
+pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 2;
+pub const TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION: u32 = 2;
 pub const TRADE_POLICY_MAX_CANDIDATES: usize = 32;
 
 /// Immutable statistical and execution-quality thresholds used for publication.
@@ -233,6 +234,7 @@ pub struct TradePolicyCohortKey {
     pub profile_ref: ResearchProfileRef,
     pub category: MarketCategory,
     pub horizon_secs: u64,
+    pub entry_route: TradePolicyEntryRoute,
     pub entry_price_min: Price,
     pub entry_price_max: Price,
     pub cash_budget_tier: Usd,
@@ -292,7 +294,9 @@ pub enum EntryConditionTemplateV1 {
 
 /// Closed market-event template set. Exact source and subject fields are
 /// always copied from the recommendation's frozen linkage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum MarketEventTemplate {
     CryptoSubjectPredicateEntered { max_input_age_ms: u64 },
@@ -439,11 +443,92 @@ pub enum EntryOrderTemplate {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Entry execution route fitted and published independently within a cohort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradePolicyEntryRoute {
+    Aggressive,
+    PassivePostOnly,
+}
+
+impl EntryOrderTemplate {
+    #[must_use]
+    pub const fn route(&self) -> TradePolicyEntryRoute {
+        match self {
+            Self::Aggressive { .. } => TradePolicyEntryRoute::Aggressive,
+            Self::PassivePostOnly { .. } => TradePolicyEntryRoute::PassivePostOnly,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PassivePlacement {
     JoinBestBid,
     ImproveBestBidByTicks { ticks: u32 },
+}
+
+/// Mutually exclusive passive-entry state estimated from cross-fitted OOS replay.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PassiveFillStateKind {
+    NoFill,
+    PartialFill,
+    FullFill,
+}
+
+/// One joint fill/latency/adverse-selection state in a passive distribution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PassiveFillState {
+    pub kind: PassiveFillStateKind,
+    pub probability_bps: u32,
+    pub fill_ratio_bps: u32,
+    pub fill_latency_ms: u64,
+    pub post_fill_markout_bps: Bps,
+}
+
+/// Published cross-fitted passive execution distribution for one cohort.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PassiveFillDistribution {
+    pub sample_count: u64,
+    pub source_evidence_hash: ContentHash,
+    pub states: Vec<PassiveFillState>,
+}
+
+impl PassiveFillDistribution {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.sample_count == 0 || self.states.is_empty() {
+            return Err("passive fill distribution requires OOS evidence and states".to_owned());
+        }
+        if self
+            .states
+            .iter()
+            .map(|state| state.probability_bps)
+            .sum::<u32>()
+            != 10_000
+            || self.states.iter().any(|state| {
+                state.probability_bps == 0
+                    || state.fill_ratio_bps > 10_000
+                    || (state.kind == PassiveFillStateKind::NoFill
+                        && (state.fill_ratio_bps != 0
+                            || state.fill_latency_ms != 0
+                            || state.post_fill_markout_bps != Bps::ZERO))
+                    || (state.kind == PassiveFillStateKind::PartialFill
+                        && (state.fill_ratio_bps == 0 || state.fill_ratio_bps >= 10_000))
+                    || (state.kind == PassiveFillStateKind::FullFill
+                        && state.fill_ratio_bps != 10_000)
+            })
+        {
+            return Err(
+                "passive fill distribution violates state or probability invariants".to_owned(),
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -550,6 +635,7 @@ pub struct TradePolicyCohort {
     pub full_l2_coverage: Decimal,
     pub common_candidate_support: Decimal,
     pub passive_reconciled_trade_coverage: Option<Decimal>,
+    pub passive_fill_distribution: Option<PassiveFillDistribution>,
     pub fee_catalog_coverage: Decimal,
     pub cpcv_path_count: u32,
     pub trial_count: u32,
@@ -830,7 +916,9 @@ pub enum TradePolicyPublicationBlocker {
     InsufficientCohortCoverage { cohort_index: u32 },
     InsufficientCohortFullL2Coverage { cohort_index: u32 },
     InsufficientCohortCommonSupport { cohort_index: u32 },
+    CohortEntryRouteMismatch { cohort_index: u32 },
     InsufficientPassiveTradeCoverage { cohort_index: u32 },
+    InvalidPassiveFillDistribution { cohort_index: u32 },
     InsufficientCohortFeeCoverage { cohort_index: u32 },
     InsufficientCohortCpcvPaths { cohort_index: u32 },
     CohortDeflatedSharpeRatioBelowGate { cohort_index: u32 },
@@ -1355,6 +1443,10 @@ impl TradePolicyArtifactPayload {
             let Ok(cohort_index) = u32::try_from(index) else {
                 continue;
             };
+            if cohort.key.entry_route != cohort.entry_order.route() {
+                blockers
+                    .push(TradePolicyPublicationBlocker::CohortEntryRouteMismatch { cohort_index });
+            }
             if cohort.effective_sample_size < Decimal::from(gate.min_effective_sample_size) {
                 blockers.push(
                     TradePolicyPublicationBlocker::InsufficientCohortEffectiveSampleSize {
@@ -1390,6 +1482,19 @@ impl TradePolicyArtifactPayload {
                     TradePolicyPublicationBlocker::InsufficientPassiveTradeCoverage {
                         cohort_index,
                     },
+                );
+            }
+            let passive = matches!(
+                cohort.entry_order,
+                EntryOrderTemplate::PassivePostOnly { .. }
+            );
+            let distribution_valid = cohort
+                .passive_fill_distribution
+                .as_ref()
+                .is_some_and(|distribution| distribution.validate().is_ok());
+            if passive != distribution_valid {
+                blockers.push(
+                    TradePolicyPublicationBlocker::InvalidPassiveFillDistribution { cohort_index },
                 );
             }
             if cohort.fee_catalog_coverage < gate.min_fee_catalog_coverage {

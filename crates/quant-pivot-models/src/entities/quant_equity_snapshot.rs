@@ -23,6 +23,9 @@ pub struct Model {
     pub available_usd: Usd,
     pub reserved_usd: Usd,
     pub realized_pnl_cumulative_usd: Usd,
+    /// Confirmed wallet credits from venue incentive programs. Estimated and
+    /// venue-awarded amounts are excluded.
+    pub incentive_credit_cumulative_usd: Usd,
     pub unrealized_pnl_usd: Usd,
     pub high_water_mark_usd: Usd,
     pub drawdown_pct: Decimal,

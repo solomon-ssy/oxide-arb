@@ -15,7 +15,11 @@ use super::{
     CandidateExplanationValidation, ModelVersionInfo, PromotionPermitActor, RepresentedRouteSet,
 };
 use crate::{
-    enums::{model::ModelFamily, quant::QuantRuntimeMode, runtime_config::PolicyActorKind},
+    enums::{
+        model::{ModelFamily, ServingEligibility},
+        quant::QuantRuntimeMode,
+        runtime_config::PolicyActorKind,
+    },
     hashing::CanonicalDigest,
     runtime_config::{
         ActivePolicyBundle, BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot,
@@ -270,10 +274,7 @@ impl ModelBootstrapManifest {
             && profile.spec.category == self.route.category()
             && evidence_matches_authority
             && scenario_matches
-            && matches!(
-                self.model_family,
-                ModelFamily::WeightedFactor | ModelFamily::ClassicalGradientBoostedTrees
-            )
+            && self.model_family.serving_eligibility() == ServingEligibility::ActiveBuyCapable
             && self.calibration_artifact_id.is_some()
             && self.calibration_artifact_id.is_some() == self.calibration_artifact_hash.is_some()
             && self.explanation_validation.input_contract_hash == self.input_contract_hash

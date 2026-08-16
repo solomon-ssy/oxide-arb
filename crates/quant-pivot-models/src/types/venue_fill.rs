@@ -4,75 +4,86 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    domain::market::fee::DeferredVenueIncentive,
     enums::fee::FeeLiquidityRole,
-    types::{Bps, ContentHash, EvmTransactionHash, OrderId, Price, Shares, Usd, VenueTradeId},
+    types::{
+        Bps, ContentHash, EvmAddress, EvmTransactionHash, OrderId, Price, Shares, Usd, VenueTradeId,
+    },
 };
 
 /// Strength of the evidence supporting a venue fee observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FeeEvidencePriority {
-    PreparedScheduleExpected,
-    AuthenticatedTradeReconstructed,
-    OnChainExact,
+pub enum FeeMeasurementPriority {
+    PreparedExpected,
+    AuthenticatedTradeDerived,
+    OnChainSettled,
 }
 
-/// Fee evidence with explicit provenance. Expected fees never masquerade as
-/// venue-observed facts.
+/// Fee measurement with explicit provenance. Expected and authenticated
+/// derived values never masquerade as chain-settled facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum FeeEvidence {
-    PreparedScheduleExpected {
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FeeMeasurement {
+    PreparedExpected {
         schedule_hash: ContentHash,
         expected_fee: Usd,
     },
-    AuthenticatedTradeReconstructed {
+    AuthenticatedTradeDerived {
         trade_id: VenueTradeId,
+        bucket_index: u32,
         order_id: OrderId,
         liquidity_role: FeeLiquidityRole,
         fee_rate_bps: Bps,
-        reconstructed_fee: Usd,
+        expected_fee: Usd,
+        derived_fee: Usd,
+        /// Present only for an authenticated maker fill covered by the frozen
+        /// decision-time Gamma schedule.
+        expected_maker_rebate: Option<DeferredVenueIncentive>,
         transaction_hash: Option<EvmTransactionHash>,
         matched_at: DateTime<Utc>,
         maker_order_ids: Vec<OrderId>,
     },
-    OnChainExact {
+    OnChainSettled {
+        venue_trade_id: VenueTradeId,
+        chain_id: u64,
+        protocol_version: u16,
+        exchange_address: EvmAddress,
         order_id: OrderId,
         liquidity_role: FeeLiquidityRole,
-        transaction_hash: String,
+        transaction_hash: EvmTransactionHash,
         log_index: u64,
         matched_at: DateTime<Utc>,
-        actual_fee: Usd,
+        available_at: DateTime<Utc>,
+        settled_fee: Usd,
         builder_code: Option<String>,
     },
 }
 
-impl FeeEvidence {
+impl FeeMeasurement {
     #[must_use]
-    pub const fn priority(&self) -> FeeEvidencePriority {
+    pub const fn priority(&self) -> FeeMeasurementPriority {
         match self {
-            Self::PreparedScheduleExpected { .. } => FeeEvidencePriority::PreparedScheduleExpected,
-            Self::AuthenticatedTradeReconstructed { .. } => {
-                FeeEvidencePriority::AuthenticatedTradeReconstructed
+            Self::PreparedExpected { .. } => FeeMeasurementPriority::PreparedExpected,
+            Self::AuthenticatedTradeDerived { .. } => {
+                FeeMeasurementPriority::AuthenticatedTradeDerived
             }
-            Self::OnChainExact { .. } => FeeEvidencePriority::OnChainExact,
+            Self::OnChainSettled { .. } => FeeMeasurementPriority::OnChainSettled,
         }
     }
 
     #[must_use]
     pub const fn fee(&self) -> Usd {
         match self {
-            Self::PreparedScheduleExpected { expected_fee, .. } => *expected_fee,
-            Self::AuthenticatedTradeReconstructed {
-                reconstructed_fee, ..
-            } => *reconstructed_fee,
-            Self::OnChainExact { actual_fee, .. } => *actual_fee,
+            Self::PreparedExpected { expected_fee, .. } => *expected_fee,
+            Self::AuthenticatedTradeDerived { derived_fee, .. } => *derived_fee,
+            Self::OnChainSettled { settled_fee, .. } => *settled_fee,
         }
     }
 
     #[must_use]
-    pub const fn is_observed(&self) -> bool {
-        !matches!(self, Self::PreparedScheduleExpected { .. })
+    pub const fn is_settled(&self) -> bool {
+        matches!(self, Self::OnChainSettled { .. })
     }
 }
 
@@ -87,33 +98,40 @@ pub struct VenueFillObservation {
     pub matched_at: DateTime<Utc>,
     pub maker_order_ids: Vec<OrderId>,
     pub builder_code: Option<String>,
-    pub fee_evidence: FeeEvidence,
+    pub fee_evidence: FeeMeasurement,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FeeEvidence, FeeEvidencePriority};
+    use super::{FeeMeasurement, FeeMeasurementPriority};
     use crate::{
         enums::fee::FeeLiquidityRole,
-        types::{OrderId, Usd},
+        types::{EvmAddress, EvmTransactionHash, OrderId, Usd, VenueTradeId},
     };
 
     #[test]
     fn fee_evidence_priority_monotonic() {
-        let prepared = FeeEvidencePriority::PreparedScheduleExpected;
-        let authenticated = FeeEvidencePriority::AuthenticatedTradeReconstructed;
-        let on_chain = FeeEvidencePriority::OnChainExact;
+        let prepared = FeeMeasurementPriority::PreparedExpected;
+        let authenticated = FeeMeasurementPriority::AuthenticatedTradeDerived;
+        let on_chain = FeeMeasurementPriority::OnChainSettled;
 
         assert!(prepared < authenticated);
         assert!(authenticated < on_chain);
         assert!(
-            !FeeEvidence::OnChainExact {
+            !FeeMeasurement::OnChainSettled {
+                venue_trade_id: VenueTradeId::new("trade-1"),
+                chain_id: 137,
+                protocol_version: 2,
+                exchange_address: EvmAddress::parse(format!("0x{}", "a".repeat(40)))
+                    .expect("exchange address"),
                 order_id: OrderId::new("0x01"),
                 liquidity_role: FeeLiquidityRole::Taker,
-                transaction_hash: "0x01".to_owned(),
+                transaction_hash: EvmTransactionHash::parse(format!("0x{}", "b".repeat(64)))
+                    .expect("transaction hash"),
                 log_index: 1,
                 matched_at: chrono::Utc::now(),
-                actual_fee: Usd::ZERO,
+                available_at: chrono::Utc::now(),
+                settled_fee: Usd::ZERO,
                 builder_code: None,
             }
             .fee()

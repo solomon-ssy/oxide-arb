@@ -2,12 +2,17 @@ use chrono::{DateTime, TimeZone, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::PortfolioSolverDeployConfig,
-    domain::quant::{
-        CapitalOccupancyBucket, DiscountCurvePoint, EntryEconomics, ExecutableEconomicTier,
-        ExistingPortfolioState, PortfolioScenario, PortfolioScenarioArtifact,
-        PortfolioScenarioEvidenceRegime, PortfolioScenarioKind, PortfolioScenarioVisibility,
-        RecommendationEconomics, RepresentedRouteSet, ScenarioCashflow, ScenarioDistribution,
-        ScenarioMarketOutcome, ScenarioPayoutState, ScenarioWeight,
+    domain::{
+        market::fee::ImmediateExecutionCost,
+        quant::{
+            AggressiveEntryEconomics, CapitalOccupancyBucket, DiscountCurvePoint,
+            EntryExecutionEconomics, ExecutableEconomicTier, ExistingPortfolioState,
+            HardReservationBucket, PortfolioScenario, PortfolioScenarioArtifact,
+            PortfolioScenarioEvidenceRegime, PortfolioScenarioKind, PortfolioScenarioVisibility,
+            RecommendationEconomics, RepresentedRouteSet, ScenarioCapitalOccupancySlice,
+            ScenarioCashflow, ScenarioDistribution, ScenarioEntryExecution,
+            ScenarioExecutionCashflow, ScenarioMarketOutcome, ScenarioPayoutState, ScenarioWeight,
+        },
     },
     enums::{
         common::MarketCategory,
@@ -189,14 +194,14 @@ impl GlobalFixture {
             BuyModelRoute::Weather,
         ])?;
         let mut policy = PortfolioConfig::default();
-        policy.budget.total_budget_usd.value = dec!(400);
+        policy.budget.total_budget_usd.value = dec!(404);
         policy.budget.cash_reserve_usd.value = Decimal::ZERO;
-        policy.budget.max_open_capital_usd.value = dec!(400);
-        policy.exposure_limits.max_single_recommendation_usd.value = dec!(200);
-        policy.exposure_limits.max_market_exposure_usd.value = dec!(200);
-        policy.exposure_limits.max_event_exposure_usd.value = dec!(400);
-        policy.exposure_limits.max_category_exposure_usd.value = dec!(400);
-        policy.exposure_limits.max_route_exposure_usd.value = dec!(400);
+        policy.budget.max_open_capital_usd.value = dec!(404);
+        policy.exposure_limits.max_single_recommendation_usd.value = dec!(202);
+        policy.exposure_limits.max_market_exposure_usd.value = dec!(202);
+        policy.exposure_limits.max_event_exposure_usd.value = dec!(404);
+        policy.exposure_limits.max_category_exposure_usd.value = dec!(404);
+        policy.exposure_limits.max_route_exposure_usd.value = dec!(404);
         policy.exposure_limits.max_open_recommendations = 2;
         policy.tail_risk.max_cvar_usd.value = dec!(400);
         policy.tail_risk.max_scenario_loss_usd.value = dec!(400);
@@ -215,9 +220,9 @@ impl GlobalFixture {
             account: AccountSnapshot::new(
                 decision_at,
                 AccountSource::Polymarket,
-                Usd::new(dec!(400)),
-                Usd::new(dec!(400)),
-                Usd::new(dec!(400)),
+                Usd::new(dec!(404)),
+                Usd::new(dec!(404)),
+                Usd::new(dec!(404)),
                 Usd::ZERO,
                 Vec::new(),
             ),
@@ -343,6 +348,14 @@ fn fixture_tiers(policy: &PortfolioConfig) -> QuantResult<(Vec<u64>, Vec<Executa
 
 fn tier(fixture: TierFixture<'_>, bucket_ends: &[u64]) -> QuantResult<ExecutableEconomicTier> {
     let identity = Uuid::from_u128(fixture.identity);
+    let filled_shares = Shares::new(dec!(400));
+    let immediate_cost =
+        ImmediateExecutionCost::new(Usd::new(dec!(200)), Usd::new(dec!(2)), Usd::ZERO)
+            .map_err(QuantError::config)?;
+    let occupancy_secs = bucket_ends
+        .first()
+        .copied()
+        .ok_or_else(|| QuantError::config("fixture requires at least one capital bucket"))?;
     Ok(ExecutableEconomicTier {
         economic_tier_id: EconomicTierId::new(identity),
         report_route_run_id: ReportRouteRunId::new(identity),
@@ -354,14 +367,15 @@ fn tier(fixture: TierFixture<'_>, bucket_ends: &[u64]) -> QuantResult<Executable
         category: fixture.category,
         token_id: TokenId::new(fixture.token),
         outcome_side: OutcomeSide::Yes,
-        shares: Shares::new(dec!(400)),
-        entry: EntryEconomics {
-            notional_usd: Usd::new(dec!(200)),
+        entry_execution: EntryExecutionEconomics::Aggressive(AggressiveEntryEconomics {
+            requested_shares: filled_shares,
+            filled_shares,
+            limit_price: Price::new(dec!(0.5)),
             entry_vwap: Price::new(dec!(0.5)),
-            fee_usd: Usd::new(dec!(2)),
+            immediate_cost,
             slippage_usd: Usd::new(dec!(1)),
             visible_liquidity_usd: Usd::new(dec!(10_000)),
-        },
+        }),
         profit_probability_lower_bps: u32::try_from(fixture.profit_bps.saturating_sub(500))
             .map_err(|error| QuantError::config(error.to_string()))?,
         probability_interval_width_bps: 1_000,
@@ -370,20 +384,33 @@ fn tier(fixture: TierFixture<'_>, bucket_ends: &[u64]) -> QuantResult<Executable
             .iter()
             .enumerate()
             .map(|(index, value)| {
-                Ok(ScenarioCashflow {
+                let discounted_net_usd = Usd::new(Decimal::from(*value));
+                Ok(ScenarioExecutionCashflow {
                     scenario_index: u32::try_from(index)
                         .map_err(|error| QuantError::config(error.to_string()))?,
-                    discounted_net_usd: Usd::new(Decimal::from(*value)),
+                    entry_execution: ScenarioEntryExecution::AggressiveFill,
+                    filled_shares,
+                    immediate_cash_outlay_usd: immediate_cost.cash_outlay_usd,
+                    discounted_exit_cash_usd: immediate_cost.cash_outlay_usd + discounted_net_usd,
+                    delayed_maker_rebate_usd: Usd::ZERO,
+                    discounted_maker_rebate_usd: Usd::ZERO,
+                    capital_cost_usd: Usd::ZERO,
+                    capital_occupancy: vec![ScenarioCapitalOccupancySlice {
+                        locked_cash_usd: immediate_cost.cash_outlay_usd,
+                        duration_secs: occupancy_secs,
+                    }],
+                    discounted_net_usd,
+                    risk_net_usd: discounted_net_usd,
                 })
             })
             .collect::<QuantResult<Vec<_>>>()?,
-        capital_occupancy: bucket_ends
+        hard_reservation_envelope: bucket_ends
             .iter()
             .enumerate()
-            .map(|(index, end_secs)| CapitalOccupancyBucket {
+            .map(|(index, end_secs)| HardReservationBucket {
                 end_secs: *end_secs,
-                locked_usd: if index == 0 {
-                    Usd::new(dec!(200))
+                reserved_cash_usd: if index == 0 {
+                    immediate_cost.cash_outlay_usd
                 } else {
                     Usd::ZERO
                 },
@@ -395,7 +422,7 @@ fn tier(fixture: TierFixture<'_>, bucket_ends: &[u64]) -> QuantResult<Executable
             robust_expected_net_usd: Usd::new(Decimal::from(fixture.robust)),
             max_loss_usd: Usd::new(Decimal::from(fixture.max_loss)),
             cvar_contribution_usd: Usd::ZERO,
-            capital_occupancy_usd_hours: UsdHours::new(dec!(200)),
+            capital_occupancy_usd_hours: UsdHours::new(immediate_cost.cash_outlay_usd.inner()),
             marginal_portfolio_value_usd: Usd::ZERO,
         },
         lineage_hash: hash(fixture.market)?,

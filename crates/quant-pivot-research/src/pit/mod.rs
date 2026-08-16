@@ -23,7 +23,7 @@ use quant_pivot_models::{
         market::{
             CatalogMarketChangeInfo, CatalogMarketLeg, CatalogSnapshotInfo,
             book::BookLevel,
-            fee::MarketFeeSchedule,
+            fee::{MarketFeeSchedule, MarketMakerRebateSchedule},
             registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
         },
     },
@@ -112,6 +112,8 @@ pub struct MarketContextAt {
     pub created_at: Option<DateTime<Utc>>,
     /// Fee schedule resolved from the independent append-only CLOB market-info ledger.
     pub fee_schedule: Option<MarketFeeSchedule>,
+    /// Gamma-sourced maker incentive schedule from the same catalog revision.
+    pub maker_rebate_schedule: Option<MarketMakerRebateSchedule>,
 }
 
 /// One immutable catalog projection used by selection, feature computation,
@@ -257,6 +259,7 @@ fn resolve_market_catalog(
         }
         .into());
     }
+    let maker_rebate_schedule = market.maker_rebate_schedule.clone();
     let context = MarketContextAt {
         market_id: market.market_id.clone(),
         effective_at: snapshot.market.source_effective_at,
@@ -267,6 +270,7 @@ fn resolve_market_catalog(
         end_date: market.end_date,
         created_at: snapshot.market.source_created_at,
         fee_schedule: None,
+        maker_rebate_schedule,
     };
     Ok(ResolvedMarketSnapshot {
         boundary: boundary.clone(),

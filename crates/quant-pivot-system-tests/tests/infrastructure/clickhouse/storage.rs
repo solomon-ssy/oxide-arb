@@ -8,9 +8,8 @@ use clickhouse::Client;
 use prometheus::IntCounter;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, ChAssetAmount, ChBps, ChDecimal64, ChDigest, ChPrice, ChSchemaVersion,
-        ChShares, ChUsd, CryptoPriceReportRow, DomainEventRow, MarketExecutionRow,
-        QuantReportRecommendationFactRow,
+        BookL2LedgerRow, ChBps, ChDecimal64, ChDigest, ChPrice, ChSchemaVersion, ChShares, ChUsd,
+        CryptoPriceReportRow, DomainEventRow, MarketExecutionRow, QuantReportRecommendationFactRow,
     },
     config::ClickHouseConfig,
     enums::clickhouse::{
@@ -638,8 +637,10 @@ fn sample_execution(token_id: &str, received_at: i64) -> MarketExecutionRow {
         maker_order_filled_event_id: digest,
         market_id: MarketId::new("market-integration"),
         token_id: TokenId::new(token_id),
+        order_hash: format!("0x{}", "b".repeat(64)),
         contract_key: "ctf_exchange_v2".to_owned(),
         exchange_version: ChExchangeVersion::V2,
+        contract_address: "0xE111180000d2663C0091e4f400237545B87B996B".to_owned(),
         transaction_hash: format!("0x{}", "a".repeat(64)),
         block_number: u64::try_from(received_at).unwrap_or_default(),
         transaction_index: 0,
@@ -650,8 +651,8 @@ fn sample_execution(token_id: &str, received_at: i64) -> MarketExecutionRow {
         price: ChPrice::from(Price::new(dec!(0.95))),
         size_shares: ChShares::from(Shares::new(dec!(10))),
         notional_usd: ChUsd::from(Usd::new(dec!(9.5))),
-        fee_amount: ChAssetAmount::from(dec!(0)),
-        fee_asset_id: "0".to_owned(),
+        fee_usd: ChUsd::from(Usd::ZERO),
+        builder: None,
         effective_at: received_at,
         observed_at: received_at,
         model_available_at: received_at,
@@ -701,6 +702,7 @@ pub async fn last_trade_is_signal() {
         trade_side: Some(ChLedgerTradeSide::Sell),
         trade_size: Some(ChShares::from(Shares::new(dec!(9)))),
         fee_rate_bps: Some(ChBps::from(dec!(2.5))),
+        trade_transaction_hash: None,
         venue_event_time: now,
         ingress_time: now + 1,
         persisted_time: now + 2,

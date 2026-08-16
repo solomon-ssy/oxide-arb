@@ -13,8 +13,8 @@ use crate::{
     types::{
         BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
         backtest::{
-            BACKTEST_METRIC_SCALE, CategoryRankIcDelta, CategoryRankIcDeltas,
-            ModelComparisonHashInput,
+            BACKTEST_METRIC_SCALE, CategoryRealizedReturnRankCorrelationDelta,
+            CategoryRealizedReturnRankCorrelationDeltas, ModelComparisonHashInput,
         },
     },
 };
@@ -29,13 +29,13 @@ pub struct ModelComparisonReportInfo {
     pub baseline_report_id: BacktestReportId,
     pub candidate_report_id: BacktestReportId,
     pub model_run_id: ModelRunId,
-    pub rank_ic_delta: Decimal,
+    pub realized_return_rank_correlation_delta: Decimal,
     pub hit_rate_delta: Decimal,
     pub realized_pnl_delta: Decimal,
     pub score_correlation: Decimal,
     pub side_disagreement_rate: Decimal,
     pub common_samples: i64,
-    pub category_breakdown_diff: CategoryRankIcDeltas,
+    pub category_breakdown_diff: CategoryRealizedReturnRankCorrelationDeltas,
     pub comparison_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 }
@@ -50,7 +50,7 @@ info_from_model!(
         baseline_report_id,
         candidate_report_id,
         model_run_id,
-        rank_ic_delta,
+        realized_return_rank_correlation_delta,
         hit_rate_delta,
         realized_pnl_delta,
         score_correlation,
@@ -88,13 +88,13 @@ pub struct NewModelComparisonReport {
     pub baseline_report_id: BacktestReportId,
     pub candidate_report_id: BacktestReportId,
     pub model_run_id: ModelRunId,
-    pub rank_ic_delta: Decimal,
+    pub realized_return_rank_correlation_delta: Decimal,
     pub hit_rate_delta: Decimal,
     pub realized_pnl_delta: Decimal,
     pub score_correlation: Decimal,
     pub side_disagreement_rate: Decimal,
     pub common_samples: i64,
-    pub category_breakdown_diff: CategoryRankIcDeltas,
+    pub category_breakdown_diff: CategoryRealizedReturnRankCorrelationDeltas,
     pub comparison_hash: ContentHash,
 }
 
@@ -138,14 +138,16 @@ impl NewModelComparisonReport {
         {
             return Err("comparison requires distinct baseline and candidate subjects".to_owned());
         }
-        let expected_rank_ic =
-            (candidate.rank_ic - baseline.rank_ic).round_dp(BACKTEST_METRIC_SCALE);
+        let expected_realized_return_rank_correlation = (candidate
+            .realized_return_rank_correlation
+            - baseline.realized_return_rank_correlation)
+            .round_dp(BACKTEST_METRIC_SCALE);
         let expected_hit_rate = (candidate.hit_rate.inner() - baseline.hit_rate.inner())
             .round_dp(BACKTEST_METRIC_SCALE);
         let expected_realized_pnl = (candidate.report_pnl_simulation.realized_pnl_usd
             - baseline.report_pnl_simulation.realized_pnl_usd)
             .round_dp(BACKTEST_METRIC_SCALE);
-        if self.rank_ic_delta != expected_rank_ic
+        if self.realized_return_rank_correlation_delta != expected_realized_return_rank_correlation
             || self.hit_rate_delta != expected_hit_rate
             || self.realized_pnl_delta != expected_realized_pnl
         {
@@ -167,7 +169,8 @@ impl NewModelComparisonReport {
         if common_samples > baseline_samples.min(candidate_samples) {
             return Err("comparison common_samples exceeds either report sample count".to_owned());
         }
-        let expected_categories = CategoryRankIcDeltas::between(baseline, candidate);
+        let expected_categories =
+            CategoryRealizedReturnRankCorrelationDeltas::between(baseline, candidate);
         if self.category_breakdown_diff != expected_categories {
             return Err("comparison category deltas do not match the two reports".to_owned());
         }
@@ -203,7 +206,7 @@ impl<'a>
             candidate_model_version_id: &report.candidate_model_version_id,
             baseline_report_hash,
             candidate_report_hash,
-            rank_ic_delta: report.rank_ic_delta,
+            realized_return_rank_correlation_delta: report.realized_return_rank_correlation_delta,
             hit_rate_delta: report.hit_rate_delta,
             realized_pnl_delta: report.realized_pnl_delta,
             score_correlation: report.score_correlation,
@@ -237,7 +240,7 @@ impl<'a>
             candidate_model_version_id: &report.candidate_model_version_id,
             baseline_report_hash,
             candidate_report_hash,
-            rank_ic_delta: report.rank_ic_delta,
+            realized_return_rank_correlation_delta: report.realized_return_rank_correlation_delta,
             hit_rate_delta: report.hit_rate_delta,
             realized_pnl_delta: report.realized_pnl_delta,
             score_correlation: report.score_correlation,
@@ -250,17 +253,17 @@ impl<'a>
     }
 }
 
-impl CategoryRankIcDeltas {
+impl CategoryRealizedReturnRankCorrelationDeltas {
     fn between(baseline: &BacktestReportInfo, candidate: &BacktestReportInfo) -> Self {
         let baseline_by_category = baseline
             .category_breakdown
             .iter()
-            .map(|metric| (metric.category, metric.rank_ic))
+            .map(|metric| (metric.category, metric.realized_return_rank_correlation))
             .collect::<BTreeMap<_, _>>();
         let candidate_by_category = candidate
             .category_breakdown
             .iter()
-            .map(|metric| (metric.category, metric.rank_ic))
+            .map(|metric| (metric.category, metric.realized_return_rank_correlation))
             .collect::<BTreeMap<_, _>>();
         let mut categories = baseline_by_category
             .keys()
@@ -272,20 +275,22 @@ impl CategoryRankIcDeltas {
         categories
             .into_iter()
             .map(|category| {
-                let baseline_rank_ic = baseline_by_category
+                let baseline_realized_return_rank_correlation = baseline_by_category
                     .get(&category)
                     .copied()
                     .unwrap_or(Decimal::ZERO);
-                let candidate_rank_ic = candidate_by_category
+                let candidate_realized_return_rank_correlation = candidate_by_category
                     .get(&category)
                     .copied()
                     .unwrap_or(Decimal::ZERO);
-                CategoryRankIcDelta {
+                CategoryRealizedReturnRankCorrelationDelta {
                     category,
-                    baseline_rank_ic,
-                    candidate_rank_ic,
-                    rank_ic_delta: (candidate_rank_ic - baseline_rank_ic)
-                        .round_dp(BACKTEST_METRIC_SCALE),
+                    baseline_realized_return_rank_correlation,
+                    candidate_realized_return_rank_correlation,
+                    realized_return_rank_correlation_delta:
+                        (candidate_realized_return_rank_correlation
+                            - baseline_realized_return_rank_correlation)
+                            .round_dp(BACKTEST_METRIC_SCALE),
                 }
             })
             .collect::<Vec<_>>()

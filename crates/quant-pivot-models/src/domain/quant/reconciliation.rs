@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::{
         patch::{NullablePatch, Patch},
-        quant::{PositionExit, PositionFill},
+        quant::{CumulativePositionExit, CumulativePositionFill},
     },
     entities::quant_reconciliation,
     enums::{
@@ -35,7 +35,8 @@ pub struct ReconciliationInfo {
     pub venue_cash_delta_usd: Option<Usd>,
     pub realized_pnl_usd: Option<Usd>,
     pub expected_fee_usd: Option<Usd>,
-    pub observed_fee_usd: Option<Usd>,
+    pub derived_fee_usd: Option<Usd>,
+    pub settled_fee_usd: Option<Usd>,
     pub fee_delta_usd: Option<Usd>,
     pub resolved_by: Option<String>,
     pub resolved_at: Option<DateTime<Utc>>,
@@ -58,7 +59,8 @@ info_from_model!(
         venue_cash_delta_usd,
         realized_pnl_usd,
         expected_fee_usd,
-        observed_fee_usd,
+        derived_fee_usd,
+        settled_fee_usd,
         fee_delta_usd,
         resolved_by,
         resolved_at,
@@ -82,7 +84,8 @@ pub struct NewReconciliation {
     pub venue_cash_delta_usd: Option<Usd>,
     pub realized_pnl_usd: Option<Usd>,
     pub expected_fee_usd: Option<Usd>,
-    pub observed_fee_usd: Option<Usd>,
+    pub derived_fee_usd: Option<Usd>,
+    pub settled_fee_usd: Option<Usd>,
     pub fee_delta_usd: Option<Usd>,
     pub resolved_by: Option<String>,
     pub resolved_at: Option<DateTime<Utc>>,
@@ -98,7 +101,8 @@ pub struct ReconciliationPatch {
     pub venue_cash_delta_usd: NullablePatch<Usd>,
     pub realized_pnl_usd: NullablePatch<Usd>,
     pub expected_fee_usd: NullablePatch<Usd>,
-    pub observed_fee_usd: NullablePatch<Usd>,
+    pub derived_fee_usd: NullablePatch<Usd>,
+    pub settled_fee_usd: NullablePatch<Usd>,
     pub fee_delta_usd: NullablePatch<Usd>,
     pub resolved_by: NullablePatch<String>,
     pub resolved_at: NullablePatch<DateTime<Utc>>,
@@ -121,6 +125,9 @@ pub enum CapitalReconcileSettlement {
     /// Venue-confirmed fill: `Locked|Impaired -> Spent` with `spent_usd`
     /// (fill cost + fee); any unspent locked remainder is released.
     Settle { spent_usd: Usd },
+    /// Venue-confirmed cumulative partial fill: keep the unfilled remainder
+    /// locked while advancing cumulative spent capital.
+    SettlePartial { spent_usd: Usd },
     /// Venue-confirmed non-fill: `Locked|Impaired -> Released`.
     Release,
     /// Unresolvable verdict: `Locked -> Impaired` (capital frozen pending an
@@ -155,25 +162,20 @@ pub struct ReconciliationLedgerWrite {
     pub error_message: Option<String>,
     /// State-guarded capital correction.
     pub capital: CapitalReconcileSettlement,
-    /// Position upsert (present only when correcting an **entry** order into a
-    /// confirmed fill, applied exactly once as the order leaves a non-filled
-    /// state).
-    pub fill: Option<PositionFill>,
-    /// Position-lot exit (present only when correcting an **exit** order into a
-    /// confirmed (partial) fill). When set, the repo applies `apply_exit` (not
-    /// `apply_fill`); on `exit_fully` it completes the capital `Spent ->
-    /// Released`, and the entry intent's `status` is left unchanged.
-    pub exit: Option<PositionExit>,
-    /// Whether the reconciled exit fully closes the lot (`Spent -> Released`).
-    pub exit_fully: bool,
+    /// Venue-authoritative cumulative entry fill. The repository applies only
+    /// the missing cumulative state under the lot lock.
+    pub cumulative_fill: Option<CumulativePositionFill>,
+    /// Venue-authoritative cumulative exit state. The repository derives and
+    /// applies only the delta against the prior reconciliation summary.
+    pub cumulative_exit: Option<CumulativePositionExit>,
     /// Exit-FSM state to set on the intent for an exit-order reconciliation.
     pub exit_state: Option<ExitState>,
     /// Revert the lot `Closing -> Open` (a reconciled exit non-fill / cancel).
     pub revert_lot: bool,
     /// Reconciliation verdict to persist on the summary row.
     pub result: ReconciliationResult,
-    /// Full evidence chain collected this pass (replaces the row's chain;
-    /// callers carry forward prior evidence to keep the row append-only).
+    /// New evidence collected this pass. The repository appends it to the
+    /// existing summary chain while the order remains non-terminal.
     pub evidence: ReconciliationEvidenceChain,
     /// Venue-confirmed total filled shares, when known.
     pub venue_filled_shares: Option<Shares>,
@@ -187,9 +189,11 @@ pub struct ReconciliationLedgerWrite {
     pub realized_pnl_usd: Option<Usd>,
     /// Fee recomputed from the frozen decision-time schedule.
     pub expected_fee_usd: Option<Usd>,
-    /// Strongest authenticated/on-chain venue fee observation.
-    pub observed_fee_usd: Option<Usd>,
-    /// Signed `observed_fee_usd - expected_fee_usd` when both are known.
+    /// Fee reconstructed from authenticated venue trade facts.
+    pub derived_fee_usd: Option<Usd>,
+    /// Fee decoded from a validated on-chain settlement event.
+    pub settled_fee_usd: Option<Usd>,
+    /// Signed `settled_fee_usd - expected_fee_usd` when both are known.
     pub fee_delta_usd: Option<Usd>,
     /// Who resolved (machine `system:reconciliation_worker` or an operator).
     /// `None` while the verdict is non-terminal or `Unresolvable`.

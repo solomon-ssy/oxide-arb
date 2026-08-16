@@ -27,8 +27,8 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     clickhouse::{
-        ChDigest, ExchangeEventRow, ExchangeHistoryAcceptanceRow, ExchangeLogRawRow,
-        ExchangeMatchRow, ExecutionParticipantRow, MarketExecutionRow,
+        ChDigest, ExchangeEventRow, ExchangeFeeChargeRow, ExchangeHistoryAcceptanceRow,
+        ExchangeLogRawRow, ExchangeMatchRow, ExecutionParticipantRow, MarketExecutionRow,
     },
     config::FinalizedExchangeHistoryConfig,
     domain::data_plane::{
@@ -83,6 +83,7 @@ struct ProjectionQuarantine {
 pub struct ExchangeHistoryWriters {
     pub raw_logs: Arc<ChFactWriter<ExchangeLogRawRow>>,
     pub events: Arc<ChFactWriter<ExchangeEventRow>>,
+    pub fee_charges: Arc<ChFactWriter<ExchangeFeeChargeRow>>,
     pub matches: Arc<ChFactWriter<ExchangeMatchRow>>,
     pub executions: Arc<ChFactWriter<MarketExecutionRow>>,
     pub participants: Arc<ChFactWriter<ExecutionParticipantRow>>,
@@ -1138,6 +1139,14 @@ impl ExchangeHistoryWorker {
         )
         .await?;
         write_rows(
+            &self.writers.fee_charges,
+            "fee-charge",
+            chunk_id,
+            self.config.batch_size,
+            projection.fee_charges,
+        )
+        .await?;
+        write_rows(
             &self.writers.matches,
             "match",
             chunk_id,
@@ -1742,6 +1751,7 @@ const fn projection_kind(error: &ExecutionProjectionError) -> ExchangeHistoryQua
             ExchangeHistoryQuarantineKind::ContractMismatch
         }
         ExecutionProjectionError::DecodeFailure
+        | ExecutionProjectionError::FeeConservation { .. }
         | ExecutionProjectionError::InvalidAmount
         | ExecutionProjectionError::ZeroExecution
         | ExecutionProjectionError::InvalidTimestamp

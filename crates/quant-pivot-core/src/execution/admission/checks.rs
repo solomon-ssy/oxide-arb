@@ -603,7 +603,7 @@ impl AdmissionCheck for LiquidityDepthCheck {
         )
         .ok();
         let visible_cash = visible.as_ref().map_or(Usd::ZERO, |fill| {
-            Usd::new((-fill.total_cash_delta).max(Decimal::ZERO))
+            Usd::new((-fill.account_cash_delta_usd).max(Decimal::ZERO))
         });
         if !visible.is_some_and(|fill| fill.outcome == BookWalkOutcome::Filled) {
             return AdmissionCheckTrace::defer(self.id(), "visible depth below minimum")

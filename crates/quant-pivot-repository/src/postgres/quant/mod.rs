@@ -59,6 +59,7 @@ pub mod settlement_redeem;
 mod shadow_comparison;
 mod source_slice;
 mod trade_policy;
+mod venue_incentive;
 
 pub use account_snapshot::PgAccountSnapshotRepository;
 pub use attribution_artifact::PgAttributionArtifactRepository;
@@ -114,3 +115,4 @@ pub use runtime_activity::PgRuntimeActivityRepository;
 pub use shadow_comparison::PgShadowComparisonRepository;
 pub use source_slice::PgSourceSliceRepository;
 pub use trade_policy::PgTradePolicyRepository;
+pub use venue_incentive::PgVenueIncentiveRepository;

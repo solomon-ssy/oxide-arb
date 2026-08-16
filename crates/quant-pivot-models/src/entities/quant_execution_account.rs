@@ -4,8 +4,9 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    quant_account_snapshot, quant_order_intent, quant_position, quant_settlement_external_cursor,
-    quant_settlement_governed_action, quant_settlement_inventory_lot, quant_settlement_redeem,
+    quant_account_snapshot, quant_execution_fill, quant_order_intent, quant_position,
+    quant_settlement_external_cursor, quant_settlement_governed_action,
+    quant_settlement_inventory_lot, quant_settlement_redeem, quant_venue_incentive_event,
 };
 use crate::{
     enums::quant::ExecutionWalletKind,
@@ -32,6 +33,10 @@ pub struct Model {
     pub account_snapshot: HasMany<quant_account_snapshot::Entity>,
     #[sea_orm(has_many, relation_enum = "OrderIntent")]
     pub order_intent: HasMany<quant_order_intent::Entity>,
+    #[sea_orm(has_many, relation_enum = "ExecutionFill")]
+    pub execution_fill: HasMany<quant_execution_fill::Entity>,
+    #[sea_orm(has_many, relation_enum = "VenueIncentiveEvent")]
+    pub venue_incentive_event: HasMany<quant_venue_incentive_event::Entity>,
     #[sea_orm(has_many, relation_enum = "Position")]
     pub position: HasMany<quant_position::Entity>,
     #[sea_orm(has_many, relation_enum = "SettlementRedeem")]

@@ -1,7 +1,6 @@
 //! Immutable, content-addressed candidate serving manifest.
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -33,7 +32,6 @@ const PROMOTION_GATE_HASH_DOMAIN: &str = "quant-pivot/candidate-readiness-gate";
 #[serde(rename_all = "snake_case")]
 pub enum CandidateExplanationMethod {
     WeightedClosedForm,
-    ExactTreeShap,
 }
 
 impl CandidateExplanationMethod {
@@ -41,7 +39,6 @@ impl CandidateExplanationMethod {
     pub const fn wire_name(self) -> &'static str {
         match self {
             Self::WeightedClosedForm => "weighted_closed_form",
-            Self::ExactTreeShap => "exact_tree_shap",
         }
     }
 }
@@ -50,14 +47,7 @@ impl CandidateExplanationMethod {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CandidateExplanationVerification {
-    WeightedClosedForm {
-        verified_term_count: u64,
-    },
-    ExactTreeShap {
-        verified_case_count: u64,
-        max_efficiency_residual: Decimal,
-        max_prediction_residual: Decimal,
-    },
+    WeightedClosedForm { verified_term_count: u64 },
 }
 
 /// Immutable explainability-contract proof bound into the candidate manifest.
@@ -93,23 +83,6 @@ impl CandidateExplanationValidation {
         )
     }
 
-    pub fn tree_shap(
-        input_contract_hash: ContentHash,
-        verified_case_count: u64,
-        max_efficiency_residual: Decimal,
-        max_prediction_residual: Decimal,
-    ) -> Result<Self, ModelCandidateManifestError> {
-        Self::try_new(
-            CandidateExplanationMethod::ExactTreeShap,
-            input_contract_hash,
-            CandidateExplanationVerification::ExactTreeShap {
-                verified_case_count,
-                max_efficiency_residual,
-                max_prediction_residual,
-            },
-        )
-    }
-
     fn try_new(
         method: CandidateExplanationMethod,
         input_contract_hash: ContentHash,
@@ -139,7 +112,6 @@ impl CandidateExplanationValidation {
     }
 
     pub fn validate(&self) -> Result<(), ModelCandidateManifestError> {
-        let residual_limit = Decimal::from_parts(1, 0, 0, false, 12);
         let expected = CanonicalDigest::content_hash_typed(
             EXPLANATION_HASH_DOMAIN,
             EXPLANATION_FORMAT_VERSION,
@@ -158,21 +130,6 @@ impl CandidateExplanationValidation {
                     verified_term_count,
                 },
             ) => *verified_term_count > 0,
-            (
-                CandidateExplanationMethod::ExactTreeShap,
-                CandidateExplanationVerification::ExactTreeShap {
-                    verified_case_count,
-                    max_efficiency_residual,
-                    max_prediction_residual,
-                },
-            ) => {
-                *verified_case_count > 0
-                    && !max_efficiency_residual.is_sign_negative()
-                    && *max_efficiency_residual <= residual_limit
-                    && !max_prediction_residual.is_sign_negative()
-                    && *max_prediction_residual <= Decimal::from_parts(1, 0, 0, false, 10)
-            }
-            _ => false,
         };
         if self.format_version != EXPLANATION_FORMAT_VERSION
             || self.report_hash != expected
@@ -202,20 +159,11 @@ impl TryFrom<&ModelServingBindings> for CandidateExplanationValidation {
                 })?;
                 Self::weighted(bindings.transform.input_contract_hash, verified_term_count)
             }
-            ModelServingEstimatorBinding::Classical {
-                tree_shap: Some(tree_shap),
-                ..
-            } => Self::tree_shap(
-                bindings.transform.input_contract_hash,
-                tree_shap.verified_case_count,
-                tree_shap.max_efficiency_residual,
-                tree_shap.max_prediction_residual,
-            ),
-            ModelServingEstimatorBinding::Classical {
-                tree_shap: None, ..
-            } => Err(ModelCandidateManifestError::UnsupportedExplanation {
-                family: bindings.model.model_family,
-            }),
+            ModelServingEstimatorBinding::Classical { .. } => {
+                Err(ModelCandidateManifestError::UnsupportedExplanation {
+                    family: bindings.model.model_family,
+                })
+            }
         }
     }
 }

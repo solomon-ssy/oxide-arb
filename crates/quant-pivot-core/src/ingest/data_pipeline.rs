@@ -2050,6 +2050,7 @@ impl PartitionActor {
                 side,
                 size,
                 fee_rate_bps,
+                transaction_hash,
                 timestamp_ms,
                 trace,
             } => {
@@ -2061,6 +2062,7 @@ impl PartitionActor {
                     side: *side,
                     trade_size: *size,
                     fee_rate_bps: *fee_rate_bps,
+                    transaction_hash: transaction_hash.as_ref(),
                     timestamp_ms: *timestamp_ms,
                     trace: *trace,
                 })

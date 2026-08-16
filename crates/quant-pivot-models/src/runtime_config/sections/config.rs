@@ -920,8 +920,8 @@ pub struct SellQualityGateConfig {
     pub min_label_coverage: DecimalValue,
     /// Minimum CPCV path-set median rank IC in `[-1, 1]`; this hard gate
     /// replaces the deleted single-path soft `min_exit_alpha_rank_ic` and
-    /// mirrors the Buy-side `research.validation.gates.rank_ic_min`.
-    pub rank_ic_min: DecimalValue,
+    /// mirrors the Buy-side `research.validation.gates.target_rank_ic_min`.
+    pub target_rank_ic_min: DecimalValue,
     /// Maximum tolerated Probability of Backtest Overfitting (hard gate).
     pub max_pbo: DecimalValue,
     /// Minimum fraction of `ExitDecision` rows simulated from full L2 books.
@@ -935,7 +935,7 @@ impl Default for SellQualityGateConfig {
         Self {
             min_sample_count: 200,
             min_label_coverage: DecimalValue::new(rust_decimal_macros::dec!(0.60)),
-            rank_ic_min: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
+            target_rank_ic_min: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
             max_pbo: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
             min_l2_book_fidelity_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
             max_fallback_ratio: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
@@ -1453,10 +1453,8 @@ pub struct ResearchValidationTrialsConfig {
     pub lambda_multipliers: Vec<DecimalValue>,
     /// Rank-loss variants to cross with each lambda multiplier (`WeightedFactor`).
     pub rank_loss_kinds: Vec<RankLossKind>,
-    /// Multipliers applied to base `ForestParams.n_trees` (classical trial grid).
-    pub forest_n_trees_multipliers: Vec<DecimalValue>,
-    /// Multipliers applied to base `LinearParams.alpha` (classical trial grid).
-    pub linear_alpha_multipliers: Vec<DecimalValue>,
+    /// Multipliers applied to the payout logistic classifier's base `alpha`.
+    pub logistic_alpha_multipliers: Vec<DecimalValue>,
     /// Hard cap on the number of trials the selected family grid may expand to.
     pub max_trials: u32,
 }
@@ -1475,15 +1473,10 @@ impl Default for ResearchValidationTrialsConfig {
                 DecimalValue::new(rust_decimal_macros::dec!(3)),
             ],
             rank_loss_kinds: vec![
-                RankLossKind::RankIcWeightedRanknet,
+                RankLossKind::TargetRankIcWeightedRanknet,
                 RankLossKind::PairwiseRanknet,
             ],
-            forest_n_trees_multipliers: vec![
-                DecimalValue::new(rust_decimal_macros::dec!(0.5)),
-                DecimalValue::new(rust_decimal_macros::dec!(1)),
-                DecimalValue::new(rust_decimal_macros::dec!(2)),
-            ],
-            linear_alpha_multipliers: vec![
+            logistic_alpha_multipliers: vec![
                 DecimalValue::new(rust_decimal_macros::dec!(0.5)),
                 DecimalValue::new(rust_decimal_macros::dec!(1)),
                 DecimalValue::new(rust_decimal_macros::dec!(2)),
@@ -1523,7 +1516,7 @@ pub struct ResearchValidationGatesConfig {
     pub min_cpcv_paths: u32,
     /// Minimum CPCV path-set median rank IC (hard gate; replaces the deleted
     /// single-path `quality_gate.min_rank_ic` soft threshold).
-    pub rank_ic_min: DecimalValue,
+    pub target_rank_ic_min: DecimalValue,
     /// Target significance (`α`) the Deflated Sharpe Ratio must clear:
     /// `deflated_sharpe >= 1 - dsr_significance` (hard gate).
     pub dsr_significance: DecimalValue,
@@ -1544,7 +1537,7 @@ impl Default for ResearchValidationGatesConfig {
     fn default() -> Self {
         Self {
             min_cpcv_paths: 21,
-            rank_ic_min: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
+            target_rank_ic_min: DecimalValue::new(rust_decimal_macros::dec!(0.02)),
             dsr_significance: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
             // The reference CSCV paper describes 0.05 as the customary model
             // rejection boundary. A 0.5 threshold admits coin-flip selection.

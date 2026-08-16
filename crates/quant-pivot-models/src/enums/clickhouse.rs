@@ -84,7 +84,6 @@ pub enum ChSnapshotReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum ChExchangeVersion {
-    V1 = 1,
     V2 = 2,
 }
 

@@ -10,10 +10,11 @@ use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
     config::PortfolioSolverDeployConfig,
     domain::quant::{
-        CapitalOccupancyBucket, ExactVerificationEvidence, ExecutableEconomicTier,
-        ExistingPortfolioState, GlobalPortfolioPlan, PortfolioConstraintEvidence,
-        PortfolioObjectiveEvidence, PortfolioScenarioArtifact, PortfolioScenarioVisibility,
-        RepresentedRouteSet, ScenarioCashflow, ScenarioWeight, SolverEvidence,
+        CapitalOccupancyBucket, EntryExecutionEconomics, ExactVerificationEvidence,
+        ExecutableEconomicTier, ExistingPortfolioState, GlobalPortfolioPlan, HardReservationBucket,
+        PortfolioConstraintEvidence, PortfolioObjectiveEvidence, PortfolioScenarioArtifact,
+        PortfolioScenarioVisibility, RepresentedRouteSet, ScenarioCashflow,
+        ScenarioExecutionCashflow, ScenarioWeight, SolverEvidence,
     },
     enums::quant::{AccountSource, OutcomeSide},
     hashing::CanonicalDigest,
@@ -24,6 +25,8 @@ use quant_pivot_models::{
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde::Serialize;
+
+use crate::precision::quantize_venue_amount;
 
 use super::{
     AccountSnapshot, CapitalTimeBucketContract, SealedPortfolioScenarioArtifact,
@@ -673,6 +676,7 @@ pub(super) struct PreparedTier {
     pub stable_key: String,
     pub notional_micro: i64,
     pub scenario_net_micro: Vec<i64>,
+    pub scenario_risk_net_micro: Vec<i64>,
     pub distribution_numerators: Vec<i64>,
     pub nominal_numerator: i64,
     pub bucket_capital_micro: Vec<i64>,
@@ -846,10 +850,17 @@ fn prepare_tiers(
             });
             continue;
         }
-        let scenario_net_micro = canonical_cashflows(
+        let scenario_net_micro = canonical_tier_cashflows(
             &tier.scenario_cashflows,
             artifact.scenarios.len(),
             "tier scenario cashflows",
+            false,
+        )?;
+        let scenario_risk_net_micro = canonical_tier_cashflows(
+            &tier.scenario_cashflows,
+            artifact.scenarios.len(),
+            "tier risk scenario cashflows",
+            true,
         )?;
         let distribution_numerators = scenario
             .distribution_weights
@@ -863,13 +874,15 @@ fn prepare_tiers(
             &scenario.nominal_weights,
             "tier nominal distribution",
         )?;
-        let bucket_capital_micro = canonical_occupancy(
-            &tier.capital_occupancy,
+        let bucket_capital_micro = canonical_reservation(
+            &tier.hard_reservation_envelope,
             bucket_ends,
-            "tier capital occupancy",
+            "tier hard reservation envelope",
         )?;
-        let capital_hours_micro =
-            occupancy_hours_micro(&bucket_capital_micro, bucket_ends, "tier capital occupancy")?;
+        let capital_hours_micro = decimal_to_micro(
+            tier.economics.capital_occupancy_usd_hours.inner(),
+            "tier nominal capital occupancy",
+        )?;
         let stable_key = stable_tier_key(tier);
         if !economic_keys.insert(stable_key.clone()) {
             return Err(ReportError::ContractViolation {
@@ -887,8 +900,12 @@ fn prepare_tiers(
             category_key: tier.category.as_str().to_owned(),
             route_key: route_key(tier.route),
             stable_key,
-            notional_micro: usd_to_micro(tier.entry.notional_usd, "tier entry notional")?,
+            notional_micro: usd_to_micro(
+                tier.entry_execution.hard_reserved_cash_usd(),
+                "tier hard cash reservation",
+            )?,
             scenario_net_micro,
+            scenario_risk_net_micro,
             distribution_numerators,
             nominal_numerator,
             bucket_capital_micro,
@@ -1158,6 +1175,7 @@ impl PreparedGlobalModel {
             ]);
             values.extend(tier.distribution_numerators.iter().copied());
             values.extend(tier.scenario_net_micro.iter().copied());
+            values.extend(tier.scenario_risk_net_micro.iter().copied());
             values.extend(tier.bucket_capital_micro.iter().copied());
         }
         if values
@@ -1239,9 +1257,11 @@ impl PreparedGlobalModel {
         }
         for (index, existing) in self.existing_scenario_net_micro.iter().enumerate() {
             let scenario_bound = ensure_exact_expression(
-                "scenario_cashflow_expression",
+                "scenario_risk_cashflow_expression",
                 *existing,
-                self.tiers.iter().map(|tier| tier.scenario_net_micro[index]),
+                self.tiers
+                    .iter()
+                    .map(|tier| tier.scenario_risk_net_micro[index]),
                 selection_limit,
             )?;
             maximum = maximum.max(scenario_bound);
@@ -1366,7 +1386,7 @@ impl PreparedGlobalModel {
                             detail: "scaled nominal sum overflow".to_owned(),
                         })
                 })?;
-        let scenario_net = self.portfolio_scenario_net(selected)?;
+        let scenario_net = self.portfolio_scenario_risk_net(selected)?;
         let cvar_numerator =
             cvar_numerator(&scenario_net, &self.nominal_weights, self.tail_mass_bps)?;
         let capital_hours_micro =
@@ -1387,15 +1407,18 @@ impl PreparedGlobalModel {
         })
     }
 
-    fn portfolio_scenario_net(&self, selected: &[usize]) -> QuantResult<Vec<i64>> {
+    fn portfolio_scenario_risk_net(&self, selected: &[usize]) -> QuantResult<Vec<i64>> {
         let mut net = self.existing_scenario_net_micro.clone();
         for index in selected {
-            for (scenario_index, value) in self.tiers[*index].scenario_net_micro.iter().enumerate()
+            for (scenario_index, value) in self.tiers[*index]
+                .scenario_risk_net_micro
+                .iter()
+                .enumerate()
             {
                 net[scenario_index] = net[scenario_index].checked_add(*value).ok_or_else(|| {
                     ReportError::NumericOverflow {
-                        field: "portfolio_scenario_net",
-                        detail: "scaled scenario sum overflow".to_owned(),
+                        field: "portfolio_scenario_risk_net",
+                        detail: "scaled risk scenario sum overflow".to_owned(),
                     }
                 })?;
             }
@@ -1568,7 +1591,7 @@ impl PreparedGlobalModel {
         objectives: &ExactObjectives,
         checked: &mut u32,
     ) -> QuantResult<i64> {
-        let scenario_net = self.portfolio_scenario_net(selected)?;
+        let scenario_net = self.portfolio_scenario_risk_net(selected)?;
         let mut maximum_scenario_loss = 0_i64;
         for net in scenario_net {
             let loss = net.saturating_neg().max(0);
@@ -1609,8 +1632,8 @@ fn validate_tier_contract(
         .into());
     }
     if tier.tier_ordinal == 0
-        || !tier.shares.is_positive()
-        || !tier.entry.notional_usd.is_positive()
+        || !tier.entry_execution.requested_shares().is_positive()
+        || !tier.entry_execution.hard_reserved_cash_usd().is_positive()
     {
         return Err(ReportError::ContractViolation {
             detail: format!(
@@ -1620,10 +1643,17 @@ fn validate_tier_contract(
         }
         .into());
     }
-    let cashflows = canonical_cashflows(
+    let cashflows = canonical_tier_cashflows(
         &tier.scenario_cashflows,
         artifact.scenarios.len(),
         "tier economics verification",
+        false,
+    )?;
+    let risk_cashflows = canonical_tier_cashflows(
+        &tier.scenario_cashflows,
+        artifact.scenarios.len(),
+        "tier risk economics verification",
+        true,
     )?;
     let expected = distribution_weights
         .iter()
@@ -1656,23 +1686,16 @@ fn validate_tier_contract(
         .filter(|(cashflow, _)| **cashflow > 0)
         .map(|(_, weight)| *weight)
         .sum::<i64>();
-    let max_loss_micro = cashflows
+    let max_loss_micro = risk_cashflows
         .iter()
         .map(|cashflow| cashflow.saturating_neg().max(0))
         .max()
         .unwrap_or_default();
-    let bucket_ends = artifact
-        .discount_curve
-        .iter()
-        .map(|point| point.end_secs)
-        .collect::<Vec<_>>();
-    let occupancy = canonical_occupancy(
-        &tier.capital_occupancy,
-        &bucket_ends,
-        "tier economics verification",
+    let capital_hours = nominal_tier_capital_hours(
+        &tier.scenario_cashflows,
+        nominal_weights,
+        artifact.scenarios.len(),
     )?;
-    let capital_hours =
-        occupancy_hours_micro(&occupancy, &bucket_ends, "tier economics verification")?;
     let comparisons = [
         (
             tier.economics.nominal_expected_net_usd.inner(),
@@ -1744,7 +1767,8 @@ fn admission_rejection(
     if tier.probability_interval_width_bps > admission.max_probability_interval_width_bps {
         return Ok(Some(TierAdmissionRejectionCode::ProbabilityIntervalWidth));
     }
-    if tier.entry.notional_usd.inner() > policy.exposure_limits.max_single_recommendation_usd.value
+    if tier.entry_execution.hard_reserved_cash_usd().inner()
+        > policy.exposure_limits.max_single_recommendation_usd.value
     {
         return Ok(Some(
             TierAdmissionRejectionCode::SingleRecommendationExposure,
@@ -1755,8 +1779,8 @@ fn admission_rejection(
         .ok_or_else(|| ReportError::ContractViolation {
             detail: "liquidity buffer exceeds 10000 bps".to_owned(),
         })?;
-    if tier.entry.notional_usd.inner() * Decimal::from(10_000_u32)
-        > tier.entry.visible_liquidity_usd.inner() * Decimal::from(allowed_bps)
+    if tier.entry_execution.hard_reserved_cash_usd().inner() * Decimal::from(10_000_u32)
+        > tier.entry_execution.visible_liquidity_usd().inner() * Decimal::from(allowed_bps)
     {
         return Ok(Some(TierAdmissionRejectionCode::LiquidityBuffer));
     }
@@ -1796,7 +1820,7 @@ fn exit_capacity_rejection(
                 })
         })?;
     let required_shares = existing_shares
-        .checked_add(tier.shares.inner())
+        .checked_add(tier.entry_execution.requested_shares().inner())
         .ok_or_else(|| ReportError::NumericOverflow {
             field: "scenario_exit_capacity.required_shares",
             detail: "existing plus proposed shares overflowed Decimal".to_owned(),
@@ -1956,6 +1980,159 @@ fn canonical_cashflows(
         .collect()
 }
 
+fn canonical_tier_cashflows(
+    cashflows: &[ScenarioExecutionCashflow],
+    scenario_count: usize,
+    field: &'static str,
+    risk: bool,
+) -> QuantResult<Vec<i64>> {
+    let mut canonical = vec![None; scenario_count];
+    for cashflow in cashflows {
+        let index = usize::try_from(cashflow.scenario_index).map_err(|error| {
+            ReportError::ContractViolation {
+                detail: format!("{field} scenario index conversion failed: {error}"),
+            }
+        })?;
+        let slot = canonical
+            .get_mut(index)
+            .ok_or_else(|| ReportError::ContractViolation {
+                detail: format!(
+                    "{field} scenario index {} is out of range",
+                    cashflow.scenario_index
+                ),
+            })?;
+        let value = if risk {
+            cashflow.risk_net_usd
+        } else {
+            cashflow.discounted_net_usd
+        };
+        if slot.replace(usd_to_micro(value, field)?).is_some() {
+            return Err(ReportError::ContractViolation {
+                detail: format!(
+                    "{field} scenario index {} is duplicated",
+                    cashflow.scenario_index
+                ),
+            }
+            .into());
+        }
+    }
+    canonical
+        .into_iter()
+        .enumerate()
+        .map(|(index, cashflow)| {
+            cashflow.ok_or_else(|| {
+                ReportError::ContractViolation {
+                    detail: format!("{field} scenario index {index} is absent"),
+                }
+                .into()
+            })
+        })
+        .collect()
+}
+
+fn nominal_tier_capital_hours(
+    cashflows: &[ScenarioExecutionCashflow],
+    nominal_weights: &[i64],
+    scenario_count: usize,
+) -> QuantResult<i64> {
+    if cashflows.len() != scenario_count || nominal_weights.len() != scenario_count {
+        return Err(ReportError::ContractViolation {
+            detail: "tier capital occupancy does not cover the nominal scenario set".to_owned(),
+        }
+        .into());
+    }
+    let mut scenario_hours = vec![None; scenario_count];
+    for cashflow in cashflows {
+        let index = usize::try_from(cashflow.scenario_index).map_err(|error| {
+            ReportError::ContractViolation {
+                detail: format!("capital occupancy scenario index conversion failed: {error}"),
+            }
+        })?;
+        let slot = scenario_hours
+            .get_mut(index)
+            .ok_or_else(|| ReportError::ContractViolation {
+                detail: format!(
+                    "capital occupancy scenario index {} is out of range",
+                    cashflow.scenario_index
+                ),
+            })?;
+        let total = cashflow
+            .capital_occupancy
+            .iter()
+            .try_fold(Decimal::ZERO, |sum, slice| {
+                if slice.locked_cash_usd.is_negative() || slice.duration_secs == 0 {
+                    return Err(ReportError::ContractViolation {
+                        detail: "scenario capital occupancy contains an invalid slice".to_owned(),
+                    });
+                }
+                let hours = slice
+                    .locked_cash_usd
+                    .inner()
+                    .checked_mul(Decimal::from(slice.duration_secs))
+                    .and_then(|value| value.checked_div(Decimal::from(3_600_u64)))
+                    .ok_or_else(|| ReportError::NumericOverflow {
+                        field: "tier capital occupancy",
+                        detail: "scenario USD-hours overflowed Decimal".to_owned(),
+                    })?;
+                sum.checked_add(hours)
+                    .ok_or_else(|| ReportError::NumericOverflow {
+                        field: "tier capital occupancy",
+                        detail: "scenario USD-hours sum overflowed Decimal".to_owned(),
+                    })
+            })?;
+        let quantized_total = quantize_venue_amount(total);
+        if slot
+            .replace(decimal_to_micro(
+                quantized_total,
+                "tier scenario capital occupancy",
+            )?)
+            .is_some()
+        {
+            return Err(ReportError::ContractViolation {
+                detail: format!(
+                    "capital occupancy repeats scenario {}",
+                    cashflow.scenario_index
+                ),
+            }
+            .into());
+        }
+    }
+    let numerator = scenario_hours
+        .into_iter()
+        .zip(nominal_weights)
+        .enumerate()
+        .try_fold(0_i128, |sum, (index, (hours, weight))| {
+            let hours = hours.ok_or_else(|| ReportError::ContractViolation {
+                detail: format!("capital occupancy scenario {index} is absent"),
+            })?;
+            sum.checked_add(i128::from(hours) * i128::from(*weight))
+                .ok_or_else(|| ReportError::NumericOverflow {
+                    field: "tier nominal capital occupancy",
+                    detail: "weighted scenario USD-hours overflowed i128".to_owned(),
+                })
+        })?;
+    let denominator = i128::from(DISTRIBUTION_MASS_BPS);
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    let rounded = if remainder * 2 >= denominator {
+        quotient
+            .checked_add(1)
+            .ok_or_else(|| ReportError::NumericOverflow {
+                field: "tier nominal capital occupancy",
+                detail: "rounded weighted USD-hours overflowed i128".to_owned(),
+            })?
+    } else {
+        quotient
+    };
+    i64::try_from(rounded).map_err(|error| {
+        ReportError::NumericOverflow {
+            field: "tier nominal capital occupancy",
+            detail: error.to_string(),
+        }
+        .into()
+    })
+}
+
 fn canonical_occupancy(
     occupancy: &[CapitalOccupancyBucket],
     expected_ends: &[u64],
@@ -1975,6 +2152,28 @@ fn canonical_occupancy(
     occupancy
         .iter()
         .map(|bucket| usd_to_micro(bucket.locked_usd, field))
+        .collect()
+}
+
+fn canonical_reservation(
+    reservation: &[HardReservationBucket],
+    expected_ends: &[u64],
+    field: &'static str,
+) -> QuantResult<Vec<i64>> {
+    if reservation.len() != expected_ends.len()
+        || reservation
+            .iter()
+            .zip(expected_ends)
+            .any(|(bucket, expected)| bucket.end_secs != *expected)
+    {
+        return Err(ReportError::ContractViolation {
+            detail: format!("{field} does not exactly cover artifact time buckets"),
+        }
+        .into());
+    }
+    reservation
+        .iter()
+        .map(|bucket| usd_to_micro(bucket.reserved_cash_usd, field))
         .collect()
 }
 
@@ -2124,9 +2323,14 @@ fn weighted_micro_to_decimal(
 }
 
 fn stable_tier_key(tier: &ExecutableEconomicTier) -> String {
+    let entry_kind = match &tier.entry_execution {
+        EntryExecutionEconomics::Aggressive(_) => "aggressive",
+        EntryExecutionEconomics::Passive(_) => "passive",
+    };
     format!(
-        "{}:{}:{}:{}:{}:{:010}",
+        "{}:{}:{}:{}:{}:{}:{:010}",
         route_key(tier.route),
+        entry_kind,
         tier.event_id,
         tier.market_id,
         tier.token_id,

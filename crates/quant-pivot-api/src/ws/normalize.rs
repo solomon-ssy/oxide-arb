@@ -226,6 +226,7 @@ fn last_trade_event(
         side,
         size: ltp.size.map(Shares::new),
         fee_rate_bps: ltp.fee_rate_bps,
+        transaction_hash: None,
         timestamp_ms,
         trace: IngressTrace::new(ws_ingress, timestamp_ms),
     })

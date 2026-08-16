@@ -195,7 +195,7 @@ impl PathSetContract<'_> {
         assert_eq!(created.dsr_conservative_independent_trial_count, 1);
         assert_eq!(created.trial_grid_count, 2);
         assert_eq!(created.coord_search_effective_n, 2);
-        assert_eq!(created.median_rank_ic, dec!(0.12));
+        assert_eq!(created.median_target_rank_ic, dec!(0.12));
         let terminal = PgModelRunRepository::new(self.db.clone())
             .find_by_id(&self.model_run_id)
             .await
@@ -226,7 +226,7 @@ impl PathSetContract<'_> {
 
     async fn assert_worm(&self) {
         let mut tampered = serde_json::to_value(self.path_set).expect("serialize sealed path set");
-        tampered["median_rank_ic"] = serde_json::json!("0.99");
+        tampered["median_target_rank_ic"] = serde_json::json!("0.99");
         let tampered: NewBacktestPathSet =
             serde_json::from_value(tampered).expect("decode structurally valid tamper");
         let error = self
@@ -327,7 +327,7 @@ impl PathSetFixture<'_> {
             fold_artifacts: fold_artifacts_fixture(),
             path_count: 1,
             combination_count: 1,
-            median_rank_ic: dec!(0.12),
+            median_target_rank_ic: dec!(0.12),
             sharpe_distribution: SharpeDistribution {
                 min: dec!(0.1),
                 p25: dec!(0.4),
@@ -345,7 +345,7 @@ impl PathSetFixture<'_> {
                 scenario_residuals: group_returns.iter().copied().map(Some).collect(),
                 group_returns,
                 sharpe: dec!(0.8),
-                rank_ic: dec!(0.12),
+                target_rank_ic: dec!(0.12),
                 max_drawdown: dec!(0.005),
                 tail_loss: dec!(-0.005),
                 turnover: None,

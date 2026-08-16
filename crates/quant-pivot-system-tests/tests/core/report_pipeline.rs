@@ -432,8 +432,8 @@ pub async fn evidence_refs_rank_populated() {
     );
     assert!(
         rec.economic_tier_json
-            .entry
-            .visible_liquidity_usd
+            .entry_execution
+            .visible_liquidity_usd()
             .is_positive()
     );
     assert!(rec.economics_json.robust_expected_net_usd.is_positive());
@@ -465,6 +465,7 @@ pub async fn report_persists_real_history() {
             reserved_usd: Usd::ZERO,
             realized_pnl_cumulative_usd: Usd::ZERO,
             unrealized_pnl_usd: Usd::ZERO,
+            incentive_credit_cumulative_usd: Usd::ZERO,
             high_water_mark_usd: peak,
             drawdown_pct: dec!(0),
             account_snapshot_ref: None,

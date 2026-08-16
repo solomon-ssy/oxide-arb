@@ -18,8 +18,8 @@ use quant_pivot_models::{
         api::{PositionListQuery, PositionSummary},
         pagination::{PageWindow, Paginated},
         quant::{
-            ExitTrainingLotRow, LotExitEventRow, NewPosition, PositionExit, PositionFill,
-            PositionInfo,
+            CumulativePositionFill, ExitTrainingLotRow, LotExitEventRow, NewPosition, PositionExit,
+            PositionExitReconciliation, PositionFill, PositionInfo,
         },
     },
     entities::{
@@ -386,6 +386,101 @@ impl PgPositionRepository {
             .map_err(StorageError::from)
             .map(Into::into)
     }
+
+    /// Advance a per-intent lot to venue-authoritative cumulative fill totals.
+    ///
+    /// The lot lock makes equal totals an idempotent no-op. Any regression is
+    /// rejected because confirmed venue trades are append-only facts.
+    pub async fn reconcile_fill(
+        db: &impl ConnectionTrait,
+        fill: CumulativePositionFill,
+    ) -> Result<PositionInfo, StorageError> {
+        if !fill.cumulative_shares.is_positive() || fill.cumulative_cost_usd.is_negative() {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_POSITION),
+                "cumulative position fill must have positive shares and non-negative cost",
+            ));
+        }
+        let existing = Entity::find()
+            .filter(Column::OrderIntentId.eq(fill.order_intent_id))
+            .lock_exclusive()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?;
+        let Some(row) = existing else {
+            let average_price = price_from_cost(fill.cumulative_cost_usd, fill.cumulative_shares)?;
+            return Self::apply_fill(
+                db,
+                PositionFill {
+                    order_intent_id: fill.order_intent_id,
+                    execution_account_id: fill.execution_account_id,
+                    token_id: fill.token_id,
+                    market_id: fill.market_id,
+                    event_id: fill.event_id,
+                    category: fill.category,
+                    side: fill.side,
+                    shares: fill.cumulative_shares,
+                    price: average_price,
+                    cost_usd: fill.cumulative_cost_usd,
+                    filled_at: fill.observed_at,
+                    source: fill.source,
+                },
+            )
+            .await;
+        };
+        if row.execution_account_id != fill.execution_account_id
+            || row.token_id != fill.token_id
+            || row.market_id != fill.market_id
+            || row.event_id != fill.event_id
+            || row.category != fill.category
+            || row.side != fill.side
+        {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_POSITION),
+                format!(
+                    "cumulative fill identity differs from position lot for intent {}",
+                    fill.order_intent_id
+                ),
+            ));
+        }
+        if matches!(
+            row.state,
+            PositionLedgerState::Closed | PositionLedgerState::Settled
+        ) {
+            return Err(StorageError::state_conflict(
+                QUANT_POSITION,
+                Some(&row.order_intent_id),
+                "cannot reconcile fill into closed position lot",
+            ));
+        }
+        if fill.cumulative_shares < row.shares || fill.cumulative_cost_usd < row.cost_usd {
+            return Err(StorageError::state_conflict(
+                QUANT_POSITION,
+                Some(&row.order_intent_id),
+                format!(
+                    "cumulative fill regressed: shares {} -> {}, cost {} -> {}",
+                    row.shares, fill.cumulative_shares, row.cost_usd, fill.cumulative_cost_usd
+                ),
+            ));
+        }
+        if fill.cumulative_shares == row.shares && fill.cumulative_cost_usd == row.cost_usd {
+            return Ok(row.into());
+        }
+        let avg_price = price_from_cost(fill.cumulative_cost_usd, fill.cumulative_shares)?;
+        let mut active = row.into_active_model();
+        active.state = ActiveValue::Set(PositionLedgerState::Open);
+        active.shares = ActiveValue::Set(fill.cumulative_shares);
+        active.avg_price = ActiveValue::Set(avg_price);
+        active.cost_usd = ActiveValue::Set(fill.cumulative_cost_usd);
+        active.source = ActiveValue::Set(fill.source);
+        active.updated_at = ActiveValue::Set(fill.observed_at);
+        active.closed_at = ActiveValue::Set(None);
+        active
+            .update(db)
+            .await
+            .map_err(StorageError::from)
+            .map(Into::into)
+    }
 }
 
 impl PgPositionRepository {
@@ -452,6 +547,88 @@ impl PgPositionRepository {
         active.cost_usd = ActiveValue::Set(normalized_cost);
         active.realized_pnl_usd = ActiveValue::Set(realized_pnl_usd);
         active.updated_at = ActiveValue::Set(exit.exited_at);
+        active.closed_at = ActiveValue::Set(closed_at);
+        active
+            .update(db)
+            .await
+            .map_err(StorageError::from)
+            .map(Into::into)
+    }
+
+    /// Apply the delta between two venue-authoritative cumulative exit states.
+    ///
+    /// `shares_delta == 0` is valid when a later fee measurement corrects the
+    /// cumulative realized `PnL`. Equal cumulative states remain an idempotent
+    /// no-op at the execution-submission owner before reaching this method.
+    pub async fn reconcile_exit(
+        db: &impl ConnectionTrait,
+        order_intent_id: &OrderIntentId,
+        adjustment: PositionExitReconciliation,
+    ) -> Result<PositionInfo, StorageError> {
+        let Some(row) = Entity::find()
+            .filter(Column::OrderIntentId.eq(*order_intent_id))
+            .lock_exclusive()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Err(StorageError::not_found(QUANT_POSITION, order_intent_id));
+        };
+        if adjustment.shares_delta > row.shares {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_POSITION),
+                format!(
+                    "reconciled exit delta exceeds remaining shares for intent {order_intent_id}: {} > {}",
+                    adjustment.shares_delta, row.shares
+                ),
+            ));
+        }
+        if adjustment.shares_delta.is_zero() && adjustment.realized_pnl_delta_usd.is_zero() {
+            return Ok(row.into());
+        }
+        if matches!(
+            row.state,
+            PositionLedgerState::Closed | PositionLedgerState::Settled
+        ) && adjustment.shares_delta.is_positive()
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_POSITION,
+                Some(order_intent_id),
+                "cannot apply an additional exit fill to a closed position lot",
+            ));
+        }
+
+        let cost_reduction = row.avg_price * adjustment.shares_delta;
+        let shares = row.shares - adjustment.shares_delta;
+        let cost_usd = row.cost_usd - cost_reduction;
+        let realized_pnl_usd = row.realized_pnl_usd + adjustment.realized_pnl_delta_usd;
+        let (state, closed_at, normalized_cost) = if shares.is_zero() {
+            let terminal_state = if adjustment.reason == ExitReason::ResolutionRedeem {
+                PositionLedgerState::Settled
+            } else {
+                PositionLedgerState::Closed
+            };
+            (
+                terminal_state,
+                row.closed_at.or(Some(adjustment.observed_at)),
+                Usd::ZERO,
+            )
+        } else {
+            (PositionLedgerState::Closing, row.closed_at, cost_usd)
+        };
+        let avg_price = if shares.is_zero() {
+            Price::ZERO
+        } else {
+            price_from_cost(normalized_cost, shares)?
+        };
+
+        let mut active = row.into_active_model();
+        active.state = ActiveValue::Set(state);
+        active.shares = ActiveValue::Set(shares);
+        active.avg_price = ActiveValue::Set(avg_price);
+        active.cost_usd = ActiveValue::Set(normalized_cost);
+        active.realized_pnl_usd = ActiveValue::Set(realized_pnl_usd);
+        active.updated_at = ActiveValue::Set(adjustment.observed_at);
         active.closed_at = ActiveValue::Set(closed_at);
         active
             .update(db)

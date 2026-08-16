@@ -12,6 +12,7 @@ pub use account::{AccountDrawdown, AccountSnapshot};
 pub use capital_bucket_contract::{CapitalTimeBucketContract, CapitalTimeBucketContractError};
 pub use economic::{
     EconomicTierFactory, ExecutableCashTierSeedFactory, ExecutableCashTierSeedInput,
+    ExecutablePassiveTierSeedFactory, ExecutablePassiveTierSeedInput,
     ExecutableTierLadderSeedFactory, ExecutableTierLadderSeedInput, ExecutableTierSeed,
     ExistingPortfolioFactory,
 };

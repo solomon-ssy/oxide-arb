@@ -1596,7 +1596,7 @@ mod tests {
         let hub = MetricsHub::new();
         hub.set_feedback_truth(60, 2, 30, 20, 10);
         hub.set_scheduler_overdue(1, 120);
-        hub.record_attribution_efficiency_failure("exact_tree_shap");
+        hub.record_attribution_efficiency_failure("weighted_closed_form");
         hub.record_feedback_quality_gate("pbo", "fail");
         hub.record_feedback_permit_expiry();
         hub.record_route_governance_conflict("promotion", "route");
@@ -1620,7 +1620,7 @@ mod tests {
         ] {
             assert!(body.contains(name), "missing metric {name}");
         }
-        assert!(body.contains(r#"method="exact_tree_shap""#));
+        assert!(body.contains(r#"method="weighted_closed_form""#));
         assert!(body.contains(r#"gate="pbo""#));
         assert!(body.contains(r#"layer="route""#));
         assert!(body.contains(r#"outcome="recovered""#));

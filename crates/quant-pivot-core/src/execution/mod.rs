@@ -13,6 +13,7 @@ pub mod execution_order_lifecycle;
 pub mod exit_dispatcher;
 pub mod exit_monitor;
 pub mod exit_monitor_service;
+pub mod fee_settlement;
 pub mod intent_lifecycle;
 pub mod intent_service;
 pub mod mode_gate;
@@ -57,6 +58,7 @@ pub use exit_monitor::{
     ExitSignalVerdict,
 };
 pub use exit_monitor_service::{ExitMonitorService, ExitMonitorServiceDeps};
+pub use fee_settlement::OnChainFeeSettlementService;
 pub use intent_lifecycle::IntentLifecyclePublisher;
 pub use intent_service::{CoreOrderIntentService, IntentTerminalEventSink, OrderIntentServiceDeps};
 pub use mode_gate::{DefaultRuntimeModeGate, IntentPolicyDecision, RuntimeModeGate};

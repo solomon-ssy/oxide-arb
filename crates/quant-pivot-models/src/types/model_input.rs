@@ -20,13 +20,6 @@ use crate::{enums::model::ModelFamily, types::TradePolicyArtifactId};
 pub enum ModelTrainingTarget {
     /// Calibrated expected terminal payout in `[0, 1]` for a canonical token.
     OutcomePayout,
-    /// Research-only forward mark-return regression target. It is valid for
-    /// offline model comparison but cannot become a promoted Buy Route because
-    /// it does not provide a calibrated payout distribution.
-    ForwardReturn {
-        /// Exact forward-label horizon in seconds.
-        horizon_secs: u64,
-    },
     /// Executable advantage, in bps, of exiting a held lot instead of holding.
     HoldVsExitAlpha,
 }
@@ -37,7 +30,6 @@ impl ModelTrainingTarget {
     pub const fn label_name(self) -> &'static str {
         match self {
             Self::OutcomePayout => "token_payout_ratio",
-            Self::ForwardReturn { .. } => "return_to_horizon",
             Self::HoldVsExitAlpha => "hold_vs_exit_alpha_bps",
         }
     }
@@ -45,10 +37,7 @@ impl ModelTrainingTarget {
     /// Exact governed label horizon for this target.
     #[must_use]
     pub const fn label_horizon_secs(self) -> u64 {
-        match self {
-            Self::ForwardReturn { horizon_secs } => horizon_secs,
-            Self::OutcomePayout | Self::HoldVsExitAlpha => 0,
-        }
+        0
     }
 
     fn validate_family(self, model_family: ModelFamily) -> Result<(), String> {
@@ -58,36 +47,12 @@ impl ModelTrainingTarget {
                 ModelFamily::WeightedFactor | ModelFamily::ClassicalLogisticRegression,
             )
             | (Self::HoldVsExitAlpha, ModelFamily::HoldVsExitWeighted) => Ok(()),
-            (
-                Self::ForwardReturn { horizon_secs },
-                ModelFamily::ClassicalGradientBoostedTrees
-                | ModelFamily::ClassicalRandomForest
-                | ModelFamily::ClassicalExtraTrees
-                | ModelFamily::ClassicalRidge
-                | ModelFamily::ClassicalLasso
-                | ModelFamily::ClassicalElasticNet,
-            ) if horizon_secs > 0 => Ok(()),
-            (
-                Self::ForwardReturn { horizon_secs: 0 },
-                ModelFamily::ClassicalGradientBoostedTrees
-                | ModelFamily::ClassicalRandomForest
-                | ModelFamily::ClassicalExtraTrees
-                | ModelFamily::ClassicalRidge
-                | ModelFamily::ClassicalLasso
-                | ModelFamily::ClassicalElasticNet,
-            ) => Err("forward-return target horizon must be positive".to_owned()),
-            (Self::OutcomePayout | Self::ForwardReturn { .. }, ModelFamily::HoldVsExitWeighted) => {
+            (Self::OutcomePayout, ModelFamily::HoldVsExitWeighted) => {
                 Err("hold-vs-exit model families cannot use a Buy target".to_owned())
             }
             (Self::HoldVsExitAlpha, _) => {
                 Err("Buy model families cannot use the sell-side hold-vs-exit target".to_owned())
             }
-            (Self::OutcomePayout, family) => Err(format!(
-                "model family {family} cannot emit a calibrated outcome-payout forecast"
-            )),
-            (Self::ForwardReturn { .. }, family) => Err(format!(
-                "model family {family} cannot use the research-only forward-return target"
-            )),
         }
     }
 }
@@ -279,30 +244,6 @@ mod tests {
             contract(ModelTrainingTarget::OutcomePayout)
                 .validate_for(ModelFamily::ClassicalLogisticRegression)
                 .is_ok()
-        );
-        assert!(
-            contract(ModelTrainingTarget::OutcomePayout)
-                .validate_for(ModelFamily::ClassicalRidge)
-                .is_err()
-        );
-        assert!(
-            contract(ModelTrainingTarget::ForwardReturn {
-                horizon_secs: 3_600
-            })
-            .validate_for(ModelFamily::ClassicalRidge)
-            .is_ok()
-        );
-        assert!(
-            contract(ModelTrainingTarget::ForwardReturn { horizon_secs: 0 })
-                .validate_for(ModelFamily::ClassicalRidge)
-                .is_err()
-        );
-        assert!(
-            contract(ModelTrainingTarget::ForwardReturn {
-                horizon_secs: 3_600
-            })
-            .validate_for(ModelFamily::WeightedFactor)
-            .is_err()
         );
         assert!(
             contract(ModelTrainingTarget::HoldVsExitAlpha)

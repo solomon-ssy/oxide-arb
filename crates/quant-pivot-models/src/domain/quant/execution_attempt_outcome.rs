@@ -440,7 +440,10 @@ fn validate_fields(
         ExecutionAttemptTerminalState::PartiallyFilled => {
             if !outcome.filled_shares.is_positive()
                 || outcome.filled_shares >= outcome.requested_shares
-                || outcome.entry_order_state != ExecutionOrderState::PartiallyFilled
+                || !matches!(
+                    outcome.entry_order_state,
+                    ExecutionOrderState::Cancelled | ExecutionOrderState::Failed
+                )
             {
                 return Err(
                     ExecutionAttemptOutcomeContractError::TerminalStateMismatch {

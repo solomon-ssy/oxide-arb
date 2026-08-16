@@ -167,6 +167,7 @@ pg_enum! {
         NotBinary => "not_binary",
         InvalidTokenPair => "invalid_token_pair",
         UnsupportedTickSize => "unsupported_tick_size",
+        InvalidFeeSchedule => "invalid_fee_schedule",
         DuplicateEntityId => "duplicate_entity_id",
         MalformedEntity => "malformed_entity",
         CursorProtocolViolation => "cursor_protocol_violation",

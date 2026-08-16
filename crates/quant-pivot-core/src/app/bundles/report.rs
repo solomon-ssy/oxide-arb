@@ -23,6 +23,7 @@ use quant_pivot_repository::{
     traits::{
         EquitySnapshotRepository, FeatureParityRepository, PolicyRepository, PositionRepository,
         RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
+        VenueIncentiveRepository,
     },
 };
 
@@ -82,6 +83,7 @@ impl ReportBundle {
             drawdown_provider: Arc::new(EquitySnapshotService::new(
                 Arc::clone(&equity_repo),
                 Arc::clone(&position_repo),
+                Arc::clone(&deps.infra.repos.venue_incentive) as Arc<dyn VenueIncentiveRepository>,
                 deps.account.execution_account.execution_account_id,
             )),
             composer,

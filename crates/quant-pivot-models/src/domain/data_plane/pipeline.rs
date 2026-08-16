@@ -12,7 +12,7 @@ use crate::{
         common::{Side, TickSize},
         system::ShardConnectionStatus,
     },
-    types::{ContentHash, MarketId, Price, Shares, TokenId, TokenKey},
+    types::{ContentHash, EvmTransactionHash, MarketId, Price, Shares, TokenId, TokenKey},
 };
 
 /// Process-local continuity identity for one physical WebSocket stream.
@@ -160,6 +160,7 @@ pub enum PipelineEvent {
         side: Option<Side>,
         size: Option<Shares>,
         fee_rate_bps: Option<Decimal>,
+        transaction_hash: Option<EvmTransactionHash>,
         timestamp_ms: u64,
         trace: IngressTrace,
     },

@@ -9,10 +9,10 @@ use quant_pivot_models::{
     domain::{
         governance::NewOperationLog,
         quant::{
-            ExecutableEconomicTier, NewAccountSnapshot, NewEntryConditionInstance,
-            NewEquitySnapshot, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-            NewReportDataQualitySnapshot, NewReportRouteRun, NewReportTransaction,
-            PortfolioDecisionResult,
+            EntryExecutionEconomics, ExecutableEconomicTier, NewAccountSnapshot,
+            NewEntryConditionInstance, NewEquitySnapshot, NewPortfolioPlan, NewRecommendation,
+            NewRecommendationReport, NewReportDataQualitySnapshot, NewReportRouteRun,
+            NewReportTransaction, PortfolioDecisionResult,
         },
     },
     enums::{
@@ -27,7 +27,7 @@ use quant_pivot_models::{
     hashing::{CanonicalDigest, canonical_state_hash},
     runtime_config::{BuyModelRoute, DecisionPolicySnapshot},
     types::{
-        BookSnapshotRef, BootstrapExitGuidance, ConditionTruth, DecisionPolicySnapshotId,
+        BookSnapshotRef, BootstrapExitGuidance, Bps, ConditionTruth, DecisionPolicySnapshotId,
         EligibilitySummary, EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
         EntryOrderPolicy, EntryOrderTemplate, EntryPlan, EventId, EvidenceRefs, EvidenceRefsInput,
         ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FactorDefinitionId, FeatureVectorId,
@@ -132,7 +132,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
                 .execution_eligibility
                 .is_eligible(QuantRuntimeMode::AutoExecution)
             {
-                auto_authorized_total += planned.tier.entry.notional_usd;
+                auto_authorized_total += planned.tier.entry_execution.hard_reserved_cash_usd();
             }
             rows.push(composed);
         }
@@ -295,7 +295,7 @@ impl ExposureCursor {
     }
 
     fn allocate(&mut self, planned: &PlannedReportRecommendation) -> SizingExposure {
-        let amount = planned.tier.entry.notional_usd;
+        let amount = planned.tier.entry_execution.hard_reserved_cash_usd();
         let market = self
             .market
             .entry(planned.tier.market_id.clone())
@@ -339,6 +339,35 @@ struct ComposedRecommendationRows {
     condition_instance: NewEntryConditionInstance,
 }
 
+fn immediate_condition_instance(
+    recommendation_id: RecommendationId,
+    valid_until: DateTime<Utc>,
+) -> NewEntryConditionInstance {
+    NewEntryConditionInstance {
+        condition_instance_id: EntryConditionInstanceId::from_v7(),
+        recommendation_id,
+        artifact_id: None,
+        artifact_hash: None,
+        state: EntryConditionState::NotRequired,
+        truth_json: Some(ConditionTruth::Satisfied),
+        revision: 0,
+        evaluation_hash: None,
+        input_fingerprint: None,
+        continuity_hash: None,
+        fold_state_json: EntryConditionFoldState::default(),
+        confirmation_started_at: None,
+        last_evaluated_at: None,
+        next_evaluation_at: None,
+        expires_at: valid_until,
+        lease_owner: None,
+        lease_expires_at: None,
+        lease_epoch: 0,
+        claimed_by_intent_id: None,
+        claim_admission_state_version: None,
+        consumed_at: None,
+    }
+}
+
 fn compose_recommendation(
     report_id: &RecommendationReportId,
     planned: &PlannedReportRecommendation,
@@ -375,7 +404,12 @@ fn compose_recommendation(
     )?;
     let exposure_after = exposure.allocate(planned);
     let portfolio_weight_pct = if input.account.capital_base_usd.is_positive() {
-        planned.tier.entry.notional_usd.inner() / input.account.capital_base_usd.inner()
+        planned
+            .tier
+            .entry_execution
+            .hard_reserved_cash_usd()
+            .inner()
+            / input.account.capital_base_usd.inner()
     } else {
         return Err(ReportError::InvariantViolation {
             stage: "global_recommendation_compose",
@@ -385,9 +419,16 @@ fn compose_recommendation(
     };
     let sizing = SizingPlan {
         economic_tier_id: planned.tier.economic_tier_id,
-        suggested_usd: planned.tier.entry.notional_usd,
-        suggested_shares: planned.tier.shares,
-        entry_vwap: planned.tier.entry.entry_vwap,
+        requested_shares: planned.tier.entry_execution.requested_shares(),
+        expected_filled_shares: planned.tier.entry_execution.expected_filled_shares(),
+        hard_reserved_cash_usd: planned.tier.entry_execution.hard_reserved_cash_usd(),
+        immediate_fee_usd: planned.tier.entry_execution.immediate_fee_usd(),
+        expected_maker_rebate_usd: planned.tier.entry_execution.expected_maker_rebate_usd(),
+        maker_rebate_schedule: match &planned.tier.entry_execution {
+            EntryExecutionEconomics::Aggressive(_) => None,
+            EntryExecutionEconomics::Passive(entry) => entry.maker_rebate_schedule,
+        },
+        reference_entry_price: tier_reference_price(&planned.tier.entry_execution),
         portfolio_weight_pct,
         market_exposure_after_usd: exposure_after.market,
         event_exposure_after_usd: exposure_after.event,
@@ -406,7 +447,7 @@ fn compose_recommendation(
     let auto_allowed = !bootstrap
         && auto_execution_allowed(
             planned.rank,
-            sizing.suggested_usd,
+            sizing.hard_reserved_cash_usd,
             auto_authorized_before,
             input.runtime_config,
         );
@@ -462,29 +503,7 @@ fn compose_recommendation(
         status: RecommendationStatus::Prepared,
         created_at: input.published_at,
     };
-    let condition_instance = NewEntryConditionInstance {
-        condition_instance_id: EntryConditionInstanceId::from_v7(),
-        recommendation_id,
-        artifact_id: None,
-        artifact_hash: None,
-        state: EntryConditionState::NotRequired,
-        truth_json: Some(ConditionTruth::Satisfied),
-        revision: 0,
-        evaluation_hash: None,
-        input_fingerprint: None,
-        continuity_hash: None,
-        fold_state_json: EntryConditionFoldState::default(),
-        confirmation_started_at: None,
-        last_evaluated_at: None,
-        next_evaluation_at: None,
-        expires_at: valid_until,
-        lease_owner: None,
-        lease_expires_at: None,
-        lease_epoch: 0,
-        claimed_by_intent_id: None,
-        claim_admission_state_version: None,
-        consumed_at: None,
-    };
+    let condition_instance = immediate_condition_instance(recommendation_id, valid_until);
     Ok(ComposedRecommendationRows {
         recommendation,
         condition_instance,
@@ -649,29 +668,54 @@ fn immediate_entry_plan(
         }
         .into());
     }
-    let (fill_requirement, max_slippage_bps) = match &cohort.entry_order {
+    let (order_policy, max_slippage_bps, entry_valid_until) = match &cohort.entry_order {
         EntryOrderTemplate::Aggressive {
             fill_requirement,
             max_slippage_bps,
             ..
-        } => (*fill_requirement, *max_slippage_bps),
-        EntryOrderTemplate::PassivePostOnly { .. } => {
-            return Err(ReportError::InvariantViolation {
-                stage: "global_recommendation_compose",
-                detail: "selected executable tier uses a non-executable passive entry".to_owned(),
+        } => (
+            EntryOrderPolicy::Aggressive {
+                worst_price: planned.entry_limit_price,
+                fill_requirement: *fill_requirement,
+            },
+            *max_slippage_bps,
+            valid_until,
+        ),
+        EntryOrderTemplate::PassivePostOnly { good_til_secs, .. } => {
+            let EntryExecutionEconomics::Passive(entry) = &planned.tier.entry_execution else {
+                return Err(ReportError::InvariantViolation {
+                    stage: "global_recommendation_compose",
+                    detail: "passive Trade Policy cohort selected a non-passive economic tier"
+                        .to_owned(),
+                }
+                .into());
+            };
+            if entry.good_til_secs != *good_til_secs
+                || entry.limit_price != planned.entry_limit_price
+            {
+                return Err(ReportError::InvariantViolation {
+                    stage: "global_recommendation_compose",
+                    detail: "passive tier differs from its published GTD or limit contract"
+                        .to_owned(),
+                }
+                .into());
             }
-            .into());
+            (
+                EntryOrderPolicy::Passive {
+                    limit_price: entry.limit_price,
+                    post_only: true,
+                },
+                Bps::ZERO,
+                valid_until.min(instant_plus_secs(valid_from, *good_til_secs)?),
+            )
         }
     };
     Ok(EntryPlan {
         condition: EntryConditionPlan::Immediate,
-        order_policy: EntryOrderPolicy::Aggressive {
-            worst_price: planned.entry_limit_price,
-            fill_requirement,
-        },
+        order_policy,
         max_slippage_bps,
         valid_from,
-        valid_until,
+        valid_until: entry_valid_until,
         min_depth_usd: cohort.key.cash_budget_tier,
         max_book_age_ms: cohort.max_book_age_ms,
         cancel_if_not_triggered: true,
@@ -680,6 +724,13 @@ fn immediate_entry_plan(
             provenance.artifact_id, provenance.cohort_index
         ),
     })
+}
+
+fn tier_reference_price(entry: &EntryExecutionEconomics) -> Price {
+    match entry {
+        EntryExecutionEconomics::Aggressive(entry) => entry.entry_vwap,
+        EntryExecutionEconomics::Passive(entry) => entry.limit_price,
+    }
 }
 
 fn recommendation_exit_plan(
@@ -709,7 +760,7 @@ fn recommendation_exit_plan(
             },
         });
     };
-    let entry = planned.tier.entry.entry_vwap.inner();
+    let entry = tier_reference_price(&planned.tier.entry_execution).inner();
     let upper_factor = Decimal::ONE + cohort.upper_barrier_bps.inner() / Decimal::from(10_000);
     let lower_factor = Decimal::ONE - cohort.lower_barrier_bps.inner() / Decimal::from(10_000);
     let time_exit_at = instant_plus_secs(as_of, cohort.vertical_barrier_secs)?;
@@ -903,7 +954,10 @@ fn report_summary(
     let mut event_allocation = BTreeMap::new();
     let mut route_allocation = BTreeMap::new();
     for recommendation in recommendations {
-        let amount = recommendation.economic_tier_json.entry.notional_usd;
+        let amount = recommendation
+            .economic_tier_json
+            .entry_execution
+            .hard_reserved_cash_usd();
         *category_allocation
             .entry(recommendation.economic_tier_json.category)
             .or_default() += amount;
@@ -914,11 +968,21 @@ fn report_summary(
     }
     let total_suggested_usd = recommendations
         .iter()
-        .map(|recommendation| recommendation.economic_tier_json.entry.notional_usd)
+        .map(|recommendation| {
+            recommendation
+                .economic_tier_json
+                .entry_execution
+                .hard_reserved_cash_usd()
+        })
         .sum();
     let max_single_recommendation_usd = recommendations
         .iter()
-        .map(|recommendation| recommendation.economic_tier_json.entry.notional_usd)
+        .map(|recommendation| {
+            recommendation
+                .economic_tier_json
+                .entry_execution
+                .hard_reserved_cash_usd()
+        })
         .max()
         .unwrap_or(Usd::ZERO);
     let (robust, nominal, cvar, maximum_loss, capital_hours) =
@@ -1058,7 +1122,7 @@ fn recommendation_events(
                     economics.capital_occupancy_usd_hours.inner(),
                 )),
                 marginal_portfolio_value_usd: ChUsd::from(economics.marginal_portfolio_value_usd),
-                suggested_usd: ChUsd::from(recommendation.trade_plan.sizing.suggested_usd),
+                suggested_usd: ChUsd::from(recommendation.trade_plan.sizing.hard_reserved_cash_usd),
                 valid_until: recommendation.valid_until.timestamp_millis(),
             })
         })
@@ -1091,7 +1155,7 @@ fn report_notification(
                 marginal_portfolio_value_usd: recommendation
                     .economics_json
                     .marginal_portfolio_value_usd,
-                suggested_usd: recommendation.trade_plan.sizing.suggested_usd,
+                suggested_usd: recommendation.trade_plan.sizing.hard_reserved_cash_usd,
             })
             .collect(),
         warnings: summary.warnings.clone(),

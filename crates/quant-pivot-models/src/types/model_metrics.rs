@@ -34,7 +34,7 @@ pub struct ObjectiveComponentMetrics {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RankingDiagnosticsMetrics {
-    pub mean_rank_ic: Decimal,
+    pub mean_target_rank_ic: Decimal,
     pub mean_ndcg_at_k: Decimal,
     pub ndcg_k: u32,
     pub group_count: u64,
@@ -45,7 +45,7 @@ pub struct RankingDiagnosticsMetrics {
 #[serde(rename_all = "snake_case")]
 pub enum HeldOutMetricKind {
     NegativeTotalLearningToRankLoss,
-    MeanRollingFoldRankIc,
+    MeanRollingFoldTargetRankIc,
 }
 
 /// Shared frozen validation result for a trained model version.

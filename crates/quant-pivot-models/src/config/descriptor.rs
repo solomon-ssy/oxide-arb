@@ -13,7 +13,7 @@ use super::{
 };
 
 /// The audited leaf count at the clean-break descriptor boundary.
-pub const DEPLOY_CONFIG_EXPECTED_LEAF_COUNT: usize = 331;
+pub const DEPLOY_CONFIG_EXPECTED_LEAF_COUNT: usize = 333;
 
 /// Every `SecretText` descriptor path. New secret fields must update this exhaustive set.
 pub const DEPLOY_SECRET_PATHS: [&str; 14] = [

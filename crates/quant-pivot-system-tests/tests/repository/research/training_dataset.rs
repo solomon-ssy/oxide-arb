@@ -215,7 +215,7 @@ pub async fn quant_training_dataset_crud() {
     );
 
     let mut drifted_manifest = fixture.manifest.clone();
-    drifted_manifest.model_family = ModelFamily::ClassicalRandomForest;
+    drifted_manifest.model_family = ModelFamily::ClassicalLogisticRegression;
     drifted_manifest.factor_serving_plane =
         FactorServingPlane::try_empty().expect("classical empty plane");
     let drifted_completion = CompleteTrainingDatasetBuild::try_new(

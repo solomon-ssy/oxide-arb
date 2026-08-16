@@ -168,9 +168,9 @@ pub struct NumericDriftSummary {
 /// Exact concept-drift summary for one champion runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RankIcDriftSummary {
-    pub baseline_rank_ic: Decimal,
-    pub evaluation_rank_ic: Decimal,
+pub struct TargetRankIcDriftSummary {
+    pub baseline_target_rank_ic: Decimal,
+    pub evaluation_target_rank_ic: Decimal,
     /// Positive deterioration, capped at one to match the governed metric
     /// domain. The uncapped endpoints remain present above.
     pub observed_drop: Decimal,
@@ -659,7 +659,7 @@ impl FeatureDriftDetail {
 pub struct ConceptDriftDetail {
     pub baseline_scored_count: u64,
     pub evaluation_scored_count: u64,
-    pub summary: Option<RankIcDriftSummary>,
+    pub summary: Option<TargetRankIcDriftSummary>,
 }
 
 impl ConceptDriftDetail {
@@ -668,13 +668,13 @@ impl ConceptDriftDetail {
             return Ok(());
         };
         let valid_range = -Decimal::ONE..=Decimal::ONE;
-        let expected_drop = (summary.baseline_rank_ic - summary.evaluation_rank_ic)
+        let expected_drop = (summary.baseline_target_rank_ic - summary.evaluation_target_rank_ic)
             .clamp(Decimal::ZERO, Decimal::ONE)
             .round_dp(RESEARCH_DECIMAL_SCALE);
         if self.baseline_scored_count < 2
             || self.evaluation_scored_count < 2
-            || !valid_range.contains(&summary.baseline_rank_ic)
-            || !valid_range.contains(&summary.evaluation_rank_ic)
+            || !valid_range.contains(&summary.baseline_target_rank_ic)
+            || !valid_range.contains(&summary.evaluation_target_rank_ic)
             || summary.observed_drop != expected_drop
         {
             return Err(methodology("champion rank-IC detail does not reconcile"));
@@ -918,7 +918,7 @@ fn drift_assessment(
     let exceeded = match metric {
         FeedbackDriftMetric::KolmogorovSmirnovPValue => value <= threshold,
         FeedbackDriftMetric::PopulationStabilityIndex
-        | FeedbackDriftMetric::RankIcDrop
+        | FeedbackDriftMetric::TargetRankIcDrop
         | FeedbackDriftMetric::JensenShannonDivergence => value >= threshold,
     };
     Ok(if exceeded {
@@ -980,7 +980,7 @@ pub fn drift_observations(
         })
         .min_by_key(|(value, _)| *value)
         .map_or((None, 0), |(value, count)| (Some(value), count));
-    let rank_ic = concept.summary.map(|summary| summary.observed_drop);
+    let target_rank_ic = concept.summary.map(|summary| summary.observed_drop);
     let rank_count = concept
         .baseline_scored_count
         .min(concept.evaluation_scored_count);
@@ -1000,9 +1000,9 @@ pub fn drift_observations(
             ks_count,
         )?,
         DriftObservation::try_new(
-            FeedbackDriftMetric::RankIcDrop,
-            rank_ic,
-            policy.concept_rank_ic_drop,
+            FeedbackDriftMetric::TargetRankIcDrop,
+            target_rank_ic,
+            policy.concept_target_rank_ic_drop,
             rank_count,
         )?,
         DriftObservation::try_new(
@@ -1102,12 +1102,12 @@ pub fn numeric_drift(
 ///
 /// Degenerate score/label support is undefined correlation and therefore
 /// returns `None`. It is never represented as a zero drift observation.
-pub fn rank_ic_drift(
+pub fn target_rank_ic_drift(
     baseline_scores: &[Decimal],
     baseline_labels: &[Decimal],
     evaluation_scores: &[Decimal],
     evaluation_labels: &[Decimal],
-) -> QuantResult<Option<RankIcDriftSummary>> {
+) -> QuantResult<Option<TargetRankIcDriftSummary>> {
     if baseline_scores.len() != baseline_labels.len()
         || evaluation_scores.len() != evaluation_labels.len()
     {
@@ -1124,16 +1124,16 @@ pub fn rank_ic_drift(
     {
         return Ok(None);
     }
-    let baseline_rank_ic =
+    let baseline_target_rank_ic =
         spearman(baseline_scores, baseline_labels).round_dp(RESEARCH_DECIMAL_SCALE);
-    let evaluation_rank_ic =
+    let evaluation_target_rank_ic =
         spearman(evaluation_scores, evaluation_labels).round_dp(RESEARCH_DECIMAL_SCALE);
-    let observed_drop = (baseline_rank_ic - evaluation_rank_ic)
+    let observed_drop = (baseline_target_rank_ic - evaluation_target_rank_ic)
         .clamp(Decimal::ZERO, Decimal::ONE)
         .round_dp(RESEARCH_DECIMAL_SCALE);
-    Ok(Some(RankIcDriftSummary {
-        baseline_rank_ic,
-        evaluation_rank_ic,
+    Ok(Some(TargetRankIcDriftSummary {
+        baseline_target_rank_ic,
+        evaluation_target_rank_ic,
         observed_drop,
     }))
 }

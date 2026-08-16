@@ -281,7 +281,7 @@ impl CoreBacktestPort {
                     detail: format!("cached backtest missing_feature_count is invalid: {error}"),
                 }
             })?,
-            rank_ic: info.rank_ic,
+            realized_return_rank_correlation: info.realized_return_rank_correlation,
             sharpe: info.sharpe,
             hit_rate: info.hit_rate,
             expected_vs_realized: info.expected_vs_realized.clone(),
@@ -377,7 +377,7 @@ fn verify_comparison_row(
         candidate_model_version_id: info.candidate_model_version_id,
         baseline_report_hash: baseline.report_hash,
         candidate_report_hash: candidate.report_hash,
-        rank_ic_delta: info.rank_ic_delta,
+        realized_return_rank_correlation_delta: info.realized_return_rank_correlation_delta,
         hit_rate_delta: info.hit_rate_delta,
         realized_pnl_delta: info.realized_pnl_delta,
         score_correlation: info.score_correlation,

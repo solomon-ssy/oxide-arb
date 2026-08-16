@@ -22,6 +22,7 @@ use quant_pivot_error::{
     storage::StorageError,
 };
 use quant_pivot_models::{
+    clickhouse::BookL2LedgerRow,
     config::PortfolioSolverDeployConfig,
     domain::{
         data_plane::{DecisionBoundary, DecisionSource},
@@ -34,12 +35,16 @@ use quant_pivot_models::{
         },
         query::TimeWindow,
     },
-    enums::quant::{DatasetPurpose, ModelRunErrorCode, ModelRunKind},
+    enums::{
+        clickhouse::{ChCanonicalBookEventType, ChLedgerTradeSide},
+        common::Side,
+        quant::{DatasetPurpose, ModelRunErrorCode, ModelRunKind},
+    },
     hashing::CanonicalDigest,
     types::{
         BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, MarketId,
         ModelComparisonReportId, ModelRunId, ModelVersionId, PayoutRatio, Price,
-        ResearchJobProgress, ResearchProfileArtifact, TokenId, TrainingDatasetId,
+        ResearchJobProgress, ResearchProfileArtifact, Shares, TokenId, TrainingDatasetId,
         calibration::ModelScoreCalibrationFitContract,
         model_serving::ModelServingPolicySnapshotBinding,
     },
@@ -52,15 +57,16 @@ use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::{
         BacktestDownsidePoint, BacktestDownsideTrajectory, BacktestExecutionSnapshot,
-        BacktestInputs, BacktestLiquidationSnapshot, BacktestMarketMeta, BacktestPortfolioContext,
-        BacktestRankTarget, BacktestReport, BacktestRequest, BacktestRunResult,
-        BacktestScenarioContext, BacktestTick, Backtester, CalibrationReplayTick, MarketOutcome,
-        ModelCalibrationOutcome, ModelCalibrationReplay, ModelComparisonReport,
-        PortfolioReplayBacktester, PortfolioReturnObservation,
+        BacktestInputs, BacktestLiquidationSnapshot, BacktestMarketMeta, BacktestPassiveTape,
+        BacktestPortfolioContext, BacktestRankTarget, BacktestReport, BacktestRequest,
+        BacktestRunResult, BacktestScenarioContext, BacktestTick, Backtester,
+        CalibrationReplayTick, MarketOutcome, ModelCalibrationOutcome, ModelCalibrationReplay,
+        ModelComparisonReport, PortfolioReplayBacktester, PortfolioReturnObservation,
     },
     execution_semantics::{PitFeeSchedule, aggressive_buy_limit},
     model::{LabelSelector, ModelRankTarget, QuantModelRuntime},
     pit::BookSnapshotAt,
+    policy_replay::PolicyReplayTrade,
     training::{LabelName, TrainingExample},
 };
 use rust_decimal::Decimal;
@@ -727,7 +733,8 @@ impl BacktestService {
                 baseline_report_id: baseline.info.backtest_report_id,
                 candidate_report_id: candidate.info.backtest_report_id,
                 model_run_id: candidate.model_run_id,
-                rank_ic_delta: comparison.rank_ic_delta,
+                realized_return_rank_correlation_delta: comparison
+                    .realized_return_rank_correlation_delta,
                 hit_rate_delta: comparison.hit_rate_delta,
                 realized_pnl_delta: comparison.realized_pnl_delta,
                 score_correlation: comparison.score_correlation,
@@ -911,7 +918,7 @@ impl BacktestService {
                 coverage: report.coverage,
                 sample_count,
                 missing_feature_count,
-                rank_ic: report.rank_ic,
+                realized_return_rank_correlation: report.realized_return_rank_correlation,
                 sharpe: report.sharpe,
                 hit_rate: report.hit_rate,
                 expected_vs_realized: report.expected_vs_realized.clone(),
@@ -1789,11 +1796,146 @@ fn frozen_execution_snapshots<'a>(
                     fill_at: example.decision_at(),
                     limit_price: aggressive_buy_limit(best_ask, max_slippage_bps),
                     book_hash,
+                    passive_tape: backtest_passive_tape(page, token_id, &book)?,
                 },
             );
         }
     }
     Ok(snapshots)
+}
+
+fn backtest_passive_tape(
+    page: &ReplayPage,
+    token_id: &TokenId,
+    book: &BookSnapshotAt,
+) -> QuantResult<BacktestPassiveTape> {
+    let anchor = book
+        .source_event
+        .as_ref()
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: format!(
+                "Source Slice decision book for token {token_id} has no canonical event lineage"
+            ),
+        })?;
+    let mut rows = page
+        .l2_ledger
+        .iter()
+        .filter(|row| {
+            &row.token_id == token_id
+                && row.stream_session_id == anchor.stream_session_id
+                && row.token_sequence > anchor.token_sequence
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.token_sequence);
+    if rows
+        .first()
+        .is_some_and(|row| anchor.token_sequence.checked_add(1) != Some(row.token_sequence))
+        || rows.windows(2).any(|pair| {
+            pair[0].token_sequence.checked_add(1) != Some(pair[1].token_sequence)
+                || pair[0].event_hash == pair[1].event_hash
+        })
+        || rows.iter().any(|row| {
+            row.schema_version != BookL2LedgerRow::SCHEMA_VERSION
+                || row.event_type == ChCanonicalBookEventType::Gap
+        })
+        || page.gaps.iter().any(|gap| {
+            gap.token_id == token_id.as_str()
+                && gap.session_id == anchor.stream_session_id.to_string()
+        })
+    {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "Source Slice passive tape for token {token_id} is not one continuous canonical session"
+            ),
+        }
+        .into());
+    }
+    let coverage_ms = page
+        .sessions
+        .iter()
+        .filter(|session| session.stream_session_id == anchor.stream_session_id)
+        .map(|session| session.recorded_at)
+        .chain(rows.iter().map(|row| row.persisted_time))
+        .max()
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: format!(
+                "Source Slice passive tape for token {token_id} has no session coverage clock"
+            ),
+        })?;
+    let coverage_through = DateTime::from_timestamp_millis(coverage_ms).ok_or_else(|| {
+        ResearchError::DatasetBuild {
+            detail: format!(
+                "Source Slice passive coverage clock {coverage_ms} is invalid for token {token_id}"
+            ),
+        }
+    })?;
+    let mut trades = Vec::new();
+    for row in rows
+        .into_iter()
+        .filter(|row| row.event_type == ChCanonicalBookEventType::LastTrade)
+    {
+        let (Some(print_price), Some(aggressor), Some(traded_size)) =
+            (row.trade_price, row.trade_side, row.trade_size)
+        else {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "Source Slice passive trade {:?} for token {token_id} lacks side/price/size",
+                    row.event_hash
+                ),
+            }
+            .into());
+        };
+        let side = match aggressor {
+            ChLedgerTradeSide::Buy => Side::Buy,
+            ChLedgerTradeSide::Sell => Side::Sell,
+            ChLedgerTradeSide::Unknown => {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "Source Slice passive trade {:?} for token {token_id} has unknown side",
+                        row.event_hash
+                    ),
+                }
+                .into());
+            }
+        };
+        let event_at = DateTime::from_timestamp_millis(row.venue_event_time).ok_or_else(|| {
+            ResearchError::DatasetBuild {
+                detail: format!("invalid passive trade event clock for token {token_id}"),
+            }
+        })?;
+        let available_at =
+            DateTime::from_timestamp_millis(row.persisted_time).ok_or_else(|| {
+                ResearchError::DatasetBuild {
+                    detail: format!(
+                        "invalid passive trade availability clock for token {token_id}"
+                    ),
+                }
+            })?;
+        let price = Price::from(print_price);
+        let shares = Shares::from(traded_size);
+        if !price.is_positive() || price > Price::ONE || !shares.is_positive() {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!("invalid passive trade economics for token {token_id}"),
+            }
+            .into());
+        }
+        trades.push(PolicyReplayTrade {
+            event_at,
+            available_at,
+            stream_session_id: anchor.stream_session_id,
+            token_sequence: row.token_sequence,
+            side,
+            price,
+            shares,
+            source_event_id: ContentHash::from(row.event_hash).to_string(),
+        });
+    }
+    Ok(BacktestPassiveTape {
+        stream_session_id: anchor.stream_session_id,
+        anchor_token_sequence: anchor.token_sequence,
+        coverage_through,
+        trades,
+    })
 }
 
 struct LiquidationRetention {

@@ -309,7 +309,7 @@ impl CoreCpcvBacktestPort {
             fold_artifacts: outcome.fold_artifacts.clone(),
             path_count,
             combination_count,
-            median_rank_ic: outcome.path_set.median_rank_ic,
+            median_target_rank_ic: outcome.path_set.median_target_rank_ic,
             sharpe_distribution: outcome.path_set.sharpe_distribution,
             paths: outcome.path_set.paths.clone().into(),
             deflated_sharpe: outcome.dsr.deflated_sharpe,

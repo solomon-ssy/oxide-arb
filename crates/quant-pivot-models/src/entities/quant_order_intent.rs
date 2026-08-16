@@ -6,8 +6,8 @@ use sea_orm::entity::prelude::*;
 use super::{
     decision_policy_snapshot, quant_capital_allocation, quant_entry_condition_instance,
     quant_execution_account, quant_execution_attempt_outcome,
-    quant_execution_attempt_reconciliation_task, quant_execution_order, quant_model_version,
-    quant_position, quant_recommendation, quant_settlement_inventory_lot,
+    quant_execution_attempt_reconciliation_task, quant_execution_fill, quant_execution_order,
+    quant_model_version, quant_position, quant_recommendation, quant_settlement_inventory_lot,
     research_profile_artifact,
 };
 use crate::{
@@ -113,6 +113,8 @@ pub struct Model {
     pub model_version: BelongsTo<quant_model_version::Entity>,
     #[sea_orm(has_many, relation_enum = "ExecutionOrder")]
     pub execution_order: HasMany<quant_execution_order::Entity>,
+    #[sea_orm(has_many, relation_enum = "ExecutionFill")]
+    pub execution_fill: HasMany<quant_execution_fill::Entity>,
     #[sea_orm(has_one, relation_enum = "CapitalAllocation")]
     pub capital_allocation: HasOne<quant_capital_allocation::Entity>,
     #[sea_orm(has_one, relation_enum = "Position")]

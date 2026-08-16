@@ -124,6 +124,8 @@ mod trade_policy_trial;
 mod training_dataset;
 #[path = "repository/governance/typed_persistence.rs"]
 mod typed_persistence;
+#[path = "repository/accounting/venue_incentive.rs"]
+mod venue_incentive;
 #[path = "repository/catalog/weather_daily_temperature.rs"]
 mod weather_daily_temperature;
 
@@ -161,6 +163,9 @@ async fn run_account_scenarios() -> Result<(), String> {
         equity_snapshot::high_water_mark_max,
         equity_snapshot::drawdown_pct_hwm_hwm,
         equity_snapshot::realized_pnl_matches_sum,
+        venue_incentive::revisions_are_pit_cumulative,
+        venue_incentive::wallet_credit_is_cash,
+        venue_incentive::conflicting_identity_rolls_back,
         portfolio_optimizer::optimizer_meta_persisted_row,
     );
     Ok(())

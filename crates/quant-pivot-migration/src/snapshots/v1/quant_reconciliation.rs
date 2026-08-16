@@ -21,7 +21,8 @@ pub struct Model {
     pub venue_cash_delta_usd: Option<Decimal>,
     pub realized_pnl_usd: Option<Decimal>,
     pub expected_fee_usd: Option<Decimal>,
-    pub observed_fee_usd: Option<Decimal>,
+    pub derived_fee_usd: Option<Decimal>,
+    pub settled_fee_usd: Option<Decimal>,
     pub fee_delta_usd: Option<Decimal>,
     #[sea_orm(column_type = "Text", nullable)]
     pub resolved_by: Option<String>,

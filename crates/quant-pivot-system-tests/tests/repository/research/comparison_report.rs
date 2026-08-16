@@ -17,7 +17,10 @@ use quant_pivot_models::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelComparisonReportId,
         ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
         Probability, TrainingDatasetId,
-        backtest::{CategoryMetrics, CategoryRankIcDeltas, ExpectedVsRealized, PnlSimulation},
+        backtest::{
+            CategoryMetrics, CategoryRealizedReturnRankCorrelationDeltas, ExpectedVsRealized,
+            PnlSimulation,
+        },
     },
 };
 use quant_pivot_repository::{
@@ -61,13 +64,13 @@ impl ComparisonFixture {
             baseline_report_id: self.baseline.backtest_report_id,
             candidate_report_id: self.candidate.backtest_report_id,
             model_run_id: self.candidate_run_id,
-            rank_ic_delta: dec!(0.15),
+            realized_return_rank_correlation_delta: dec!(0.15),
             hit_rate_delta: dec!(0.05),
             realized_pnl_delta: dec!(80),
             score_correlation: dec!(0.95),
             side_disagreement_rate: dec!(0.5),
             common_samples: 2,
-            category_breakdown_diff: CategoryRankIcDeltas::default(),
+            category_breakdown_diff: CategoryRealizedReturnRankCorrelationDeltas::default(),
             comparison_hash: content_hash('0'),
         };
         report.comparison_hash = report
@@ -135,7 +138,7 @@ async fn seed_run(
 }
 
 struct BacktestMetrics {
-    rank_ic: Decimal,
+    realized_return_rank_correlation: Decimal,
     hit_rate: Probability,
     realized_pnl_usd: Decimal,
 }
@@ -162,7 +165,7 @@ async fn persist_report(db: &DatabaseConnection, seed: BacktestReportSeed) -> Ba
         coverage: dec!(1),
         sample_count: 10,
         missing_feature_count: 0,
-        rank_ic: seed.metrics.rank_ic,
+        realized_return_rank_correlation: seed.metrics.realized_return_rank_correlation,
         sharpe: dec!(0.8),
         hit_rate: seed.metrics.hit_rate,
         expected_vs_realized: ExpectedVsRealized {
@@ -305,7 +308,7 @@ async fn prepare_fixture_inner(db: &DatabaseConnection) -> ComparisonFixture {
             window_start,
             window_end,
             metrics: BacktestMetrics {
-                rank_ic: dec!(0.30),
+                realized_return_rank_correlation: dec!(0.30),
                 hit_rate: Probability::new(dec!(0.60)),
                 realized_pnl_usd: dec!(8),
             },
@@ -322,7 +325,7 @@ async fn prepare_fixture_inner(db: &DatabaseConnection) -> ComparisonFixture {
             window_start,
             window_end,
             metrics: BacktestMetrics {
-                rank_ic: dec!(0.45),
+                realized_return_rank_correlation: dec!(0.45),
                 hit_rate: Probability::new(dec!(0.65)),
                 realized_pnl_usd: dec!(88),
             },
@@ -383,7 +386,7 @@ pub async fn quant_model_comparison_crud() {
     let comparison_report_id = comparison.comparison_report_id;
     let created = repo.create(comparison).await.expect("create comparison");
     assert_eq!(created.comparison_report_id, comparison_report_id);
-    assert_eq!(created.rank_ic_delta, dec!(0.15));
+    assert_eq!(created.realized_return_rank_correlation_delta, dec!(0.15));
     assert_eq!(created.common_samples, 2);
 
     let found = repo
@@ -450,7 +453,7 @@ pub async fn comparison_rejects_tampering() {
     assert_invariant("forged comparison hash", repo.create(forged_hash).await);
 
     let mut forged_delta = fixture.comparison();
-    forged_delta.rank_ic_delta = dec!(0.14);
+    forged_delta.realized_return_rank_correlation_delta = dec!(0.14);
     forged_delta.comparison_hash = forged_delta
         .recomputed_hash(
             &fixture.baseline.report_hash,

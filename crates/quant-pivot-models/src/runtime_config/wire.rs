@@ -86,14 +86,14 @@ pub enum SmallCrossSectionPolicy {
 /// Ranking loss optimized by the governed learning-to-rank trainer.
 ///
 /// These are **simplex black-box surrogates**, not XGBoost/LightGBM `LambdaMART`
-/// λ-gradient rankers. `RankIcWeightedRanknet` weights `RankNet` pairs by the
+/// λ-gradient rankers. `TargetRankIcWeightedRanknet` weights `RankNet` pairs by the
 /// closed-form `RankIC` swap delta; it is not a GBDT `LambdaRankIC` implementation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RankLossKind {
     /// RankIC-swap-weighted pairwise `RankNet` logistic loss (simplex surrogate).
     #[default]
-    RankIcWeightedRanknet,
+    TargetRankIcWeightedRanknet,
     /// Plain pairwise `RankNet` logistic loss.
     PairwiseRanknet,
 }
@@ -103,7 +103,7 @@ impl RankLossKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::RankIcWeightedRanknet => "rank_ic_weighted_ranknet",
+            Self::TargetRankIcWeightedRanknet => "target_rank_ic_weighted_ranknet",
             Self::PairwiseRanknet => "pairwise_ranknet",
         }
     }

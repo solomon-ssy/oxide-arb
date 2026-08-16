@@ -19,7 +19,10 @@ use quant_pivot_models::{
         governance::DecisionPolicySnapshotInfo,
         quant::{ModelVersionInfo, RepresentedRouteSet},
     },
-    enums::{common::MarketCategory, model::ModelFamily},
+    enums::{
+        common::MarketCategory,
+        model::{ModelFamily, ServingEligibility},
+    },
     runtime_config::{
         ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, ModelBinding,
         PolicyBundleIdentity,
@@ -856,22 +859,19 @@ fn validate_policy_profiles(
 }
 
 fn ensure_active_family(family: ModelFamily, path: &str) -> Result<(), ControlError> {
-    if family == ModelFamily::WeightedFactor {
-        return Ok(());
-    }
-    let detail = if family.is_classical() {
-        format!(
-            "classical family {family} is ShadowOnly until a governed probability-to-return \
-             calibration is frozen"
-        )
-    } else {
-        format!("Buy-side serving does not support family {family}")
+    let detail = match family.serving_eligibility() {
+        ServingEligibility::ShadowOnly => format!("family {family} is shadow-only"),
+        ServingEligibility::ExitOnly => format!("family {family} is sell-side only"),
+        ServingEligibility::ActiveBuyCapable => return Ok(()),
     };
     Err(ControlError::Precondition(format!("{path}: {detail}")))
 }
 
 fn ensure_shadow_family(family: ModelFamily, path: &str) -> Result<(), ControlError> {
-    if family == ModelFamily::WeightedFactor || family.is_classical() {
+    if matches!(
+        family.serving_eligibility(),
+        ServingEligibility::ActiveBuyCapable | ServingEligibility::ShadowOnly
+    ) {
         return Ok(());
     }
     Err(ControlError::Precondition(format!(

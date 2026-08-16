@@ -18,9 +18,9 @@ use quant_pivot_models::{
     domain::{
         data_plane::DecisionClock,
         market::{
-            CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit, CatalogBatchFailure,
-            CatalogEventCandidate, CatalogMarketCandidate, EventRegistryInfo, EventTags,
-            MarketRegistryInfo, NewCatalogEventChange, NewCatalogEventObject,
+            CATALOG_OBJECT_HASH_VERSION, CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit,
+            CatalogBatchFailure, CatalogEventCandidate, CatalogMarketCandidate, EventRegistryInfo,
+            EventTags, MarketRegistryInfo, NewCatalogEventChange, NewCatalogEventObject,
             NewCatalogMarketObject, NewCatalogSyncBatch, NewCatalogSyncRejection, UpsertEvent,
             UpsertMarket,
         },
@@ -882,8 +882,11 @@ fn build_event_candidates(
                 id: event.event_id.to_string(),
                 reason: error.to_string(),
             })?;
-        let content_hash =
-            CanonicalDigest::content_hash_typed("quant-pivot/catalog-event-object", 1, event)?;
+        let content_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-event-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            event,
+        )?;
         let event_object_id = CatalogEventObjectId::from_content_hash(&content_hash);
         let mutation = mutations
             .get(&event.event_id)
@@ -969,8 +972,11 @@ fn build_market_candidates(
                 id: market.market_id.to_string(),
                 reason: error.to_string(),
             })?;
-        let content_hash =
-            CanonicalDigest::content_hash_typed("quant-pivot/catalog-market-object", 1, market)?;
+        let content_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-market-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            market,
+        )?;
         let market_object_id = CatalogMarketObjectId::from_content_hash(&content_hash);
         let mutation = mutations
             .get(&market.market_id)
@@ -1090,6 +1096,9 @@ const fn rejection_reason(rejection: &CatalogMarketReject) -> CatalogRejectionRe
         CatalogMarketReject::InvalidTokenPair { .. } => CatalogRejectionReason::InvalidTokenPair,
         CatalogMarketReject::UnsupportedTickSize { .. } => {
             CatalogRejectionReason::UnsupportedTickSize
+        }
+        CatalogMarketReject::InvalidFeeSchedule { .. } => {
+            CatalogRejectionReason::InvalidFeeSchedule
         }
     }
 }
@@ -1304,6 +1313,7 @@ mod tests {
             min_order_size: Decimal::ONE,
             liquidity_usd: None,
             volume_24h: None,
+            maker_rebate_schedule: None,
             start_date: None,
             end_date: None,
             resolved_at,

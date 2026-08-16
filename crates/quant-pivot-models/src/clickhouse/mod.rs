@@ -23,8 +23,8 @@ pub use domain_event::{
 };
 pub use domain_observation::DomainObservationRow;
 pub use exchange_history::{
-    ExchangeEventRow, ExchangeHistoryAcceptanceRow, ExchangeLogRawRow, ExchangeMatchRow,
-    ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
+    ExchangeEventRow, ExchangeFeeChargeRow, ExchangeHistoryAcceptanceRow, ExchangeLogRawRow,
+    ExchangeMatchRow, ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
 };
 pub use market_resolution::{MarketResolutionFactInput, MarketResolutionRow};
 pub use quant_facts::{

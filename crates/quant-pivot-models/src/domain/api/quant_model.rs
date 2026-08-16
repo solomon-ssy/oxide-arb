@@ -31,8 +31,8 @@ pub enum ModelPickerSide {
 /// derived only from a governed route generation.
 ///
 /// `model_family` deserializes from its canonical wire label (`"weighted_factor"`,
-/// `"classical_random_forest"`, `"hold_vs_exit_weighted"`, …); an unknown label
-/// is rejected at the boundary with `400`.
+/// `"classical_logistic_regression"`, or `"hold_vs_exit_weighted"`); an unknown
+/// label is rejected at the boundary with `400`.
 #[derive(Debug, Clone, Deserialize, Validate, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateModelSpecRequest {

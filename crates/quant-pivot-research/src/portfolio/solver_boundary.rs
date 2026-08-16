@@ -145,7 +145,9 @@ impl ModelForms {
                         .tiers
                         .iter()
                         .zip(&prepared.tiers)
-                        .map(|(column, tier)| (*column, tier.scenario_net_micro[scenario_index]))
+                        .map(|(column, tier)| {
+                            (*column, tier.scenario_risk_net_micro[scenario_index])
+                        })
                         .collect(),
                 )
             })
@@ -1433,6 +1435,7 @@ mod tests {
                 route_key: "route".to_owned(),
                 stable_key: "stable".to_owned(),
                 notional_micro: 1_000_000,
+                scenario_risk_net_micro: scenario_net_micro.clone(),
                 scenario_net_micro,
                 distribution_numerators: vec![nominal_numerator],
                 nominal_numerator,
@@ -1584,6 +1587,7 @@ mod tests {
                     stable_key: format!("placeholder-{index}"),
                     notional_micro: 1_000_000,
                     scenario_net_micro: scenario_net_micro.clone(),
+                    scenario_risk_net_micro: scenario_net_micro.clone(),
                     distribution_numerators: vec![nominal_numerator],
                     nominal_numerator,
                     bucket_capital_micro: vec![1_000_000],

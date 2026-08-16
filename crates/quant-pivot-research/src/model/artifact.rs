@@ -36,7 +36,6 @@ use quant_pivot_models::{
         model_serving::{
             ModelServingContract, ModelServingEstimatorBinding, ModelServingEstimatorInput,
             ModelServingIntrinsicInputKind, ModelServingIntrinsicInputRef,
-            ModelServingTreeShapBinding,
         },
         model_training::TrainingObjectiveSpec,
     },
@@ -46,7 +45,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
-    attribution::TreeShapModelContract,
     factors::FrozenReferenceQuantiles,
     features::{FeatureName, FeatureUnit, FeatureValueKind, NullReason},
     hashing::ResearchHasher,
@@ -981,13 +979,10 @@ pub struct ClassicalModelMetrics {
 ///
 /// This is deliberately narrower than a free-form label name. A runtime may
 /// only turn an estimator output into a shadow signal when its supervised
-/// target has one of these two well-defined business units.
+/// target is the governed full-payout event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClassicalOutputSemantics {
-    /// Regressor output is the predicted YES-token return over the frozen
-    /// horizon, expressed in basis points.
-    ForwardReturnBps,
     /// Logistic output is the uncalibrated probability that the token pays exactly 1.
     FullPayoutProbability,
 }
@@ -1024,10 +1019,6 @@ pub struct ClassicalModelPayload {
     pub serialization_format: ModelSerializationFormat,
     /// Frozen unit-conversion, imputation, indicators, and standardization.
     pub input_transform: FittedInputTransform,
-    /// Exact portable tree representation and training-time verification.
-    ///
-    /// Required for GBDT and forbidden for every other classical estimator.
-    pub tree_shap: Option<TreeShapModelContract>,
     /// Training metrics + feature importances.
     pub metrics: ClassicalModelMetrics,
 }
@@ -1078,10 +1069,8 @@ impl ClassicalModelPayload {
                 "classical input transform must contain inputs and encoded columns",
             ));
         }
-        let expected_semantics = if self.kind == ClassicalKind::LogisticRegression {
-            ClassicalOutputSemantics::FullPayoutProbability
-        } else {
-            ClassicalOutputSemantics::ForwardReturnBps
+        let expected_semantics = match self.kind {
+            ClassicalKind::LogisticRegression => ClassicalOutputSemantics::FullPayoutProbability,
         };
         if self.output_semantics != expected_semantics {
             return Err(invalid_classical_artifact(format!(
@@ -1115,37 +1104,6 @@ impl ClassicalModelPayload {
             ));
         }
         self.input_transform.transform_hash()?;
-        match (self.kind, &self.tree_shap) {
-            (ClassicalKind::GradientBoostedTrees, Some(tree_shap)) => {
-                tree_shap.validate()?;
-                let input_contract_hash = model_input_contract_hash(&self.input_contract)?;
-                let encoded_names = self
-                    .input_transform
-                    .encoded_columns
-                    .iter()
-                    .map(|column| column.name.to_string())
-                    .collect::<Vec<_>>();
-                if tree_shap.ensemble.serialized_model_hash != self.serialized_model_hash
-                    || tree_shap.ensemble.input_contract_hash != input_contract_hash
-                    || tree_shap.ensemble.feature_names != encoded_names
-                {
-                    return Err(invalid_classical_artifact(
-                        "GBDT TreeSHAP contract differs from serialized estimator or input contract",
-                    ));
-                }
-            }
-            (ClassicalKind::GradientBoostedTrees, None) => {
-                return Err(invalid_classical_artifact(
-                    "GBDT payload requires an exact TreeSHAP contract",
-                ));
-            }
-            (_, Some(_)) => {
-                return Err(invalid_classical_artifact(
-                    "only GBDT payloads may carry a TreeSHAP contract",
-                ));
-            }
-            (_, None) => {}
-        }
         Ok(())
     }
 }
@@ -1527,17 +1485,6 @@ impl ModelPayload {
                     model_payload_hash,
                     serialized_model_hash: payload.serialized_model_hash,
                     serialization_format: payload.serialization_format,
-                    tree_shap: payload.tree_shap.as_ref().map(|contract| {
-                        ModelServingTreeShapBinding {
-                            ensemble_hash: contract.ensemble_hash,
-                            background_distribution_hash: contract
-                                .ensemble
-                                .background_distribution_hash,
-                            verified_case_count: contract.verified_case_count,
-                            max_efficiency_residual: contract.max_efficiency_residual,
-                            max_prediction_residual: contract.max_prediction_residual,
-                        }
-                    }),
                 })
             }
         }
@@ -1790,7 +1737,6 @@ fn validate_payload_contract(
                 model_payload_hash,
                 serialized_model_hash,
                 serialization_format,
-                tree_shap,
             },
             ModelPayload::Classical(classical),
         ) if bindings.model.model_family == ModelFamily::from_classical(*kind) => {
@@ -1812,24 +1758,6 @@ fn validate_payload_contract(
                     "classical payload kind {} differs from contract kind {}",
                     classical.kind, kind
                 )));
-            }
-            let expected_tree_shap =
-                classical
-                    .tree_shap
-                    .as_ref()
-                    .map(|contract| ModelServingTreeShapBinding {
-                        ensemble_hash: contract.ensemble_hash,
-                        background_distribution_hash: contract
-                            .ensemble
-                            .background_distribution_hash,
-                        verified_case_count: contract.verified_case_count,
-                        max_efficiency_residual: contract.max_efficiency_residual,
-                        max_prediction_residual: contract.max_prediction_residual,
-                    });
-            if *tree_shap != expected_tree_shap {
-                return Err(invalid_model_payload(
-                    "classical TreeSHAP serving binding differs from payload".to_owned(),
-                ));
             }
             classical.validate()?;
             validate_transform(

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     enums::execution::ReconciliationEvidenceKind,
-    types::{FeeEvidence, Price, Shares},
+    types::{FeeMeasurement, Price, Shares},
 };
 
 /// One reconciliation observation used to explain an execution-order result.
@@ -19,7 +19,7 @@ pub struct ReconciliationEvidence {
     pub shares: Option<Shares>,
     pub price: Option<Price>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fee_evidence: Option<FeeEvidence>,
+    pub fee_evidence: Option<FeeMeasurement>,
 }
 
 /// Ordered evidence chain for one reconciliation summary row.

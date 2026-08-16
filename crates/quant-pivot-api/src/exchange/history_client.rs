@@ -268,7 +268,13 @@ impl ExchangeHistoryExtractor {
             .collect::<Vec<_>>();
         let topics = EXCHANGE_CONTRACTS
             .iter()
-            .flat_map(|contract| [contract.order_filled_topic, contract.orders_matched_topic])
+            .flat_map(|contract| {
+                [
+                    contract.order_filled_topic,
+                    contract.orders_matched_topic,
+                    contract.fee_charged_topic,
+                ]
+            })
             .map(|topic| format!("{topic:#x}"))
             .collect::<Vec<_>>();
         let log_filter = LogFilter::all()
@@ -685,7 +691,13 @@ impl ExchangeHistoryAttestor {
             .collect::<Vec<_>>();
         let topics = EXCHANGE_CONTRACTS
             .iter()
-            .flat_map(|contract| [contract.order_filled_topic, contract.orders_matched_topic])
+            .flat_map(|contract| {
+                [
+                    contract.order_filled_topic,
+                    contract.orders_matched_topic,
+                    contract.fee_charged_topic,
+                ]
+            })
             .map(|topic| format!("{topic:#x}"))
             .collect::<Vec<_>>();
         let filter = RpcLogFilter {

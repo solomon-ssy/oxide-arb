@@ -47,6 +47,7 @@ pub use quant::{
     PgResearchJobRepository, PgResearchReadinessEvidenceRepository, PgReservedCapitalRepository,
     PgResolutionObservationRepository, PgRuntimeActivityRepository, PgShadowComparisonRepository,
     PgSourceSliceRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
+    PgVenueIncentiveRepository,
 };
 pub use rbac::{
     PgCasbinAdapter, PgMenuRepository, PgRoleMenuRepository, PgRolePermissionRepository,

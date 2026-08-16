@@ -131,7 +131,7 @@ use quant_pivot_repository::{
         PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
         PgPolicyRepository, PgPositionRepository, PgRecommendationReportRepository,
         PgRecommendationRepository, PgReportRunRepository, PgReservedCapitalRepository,
-        PgShadowComparisonRepository, PgTradePolicyRepository,
+        PgShadowComparisonRepository, PgTradePolicyRepository, PgVenueIncentiveRepository,
     },
     traits::{
         BasisAlertRepository, CalibrationArtifactRepository, EquitySnapshotRepository,
@@ -140,6 +140,7 @@ use quant_pivot_repository::{
         ModelRegistryRepository, ModelRunRepository, PolicyRepository, PositionRepository,
         QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
         ReportRunRepository, ReservedCapitalRepository, TradePolicyRepository,
+        VenueIncentiveRepository,
     },
 };
 use quant_pivot_research::{
@@ -1349,6 +1350,7 @@ const fn fixture_equity_snapshot(report: &RecommendationReportInfo) -> NewEquity
         reserved_usd: Usd::ZERO,
         realized_pnl_cumulative_usd: Usd::ZERO,
         unrealized_pnl_usd: Usd::ZERO,
+        incentive_credit_cumulative_usd: Usd::ZERO,
         high_water_mark_usd: report.capital_base_usd,
         drawdown_pct: Decimal::ZERO,
         account_snapshot_ref: Some(report.account_snapshot_ref),
@@ -1674,7 +1676,12 @@ fn fixture_portfolio_decision(
     };
     let allocated_usd = recommendations
         .iter()
-        .map(|recommendation| recommendation.economic_tier_json.entry.notional_usd)
+        .map(|recommendation| {
+            recommendation
+                .economic_tier_json
+                .entry_execution
+                .hard_reserved_cash_usd()
+        })
         .sum();
     let constraints = PortfolioConstraintEvidence {
         available_cash_used_usd: allocated_usd,
@@ -1864,6 +1871,8 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
             Arc::new(PgEquitySnapshotRepository::new(db.clone()))
                 as Arc<dyn EquitySnapshotRepository>,
             Arc::new(PgPositionRepository::new(db.clone())) as Arc<dyn PositionRepository>,
+            Arc::new(PgVenueIncentiveRepository::new(db.clone()))
+                as Arc<dyn VenueIncentiveRepository>,
             harness_execution_account().execution_account_id,
         )),
         composer: Arc::new(DefaultRecommendationComposer::new()),
@@ -1992,6 +2001,7 @@ impl From<RegistryMarketFixture<'_>> for MarketRegistryInfo {
             min_order_size: Decimal::ONE,
             liquidity_usd: Some(fixture.liquidity_usd),
             volume_24h: Some(fixture.volume_24h_usd),
+            maker_rebate_schedule: None,
             start_date: Some(fixture.decision_at - ChronoDuration::hours(1)),
             end_date: Some(fixture.decision_at + ChronoDuration::days(2)),
             resolved_at: None,

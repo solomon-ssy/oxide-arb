@@ -15,11 +15,11 @@ use quant_pivot_models::{
         governance::NewOperationLog,
         quant::{
             ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalReconcileSettlement,
-            CapitalSettlement, ExecutionIdentityEnrichment, ExecutionIdentityRefs,
-            ExecutionTradeObservation, ExitLedgerWrite, NewCapitalAllocation, NewExecutionOrder,
-            NewFeatureParityState, NewMarketSelection, NewOrderIntent, NewReconciliation,
-            NewReportTransaction, PositionExit, PositionFill, ReconciliationLedgerWrite,
-            ReportRunClaim, SubmissionLedgerWrite,
+            CapitalSettlement, CumulativePositionFill, ExecutionIdentityEnrichment,
+            ExecutionIdentityRefs, ExecutionTradeObservation, ExitLedgerWrite,
+            NewCapitalAllocation, NewExecutionOrder, NewFeatureParityState, NewMarketSelection,
+            NewOrderIntent, NewReconciliation, NewReportTransaction, PositionExit, PositionFill,
+            ReconciliationLedgerWrite, ReportRunClaim, SubmissionLedgerWrite,
         },
     },
     entities::{
@@ -1517,14 +1517,14 @@ pub async fn restart_enrichment_backfills_identity() {
                 discovered_order_id: Some(OrderId::new("venue-recovered")),
                 trades: vec![ExecutionTradeObservation {
                     venue_trade_id: VenueTradeId::new("trade-restart"),
-                    trade_status: VenueTradeStatus::Mined,
-                    transaction_hash: Some(transaction_hash.clone()),
+                    trade_status: VenueTradeStatus::Confirmed,
+                    transaction_hash: None,
                 }],
                 observed_at: Utc::now(),
             },
         )
         .await
-        .expect("restart enrichment");
+        .expect("confirmed trade may arrive before its transaction hash");
     let confirmed = restarted
         .enrich_identity_refs(
             &order.execution_order_id,
@@ -1539,7 +1539,7 @@ pub async fn restart_enrichment_backfills_identity() {
             },
         )
         .await
-        .expect("confirm enriched trade");
+        .expect("late transaction hash enriches the confirmed trade");
 
     assert_eq!(
         confirmed.trades[0].trade_status,
@@ -1583,7 +1583,7 @@ pub async fn restart_enrichment_backfills_identity() {
 pub async fn execution_atomic_unique_concurrent() {
     submission_persists_multi_atomically().await;
     Box::pin(duplicate_trade_identity_outcome()).await;
-    concurrent_orders_preserves_identity().await;
+    Box::pin(concurrent_orders_preserves_identity()).await;
     restart_enrichment_backfills_identity().await;
 }
 
@@ -1834,6 +1834,7 @@ fn new_pending_intent_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> NewOrd
             post_only: false,
             limit_price: Price::new(dec!(0.6)),
             amount: OrderAmount::Shares(Shares::new(dec!(100))),
+            maker_rebate_schedule: None,
             max_slippage_bps: Bps::new(dec!(50)),
             valid_until: Utc::now() + Duration::hours(1),
         },
@@ -1934,7 +1935,8 @@ fn pending_recon_row(eo: &ExecutionOrderId, intent: &OrderIntentId) -> NewReconc
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
         expected_fee_usd: None,
-        observed_fee_usd: None,
+        derived_fee_usd: None,
+        settled_fee_usd: None,
         fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
@@ -1965,9 +1967,8 @@ fn filled_write() -> ReconciliationLedgerWrite {
         capital: CapitalReconcileSettlement::Settle {
             spent_usd: Usd::new(NOTIONAL),
         },
-        fill: None,
-        exit: None,
-        exit_fully: false,
+        cumulative_fill: None,
+        cumulative_exit: None,
         exit_state: None,
         revert_lot: false,
         result: ReconciliationResult::Filled,
@@ -1978,7 +1979,8 @@ fn filled_write() -> ReconciliationLedgerWrite {
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
         expected_fee_usd: None,
-        observed_fee_usd: None,
+        derived_fee_usd: None,
+        settled_fee_usd: None,
         fee_delta_usd: None,
         resolved_by: Some("system:reconciliation_worker".to_owned()),
         resolved_at: Some(Utc::now()),
@@ -1993,7 +1995,7 @@ pub async fn reconcile_ambiguous_writes_position() {
     let (intent_id, order_id) = ambiguous_order(&db, &submission, &ids).await;
 
     let mut write = filled_write();
-    write.fill = Some(position_fill(&ids, &intent_id));
+    write.cumulative_fill = Some(cumulative_position_fill(&ids, &intent_id));
     let recorded = submission
         .apply_reconciliation(&order_id, write)
         .await
@@ -2043,9 +2045,8 @@ pub async fn reconcile_ambiguous_not_capital() {
         cancelled_at: Some(Utc::now()),
         error_message: None,
         capital: CapitalReconcileSettlement::Release,
-        fill: None,
-        exit: None,
-        exit_fully: false,
+        cumulative_fill: None,
+        cumulative_exit: None,
         exit_state: None,
         revert_lot: false,
         result: ReconciliationResult::NotFilled,
@@ -2056,7 +2057,8 @@ pub async fn reconcile_ambiguous_not_capital() {
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
         expected_fee_usd: None,
-        observed_fee_usd: None,
+        derived_fee_usd: None,
+        settled_fee_usd: None,
         fee_delta_usd: None,
         resolved_by: Some("system:reconciliation_worker".to_owned()),
         resolved_at: Some(Utc::now()),
@@ -2099,9 +2101,8 @@ pub async fn reconcile_unresolvable_impairs_ambiguous() {
         cancelled_at: None,
         error_message: Some("conflicting evidence".to_owned()),
         capital: CapitalReconcileSettlement::Impair,
-        fill: None,
-        exit: None,
-        exit_fully: false,
+        cumulative_fill: None,
+        cumulative_exit: None,
         exit_state: None,
         revert_lot: false,
         result: ReconciliationResult::Unresolvable,
@@ -2112,7 +2113,8 @@ pub async fn reconcile_unresolvable_impairs_ambiguous() {
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
         expected_fee_usd: None,
-        observed_fee_usd: None,
+        derived_fee_usd: None,
+        settled_fee_usd: None,
         fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
@@ -2165,9 +2167,8 @@ pub async fn reconcile_partial_writes_position() {
         capital: CapitalReconcileSettlement::Settle {
             spent_usd: Usd::new(PARTIAL_SPENT),
         },
-        fill: None,
-        exit: None,
-        exit_fully: false,
+        cumulative_fill: None,
+        cumulative_exit: None,
         exit_state: None,
         revert_lot: false,
         result: ReconciliationResult::PartiallyFilled,
@@ -2178,12 +2179,13 @@ pub async fn reconcile_partial_writes_position() {
         venue_cash_delta_usd: Some(Usd::new(-PARTIAL_SPENT)),
         realized_pnl_usd: None,
         expected_fee_usd: Some(Usd::new(PARTIAL_SPENT - PARTIAL_SHARES * dec!(0.6))),
-        observed_fee_usd: None,
+        derived_fee_usd: None,
+        settled_fee_usd: None,
         fee_delta_usd: None,
         resolved_by: Some("system:reconciliation_worker".to_owned()),
         resolved_at: Some(Utc::now()),
     };
-    write.fill = Some(PositionFill {
+    write.cumulative_fill = Some(CumulativePositionFill {
         order_intent_id: intent_id,
         execution_account_id: execution_pg_seed::fixture_execution_account().execution_account_id,
         token_id: TokenId::new("token-1"),
@@ -2191,10 +2193,9 @@ pub async fn reconcile_partial_writes_position() {
         event_id: Some(EventId::new(&ids.event)),
         category: MarketCategory::Politics,
         side: OutcomeSide::Yes,
-        shares: Shares::new(PARTIAL_SHARES),
-        price: Price::new(dec!(0.6)),
-        cost_usd: Usd::new(PARTIAL_SPENT),
-        filled_at: Utc::now(),
+        cumulative_shares: Shares::new(PARTIAL_SHARES),
+        cumulative_cost_usd: Usd::new(PARTIAL_SPENT),
+        observed_at: Utc::now(),
         source: AccountSource::Polymarket,
     });
 
@@ -2233,7 +2234,7 @@ pub async fn reconcile_correction_is_idempotent() {
     let (intent_id, order_id) = ambiguous_order(&db, &submission, &ids).await;
 
     let mut first = filled_write();
-    first.fill = Some(position_fill(&ids, &intent_id));
+    first.cumulative_fill = Some(cumulative_position_fill(&ids, &intent_id));
     submission
         .apply_reconciliation(&order_id, first)
         .await
@@ -2242,7 +2243,7 @@ pub async fn reconcile_correction_is_idempotent() {
     // Second identical correction must be a no-op (order is already terminal):
     // capital is not double-spent and the position is not double-written.
     let mut second = filled_write();
-    second.fill = Some(position_fill(&ids, &intent_id));
+    second.cumulative_fill = Some(cumulative_position_fill(&ids, &intent_id));
     submission
         .apply_reconciliation(&order_id, second)
         .await
@@ -2276,6 +2277,14 @@ pub async fn reconcile_correction_is_idempotent() {
         2,
         "the second no-op correction must not append more evidence",
     );
+
+    let mut conflicting = filled_write();
+    conflicting.result = ReconciliationResult::NotFilled;
+    let error = submission
+        .apply_reconciliation(&order_id, conflicting)
+        .await
+        .expect_err("a terminal replay with a different result must fail closed");
+    assert!(matches!(error, StorageError::StateConflict { .. }));
 }
 
 pub async fn operator_resolve_impaired_capital() {
@@ -2298,9 +2307,8 @@ pub async fn operator_resolve_impaired_capital() {
                 cancelled_at: None,
                 error_message: Some("unresolvable".to_owned()),
                 capital: CapitalReconcileSettlement::Impair,
-                fill: None,
-                exit: None,
-                exit_fully: false,
+                cumulative_fill: None,
+                cumulative_exit: None,
                 exit_state: None,
                 revert_lot: false,
                 result: ReconciliationResult::Unresolvable,
@@ -2311,7 +2319,8 @@ pub async fn operator_resolve_impaired_capital() {
                 venue_cash_delta_usd: None,
                 realized_pnl_usd: None,
                 expected_fee_usd: None,
-                observed_fee_usd: None,
+                derived_fee_usd: None,
+                settled_fee_usd: None,
                 fee_delta_usd: None,
                 resolved_by: None,
                 resolved_at: None,
@@ -2322,7 +2331,7 @@ pub async fn operator_resolve_impaired_capital() {
 
     //...then an operator resolves it to filled (Impaired -> Spent).
     let mut resolve = filled_write();
-    resolve.fill = Some(position_fill(&ids, &intent_id));
+    resolve.cumulative_fill = Some(cumulative_position_fill(&ids, &intent_id));
     resolve.resolved_by = Some("operator:alice".to_owned());
     let recorded = submission
         .apply_reconciliation(&order_id, resolve)
@@ -2403,6 +2412,23 @@ fn position_fill(ids: &TxnIds, intent_id: &OrderIntentId) -> PositionFill {
     }
 }
 
+fn cumulative_position_fill(ids: &TxnIds, intent_id: &OrderIntentId) -> CumulativePositionFill {
+    let fill = position_fill(ids, intent_id);
+    CumulativePositionFill {
+        order_intent_id: fill.order_intent_id,
+        execution_account_id: fill.execution_account_id,
+        token_id: fill.token_id,
+        market_id: fill.market_id,
+        event_id: fill.event_id,
+        category: fill.category,
+        side: fill.side,
+        cumulative_shares: fill.shares,
+        cumulative_cost_usd: fill.cost_usd,
+        observed_at: fill.filled_at,
+        source: fill.source,
+    }
+}
+
 fn reconciliation_row(
     execution_order_id: &ExecutionOrderId,
     intent_id: &OrderIntentId,
@@ -2427,7 +2453,8 @@ fn reconciliation_row(
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
         expected_fee_usd: None,
-        observed_fee_usd: None,
+        derived_fee_usd: None,
+        settled_fee_usd: None,
         fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
@@ -2468,6 +2495,7 @@ async fn seed_approved_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderInt
                     post_only: false,
                     limit_price: Price::new(dec!(0.6)),
                     amount: OrderAmount::Shares(Shares::new(dec!(100))),
+                    maker_rebate_schedule: None,
                     max_slippage_bps: Bps::new(dec!(50)),
                     valid_until: Utc::now() + Duration::hours(1),
                 },

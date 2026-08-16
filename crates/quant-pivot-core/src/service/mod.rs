@@ -66,5 +66,6 @@ pub mod trade_policy_evidence;
 pub mod trade_policy_preimage;
 pub(crate) mod trade_policy_replay;
 pub mod training_dataset;
+pub mod venue_incentive;
 pub mod weather_fact_ingest;
 pub mod ws_subscription;

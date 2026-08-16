@@ -10,7 +10,6 @@
 //! canonical execution truth.
 
 mod artifacts;
-mod tree_shap;
 
 pub use artifacts::{
     ActualBaselineNotEvaluableReason, ActualExecutionBaseline, AlternativeExitPolicy,
@@ -31,8 +30,4 @@ pub use artifacts::{
     TrajectoryExcursionEvaluation, TrajectoryPoint, TrajectoryPointEconomics,
     TrajectoryPointNotEvaluableReason, WeightedExplanationInput, WeightedFactorExplanationInput,
     WeightedTerm,
-};
-pub use tree_shap::{
-    DecisionTreeSpec, MissingBranch, TreeEnsembleInput, TreeEnsembleSpec, TreeInputSupport,
-    TreeNode, TreeShapExplainer, TreeShapModelContract,
 };

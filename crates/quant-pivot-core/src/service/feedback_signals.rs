@@ -35,7 +35,7 @@ use quant_pivot_research::{
         DriftObservation, FEEDBACK_COVERAGE_ARTIFACT_FORMAT_VERSION,
         FEEDBACK_DRIFT_ARTIFACT_FORMAT_VERSION, FeatureDriftDetail, FeedbackCoverageArtifact,
         FeedbackCoverageCodec, FeedbackDriftArtifact, FeedbackDriftCodec, LabelDriftDetail,
-        drift_gate, drift_observations, jensen_shannon, rank_ic_drift,
+        drift_gate, drift_observations, jensen_shannon, target_rank_ic_drift,
     },
     model::QuantModelRuntime,
     training::{TOKEN_PAYOUT_RATIO, TrainingExample},
@@ -520,7 +520,7 @@ async fn compute_drift(
         &coverage.champion_examples,
     )
     .await?;
-    let rank_summary = rank_ic_drift(
+    let target_rank_summary = target_rank_ic_drift(
         &baseline_scores,
         &baseline_labels,
         &evaluation_scores,
@@ -532,7 +532,7 @@ async fn compute_drift(
             "evaluation champion scores",
             evaluation_scores.len(),
         )?,
-        summary: rank_summary,
+        summary: target_rank_summary,
     };
     let baseline_counts = payout_histogram(baseline_examples)?;
     let evaluation_counts = payout_histogram(&coverage.champion_examples)?;
@@ -577,9 +577,9 @@ fn overlapping_drift(
             0,
         )?,
         DriftObservation::try_new(
-            FeedbackDriftMetric::RankIcDrop,
+            FeedbackDriftMetric::TargetRankIcDrop,
             None,
-            policy.concept_rank_ic_drop,
+            policy.concept_target_rank_ic_drop,
             0,
         )?,
         DriftObservation::try_new(

@@ -29,9 +29,8 @@ pub use labeler::{
     HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LIQUIDITY_EXIT_POSSIBLE, LabelDefinition,
     LiquidityExitLabeler, MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS,
     MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, POLICY_ENTRY_FILL_RATIO,
-    POLICY_EXIT_FILL_RATIO, POLICY_NET_POSITIVE, POLICY_NET_RETURN_BPS, RETURN_TO_HORIZON,
-    ReturnToHorizonLabeler, TOKEN_PAYOUT_RATIO, TokenPayoutRatioLabeler, label_definitions,
-    label_names, label_names_for_sources,
+    POLICY_EXIT_FILL_RATIO, POLICY_NET_POSITIVE, POLICY_NET_RETURN_BPS, TOKEN_PAYOUT_RATIO,
+    TokenPayoutRatioLabeler, label_definitions, label_names, label_names_for_sources,
 };
 pub use leakage::{
     LeakageFindings, LeakageViolation, assert_no_future_leakage, scan_future_leakage,
@@ -82,7 +81,7 @@ use crate::{
 };
 
 stable_name! {
-    /// Stable, compile-time-known label name (e.g. `"return_to_horizon"`).
+    /// Stable, compile-time-known supervised label name.
     LabelName
 }
 
@@ -1286,8 +1285,8 @@ pub(crate) mod fixtures {
             },
             factor_values: Vec::new(),
             labels: vec![TrainingLabel {
-                label_name: LabelName::from_static("return_to_horizon"),
-                horizon_secs: 60,
+                label_name: LabelName::from_static("token_payout_ratio"),
+                horizon_secs: 0,
                 value: Decimal::from(label_value),
                 is_resolved: true,
                 matured_at: as_of + Duration::seconds(60),
@@ -1499,8 +1498,12 @@ mod tests {
         let mut example = example("aaa", 100);
         example.factor_values = vec![factor_value(&native_plane)];
         assert!(
-            validate_factor_rows(ModelFamily::ClassicalRandomForest, &empty_plane, &[example])
-                .is_err()
+            validate_factor_rows(
+                ModelFamily::ClassicalLogisticRegression,
+                &empty_plane,
+                &[example]
+            )
+            .is_err()
         );
     }
 
@@ -1542,7 +1545,7 @@ mod tests {
         TrainingDatasetArtifact::compute_dataset_hash(
             DatasetHashContract {
                 model_spec_id,
-                model_family: ModelFamily::ClassicalRandomForest,
+                model_family: ModelFamily::ClassicalLogisticRegression,
                 window_start: start,
                 window_end: start,
                 purpose,

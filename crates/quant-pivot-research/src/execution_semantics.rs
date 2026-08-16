@@ -1,14 +1,21 @@
 //! Pure venue execution semantics shared by research and serving.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Days, Utc};
 use quant_pivot_models::{
     domain::market::{
         book::BookLevel,
-        fee::{BuilderFeeAttribution, MarketFeeSchedule},
+        fee::{
+            BuilderFeeAttribution, DeferredVenueIncentive, FrozenMakerRebateSchedule,
+            ImmediateExecutionCost, MakerRebateEligibility, MarketFeeSchedule,
+            MarketMakerRebateSchedule,
+        },
     },
-    enums::{common::Side, quant::FillRequirement},
+    enums::{
+        common::{Side, TickSize},
+        quant::FillRequirement,
+    },
     hashing::CanonicalDigest,
-    types::{Bps, ContentHash, PayoutRatio, Price, Shares, Usd},
+    types::{Bps, ContentHash, PassivePlacement, PayoutRatio, Price, Shares, Usd},
 };
 use rust_decimal::{Decimal, MathematicalOps, RoundingStrategy};
 use serde::{Deserialize, Serialize};
@@ -17,7 +24,7 @@ use uuid::Uuid;
 use crate::precision::quantize_venue_amount;
 
 /// Versioned identity of the shared book-walk, queue, and fee semantics.
-pub const EXECUTION_SEMANTICS_VERSION: &str = "polymarket_execution_semantics_v1";
+pub const EXECUTION_SEMANTICS_VERSION: &str = "polymarket_execution_semantics_v2";
 
 /// Full-depth book evidence is the only publishable fidelity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +51,28 @@ pub struct PitFeeSchedule {
     pub builder_maker_fee_bps: Bps,
     pub builder_taker_fee_bps: Bps,
     pub builder_attribution: BuilderFeeAttribution,
+}
+
+/// Point-in-time Gamma maker-rebate schedule, independent of immediate fees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PitMakerRebateSchedule {
+    pub schedule_hash: ContentHash,
+    pub catalog_change_hash: ContentHash,
+    pub effective_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub fees_enabled: bool,
+    pub platform_rate: Decimal,
+    pub exponent: Decimal,
+    pub taker_only: bool,
+    pub rebate_rate: Decimal,
+}
+
+/// Composite PIT identity used by candidate admission and economic scenarios.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PitMarketExecutionEconomics {
+    pub fee_schedule: PitFeeSchedule,
+    pub maker_rebate_schedule: Option<PitMakerRebateSchedule>,
+    pub composite_hash: ContentHash,
 }
 
 impl PitFeeSchedule {
@@ -94,8 +123,7 @@ impl PitFeeSchedule {
         if !price.is_positive() || price > Price::ONE || !shares.is_positive() {
             return Err(FeeError::InvalidFill);
         }
-        let curve_base = price.inner() * (Decimal::ONE - price.inner());
-        let curve = curve_base.powd(self.exponent);
+        let curve = self.fee_curve(price);
         let platform_rate = match role {
             LiquidityRole::Maker if self.taker_only => Decimal::ZERO,
             LiquidityRole::Maker | LiquidityRole::Taker => self.platform_rate,
@@ -114,6 +142,165 @@ impl PitFeeSchedule {
             Ok(Usd::new(fee))
         }
     }
+
+    /// Fee-equivalent used by the maker-rebate program. It deliberately
+    /// ignores `taker_only` and builder fees and applies no minimum-fee floor.
+    pub fn fee_equivalent(
+        &self,
+        price: Price,
+        shares: Shares,
+        fill_at: DateTime<Utc>,
+    ) -> Result<Usd, FeeError> {
+        self.validate_at(fill_at)?;
+        if !price.is_positive() || price > Price::ONE || !shares.is_positive() {
+            return Err(FeeError::InvalidFill);
+        }
+        Ok(Usd::new(quantize_venue_amount(
+            shares.inner() * self.platform_rate * self.fee_curve(price),
+        )))
+    }
+
+    fn fee_curve(&self, price: Price) -> Decimal {
+        (price.inner() * (Decimal::ONE - price.inner())).powd(self.exponent)
+    }
+}
+
+impl PitMakerRebateSchedule {
+    pub const fn from_market_schedule(
+        schedule: &MarketMakerRebateSchedule,
+    ) -> Result<Self, FeeError> {
+        Ok(Self {
+            schedule_hash: schedule.schedule_hash,
+            catalog_change_hash: schedule.catalog_change_hash,
+            effective_at: schedule.effective_at,
+            available_at: schedule.available_at,
+            fees_enabled: schedule.fees_enabled,
+            platform_rate: schedule.platform_rate,
+            exponent: schedule.exponent,
+            taker_only: schedule.taker_only,
+            rebate_rate: schedule.rebate_rate,
+        })
+    }
+
+    pub fn validate_at(&self, decision_at: DateTime<Utc>) -> Result<(), FeeError> {
+        if self.effective_at > decision_at || self.available_at > decision_at {
+            return Err(FeeError::NotPointInTime);
+        }
+        if self.platform_rate < Decimal::ZERO
+            || self.platform_rate > Decimal::ONE
+            || self.exponent <= Decimal::ZERO
+            || self.exponent > Decimal::from(8)
+            || self.rebate_rate < Decimal::ZERO
+            || self.rebate_rate > Decimal::ONE
+        {
+            return Err(FeeError::InvalidSchedule);
+        }
+        Ok(())
+    }
+
+    /// Freeze the exact Gamma terms into an executable recommendation.
+    #[must_use]
+    pub const fn frozen(&self) -> FrozenMakerRebateSchedule {
+        FrozenMakerRebateSchedule {
+            schedule_hash: self.schedule_hash,
+            catalog_change_hash: self.catalog_change_hash,
+            effective_at: self.effective_at,
+            available_at: self.available_at,
+            fees_enabled: self.fees_enabled,
+            platform_rate: self.platform_rate,
+            exponent: self.exponent,
+            taker_only: self.taker_only,
+            rebate_rate: self.rebate_rate,
+        }
+    }
+
+    /// Estimate the delayed maker incentive for a confirmed or simulated
+    /// maker fill. No fill, taker liquidity, disabled fees, or a zero program
+    /// rate produces no accrual.
+    pub fn expected_incentive(
+        &self,
+        fee_schedule: &PitFeeSchedule,
+        role: LiquidityRole,
+        price: Price,
+        shares: Shares,
+        fill_at: DateTime<Utc>,
+    ) -> Result<Option<DeferredVenueIncentive>, FeeError> {
+        self.validate_at(fill_at)?;
+        if role != LiquidityRole::Maker
+            || !shares.is_positive()
+            || !self.fees_enabled
+            || self.rebate_rate.is_zero()
+        {
+            return Ok(None);
+        }
+        let expected_rebate_usd = Usd::new(quantize_venue_amount(
+            fee_schedule.fee_equivalent(price, shares, fill_at)?.inner() * self.rebate_rate,
+        ));
+        Ok(Some(DeferredVenueIncentive {
+            expected_rebate_usd,
+            settlement_date: fill_at
+                .date_naive()
+                .checked_add_days(Days::new(1))
+                .ok_or(FeeError::InvalidFill)?,
+            source_schedule_hash: self.schedule_hash,
+            eligibility: MakerRebateEligibility::EligibleMakerFill,
+        }))
+    }
+}
+
+impl PitMarketExecutionEconomics {
+    /// Resolve the independent CLOB/Gamma sources and reject any visible
+    /// fee-curve disagreement at the decision boundary.
+    pub fn resolve(
+        fee_schedule: &MarketFeeSchedule,
+        maker_rebate_schedule: Option<&MarketMakerRebateSchedule>,
+        decision_at: DateTime<Utc>,
+    ) -> Result<Self, FeeError> {
+        if maker_rebate_schedule
+            .is_some_and(|schedule| schedule.market_id != fee_schedule.market_id)
+        {
+            return Err(FeeError::SourceMismatch);
+        }
+        let fee_schedule = PitFeeSchedule::from_market_fee_schedule(fee_schedule)?;
+        fee_schedule.validate_at(decision_at)?;
+        let maker_rebate_schedule = match maker_rebate_schedule
+            .map(PitMakerRebateSchedule::from_market_schedule)
+            .transpose()?
+        {
+            Some(schedule) => match schedule.validate_at(decision_at) {
+                Ok(()) => Some(schedule),
+                Err(FeeError::NotPointInTime) => None,
+                Err(error) => return Err(error),
+            },
+            None => None,
+        };
+        if let Some(rebate) = &maker_rebate_schedule {
+            let clob_fees_enabled = !fee_schedule.platform_rate.is_zero();
+            if rebate.fees_enabled != clob_fees_enabled
+                || rebate.platform_rate != fee_schedule.platform_rate
+                || rebate.exponent != fee_schedule.exponent
+                || rebate.taker_only != fee_schedule.taker_only
+            {
+                return Err(FeeError::SourceMismatch);
+            }
+        }
+        let composite_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/pit-market-execution-economics",
+            2,
+            &(
+                fee_schedule.schedule_hash,
+                maker_rebate_schedule
+                    .as_ref()
+                    .map(|schedule| schedule.schedule_hash),
+            ),
+        )
+        .map_err(|_| FeeError::InvalidSchedule)?;
+        Ok(Self {
+            fee_schedule,
+            maker_rebate_schedule,
+            composite_hash,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +309,7 @@ pub enum FeeError {
     InvalidSchedule,
     InvalidFill,
     CashBudgetInvariant,
+    SourceMismatch,
 }
 
 /// Resolution economics of one already-walked binary-token BUY.
@@ -141,16 +329,16 @@ pub struct ResolutionBuyEconomics {
 impl ResolutionBuyEconomics {
     /// Derive binary-resolution economics from a successful cash-budget walk.
     pub fn from_fill(fill: &BookWalkFill) -> Result<Self, FeeError> {
-        let raw_cash_outlay = -fill.total_cash_delta;
+        let raw_cash_outlay = -fill.account_cash_delta_usd;
         if fill.outcome == BookWalkOutcome::Unfilled
             || !fill.filled_shares.is_positive()
             || raw_cash_outlay <= Decimal::ZERO
-            || fill.gross_order_amount.inner() + fill.expected_fee.inner() != raw_cash_outlay
+            || fill.immediate_cost.cash_outlay_usd.inner() != raw_cash_outlay
         {
             return Err(FeeError::InvalidFill);
         }
         let cash_outlay = quantize_venue_amount(raw_cash_outlay);
-        let entry_fee = quantize_venue_amount(fill.expected_fee.inner());
+        let entry_fee = quantize_venue_amount(fill.immediate_cost.total_fee_usd().inner());
         let all_in = cash_outlay / fill.filled_shares.inner();
         if all_in <= Decimal::ZERO || all_in > Decimal::ONE {
             return Err(FeeError::InvalidFill);
@@ -195,6 +383,29 @@ pub fn aggressive_buy_limit(best_ask: Price, max_slippage_bps: Bps) -> Price {
     )
 }
 
+/// Post-only BUY price resolved from the same placement semantics used by OOS replay.
+pub fn passive_buy_limit(
+    best_bid: Price,
+    best_ask: Price,
+    placement: PassivePlacement,
+    tick_size: TickSize,
+) -> Result<Price, FeeError> {
+    if !best_bid.is_positive() || best_ask <= best_bid || best_ask > Price::ONE {
+        return Err(FeeError::InvalidFill);
+    }
+    let limit = match placement {
+        PassivePlacement::JoinBestBid => best_bid,
+        PassivePlacement::ImproveBestBidByTicks { ticks } => Price::new(
+            (best_bid.inner() + tick_size.as_decimal() * Decimal::from(ticks))
+                .min(best_ask.inner() - tick_size.as_decimal()),
+        ),
+    };
+    if !limit.is_positive() || limit >= best_ask {
+        return Err(FeeError::InvalidFill);
+    }
+    Ok(limit)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BookWalkOutcome {
@@ -210,11 +421,10 @@ pub struct BookWalkFill {
     pub vwap: Option<Price>,
     pub worst_price: Option<Price>,
     pub filled_shares: Shares,
-    /// Principal encoded in the venue order, excluding fees.
-    pub gross_order_amount: Usd,
-    pub expected_fee: Usd,
+    /// Immediate principal and independently attributed fee components.
+    pub immediate_cost: ImmediateExecutionCost,
     /// Signed account cash movement: negative for BUY, positive for SELL.
-    pub total_cash_delta: Decimal,
+    pub account_cash_delta_usd: Decimal,
     pub unfilled_cash_budget: Usd,
     pub unfilled_shares: Shares,
 }
@@ -226,9 +436,13 @@ impl BookWalkFill {
             vwap: None,
             worst_price: None,
             filled_shares: Shares::ZERO,
-            gross_order_amount: Usd::ZERO,
-            expected_fee: Usd::ZERO,
-            total_cash_delta: Decimal::ZERO,
+            immediate_cost: ImmediateExecutionCost {
+                principal_usd: Usd::ZERO,
+                venue_fee_usd: Usd::ZERO,
+                builder_fee_usd: Usd::ZERO,
+                cash_outlay_usd: Usd::ZERO,
+            },
+            account_cash_delta_usd: Decimal::ZERO,
             unfilled_cash_budget,
             unfilled_shares,
         }
@@ -472,6 +686,16 @@ impl WalkResultParts {
         if shares <= Decimal::ZERO {
             return BookWalkFill::unfilled(unfilled_cash_budget, unfilled_shares);
         }
+        let principal = quantize_venue_amount(gross);
+        let venue_fee = quantize_venue_amount(fee);
+        let cash_outlay = quantize_venue_amount(principal + venue_fee);
+        let cash_proceeds = quantize_venue_amount(principal - venue_fee);
+        let immediate_cost = ImmediateExecutionCost {
+            principal_usd: Usd::new(principal),
+            venue_fee_usd: Usd::new(venue_fee),
+            builder_fee_usd: Usd::ZERO,
+            cash_outlay_usd: Usd::new(cash_outlay),
+        };
         BookWalkFill {
             outcome: if complete {
                 BookWalkOutcome::Filled
@@ -481,22 +705,15 @@ impl WalkResultParts {
             vwap: Some(Price::new(gross / shares)),
             worst_price: worst,
             filled_shares: Shares::new(shares),
-            gross_order_amount: Usd::new(gross),
-            expected_fee: Usd::new(fee),
-            total_cash_delta: match side {
-                Side::Buy => -(gross + fee),
-                Side::Sell => gross - fee,
+            immediate_cost,
+            account_cash_delta_usd: match side {
+                Side::Buy => -cash_outlay,
+                Side::Sell => cash_proceeds,
             },
             unfilled_cash_budget,
             unfilled_shares,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PassiveQueueAvailability {
-    Available,
-    UnknownAfterReset,
 }
 
 /// Conservative queue-ahead lower-bound model for one passive buy.
@@ -507,7 +724,6 @@ pub struct PassiveQueueState {
     pub queue_ahead: Shares,
     pub remaining_shares: Shares,
     pub filled_shares: Shares,
-    pub availability: PassiveQueueAvailability,
 }
 
 impl PassiveQueueState {
@@ -523,16 +739,14 @@ impl PassiveQueueState {
             queue_ahead: visible_same_side_size,
             remaining_shares: requested_shares,
             filled_shares: Shares::ZERO,
-            availability: PassiveQueueAvailability::Available,
         }
     }
 
-    /// Only accepted opposing executions at the exact price consume queue.
+    /// Opposing executions at or through the resting BUY price consume queue.
     pub fn apply_trade(&mut self, trade: PassiveTrade) -> Shares {
-        if self.availability != PassiveQueueAvailability::Available
-            || trade.stream_session_id != self.stream_session_id
+        if trade.stream_session_id != self.stream_session_id
             || trade.side != Side::Sell
-            || trade.price != self.price
+            || trade.price > self.price
             || !trade.shares.is_positive()
         {
             return Shares::ZERO;
@@ -548,12 +762,6 @@ impl PassiveQueueState {
 
     /// L2 cancellations never count as fills or queue consumption.
     pub const fn apply_cancellation(&mut self, _cancelled: Shares) {}
-
-    pub fn reset_session(&mut self, new_session_id: Uuid) {
-        if new_session_id != self.stream_session_id {
-            self.availability = PassiveQueueAvailability::UnknownAfterReset;
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -566,19 +774,23 @@ pub struct PassiveTrade {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
+        domain::market::{
+            book::BookLevel,
+            fee::{BuilderFeeAttribution, MarketFeeSchedule, MarketMakerRebateSchedule},
+        },
         enums::{common::Side, quant::FillRequirement},
-        types::{Bps, ContentHash, Price, Shares, Usd},
+        types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, Price, Shares, Usd},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use uuid::Uuid;
 
     use super::{
-        BookWalkOutcome, LiquidityRole, PassiveQueueState, PassiveTrade, PitFeeSchedule,
-        walk_buy_cash_budget, walk_sell_exact_shares,
+        BookWalkOutcome, FeeError, LiquidityRole, PassiveQueueState, PassiveTrade, PitFeeSchedule,
+        PitMakerRebateSchedule, PitMarketExecutionEconomics, walk_buy_cash_budget,
+        walk_sell_exact_shares,
     };
 
     fn level(price: Decimal, size: Decimal) -> BookLevel {
@@ -631,8 +843,8 @@ mod tests {
         )
         .expect("walk");
         assert_eq!(fak.outcome, BookWalkOutcome::Partial);
-        assert_eq!(fak.gross_order_amount, Usd::new(dec!(5)));
-        assert!(fak.gross_order_amount.inner() + fak.expected_fee.inner() <= dec!(10));
+        assert_eq!(fak.immediate_cost.principal_usd, Usd::new(dec!(5)));
+        assert!(fak.immediate_cost.cash_outlay_usd.inner() <= dec!(10));
     }
 
     #[test]
@@ -649,11 +861,11 @@ mod tests {
             at,
         )
         .expect("walk");
-        assert_eq!(fill.gross_order_amount, Usd::new(dec!(13)));
-        assert!(fill.expected_fee.is_positive());
+        assert_eq!(fill.immediate_cost.principal_usd, Usd::new(dec!(13)));
+        assert!(fill.immediate_cost.total_fee_usd().is_positive());
         assert_eq!(
-            fill.total_cash_delta,
-            fill.gross_order_amount.inner() - fill.expected_fee.inner()
+            fill.account_cash_delta_usd,
+            fill.immediate_cost.principal_usd.inner() - fill.immediate_cost.total_fee_usd().inner()
         );
     }
 
@@ -675,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn platform_fee_golden_rounding() {
+    fn platform_fee_contract_vectors() {
         let mut fees = PitFeeSchedule::semantics_fixture();
         fees.platform_rate = dec!(0.25);
         fees.exponent = dec!(2);
@@ -710,17 +922,17 @@ mod tests {
             Usd::new(dec!(0.4375)),
         );
 
-        // Polymarket SDK production vectors express a $100 order as shares =
-        // amount / price. Preserve those external contract vectors here after
-        // deleting the parallel API fee implementation.
+        // Current venue category rates, expressed for a $100 principal order
+        // as shares = amount / price.
         fees.exponent = Decimal::ONE;
         for (price, rate, expected) in [
-            (dec!(0.5), dec!(0.03), dec!(1.5)),
-            (dec!(0.3), dec!(0.03), dec!(2.1)),
-            (dec!(0.7), dec!(0.03), dec!(0.9)),
-            (dec!(0.5), dec!(0.04), dec!(2.0)),
+            (dec!(0.5), dec!(0.07), dec!(3.5)),
+            (dec!(0.3), dec!(0.07), dec!(4.9)),
+            (dec!(0.7), dec!(0.07), dec!(2.1)),
             (dec!(0.5), dec!(0.05), dec!(2.5)),
-            (dec!(0.5), dec!(0.072), dec!(3.6)),
+            (dec!(0.5), dec!(0.04), dec!(2.0)),
+            (dec!(0.5), dec!(0.03), dec!(1.5)),
+            (dec!(0.5), Decimal::ZERO, Decimal::ZERO),
         ] {
             fees.platform_rate = rate;
             assert_eq!(
@@ -776,6 +988,156 @@ mod tests {
     }
 
     #[test]
+    fn fee_pool_share_cancels() {
+        let fees = PitFeeSchedule::semantics_fixture();
+        let own = fees
+            .fee_equivalent(
+                Price::new(dec!(0.5)),
+                Shares::new(dec!(100)),
+                fees.effective_at,
+            )
+            .expect("own fee equivalent")
+            .inner();
+        let others = dec!(5.25);
+        let pool = own + others;
+        let rebate_rate = dec!(0.20);
+        let share_weighted_award = own / pool * (pool * rebate_rate);
+        assert_eq!(share_weighted_award, own * rebate_rate);
+    }
+
+    #[test]
+    fn rebate_requires_maker_fill() {
+        let fees = PitFeeSchedule::semantics_fixture();
+        let rebate = PitMakerRebateSchedule {
+            schedule_hash: ContentHash::parse(&format!("blake3:{}", "2".repeat(64))).expect("hash"),
+            catalog_change_hash: ContentHash::parse(&format!("blake3:{}", "3".repeat(64)))
+                .expect("hash"),
+            effective_at: fees.effective_at,
+            available_at: fees.available_at,
+            fees_enabled: true,
+            platform_rate: fees.platform_rate,
+            exponent: fees.exponent,
+            taker_only: fees.taker_only,
+            rebate_rate: dec!(0.20),
+        };
+        let incentive = rebate
+            .expected_incentive(
+                &fees,
+                LiquidityRole::Maker,
+                Price::new(dec!(0.5)),
+                Shares::new(dec!(100)),
+                fees.effective_at,
+            )
+            .expect("rebate estimate")
+            .expect("eligible maker fill");
+        assert_eq!(incentive.expected_rebate_usd, Usd::new(dec!(0.35)));
+        assert!(
+            rebate
+                .expected_incentive(
+                    &fees,
+                    LiquidityRole::Taker,
+                    Price::new(dec!(0.5)),
+                    Shares::new(dec!(100)),
+                    fees.effective_at,
+                )
+                .expect("taker check")
+                .is_none()
+        );
+        assert!(
+            rebate
+                .expected_incentive(
+                    &fees,
+                    LiquidityRole::Maker,
+                    Price::new(dec!(0.5)),
+                    Shares::ZERO,
+                    fees.effective_at,
+                )
+                .expect("no-fill check")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pit_mismatch_fails_closed() {
+        let fees = PitFeeSchedule::semantics_fixture();
+        let market_id = MarketId::new("0xmarket");
+        let clob = MarketFeeSchedule {
+            market_id: market_id.clone(),
+            market_info_version_id: ClobMarketInfoVersionId::from_v7(),
+            market_info_payload_hash: fees.schedule_hash,
+            platform_rate: fees.platform_rate,
+            exponent: fees.exponent,
+            taker_only: fees.taker_only,
+            builder_maker_fee_bps: Bps::ZERO,
+            builder_taker_fee_bps: Bps::ZERO,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+            effective_at: fees.effective_at,
+            available_at: fees.available_at,
+        };
+        let gamma = MarketMakerRebateSchedule {
+            market_id,
+            fees_enabled: true,
+            platform_rate: dec!(0.05),
+            exponent: fees.exponent,
+            taker_only: fees.taker_only,
+            rebate_rate: dec!(0.20),
+            effective_at: fees.effective_at,
+            available_at: fees.available_at,
+            catalog_change_hash: ContentHash::parse(&format!("blake3:{}", "4".repeat(64)))
+                .expect("hash"),
+            schedule_hash: ContentHash::parse(&format!("blake3:{}", "5".repeat(64))).expect("hash"),
+        };
+        assert_eq!(
+            PitMarketExecutionEconomics::resolve(&clob, Some(&gamma), fees.effective_at),
+            Err(FeeError::SourceMismatch)
+        );
+
+        let mut wrong_market = gamma;
+        wrong_market.platform_rate = fees.platform_rate;
+        wrong_market.market_id = MarketId::new("0xother-market");
+        assert_eq!(
+            PitMarketExecutionEconomics::resolve(&clob, Some(&wrong_market), fees.effective_at,),
+            Err(FeeError::SourceMismatch)
+        );
+    }
+
+    #[test]
+    fn future_rebate_is_zero() {
+        let fees = PitFeeSchedule::semantics_fixture();
+        let market_id = MarketId::new("0xmarket");
+        let clob = MarketFeeSchedule {
+            market_id: market_id.clone(),
+            market_info_version_id: ClobMarketInfoVersionId::from_v7(),
+            market_info_payload_hash: fees.schedule_hash,
+            platform_rate: fees.platform_rate,
+            exponent: fees.exponent,
+            taker_only: fees.taker_only,
+            builder_maker_fee_bps: Bps::ZERO,
+            builder_taker_fee_bps: Bps::ZERO,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+            effective_at: fees.effective_at,
+            available_at: fees.available_at,
+        };
+        let gamma = MarketMakerRebateSchedule {
+            market_id,
+            fees_enabled: true,
+            platform_rate: fees.platform_rate,
+            exponent: fees.exponent,
+            taker_only: fees.taker_only,
+            rebate_rate: dec!(0.20),
+            effective_at: fees.effective_at,
+            available_at: fees.available_at + Duration::seconds(1),
+            catalog_change_hash: ContentHash::parse(&format!("blake3:{}", "4".repeat(64)))
+                .expect("hash"),
+            schedule_hash: ContentHash::parse(&format!("blake3:{}", "5".repeat(64))).expect("hash"),
+        };
+
+        let resolved = PitMarketExecutionEconomics::resolve(&clob, Some(&gamma), fees.effective_at)
+            .expect("future rebate source is unavailable, not a fee failure");
+        assert!(resolved.maker_rebate_schedule.is_none());
+    }
+
+    #[test]
     fn buy_respects_total_budget() {
         for budget in [dec!(0.01), dec!(1), dec!(25), dec!(100), dec!(500)] {
             for price in [dec!(0.01), dec!(0.1), dec!(0.5), dec!(0.9), dec!(0.99)] {
@@ -796,7 +1158,7 @@ mod tests {
                         )
                         .expect("cash-budget walk");
                         assert!(
-                            fill.gross_order_amount.inner() + fill.expected_fee.inner() <= budget,
+                            fill.immediate_cost.cash_outlay_usd.inner() <= budget,
                             "budget={budget} price={price} rate={rate} exponent={exponent} fill={fill:?}"
                         );
                     }
@@ -830,5 +1192,26 @@ mod tests {
             shares: Shares::new(dec!(12)),
         });
         assert_eq!(exhausted, Shares::ZERO);
+    }
+
+    #[test]
+    fn price_through_consumes_queue() {
+        let session = Uuid::now_v7();
+        let mut queue = PassiveQueueState::new(
+            session,
+            Price::new(dec!(0.5)),
+            Shares::new(dec!(10)),
+            Shares::new(dec!(5)),
+        );
+        let filled = queue.apply_trade(PassiveTrade {
+            stream_session_id: session,
+            side: Side::Sell,
+            price: Price::new(dec!(0.49)),
+            shares: Shares::new(dec!(12)),
+        });
+
+        assert_eq!(filled, Shares::new(dec!(2)));
+        assert_eq!(queue.queue_ahead, Shares::ZERO);
+        assert_eq!(queue.remaining_shares, Shares::new(dec!(3)));
     }
 }

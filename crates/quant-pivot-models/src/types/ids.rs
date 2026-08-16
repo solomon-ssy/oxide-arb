@@ -1192,6 +1192,18 @@ pub struct ExecutionOrderId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExecutionTradeRefId(Uuid);
 
+/// One immutable authenticated venue fill fact.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExecutionFillId(Uuid);
+
+/// One immutable fee-provenance fact attached to an execution fill.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExecutionFeeMeasurementId(Uuid);
+
+/// One immutable venue incentive lifecycle event.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VenueIncentiveEventId(Uuid);
+
 /// One execution-order to EVM transaction relationship.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExecutionTransactionRefId(Uuid);

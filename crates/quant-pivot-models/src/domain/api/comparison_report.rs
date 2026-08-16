@@ -13,7 +13,7 @@ use crate::{
     domain::{pagination::PageRequest, quant::ModelComparisonReportInfo},
     types::{
         BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
-        backtest::CategoryRankIcDeltas,
+        backtest::CategoryRealizedReturnRankCorrelationDeltas,
     },
 };
 
@@ -26,13 +26,13 @@ pub struct ModelComparisonReportView {
     pub baseline_report_id: BacktestReportId,
     pub candidate_report_id: BacktestReportId,
     pub model_run_id: ModelRunId,
-    pub rank_ic_delta: Decimal,
+    pub realized_return_rank_correlation_delta: Decimal,
     pub hit_rate_delta: Decimal,
     pub realized_pnl_delta: Decimal,
     pub score_correlation: Decimal,
     pub side_disagreement_rate: Decimal,
     pub common_samples: i64,
-    pub category_breakdown_diff: CategoryRankIcDeltas,
+    pub category_breakdown_diff: CategoryRealizedReturnRankCorrelationDeltas,
     pub comparison_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 }
@@ -61,7 +61,7 @@ impl From<ModelComparisonReportInfo> for ModelComparisonReportView {
             baseline_report_id: info.baseline_report_id,
             candidate_report_id: info.candidate_report_id,
             model_run_id: info.model_run_id,
-            rank_ic_delta: info.rank_ic_delta,
+            realized_return_rank_correlation_delta: info.realized_return_rank_correlation_delta,
             hit_rate_delta: info.hit_rate_delta,
             realized_pnl_delta: info.realized_pnl_delta,
             score_correlation: info.score_correlation,

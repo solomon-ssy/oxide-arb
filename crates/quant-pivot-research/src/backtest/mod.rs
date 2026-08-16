@@ -55,6 +55,7 @@ use quant_pivot_models::{
 pub use runner::{ModelCalibrationReplay, PortfolioReplayBacktester};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     execution_semantics::PitFeeSchedule,
@@ -63,6 +64,7 @@ use crate::{
         ModelRankTarget, QuantModelRuntime,
         runtime::{ModelRuntimeInput, ModelRuntimeOutput},
     },
+    policy_replay::PolicyReplayTrade,
     portfolio::{AccountSnapshot, VerifiedPortfolioScenarioModel, scenario_economic_function_hash},
     precision::RESEARCH_DECIMAL_SCALE,
 };
@@ -83,6 +85,21 @@ pub struct BacktestExecutionSnapshot {
     pub fill_at: DateTime<Utc>,
     pub limit_price: Price,
     pub book_hash: ContentHash,
+    /// Continuous same-session market-print evidence after the decision book.
+    pub passive_tape: BacktestPassiveTape,
+}
+
+/// Frozen future execution evidence used only to evaluate a historical
+/// post-only order selected by the optimizer.
+///
+/// It is outcome truth, not model
+/// input, and therefore cannot affect the decision-time feature plane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacktestPassiveTape {
+    pub stream_session_id: Uuid,
+    pub anchor_token_sequence: u64,
+    pub coverage_through: DateTime<Utc>,
+    pub trades: Vec<PolicyReplayTrade>,
 }
 
 /// Exact decision-time executable liquidation state for one outcome token.
@@ -521,7 +538,7 @@ pub struct BacktestReport {
     /// Count of missing-factor warnings across the replay.
     pub missing_feature_count: u64,
     /// Spearman rank IC between composite score and realized return.
-    pub rank_ic: Decimal,
+    pub realized_return_rank_correlation: Decimal,
     /// Unannualized Sharpe ratio of the per-tick portfolio return series
     /// (`0` for fewer than two ticks or a zero-variance
     /// series). The single-path replay's own Sharpe — the debug-view sibling

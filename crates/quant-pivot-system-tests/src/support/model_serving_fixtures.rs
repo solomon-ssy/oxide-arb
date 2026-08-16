@@ -1328,7 +1328,7 @@ impl ModelVersionFixture {
                     spec.input_contract.clone(),
                     scoring.cross_section.clone(),
                 )?,
-                model_family => {
+                model_family @ ModelFamily::ClassicalLogisticRegression => {
                     return Err(ResearchError::InvalidModelArtifact {
                         detail: format!(
                             "model fixture requires real fitted bytes for family {model_family:?}"

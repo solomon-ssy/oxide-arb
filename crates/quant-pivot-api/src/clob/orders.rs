@@ -48,6 +48,7 @@ pub struct ClobOrder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClobTrade {
     pub trade_id: VenueTradeId,
+    pub bucket_index: u32,
     pub order_id: OrderId,
     pub market_id: MarketId,
     pub token_id: TokenId,

@@ -4,12 +4,17 @@ use chrono::{DateTime, Utc};
 use criterion::{Criterion, criterion_group, criterion_main};
 use quant_pivot_models::{
     config::PortfolioSolverDeployConfig,
-    domain::quant::{
-        CapitalOccupancyBucket, DiscountCurvePoint, EntryEconomics, ExecutableEconomicTier,
-        ExistingPortfolioState, PortfolioScenario, PortfolioScenarioArtifact,
-        PortfolioScenarioEvidenceRegime, PortfolioScenarioKind, PortfolioScenarioVisibility,
-        RecommendationEconomics, RepresentedRouteSet, ScenarioCashflow, ScenarioDistribution,
-        ScenarioWeight,
+    domain::{
+        market::fee::ImmediateExecutionCost,
+        quant::{
+            AggressiveEntryEconomics, CapitalOccupancyBucket, DiscountCurvePoint,
+            EntryExecutionEconomics, ExecutableEconomicTier, ExistingPortfolioState,
+            HardReservationBucket, PortfolioScenario, PortfolioScenarioArtifact,
+            PortfolioScenarioEvidenceRegime, PortfolioScenarioKind, PortfolioScenarioVisibility,
+            RecommendationEconomics, RepresentedRouteSet, ScenarioCapitalOccupancySlice,
+            ScenarioCashflow, ScenarioDistribution, ScenarioEntryExecution,
+            ScenarioExecutionCashflow, ScenarioWeight,
+        },
     },
     enums::{
         common::MarketCategory,
@@ -209,6 +214,11 @@ fn tier(identity: u128, bucket_ends: &[u64]) -> ExecutableEconomicTier {
     let cashflows = [upside, 10, -5];
     let nominal = weighted_expected(cashflows, [5_000, 3_000, 2_000]);
     let robust = weighted_expected(cashflows, [3_000, 3_000, 4_000]);
+    let filled_shares = Shares::new(dec!(200));
+    let immediate_cost =
+        ImmediateExecutionCost::new(Usd::new(dec!(100)), Usd::new(dec!(1)), Usd::ZERO)
+            .expect("valid benchmark cost");
+    let occupancy_secs = bucket_ends.first().copied().expect("capital bucket");
     ExecutableEconomicTier {
         economic_tier_id: EconomicTierId::new(Uuid::from_u128(identity)),
         report_route_run_id: ReportRouteRunId::new(Uuid::from_u128(500)),
@@ -220,31 +230,47 @@ fn tier(identity: u128, bucket_ends: &[u64]) -> ExecutableEconomicTier {
         category: MarketCategory::Sports,
         token_id: TokenId::new(format!("token-{identity}")),
         outcome_side: OutcomeSide::Yes,
-        shares: Shares::new(dec!(200)),
-        entry: EntryEconomics {
-            notional_usd: Usd::new(dec!(100)),
+        entry_execution: EntryExecutionEconomics::Aggressive(AggressiveEntryEconomics {
+            requested_shares: filled_shares,
+            filled_shares,
+            limit_price: Price::new(dec!(0.5)),
             entry_vwap: Price::new(dec!(0.5)),
-            fee_usd: Usd::new(dec!(1)),
+            immediate_cost,
             slippage_usd: Usd::new(dec!(1)),
             visible_liquidity_usd: Usd::new(dec!(10000)),
-        },
+        }),
         profit_probability_lower_bps: 7_500,
         probability_interval_width_bps: 1_000,
         scenario_cashflows: cashflows
             .into_iter()
             .enumerate()
-            .map(|(index, value)| ScenarioCashflow {
-                scenario_index: u32::try_from(index).expect("three scenarios"),
-                discounted_net_usd: Usd::new(Decimal::from(value)),
+            .map(|(index, value)| {
+                let discounted_net_usd = Usd::new(Decimal::from(value));
+                ScenarioExecutionCashflow {
+                    scenario_index: u32::try_from(index).expect("three scenarios"),
+                    entry_execution: ScenarioEntryExecution::AggressiveFill,
+                    filled_shares,
+                    immediate_cash_outlay_usd: immediate_cost.cash_outlay_usd,
+                    discounted_exit_cash_usd: immediate_cost.cash_outlay_usd + discounted_net_usd,
+                    delayed_maker_rebate_usd: Usd::ZERO,
+                    discounted_maker_rebate_usd: Usd::ZERO,
+                    capital_cost_usd: Usd::ZERO,
+                    capital_occupancy: vec![ScenarioCapitalOccupancySlice {
+                        locked_cash_usd: immediate_cost.cash_outlay_usd,
+                        duration_secs: occupancy_secs,
+                    }],
+                    discounted_net_usd,
+                    risk_net_usd: discounted_net_usd,
+                }
             })
             .collect(),
-        capital_occupancy: bucket_ends
+        hard_reservation_envelope: bucket_ends
             .iter()
             .enumerate()
-            .map(|(index, end_secs)| CapitalOccupancyBucket {
+            .map(|(index, end_secs)| HardReservationBucket {
                 end_secs: *end_secs,
-                locked_usd: if index == 0 {
-                    Usd::new(dec!(100))
+                reserved_cash_usd: if index == 0 {
+                    immediate_cost.cash_outlay_usd
                 } else {
                     Usd::ZERO
                 },

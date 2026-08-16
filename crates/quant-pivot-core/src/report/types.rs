@@ -145,6 +145,9 @@ pub struct ReportTierRejection {
 /// Typed reason why no executable economic tier could be built for a market.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EconomicTierBuildRejection {
+    ExecutionEconomicsUnavailable {
+        market_id: MarketId,
+    },
     InsufficientLiveDepth {
         market_id: MarketId,
         visible_usd: Usd,
@@ -157,7 +160,8 @@ impl EconomicTierBuildRejection {
     #[must_use]
     pub const fn market_id(&self) -> &MarketId {
         match self {
-            Self::InsufficientLiveDepth { market_id, .. } => market_id,
+            Self::ExecutionEconomicsUnavailable { market_id }
+            | Self::InsufficientLiveDepth { market_id, .. } => market_id,
         }
     }
 }

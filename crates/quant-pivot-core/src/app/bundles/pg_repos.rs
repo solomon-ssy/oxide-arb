@@ -31,6 +31,7 @@ use quant_pivot_repository::postgres::{
     PgRoleRepository, PgRuntimeActivityRepository, PgRuntimeControlRepository,
     PgShadowComparisonRepository, PgSourceSliceRepository, PgTradePolicyRepository,
     PgTrainingDatasetRepository, PgUserRepository, PgUserRoleRepository,
+    PgVenueIncentiveRepository,
     quant::{
         settlement_governance::PgSettlementGovernanceRepository,
         settlement_redeem::PgSettlementRedeemRepository,
@@ -66,6 +67,7 @@ pub struct PgRepositories {
     pub portfolio_plan: Arc<PgPortfolioPlanRepository>,
     pub report_run: Arc<PgReportRunRepository>,
     pub equity_snapshot: Arc<PgEquitySnapshotRepository>,
+    pub venue_incentive: Arc<PgVenueIncentiveRepository>,
     pub market_selection: Arc<PgMarketSelectionRepository>,
     pub feature: Arc<PgFeatureRepository>,
     pub feature_parity: Arc<PgFeatureParityRepository>,
@@ -149,6 +151,7 @@ impl PgRepositories {
             portfolio_plan: Arc::new(PgPortfolioPlanRepository::new(db.clone())),
             report_run: Arc::new(PgReportRunRepository::new(db.clone())),
             equity_snapshot: Arc::new(PgEquitySnapshotRepository::new(db.clone())),
+            venue_incentive: Arc::new(PgVenueIncentiveRepository::new(db.clone())),
             market_selection: Arc::new(PgMarketSelectionRepository::new(db.clone())),
             feature: Arc::new(PgFeatureRepository::new(db.clone())),
             feature_parity: Arc::new(PgFeatureParityRepository::new(db.clone())),

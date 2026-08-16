@@ -11,7 +11,7 @@ use quant_pivot_models::{
         PromotionPermitStatus, PromotionPolicyProjection, PromotionPreflight,
         PromotionPreflightInput, PromotionServingConstraints, PromotionServingConstraintsInput,
     },
-    enums::{common::MarketCategory, model::ModelFamily},
+    enums::{common::MarketCategory, model::ServingEligibility},
     runtime_config::{ActivePolicyBundle, BuyModelRoute},
     types::{FeedbackCycleId, PromotionPermitId},
 };
@@ -356,10 +356,7 @@ impl PromotionPreflightService {
             || candidate.serving_contract_hash != contract.candidate_serving_contract_hash()
             || candidate.profile_ref != *contract.profile_ref()
             || candidate.category_scope != Some(category)
-            || !matches!(
-                candidate.model_family,
-                ModelFamily::WeightedFactor | ModelFamily::ClassicalGradientBoostedTrees
-            )
+            || candidate.model_family.serving_eligibility() != ServingEligibility::ActiveBuyCapable
         {
             return Err(Self::invalid(
                 "champion or candidate model projection differs from F10 serving evidence",

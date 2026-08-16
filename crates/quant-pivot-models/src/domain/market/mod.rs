@@ -18,9 +18,9 @@ pub use registry::{
     TokenInfo, UpsertMarket, resolve_binary_pair_exact,
 };
 pub use version::{
-    CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchChainInfo, CatalogBatchCommit, CatalogBatchFailure,
-    CatalogEventCandidate, CatalogEventChangeInfo, CatalogMarketCandidate, CatalogMarketChangeInfo,
-    CatalogSnapshotInfo, CatalogSyncBatchInfo, CatalogWindowInfo, NewCatalogEventChange,
-    NewCatalogEventObject, NewCatalogMarketChange, NewCatalogMarketObject, NewCatalogSyncBatch,
-    NewCatalogSyncRejection,
+    CATALOG_OBJECT_HASH_VERSION, CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchChainInfo,
+    CatalogBatchCommit, CatalogBatchFailure, CatalogEventCandidate, CatalogEventChangeInfo,
+    CatalogMarketCandidate, CatalogMarketChangeInfo, CatalogSnapshotInfo, CatalogSyncBatchInfo,
+    CatalogWindowInfo, NewCatalogEventChange, NewCatalogEventObject, NewCatalogMarketChange,
+    NewCatalogMarketObject, NewCatalogSyncBatch, NewCatalogSyncRejection,
 };

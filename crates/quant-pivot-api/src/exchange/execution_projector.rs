@@ -12,8 +12,8 @@ use alloy::{
 use blake3::Hasher;
 use quant_pivot_models::{
     clickhouse::{
-        ChAssetAmount, ChDigest, ChPrice, ChShares, ChUsd, ExchangeEventRow, ExchangeLogRawRow,
-        ExchangeMatchRow, ExecutionParticipantRow, MarketExecutionRow,
+        ChDigest, ChPrice, ChShares, ChUsd, ExchangeEventRow, ExchangeFeeChargeRow,
+        ExchangeLogRawRow, ExchangeMatchRow, ExecutionParticipantRow, MarketExecutionRow,
     },
     enums::clickhouse::{
         ChAvailabilityBasis, ChExchangeEventKind, ChExchangeSide, ChExchangeVersion,
@@ -25,9 +25,10 @@ use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use super::{
-    constants::{EXCHANGE_CONTRACTS, ExchangeContract, ExchangeVersion},
+    constants::{EXCHANGE_CONTRACTS, ExchangeContract},
+    fee_charged_v2,
     history_client::{CanonicalExchangeLog, polygon_chain_id},
-    order_filled_v1, order_filled_v2, orders_matched_v1, orders_matched_v2,
+    order_filled_v2, orders_matched_v2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -61,12 +62,22 @@ pub enum ExecutionProjectionError {
         expected: &'static str,
         actual: &'static str,
     },
+    #[error(
+        "V2 fee conservation failed for {contract} transaction {transaction_hash}: OrderFilled fees={order_filled_fee}, FeeCharged amounts={fee_charged_amount}"
+    )]
+    FeeConservation {
+        contract: String,
+        transaction_hash: String,
+        order_filled_fee: String,
+        fee_charged_amount: String,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct ExchangeHistoryProjection {
     pub raw_logs: Vec<ExchangeLogRawRow>,
     pub events: Vec<ExchangeEventRow>,
+    pub fee_charges: Vec<ExchangeFeeChargeRow>,
     pub matches: Vec<ExchangeMatchRow>,
     pub executions: Vec<MarketExecutionRow>,
     pub participants: Vec<ExecutionParticipantRow>,
@@ -93,6 +104,7 @@ pub fn history_token_ids(
             DecodedEvent::Matched(matched) => {
                 token_ids.insert(matched.token_id);
             }
+            DecodedEvent::FeeCharge(_) => {}
         }
     }
     Ok(token_ids)
@@ -130,32 +142,40 @@ pub fn project_history(
         ));
     }
     observations.sort_by(|left, right| {
-        let left = left.1.row();
-        let right = right.1.row();
         (
-            left.contract_address.as_str(),
-            left.transaction_hash.as_str(),
-            left.log_index,
+            left.1.contract_address(),
+            left.1.transaction_hash(),
+            left.1.log_index(),
         )
             .cmp(&(
-                right.contract_address.as_str(),
-                right.transaction_hash.as_str(),
-                right.log_index,
+                right.1.contract_address(),
+                right.1.transaction_hash(),
+                right.1.log_index(),
             ))
     });
     let (raw_logs, decoded): (Vec<_>, Vec<_>) = observations.into_iter().unzip();
+    validate_fee_conservation(&decoded)?;
+    let mut fee_charges = Vec::new();
+    let mut trading_events = Vec::new();
+    for event in decoded {
+        match event {
+            DecodedEvent::FeeCharge(fee_charge) => fee_charges.push(fee_charge.row),
+            event => trading_events.push(event),
+        }
+    }
+    let decoded = trading_events;
 
     let mut aggregate_ids = BTreeSet::new();
     let mut matched_fills = BTreeMap::new();
     let mut match_rows = Vec::new();
     let mut start = 0_usize;
     while start < decoded.len() {
-        let transaction_hash = decoded[start].row().transaction_hash.clone();
-        let contract_address = decoded[start].row().contract_address.clone();
+        let transaction_hash = decoded[start].transaction_hash().to_owned();
+        let contract_address = decoded[start].contract_address().to_owned();
         let mut end = start + 1;
         while end < decoded.len()
-            && decoded[end].row().transaction_hash == transaction_hash
-            && decoded[end].row().contract_address == contract_address
+            && decoded[end].transaction_hash() == transaction_hash
+            && decoded[end].contract_address() == contract_address
         {
             end += 1;
         }
@@ -172,26 +192,30 @@ pub fn project_history(
     let mut executions = Vec::new();
     let mut participants = Vec::new();
     for event in decoded {
-        let event_id = event.row().event_id;
-        if let DecodedEvent::Fill(fill) = &event
-            && !aggregate_ids.contains(&event_id)
-        {
-            let match_binding = matched_fills.get(&event_id);
-            let execution = execution_from_fill(
-                fill,
-                match_binding,
-                policy_hash,
-                chunk_id,
-                &market_for_token,
-            )?;
-            participants.extend(participants_for(&execution, policy_hash, chunk_id));
-            executions.push(execution);
+        match event {
+            DecodedEvent::Fill(fill) => {
+                if !aggregate_ids.contains(&fill.row.event_id) {
+                    let match_binding = matched_fills.get(&fill.row.event_id);
+                    let execution = execution_from_fill(
+                        &fill,
+                        match_binding,
+                        policy_hash,
+                        chunk_id,
+                        &market_for_token,
+                    )?;
+                    participants.extend(participants_for(&execution, policy_hash, chunk_id));
+                    executions.push(execution);
+                }
+                events.push(fill.row);
+            }
+            DecodedEvent::Matched(matched) => events.push(matched.row),
+            DecodedEvent::FeeCharge(_) => return Err(ExecutionProjectionError::DecodeFailure),
         }
-        events.push(event.into());
     }
     Ok(ExchangeHistoryProjection {
         raw_logs,
         events,
+        fee_charges,
         matches: match_rows,
         executions,
         participants,
@@ -202,22 +226,31 @@ pub fn project_history(
 enum DecodedEvent {
     Fill(DecodedFill),
     Matched(DecodedMatch),
+    FeeCharge(DecodedFeeCharge),
 }
 
 impl DecodedEvent {
-    const fn row(&self) -> &ExchangeEventRow {
+    fn contract_address(&self) -> &str {
         match self {
-            Self::Fill(fill) => &fill.row,
-            Self::Matched(matched) => &matched.row,
+            Self::Fill(fill) => &fill.row.contract_address,
+            Self::Matched(matched) => &matched.row.contract_address,
+            Self::FeeCharge(fee_charge) => &fee_charge.row.contract_address,
         }
     }
-}
 
-impl From<DecodedEvent> for ExchangeEventRow {
-    fn from(value: DecodedEvent) -> Self {
-        match value {
-            DecodedEvent::Fill(fill) => fill.row,
-            DecodedEvent::Matched(matched) => matched.row,
+    fn transaction_hash(&self) -> &str {
+        match self {
+            Self::Fill(fill) => &fill.row.transaction_hash,
+            Self::Matched(matched) => &matched.row.transaction_hash,
+            Self::FeeCharge(fee_charge) => &fee_charge.row.transaction_hash,
+        }
+    }
+
+    const fn log_index(&self) -> u64 {
+        match self {
+            Self::Fill(fill) => fill.row.log_index,
+            Self::Matched(matched) => matched.row.log_index,
+            Self::FeeCharge(fee_charge) => fee_charge.row.log_index,
         }
     }
 }
@@ -233,7 +266,6 @@ struct DecodedFill {
     collateral_raw: U256,
     shares_raw: U256,
     fee_raw: U256,
-    fee_asset_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +279,12 @@ struct DecodedMatch {
     taker_asset_id: Option<String>,
     maker_amount: U256,
     taker_amount: U256,
+}
+
+#[derive(Debug, Clone)]
+struct DecodedFeeCharge {
+    row: ExchangeFeeChargeRow,
+    amount_raw: U256,
 }
 
 #[derive(Debug, Clone)]
@@ -285,6 +323,41 @@ struct EventFields {
     metadata: Option<String>,
 }
 
+fn validate_fee_conservation(events: &[DecodedEvent]) -> Result<(), ExecutionProjectionError> {
+    let mut totals = BTreeMap::<(&str, &str), (U256, U256)>::new();
+    for event in events {
+        let totals = totals
+            .entry((event.contract_address(), event.transaction_hash()))
+            .or_default();
+        match event {
+            DecodedEvent::Fill(fill) => {
+                totals.0 = totals
+                    .0
+                    .checked_add(fill.fee_raw)
+                    .ok_or(ExecutionProjectionError::InvalidAmount)?;
+            }
+            DecodedEvent::FeeCharge(fee_charge) => {
+                totals.1 = totals
+                    .1
+                    .checked_add(fee_charge.amount_raw)
+                    .ok_or(ExecutionProjectionError::InvalidAmount)?;
+            }
+            DecodedEvent::Matched(_) => {}
+        }
+    }
+    for ((contract, transaction_hash), (order_filled_fee, fee_charged_amount)) in totals {
+        if order_filled_fee != fee_charged_amount {
+            return Err(ExecutionProjectionError::FeeConservation {
+                contract: contract.to_owned(),
+                transaction_hash: transaction_hash.to_owned(),
+                order_filled_fee: order_filled_fee.to_string(),
+                fee_charged_amount: fee_charged_amount.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn correlate_transaction(
     events: &[DecodedEvent],
     aggregate_ids: &mut BTreeSet<ChDigest>,
@@ -296,7 +369,7 @@ fn correlate_transaction(
     };
     if events
         .windows(2)
-        .any(|pair| pair[0].row().log_index >= pair[1].row().log_index)
+        .any(|pair| pair[0].log_index() >= pair[1].log_index())
     {
         return Err(transaction_grammar_error(
             first,
@@ -308,14 +381,11 @@ fn correlate_transaction(
         .iter()
         .any(|event| matches!(event, DecodedEvent::Matched(_)));
     if !has_match {
-        return match first.row().exchange_version {
-            ChExchangeVersion::V1 => Ok(()),
-            ChExchangeVersion::V2 => Err(transaction_grammar_error(
-                first,
-                "one or more complete matchOrders groups",
-                "standalone OrderFilled",
-            )),
-        };
+        return Err(transaction_grammar_error(
+            first,
+            "one or more complete matchOrders groups",
+            "standalone OrderFilled",
+        ));
     }
     let mut maker_start = 0_usize;
     for (match_index, event) in events.iter().enumerate() {
@@ -417,15 +487,11 @@ fn transaction_grammar_error(
     expected: &'static str,
     actual: &'static str,
 ) -> ExecutionProjectionError {
-    let row = event.row();
     ExecutionProjectionError::InvalidTransactionGrammar {
-        version: match row.exchange_version {
-            ChExchangeVersion::V1 => "v1",
-            ChExchangeVersion::V2 => "v2",
-        },
-        contract: row.contract_address.clone(),
-        transaction_hash: row.transaction_hash.clone(),
-        log_index: row.log_index,
+        version: "v2",
+        contract: event.contract_address().to_owned(),
+        transaction_hash: event.transaction_hash().to_owned(),
+        log_index: event.log_index(),
         expected,
         actual,
     }
@@ -474,8 +540,10 @@ fn execution_from_fill(
         maker_order_filled_event_id: fill.row.event_id,
         market_id,
         token_id: fill.token_id.clone(),
+        order_hash: fill.order_hash.clone(),
         contract_key: fill.row.contract_key.clone(),
         exchange_version: fill.row.exchange_version,
+        contract_address: fill.row.contract_address.clone(),
         transaction_hash: fill.row.transaction_hash.clone(),
         block_number: fill.row.block_number,
         transaction_index: fill.row.transaction_index,
@@ -486,8 +554,8 @@ fn execution_from_fill(
         price: ChPrice::from(price),
         size_shares: ChShares::from(Shares::new(shares)),
         notional_usd: ChUsd::from(Usd::new(collateral)),
-        fee_amount: ChAssetAmount::from(raw_decimal(fill.fee_raw)?),
-        fee_asset_id: fill.fee_asset_id.clone(),
+        fee_usd: ChUsd::from(Usd::new(raw_decimal(fill.fee_raw)?)),
+        builder: fill.row.builder.clone(),
         effective_at: fill.row.block_timestamp,
         observed_at: fill.row.observed_at,
         model_available_at: fill.row.model_available_at,
@@ -535,187 +603,93 @@ fn decode_event(
         .topic0()
         .copied()
         .ok_or(ExecutionProjectionError::DecodeFailure)?;
-    match contract.version {
-        ExchangeVersion::V1 if topic == contract.order_filled_topic => {
-            let decoded = order_filled_v1::decode_log(&rpc_log)
-                .ok_or(ExecutionProjectionError::DecodeFailure)?;
-            let is_buy = decoded.maker_asset_id.is_zero();
-            let token_raw = if is_buy {
-                decoded.taker_asset_id
-            } else {
-                decoded.maker_asset_id
-            };
-            let side = if is_buy {
-                ChExchangeSide::Buy
-            } else {
-                ChExchangeSide::Sell
-            };
-            let token_id = TokenId::new(token_raw.to_string());
-            let row = event_row(
-                log,
-                contract,
-                raw_log_hash,
-                context,
-                EventFields {
-                    event_kind: ChExchangeEventKind::OrderFilled,
-                    order_hash: format!("{:#x}", decoded.order_hash),
-                    maker: format!("{:#x}", decoded.maker),
-                    taker: Some(format!("{:#x}", decoded.taker)),
-                    side,
-                    token_id: Some(token_id.as_str().to_owned()),
-                    maker_asset_id: Some(decoded.maker_asset_id.to_string()),
-                    taker_asset_id: Some(decoded.taker_asset_id.to_string()),
-                    maker_amount: decoded.maker_amount_filled.to_string(),
-                    taker_amount: decoded.taker_amount_filled.to_string(),
-                    fee_amount: Some(decoded.fee.to_string()),
-                    builder: None,
-                    metadata: None,
-                },
-            )?;
-            Ok(DecodedEvent::Fill(DecodedFill {
-                row,
+    if topic == contract.order_filled_topic {
+        let decoded =
+            order_filled_v2::decode_log(&rpc_log).ok_or(ExecutionProjectionError::DecodeFailure)?;
+        let is_buy = decoded.side == 0;
+        let side = if is_buy {
+            ChExchangeSide::Buy
+        } else {
+            ChExchangeSide::Sell
+        };
+        let token_id = TokenId::new(decoded.token_id.to_string());
+        let row = event_row(
+            log,
+            contract,
+            raw_log_hash,
+            context,
+            EventFields {
+                event_kind: ChExchangeEventKind::OrderFilled,
                 order_hash: format!("{:#x}", decoded.order_hash),
-                maker: address_text(decoded.maker),
-                taker: address_text(decoded.taker),
+                maker: format!("{:#x}", decoded.maker),
+                taker: Some(format!("{:#x}", decoded.taker)),
                 side,
-                token_id,
-                collateral_raw: if is_buy {
-                    decoded.maker_amount_filled
-                } else {
-                    decoded.taker_amount_filled
-                },
-                shares_raw: if is_buy {
-                    decoded.taker_amount_filled
-                } else {
-                    decoded.maker_amount_filled
-                },
-                fee_raw: decoded.fee,
-                fee_asset_id: decoded.taker_asset_id.to_string(),
-            }))
-        }
-        ExchangeVersion::V2 if topic == contract.order_filled_topic => {
-            let decoded = order_filled_v2::decode_log(&rpc_log)
-                .ok_or(ExecutionProjectionError::DecodeFailure)?;
-            let is_buy = decoded.side == 0;
-            let side = if is_buy {
-                ChExchangeSide::Buy
-            } else {
-                ChExchangeSide::Sell
-            };
-            let token_id = TokenId::new(decoded.token_id.to_string());
-            let row = event_row(
-                log,
-                contract,
-                raw_log_hash,
-                context,
-                EventFields {
-                    event_kind: ChExchangeEventKind::OrderFilled,
-                    order_hash: format!("{:#x}", decoded.order_hash),
-                    maker: format!("{:#x}", decoded.maker),
-                    taker: Some(format!("{:#x}", decoded.taker)),
-                    side,
-                    token_id: Some(token_id.as_str().to_owned()),
-                    maker_asset_id: None,
-                    taker_asset_id: None,
-                    maker_amount: decoded.maker_amount_filled.to_string(),
-                    taker_amount: decoded.taker_amount_filled.to_string(),
-                    fee_amount: Some(decoded.fee.to_string()),
-                    builder: Some(format!("{:#x}", decoded.builder)),
-                    metadata: Some(format!("{:#x}", decoded.metadata)),
-                },
-            )?;
-            Ok(DecodedEvent::Fill(DecodedFill {
-                row,
-                order_hash: format!("{:#x}", decoded.order_hash),
-                maker: address_text(decoded.maker),
-                taker: address_text(decoded.taker),
-                side,
-                token_id: token_id.clone(),
-                collateral_raw: if is_buy {
-                    decoded.maker_amount_filled
-                } else {
-                    decoded.taker_amount_filled
-                },
-                shares_raw: if is_buy {
-                    decoded.taker_amount_filled
-                } else {
-                    decoded.maker_amount_filled
-                },
-                fee_raw: decoded.fee,
-                fee_asset_id: if is_buy {
-                    token_id.as_str().to_owned()
-                } else {
-                    "0".to_owned()
-                },
-            }))
-        }
-        ExchangeVersion::V1 if topic == contract.orders_matched_topic => {
-            decode_matched_v1(log, &rpc_log, contract, raw_log_hash, context)
-        }
-        ExchangeVersion::V2 if topic == contract.orders_matched_topic => {
-            decode_matched_v2(log, &rpc_log, contract, raw_log_hash, context)
-        }
-        _ => Err(ExecutionProjectionError::DecodeFailure),
-    }
-}
-
-fn decode_matched_v1(
-    log: &CanonicalExchangeLog,
-    rpc_log: &RpcAlloyLog,
-    contract: ExchangeContract,
-    raw_log_hash: ChDigest,
-    context: ProjectionContext,
-) -> Result<DecodedEvent, ExecutionProjectionError> {
-    let decoded =
-        orders_matched_v1::decode_log(rpc_log).ok_or(ExecutionProjectionError::DecodeFailure)?;
-    let is_buy = decoded.maker_asset_id.is_zero();
-    let side = if is_buy {
-        ChExchangeSide::Buy
-    } else {
-        ChExchangeSide::Sell
-    };
-    let token_raw = if is_buy {
-        decoded.taker_asset_id
-    } else {
-        decoded.maker_asset_id
-    };
-    let token_id = TokenId::new(token_raw.to_string());
-    let maker_asset_id = Some(decoded.maker_asset_id.to_string());
-    let taker_asset_id = Some(decoded.taker_asset_id.to_string());
-    let order_hash = format!("{:#x}", decoded.taker_order_hash);
-    let taker = address_text(decoded.taker_order_maker);
-    let row = event_row(
-        log,
-        contract,
-        raw_log_hash,
-        context,
-        EventFields {
-            event_kind: ChExchangeEventKind::OrdersMatched,
-            order_hash: order_hash.clone(),
-            maker: taker.clone(),
-            taker: None,
+                token_id: Some(token_id.as_str().to_owned()),
+                maker_asset_id: None,
+                taker_asset_id: None,
+                maker_amount: decoded.maker_amount_filled.to_string(),
+                taker_amount: decoded.taker_amount_filled.to_string(),
+                fee_amount: Some(decoded.fee.to_string()),
+                builder: Some(format!("{:#x}", decoded.builder)),
+                metadata: Some(format!("{:#x}", decoded.metadata)),
+            },
+        )?;
+        return Ok(DecodedEvent::Fill(DecodedFill {
+            row,
+            order_hash: format!("{:#x}", decoded.order_hash),
+            maker: address_text(decoded.maker),
+            taker: address_text(decoded.taker),
             side,
-            token_id: Some(token_id.as_str().to_owned()),
-            maker_asset_id: maker_asset_id.clone(),
-            taker_asset_id: taker_asset_id.clone(),
-            maker_amount: decoded.maker_amount_filled.to_string(),
-            taker_amount: decoded.taker_amount_filled.to_string(),
-            fee_amount: None,
-            builder: None,
-            metadata: None,
-        },
-    )?;
-    Ok(DecodedEvent::Matched(DecodedMatch {
-        row,
-        order_hash,
-        taker,
-        side,
-        token_id,
-        maker_asset_id,
-        taker_asset_id,
-        maker_amount: decoded.maker_amount_filled,
-        taker_amount: decoded.taker_amount_filled,
-    }))
+            token_id,
+            collateral_raw: if is_buy {
+                decoded.maker_amount_filled
+            } else {
+                decoded.taker_amount_filled
+            },
+            shares_raw: if is_buy {
+                decoded.taker_amount_filled
+            } else {
+                decoded.maker_amount_filled
+            },
+            fee_raw: decoded.fee,
+        }));
+    }
+    if topic == contract.orders_matched_topic {
+        return decode_matched_v2(log, &rpc_log, contract, raw_log_hash, context);
+    }
+    if topic == contract.fee_charged_topic {
+        let decoded =
+            fee_charged_v2::decode_log(&rpc_log).ok_or(ExecutionProjectionError::DecodeFailure)?;
+        let fee_charge_id = digest_parts(
+            b"quant-pivot/exchange-fee-charge/v2\0",
+            &[raw_log_hash.as_bytes()],
+        );
+        return Ok(DecodedEvent::FeeCharge(DecodedFeeCharge {
+            row: ExchangeFeeChargeRow {
+                fee_charge_id,
+                raw_log_hash,
+                chain_id: polygon_chain_id(),
+                contract_key: contract.key.to_owned(),
+                exchange_version: ChExchangeVersion::V2,
+                contract_address: log.address.clone(),
+                block_number: log.block_number,
+                block_hash: log.block_hash.clone(),
+                block_timestamp: millis(log.block_timestamp)?,
+                transaction_hash: log.transaction_hash.clone(),
+                transaction_index: log.transaction_index,
+                log_index: log.log_index,
+                receiver: address_text(decoded.receiver),
+                amount_usd: ChUsd::from(Usd::new(raw_decimal(decoded.amount)?)),
+                observed_at: context.observed_at,
+                model_available_at: millis(log.model_available_timestamp)?,
+                availability_policy_hash: context.policy_hash,
+                chunk_id: context.chunk_id,
+                schema_version: ExchangeFeeChargeRow::SCHEMA_VERSION,
+            },
+            amount_raw: decoded.amount,
+        }));
+    }
+    Err(ExecutionProjectionError::DecodeFailure)
 }
 
 fn decode_matched_v2(
@@ -786,9 +760,10 @@ fn event_row(
     Ok(ExchangeEventRow {
         event_id,
         raw_log_hash,
+        chain_id: polygon_chain_id(),
         event_kind: fields.event_kind,
         contract_key: contract.key.to_owned(),
-        exchange_version: contract.version.into(),
+        exchange_version: ChExchangeVersion::V2,
         contract_address: log.address.clone(),
         block_number: log.block_number,
         block_hash: log.block_hash.clone(),
@@ -826,7 +801,7 @@ fn raw_row(
     Ok(ExchangeLogRawRow {
         chain_id: polygon_chain_id(),
         contract_key: contract.key.to_owned(),
-        exchange_version: contract.version.into(),
+        exchange_version: ChExchangeVersion::V2,
         contract_address: log.address.clone(),
         block_number: log.block_number,
         block_hash: log.block_hash.clone(),
@@ -919,22 +894,13 @@ fn address_text(address: Address) -> String {
     format!("{address:#x}")
 }
 
-impl From<ExchangeVersion> for ChExchangeVersion {
-    fn from(value: ExchangeVersion) -> Self {
-        match value {
-            ExchangeVersion::V1 => Self::V1,
-            ExchangeVersion::V2 => Self::V2,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use alloy::{
         primitives::{Address, B256, LogData, U256, address, b256, keccak256},
         sol_types::SolEvent,
     };
-    use quant_pivot_models::types::{ContentHash, MarketId, Price, TokenId, Usd};
+    use quant_pivot_models::types::{ContentHash, MarketId, TokenId, Usd};
     use rust_decimal::Decimal;
     use uuid::Uuid;
 
@@ -942,38 +908,10 @@ mod tests {
         CanonicalExchangeLog, ExchangeHistoryProjection, ExecutionProjectionError, project_history,
     };
     use crate::exchange::{
-        constants::{CTF_EXCHANGE_V1, CTF_EXCHANGE_V2},
-        order_filled_v1::ORDER_FILLED_TOPIC as ORDER_FILLED_V1_TOPIC,
+        constants::CTF_EXCHANGE_V2, fee_charged_v2::FEE_CHARGED_TOPIC,
         order_filled_v2::ORDER_FILLED_TOPIC as ORDER_FILLED_V2_TOPIC,
-        orders_matched_v1::ORDERS_MATCHED_TOPIC as ORDERS_MATCHED_V1_TOPIC,
         orders_matched_v2::ORDERS_MATCHED_TOPIC as ORDERS_MATCHED_V2_TOPIC,
     };
-
-    mod v1_events {
-        use alloy::sol;
-
-        sol! {
-            event OrderFilled(
-                bytes32 indexed orderHash,
-                address indexed maker,
-                address indexed taker,
-                uint256 makerAssetId,
-                uint256 takerAssetId,
-                uint256 makerAmountFilled,
-                uint256 takerAmountFilled,
-                uint256 fee
-            );
-
-            event OrdersMatched(
-                bytes32 indexed takerOrderHash,
-                address indexed takerOrderMaker,
-                uint256 makerAssetId,
-                uint256 takerAssetId,
-                uint256 makerAmountFilled,
-                uint256 takerAmountFilled
-            );
-        }
-    }
 
     mod v2_events {
         use alloy::sol;
@@ -1000,11 +938,14 @@ mod tests {
                 uint256 makerAmountFilled,
                 uint256 takerAmountFilled
             );
+
+            event FeeCharged(address indexed receiver, uint256 amount);
         }
     }
 
-    use v1_events::{OrderFilled as OrderFilledV1, OrdersMatched as OrdersMatchedV1};
-    use v2_events::{OrderFilled as OrderFilledV2, OrdersMatched as OrdersMatchedV2};
+    use v2_events::{
+        FeeCharged as FeeChargedV2, OrderFilled as OrderFilledV2, OrdersMatched as OrdersMatchedV2,
+    };
 
     const MAKER_ONE: Address = address!("0x1000000000000000000000000000000000000001");
     const MAKER_TWO: Address = address!("0x2000000000000000000000000000000000000002");
@@ -1021,16 +962,6 @@ mod tests {
     #[test]
     fn canonical_topics_match() {
         assert_eq!(
-            ORDER_FILLED_V1_TOPIC,
-            keccak256(
-                "OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)"
-            )
-        );
-        assert_eq!(
-            ORDERS_MATCHED_V1_TOPIC,
-            keccak256("OrdersMatched(bytes32,address,uint256,uint256,uint256,uint256)")
-        );
-        assert_eq!(
             ORDER_FILLED_V2_TOPIC,
             keccak256(
                 "OrderFilled(bytes32,address,address,uint8,uint256,uint256,uint256,uint256,bytes32,bytes32)"
@@ -1040,6 +971,7 @@ mod tests {
             ORDERS_MATCHED_V2_TOPIC,
             keccak256("OrdersMatched(bytes32,address,uint8,uint256,uint256,uint256)")
         );
+        assert_eq!(FEE_CHARGED_TOPIC, keccak256("FeeCharged(address,uint256)"));
     }
 
     #[test]
@@ -1110,10 +1042,20 @@ mod tests {
                 }
                 .encode_log_data(),
             ),
+            canonical(
+                CTF_EXCHANGE_V2.address,
+                4,
+                FeeChargedV2 {
+                    receiver: EXCHANGE,
+                    amount: U256::from(1_000_000_u64),
+                }
+                .encode_log_data(),
+            ),
         ];
 
         let projection = project(&logs).expect("valid V2 projection");
         assert_eq!(projection.events.len(), 4);
+        assert_eq!(projection.fee_charges.len(), 1);
         assert_eq!(projection.matches.len(), 1);
         assert_eq!(projection.executions.len(), 2);
         assert_eq!(projection.participants.len(), 4);
@@ -1138,68 +1080,6 @@ mod tests {
                 .executions
                 .iter()
                 .all(|execution| execution.taker_address == format!("{TAKER:#x}"))
-        );
-    }
-
-    #[test]
-    fn v1_projects_execution() {
-        let token = U256::from(84_u64);
-        let logs = vec![
-            canonical(
-                CTF_EXCHANGE_V1.address,
-                0,
-                OrderFilledV1 {
-                    orderHash: MAKER_HASH_ONE,
-                    maker: MAKER_ONE,
-                    taker: TAKER,
-                    makerAssetId: token,
-                    takerAssetId: U256::ZERO,
-                    makerAmountFilled: U256::from(20_000_000_u64),
-                    takerAmountFilled: U256::from(5_000_000_u64),
-                    fee: U256::from(100_000_u64),
-                }
-                .encode_log_data(),
-            ),
-            canonical(
-                CTF_EXCHANGE_V1.address,
-                1,
-                OrderFilledV1 {
-                    orderHash: TAKER_HASH,
-                    maker: TAKER,
-                    taker: EXCHANGE,
-                    makerAssetId: U256::ZERO,
-                    takerAssetId: token,
-                    makerAmountFilled: U256::from(5_000_000_u64),
-                    takerAmountFilled: U256::from(20_000_000_u64),
-                    fee: U256::ZERO,
-                }
-                .encode_log_data(),
-            ),
-            canonical(
-                CTF_EXCHANGE_V1.address,
-                2,
-                OrdersMatchedV1 {
-                    takerOrderHash: TAKER_HASH,
-                    takerOrderMaker: TAKER,
-                    makerAssetId: U256::ZERO,
-                    takerAssetId: token,
-                    makerAmountFilled: U256::from(5_000_000_u64),
-                    takerAmountFilled: U256::from(20_000_000_u64),
-                }
-                .encode_log_data(),
-            ),
-        ];
-
-        let projection = project(&logs).expect("valid V1 projection");
-        assert_eq!(projection.executions.len(), 1);
-        assert_eq!(projection.participants.len(), 2);
-        assert_eq!(
-            Usd::from(projection.executions[0].notional_usd).inner(),
-            Decimal::from(5_u64)
-        );
-        assert_eq!(
-            Price::from(projection.executions[0].price).inner(),
-            Decimal::new(25, 2)
         );
     }
 
@@ -1270,6 +1150,47 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn fee_conservation_blocks_projection() {
+        let logs = vec![
+            canonical(
+                CTF_EXCHANGE_V2.address,
+                0,
+                OrderFilledV2 {
+                    orderHash: MAKER_HASH_ONE,
+                    maker: MAKER_ONE,
+                    taker: TAKER,
+                    side: 1,
+                    tokenId: U256::from(42_u64),
+                    makerAmountFilled: U256::from(20_000_000_u64),
+                    takerAmountFilled: U256::from(10_000_000_u64),
+                    fee: U256::from(100_u64),
+                    builder: B256::ZERO,
+                    metadata: B256::ZERO,
+                }
+                .encode_log_data(),
+            ),
+            canonical(
+                CTF_EXCHANGE_V2.address,
+                1,
+                FeeChargedV2 {
+                    receiver: EXCHANGE,
+                    amount: U256::from(99_u64),
+                }
+                .encode_log_data(),
+            ),
+        ];
+
+        assert!(matches!(
+            project(&logs),
+            Err(ExecutionProjectionError::FeeConservation {
+                order_filled_fee,
+                fee_charged_amount,
+                ..
+            }) if order_filled_fee == "100" && fee_charged_amount == "99"
+        ));
+    }
+
     fn project(
         logs: &[CanonicalExchangeLog],
     ) -> Result<ExchangeHistoryProjection, ExecutionProjectionError> {
@@ -1279,10 +1200,7 @@ mod tests {
             1_800_000_000_001,
             ContentHash::from_bytes([9; 32]),
             Uuid::from_u128(7),
-            |token| {
-                (token == &TokenId::new("42") || token == &TokenId::new("84"))
-                    .then(|| MarketId::new("market"))
-            },
+            |token| (token == &TokenId::new("42")).then(|| MarketId::new("market")),
         )
     }
 
@@ -1290,11 +1208,7 @@ mod tests {
         let (topics, data) = encoded.split();
         CanonicalExchangeLog {
             address: format!("{address:#x}"),
-            block_number: if address == CTF_EXCHANGE_V1.address {
-                CTF_EXCHANGE_V1.first_valid_block
-            } else {
-                CTF_EXCHANGE_V2.first_valid_block
-            },
+            block_number: CTF_EXCHANGE_V2.first_valid_block,
             block_hash: format!(
                 "{:#x}",
                 b256!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")

@@ -25,6 +25,7 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    domain::market::fee::FrozenMakerRebateSchedule,
     enums::{
         common::MarketCategory,
         factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
@@ -100,12 +101,21 @@ impl EntryOrderPolicy {
 pub struct SizingPlan {
     /// Exact immutable tier selected by the global MILP.
     pub economic_tier_id: EconomicTierId,
-    /// Suggested allocation in USD.
-    pub suggested_usd: Usd,
-    /// Suggested allocation in shares at the reference price.
-    pub suggested_shares: Shares,
-    /// Exact executable entry VWAP produced by the frozen L2 walk.
-    pub entry_vwap: Price,
+    /// Shares submitted to the selected route.
+    pub requested_shares: Shares,
+    /// OOS expected fill quantity; equals requested shares for aggressive entry.
+    pub expected_filled_shares: Shares,
+    /// Cash reserved independently of expected passive fills or incentives.
+    pub hard_reserved_cash_usd: Usd,
+    /// Immediate full-fill venue and builder fee.
+    pub immediate_fee_usd: Usd,
+    /// Delayed maker incentive expectation; never spendable cash.
+    pub expected_maker_rebate_usd: Usd,
+    /// Independent Gamma terms frozen for later maker-fill accrual. `None`
+    /// means the tier was valued with zero rebate.
+    pub maker_rebate_schedule: Option<FrozenMakerRebateSchedule>,
+    /// Aggressive executable VWAP or passive post-only limit price.
+    pub reference_entry_price: Price,
     /// Suggested allocation as a fraction of the capital base.
     pub portfolio_weight_pct: Decimal,
     /// Projected market exposure after this allocation.

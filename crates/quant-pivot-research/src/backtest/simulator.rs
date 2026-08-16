@@ -77,7 +77,7 @@ mod tests {
             settle_executed_buy(&fill, PayoutRatio::try_new(dec!(0.5)).expect("half payout"))
                 .expect("settlement");
 
-        assert_eq!(won.economics.entry_fee, fill.expected_fee);
+        assert_eq!(won.economics.entry_fee, fill.immediate_cost.total_fee_usd());
         assert_eq!(
             lost.realized_pnl_usd,
             Usd::new(-lost.economics.cash_outlay.inner())

@@ -746,6 +746,7 @@ mod tests {
             trade_side: None,
             trade_size: None,
             fee_rate_bps: None,
+            trade_transaction_hash: None,
             venue_event_time: 1_000_000,
             ingress_time: 1_000_000,
             persisted_time: 1_000_000,

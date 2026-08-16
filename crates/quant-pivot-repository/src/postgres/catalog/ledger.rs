@@ -1103,6 +1103,17 @@ impl PgCatalogLedgerRepository {
                         ),
                     }
                 })?;
+                if object.schema_version != CATALOG_OBJECT_SCHEMA_VERSION {
+                    return Err(StorageError::InvariantViolation {
+                        entity: Some("catalog_event_object"),
+                        detail: format!(
+                            "event object {} uses retired schema version {}; required={}",
+                            object.event_object_id,
+                            object.schema_version,
+                            CATALOG_OBJECT_SCHEMA_VERSION
+                        ),
+                    });
+                }
                 let available_at = Self::committed_at_for(&batches, &change.catalog_sync_batch_id)?;
                 Ok(CatalogEventChangeInfo {
                     event_change_id: change.event_change_id,
@@ -1158,6 +1169,17 @@ impl PgCatalogLedgerRepository {
                         ),
                     }
                 })?;
+                if object.schema_version != CATALOG_OBJECT_SCHEMA_VERSION {
+                    return Err(StorageError::InvariantViolation {
+                        entity: Some("catalog_market_object"),
+                        detail: format!(
+                            "market object {} uses retired schema version {}; required={}",
+                            object.market_object_id,
+                            object.schema_version,
+                            CATALOG_OBJECT_SCHEMA_VERSION
+                        ),
+                    });
+                }
                 let available_at = Self::committed_at_for(&batches, &change.catalog_sync_batch_id)?;
                 Ok(CatalogMarketChangeInfo {
                     market_change_id: change.market_change_id,

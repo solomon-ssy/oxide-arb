@@ -429,8 +429,8 @@ mod tests {
     fn model_family_string_roundtrip() {
         for family in [
             ModelFamily::WeightedFactor,
-            ModelFamily::from_classical(ClassicalKind::RandomForest),
-            ModelFamily::from_classical(ClassicalKind::ElasticNet),
+            ModelFamily::from_classical(ClassicalKind::LogisticRegression),
+            ModelFamily::HoldVsExitWeighted,
         ] {
             let text = family.to_string();
             let parsed = ModelFamily::from_str(&text).expect("round-trip");

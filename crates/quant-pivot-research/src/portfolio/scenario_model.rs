@@ -2631,7 +2631,7 @@ mod tests {
             fold_artifacts: fold_artifacts(seed),
             path_count: 1,
             combination_count: 1,
-            median_rank_ic: dec!(0.12),
+            median_target_rank_ic: dec!(0.12),
             sharpe_distribution: SharpeDistribution {
                 min: dec!(0.3),
                 p25: dec!(0.4),
@@ -2649,7 +2649,7 @@ mod tests {
                 group_returns,
                 scenario_residuals,
                 sharpe: dec!(0.5),
-                rank_ic: dec!(0.12),
+                target_rank_ic: dec!(0.12),
                 max_drawdown: dec!(0.08),
                 tail_loss: dec!(-0.03),
                 turnover: Some(dec!(0.2)),

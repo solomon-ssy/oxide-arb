@@ -12,25 +12,27 @@ use quant_pivot_models::{
     config::ClickHouseConfig,
     domain::{
         governance::{NewOperationLog, RuntimeControlUpdate},
-        market::fee::BuilderFeeAttribution,
+        market::fee::{BuilderFeeAttribution, ImmediateExecutionCost},
         quant::{
-            ApproveOrderIntent, CalibrationArtifactPayload, CapitalOccupancyBucket,
-            CapitalSettlement, DiscountCurvePoint, EntryConditionClaim, EntryEconomics,
-            ExactVerificationEvidence, ExecutableEconomicTier, ExecutionIdentityRefs,
-            ExistingPortfolioState, ExitLedgerWrite, GlobalPortfolioPlan, MarketSelectionModel,
-            ModelScoreCalibrationCommit, ModelVersionInfo, NewAccountSnapshot,
-            NewCalibrationArtifact, NewCapitalAllocation, NewEntryConditionArtifact,
-            NewEntryConditionInstance, NewEquitySnapshot, NewExecutionAccount, NewExecutionOrder,
-            NewFactorDefinition, NewFeatureParityState, NewMarketSelection,
-            NewMarketSelectionMember, NewModelRun, NewModelVersion, NewOrderIntent,
-            NewPortfolioPlan, NewRecommendation, NewRecommendationReport, NewReconciliation,
-            NewReportDataQualitySnapshot, NewReportRouteRun, NewReportTransaction,
-            PortfolioConstraintEvidence, PortfolioDecisionResult, PortfolioObjectiveEvidence,
-            PortfolioScenario, PortfolioScenarioArtifact, PortfolioScenarioEvidenceRegime,
-            PortfolioScenarioKind, PortfolioScenarioVisibility, PositionExit, PositionFill,
-            RecommendationEconomics, RepresentedRouteSet, RouteCandidateFunnel, RouteModelLineage,
-            RouteRunOutcome, ScenarioCashflow, ScenarioDistribution, ScenarioWeight,
-            SolverEvidence, SubmissionLedgerWrite, TrainingDatasetInfo,
+            AggressiveEntryEconomics, ApproveOrderIntent, CalibrationArtifactPayload,
+            CapitalOccupancyBucket, CapitalSettlement, DiscountCurvePoint, EntryConditionClaim,
+            EntryExecutionEconomics, ExactVerificationEvidence, ExecutableEconomicTier,
+            ExecutionIdentityRefs, ExistingPortfolioState, ExitLedgerWrite, GlobalPortfolioPlan,
+            HardReservationBucket, MarketSelectionModel, ModelScoreCalibrationCommit,
+            ModelVersionInfo, NewAccountSnapshot, NewCalibrationArtifact, NewCapitalAllocation,
+            NewEntryConditionArtifact, NewEntryConditionInstance, NewEquitySnapshot,
+            NewExecutionAccount, NewExecutionOrder, NewFactorDefinition, NewFeatureParityState,
+            NewMarketSelection, NewMarketSelectionMember, NewModelRun, NewModelVersion,
+            NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
+            NewReconciliation, NewReportDataQualitySnapshot, NewReportRouteRun,
+            NewReportTransaction, PortfolioConstraintEvidence, PortfolioDecisionResult,
+            PortfolioObjectiveEvidence, PortfolioScenario, PortfolioScenarioArtifact,
+            PortfolioScenarioEvidenceRegime, PortfolioScenarioKind, PortfolioScenarioVisibility,
+            PositionExit, PositionFill, RecommendationEconomics, RepresentedRouteSet,
+            RouteCandidateFunnel, RouteModelLineage, RouteRunOutcome,
+            ScenarioCapitalOccupancySlice, ScenarioCashflow, ScenarioDistribution,
+            ScenarioEntryExecution, ScenarioExecutionCashflow, ScenarioWeight, SolverEvidence,
+            SubmissionLedgerWrite, TrainingDatasetInfo,
         },
         query::TimeWindow,
     },
@@ -1375,6 +1377,13 @@ fn fixture_economic_tier(
     token_id: TokenId,
     economics: RecommendationEconomics,
 ) -> ExecutableEconomicTier {
+    let shares = Shares::new(ENTRY_FILLED_SHARES);
+    let immediate_cost = ImmediateExecutionCost::new(
+        Usd::new(ENTRY_FILLED_SHARES * ENTRY_PRICE),
+        Usd::new(ENTRY_FEE_USD),
+        Usd::ZERO,
+    )
+    .expect("valid execution fixture cost");
     ExecutableEconomicTier {
         economic_tier_id,
         report_route_run_id,
@@ -1386,42 +1395,79 @@ fn fixture_economic_tier(
         category: MarketCategory::Weather,
         token_id,
         outcome_side: OutcomeSide::Yes,
-        shares: Shares::new(ENTRY_FILLED_SHARES),
-        entry: EntryEconomics {
-            notional_usd: Usd::new(EXECUTION_NOTIONAL),
+        entry_execution: EntryExecutionEconomics::Aggressive(AggressiveEntryEconomics {
+            requested_shares: shares,
+            filled_shares: shares,
+            limit_price: Price::new(ENTRY_PRICE),
             entry_vwap: Price::new(ENTRY_PRICE),
-            fee_usd: Usd::new(ENTRY_FEE_USD),
+            immediate_cost,
             slippage_usd: Usd::ZERO,
             visible_liquidity_usd: Usd::new(dec!(5000)),
-        },
+        }),
         profit_probability_lower_bps: 6_500,
         probability_interval_width_bps: 1_000,
         scenario_cashflows: vec![
-            ScenarioCashflow {
+            ScenarioExecutionCashflow {
                 scenario_index: 0,
+                entry_execution: ScenarioEntryExecution::AggressiveFill,
+                filled_shares: shares,
+                immediate_cash_outlay_usd: immediate_cost.cash_outlay_usd,
+                discounted_exit_cash_usd: immediate_cost.cash_outlay_usd + Usd::new(dec!(50)),
+                delayed_maker_rebate_usd: Usd::ZERO,
+                discounted_maker_rebate_usd: Usd::ZERO,
+                capital_cost_usd: Usd::ZERO,
+                capital_occupancy: vec![ScenarioCapitalOccupancySlice {
+                    locked_cash_usd: immediate_cost.cash_outlay_usd,
+                    duration_secs: 3_600,
+                }],
                 discounted_net_usd: Usd::new(dec!(50)),
+                risk_net_usd: Usd::new(dec!(50)),
             },
-            ScenarioCashflow {
+            ScenarioExecutionCashflow {
                 scenario_index: 1,
+                entry_execution: ScenarioEntryExecution::AggressiveFill,
+                filled_shares: shares,
+                immediate_cash_outlay_usd: immediate_cost.cash_outlay_usd,
+                discounted_exit_cash_usd: Usd::ZERO,
+                delayed_maker_rebate_usd: Usd::ZERO,
+                discounted_maker_rebate_usd: Usd::ZERO,
+                capital_cost_usd: Usd::ZERO,
+                capital_occupancy: vec![ScenarioCapitalOccupancySlice {
+                    locked_cash_usd: immediate_cost.cash_outlay_usd,
+                    duration_secs: 3_600,
+                }],
                 discounted_net_usd: Usd::new(dec!(-25)),
+                risk_net_usd: Usd::new(dec!(-25)),
             },
-            ScenarioCashflow {
+            ScenarioExecutionCashflow {
                 scenario_index: 2,
+                entry_execution: ScenarioEntryExecution::AggressiveFill,
+                filled_shares: shares,
+                immediate_cash_outlay_usd: immediate_cost.cash_outlay_usd,
+                discounted_exit_cash_usd: immediate_cost.cash_outlay_usd + Usd::new(dec!(10)),
+                delayed_maker_rebate_usd: Usd::ZERO,
+                discounted_maker_rebate_usd: Usd::ZERO,
+                capital_cost_usd: Usd::ZERO,
+                capital_occupancy: vec![ScenarioCapitalOccupancySlice {
+                    locked_cash_usd: immediate_cost.cash_outlay_usd,
+                    duration_secs: 3_600,
+                }],
                 discounted_net_usd: Usd::new(dec!(10)),
+                risk_net_usd: Usd::new(dec!(10)),
             },
         ],
-        capital_occupancy: vec![
-            CapitalOccupancyBucket {
+        hard_reservation_envelope: vec![
+            HardReservationBucket {
                 end_secs: 3_600,
-                locked_usd: Usd::new(EXECUTION_NOTIONAL),
+                reserved_cash_usd: immediate_cost.cash_outlay_usd,
             },
-            CapitalOccupancyBucket {
+            HardReservationBucket {
                 end_secs: 86_400,
-                locked_usd: Usd::ZERO,
+                reserved_cash_usd: Usd::ZERO,
             },
-            CapitalOccupancyBucket {
+            HardReservationBucket {
                 end_secs: 604_800,
-                locked_usd: Usd::ZERO,
+                reserved_cash_usd: Usd::ZERO,
             },
         ],
         economics,
@@ -1796,6 +1842,7 @@ pub(super) fn new_order_intent(
             post_only: false,
             limit_price: Price::new(dec!(0.6)),
             amount: OrderAmount::CashBudget(Usd::new(EXECUTION_NOTIONAL)),
+            maker_rebate_schedule: None,
             max_slippage_bps: Bps::new(dec!(50)),
             valid_until: Utc::now() + Duration::hours(1),
         },
@@ -1905,6 +1952,7 @@ pub fn prepared_order(
             builder_taker_fee_bps: Bps::ZERO,
             builder_attribution: BuilderFeeAttribution::NoBuilderCode,
         },
+        maker_rebate_schedule: None,
         prepared_at: now,
         valid_until: now + Duration::hours(1),
     }
@@ -2008,7 +2056,8 @@ pub(super) fn reconciliation_row(
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
         expected_fee_usd: Some(Usd::new(ENTRY_FEE_USD)),
-        observed_fee_usd: Some(Usd::new(ENTRY_FEE_USD)),
+        derived_fee_usd: None,
+        settled_fee_usd: Some(Usd::new(ENTRY_FEE_USD)),
         fee_delta_usd: Some(Usd::ZERO),
         resolved_by: Some("venue_submit_response".to_owned()),
         resolved_at: Some(resolved_at),
@@ -2042,7 +2091,8 @@ pub(super) fn exit_reconciliation_row(
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
         expected_fee_usd: Some(Usd::ZERO),
-        observed_fee_usd: Some(Usd::ZERO),
+        derived_fee_usd: None,
+        settled_fee_usd: Some(Usd::ZERO),
         fee_delta_usd: Some(Usd::ZERO),
         resolved_by: Some("venue_submit_response".to_owned()),
         resolved_at: Some(resolved_at),
@@ -2886,6 +2936,7 @@ fn build_report_transaction_inner(
             reserved_usd: Usd::ZERO,
             realized_pnl_cumulative_usd: Usd::ZERO,
             unrealized_pnl_usd: Usd::ZERO,
+            incentive_credit_cumulative_usd: Usd::ZERO,
             high_water_mark_usd: capital_base_usd,
             drawdown_pct: Decimal::ZERO,
             account_snapshot_ref: Some(ids.account_snapshot),
@@ -3308,7 +3359,12 @@ fn fixture_portfolio_decision(
     };
     let allocated_usd = recommendations
         .iter()
-        .map(|recommendation| recommendation.economic_tier_json.entry.notional_usd)
+        .map(|recommendation| {
+            recommendation
+                .economic_tier_json
+                .entry_execution
+                .hard_reserved_cash_usd()
+        })
         .sum();
     let selected_recommendation_count =
         u32::try_from(recommendations.len()).expect("fixture recommendation count fits u32");
@@ -3437,9 +3493,13 @@ fn entry_plan() -> EntryPlan {
 fn sizing_plan(economic_tier_id: EconomicTierId) -> SizingPlan {
     SizingPlan {
         economic_tier_id,
-        suggested_usd: Usd::new(EXECUTION_NOTIONAL),
-        suggested_shares: Shares::new(ENTRY_FILLED_SHARES),
-        entry_vwap: Price::new(ENTRY_PRICE),
+        requested_shares: Shares::new(ENTRY_FILLED_SHARES),
+        expected_filled_shares: Shares::new(ENTRY_FILLED_SHARES),
+        hard_reserved_cash_usd: Usd::new(EXECUTION_NOTIONAL),
+        immediate_fee_usd: Usd::new(ENTRY_FEE_USD),
+        expected_maker_rebate_usd: Usd::ZERO,
+        maker_rebate_schedule: None,
+        reference_entry_price: Price::new(ENTRY_PRICE),
         portfolio_weight_pct: dec!(0.025),
         market_exposure_after_usd: Usd::new(EXECUTION_NOTIONAL),
         event_exposure_after_usd: Usd::new(EXECUTION_NOTIONAL),

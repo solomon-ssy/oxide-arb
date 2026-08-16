@@ -20,7 +20,9 @@ use quant_pivot_models::{
         },
         common::{Side, TickSize},
     },
-    types::{Bps, ContentHash, MarketId, PartitionId, Price, Shares, TokenId, Usd},
+    types::{
+        Bps, ContentHash, EvmTransactionHash, MarketId, PartitionId, Price, Shares, TokenId, Usd,
+    },
 };
 use quant_pivot_storage::write::{DurableWriteError, DurableWriter};
 use rust_decimal::Decimal;
@@ -29,7 +31,7 @@ use uuid::Uuid;
 use super::ledger_persistence::{LedgerPersistenceHandle, PartitionLedgerClient};
 
 pub(crate) const CANONICAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
-const L2_SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(1);
+const L2_SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
 
 pub struct BookFactWriter {
     ledger: LedgerPersistenceHandle,
@@ -50,6 +52,7 @@ pub(crate) struct MarketWsTradeFact<'a> {
     pub side: Option<Side>,
     pub trade_size: Option<Shares>,
     pub fee_rate_bps: Option<Decimal>,
+    pub transaction_hash: Option<&'a EvmTransactionHash>,
     pub timestamp_ms: u64,
     pub trace: IngressTrace,
 }
@@ -179,6 +182,7 @@ impl BookFactWriter {
         });
         ledger_row.trade_size = fact.trade_size.map(ChShares::from);
         ledger_row.fee_rate_bps = fact.fee_rate_bps.map(ChBps::from);
+        ledger_row.trade_transaction_hash = fact.transaction_hash.map(ToString::to_string);
         seal_ledger_row(ledger_row)
     }
 
@@ -366,6 +370,7 @@ fn ledger_row(identity: LedgerIdentity<'_>) -> BookL2LedgerRow {
         trade_side: None,
         trade_size: None,
         fee_rate_bps: None,
+        trade_transaction_hash: None,
         venue_event_time: i64::try_from(venue_event_time).unwrap_or(i64::MAX),
         ingress_time,
         persisted_time: Utc::now().timestamp_millis(),

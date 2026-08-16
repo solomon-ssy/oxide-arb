@@ -3763,7 +3763,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "median_rank_ic",
+      "name": "median_target_rank_ic",
       "nullable": false,
       "ordinal": 13,
       "storage": "m",
@@ -4062,7 +4062,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "rank_ic",
+      "name": "realized_return_rank_correlation",
       "nullable": false,
       "ordinal": 11,
       "storage": "m",
@@ -6324,7 +6324,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "unrealized_pnl_usd",
+      "name": "incentive_credit_cumulative_usd",
       "nullable": false,
       "ordinal": 9,
       "storage": "m",
@@ -6337,7 +6337,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "high_water_mark_usd",
+      "name": "unrealized_pnl_usd",
       "nullable": false,
       "ordinal": 10,
       "storage": "m",
@@ -6350,7 +6350,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "drawdown_pct",
+      "name": "high_water_mark_usd",
       "nullable": false,
       "ordinal": 11,
       "storage": "m",
@@ -6363,9 +6363,22 @@
       "default": null,
       "generated": "",
       "identity": "",
+      "name": "drawdown_pct",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "m",
+      "table": "quant_equity_snapshot",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
       "name": "account_snapshot_ref",
       "nullable": true,
-      "ordinal": 12,
+      "ordinal": 13,
       "storage": "p",
       "table": "quant_equity_snapshot",
       "type": "uuid"
@@ -6378,7 +6391,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 14,
       "storage": "p",
       "table": "quant_equity_snapshot",
       "type": "timestamp with time zone"
@@ -7720,6 +7733,448 @@
       "ordinal": 11,
       "storage": "p",
       "table": "quant_execution_attempt_reconciliation_task",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_fee_measurement_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_execution_fee_measurement",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_fill_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_execution_fee_measurement",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "stage",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_execution_fee_measurement",
+      "type": "qp_fee_measurement_stage"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "fee_usd",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "m",
+      "table": "quant_execution_fee_measurement",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "fee_rate_bps",
+      "nullable": true,
+      "ordinal": 5,
+      "storage": "m",
+      "table": "quant_execution_fee_measurement",
+      "type": "numeric"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_identity",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_execution_fee_measurement",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "chain_id",
+      "nullable": true,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_execution_fee_measurement",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "protocol_version",
+      "nullable": true,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_execution_fee_measurement",
+      "type": "integer"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "exchange_address",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_execution_fee_measurement",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "transaction_hash",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_execution_fee_measurement",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "log_index",
+      "nullable": true,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_execution_fee_measurement",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "observed_at",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_execution_fee_measurement",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "available_at",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_execution_fee_measurement",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "x",
+      "table": "quant_execution_fee_measurement",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "p",
+      "table": "quant_execution_fee_measurement",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_fill_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_execution_fill",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_order_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_execution_fill",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "order_intent_id",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_execution_fill",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_account_id",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_execution_fill",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "venue_trade_id",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_execution_fill",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "venue_bucket_index",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_execution_fill",
+      "type": "integer"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "venue_order_id",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_execution_fill",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "order_phase",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_execution_fill",
+      "type": "qp_execution_order_phase"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "market_id",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_execution_fill",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "token_id",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_execution_fill",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "side",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_execution_fill",
+      "type": "qp_side"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "liquidity_role",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_execution_fill",
+      "type": "qp_fee_liquidity_role"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "shares",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "m",
+      "table": "quant_execution_fill",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "price",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "m",
+      "table": "quant_execution_fill",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "principal_usd",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "m",
+      "table": "quant_execution_fill",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "matched_at",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "p",
+      "table": "quant_execution_fill",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "available_at",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "p",
+      "table": "quant_execution_fill",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 18,
+      "storage": "x",
+      "table": "quant_execution_fill",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 19,
+      "storage": "p",
+      "table": "quant_execution_fill",
       "type": "timestamp with time zone"
     },
     {
@@ -13890,7 +14345,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "rank_ic_delta",
+      "name": "realized_return_rank_correlation_delta",
       "nullable": false,
       "ordinal": 7,
       "storage": "m",
@@ -17283,7 +17738,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "observed_fee_usd",
+      "name": "derived_fee_usd",
       "nullable": true,
       "ordinal": 12,
       "storage": "m",
@@ -17296,9 +17751,22 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "fee_delta_usd",
+      "name": "settled_fee_usd",
       "nullable": true,
       "ordinal": 13,
+      "storage": "m",
+      "table": "quant_reconciliation",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "fee_delta_usd",
+      "nullable": true,
+      "ordinal": 14,
       "storage": "m",
       "table": "quant_reconciliation",
       "type": "numeric"
@@ -17311,7 +17779,7 @@
       "identity": "",
       "name": "resolved_by",
       "nullable": true,
-      "ordinal": 14,
+      "ordinal": 15,
       "storage": "x",
       "table": "quant_reconciliation",
       "type": "text"
@@ -17324,7 +17792,7 @@
       "identity": "",
       "name": "resolved_at",
       "nullable": true,
-      "ordinal": 15,
+      "ordinal": 16,
       "storage": "p",
       "table": "quant_reconciliation",
       "type": "timestamp with time zone"
@@ -17337,7 +17805,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 16,
+      "ordinal": 17,
       "storage": "p",
       "table": "quant_reconciliation",
       "type": "timestamp with time zone"
@@ -17350,7 +17818,7 @@
       "identity": "",
       "name": "updated_at",
       "nullable": false,
-      "ordinal": 17,
+      "ordinal": 18,
       "storage": "p",
       "table": "quant_reconciliation",
       "type": "timestamp with time zone"
@@ -23700,6 +24168,214 @@
       "type": "timestamp with time zone"
     },
     {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "venue_incentive_event_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_venue_incentive_event",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_account_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_venue_incentive_event",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_fill_id",
+      "nullable": true,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_venue_incentive_event",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "market_id",
+      "nullable": true,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_venue_incentive_event",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "kind",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_venue_incentive_event",
+      "type": "qp_venue_incentive_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "stage",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_venue_incentive_event",
+      "type": "qp_venue_incentive_stage"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "program_date",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_venue_incentive_event",
+      "type": "date"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "amount_usd",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "m",
+      "table": "quant_venue_incentive_event",
+      "type": "numeric"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_schedule_hash",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_venue_incentive_event",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_partition",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_venue_incentive_event",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_identity",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_venue_incentive_event",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "transaction_hash",
+      "nullable": true,
+      "ordinal": 12,
+      "storage": "x",
+      "table": "quant_venue_incentive_event",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "observed_at",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_venue_incentive_event",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "available_at",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "quant_venue_incentive_event",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "x",
+      "table": "quant_venue_incentive_event",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "p",
+      "table": "quant_venue_incentive_event",
+      "type": "timestamp with time zone"
+    },
+    {
       "collation": "default",
       "compression": "",
       "default": null,
@@ -25990,7 +26666,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((((kind = 'data'::qp_feedback_drift_kind) AND (metric = ANY (ARRAY['population_stability_index'::qp_feedback_drift_metric, 'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric]))) OR ((kind = 'concept'::qp_feedback_drift_kind) AND (metric = 'rank_ic_drop'::qp_feedback_drift_metric)) OR ((kind = 'label'::qp_feedback_drift_kind) AND (metric = 'jensen_shannon_divergence'::qp_feedback_drift_metric))) AND (baseline_window_start < baseline_window_end) AND (baseline_window_end <= evaluation_window_start) AND (evaluation_window_start < evaluation_window_end) AND (evaluation_window_end <= label_cutoff) AND (label_cutoff <= observed_at) AND (observed_at <= created_at) AND (sample_count >= 0) AND (threshold <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND (threshold > (0)::numeric) AND ((metric = 'population_stability_index'::qp_feedback_drift_metric) OR (threshold <= (1)::numeric)) AND ((observed_value IS NULL) OR ((observed_value <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND (observed_value >= (0)::numeric) AND ((metric = 'population_stability_index'::qp_feedback_drift_metric) OR (observed_value <= (1)::numeric)))) AND (((assessment = 'insufficient_evidence'::qp_feedback_drift_assessment) AND (observed_value IS NULL)) OR ((assessment <> 'insufficient_evidence'::qp_feedback_drift_assessment) AND (observed_value IS NOT NULL) AND (sample_count > 0) AND (((metric = 'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric) AND (((assessment = 'threshold_exceeded'::qp_feedback_drift_assessment) AND (observed_value <= threshold)) OR ((assessment = 'within_threshold'::qp_feedback_drift_assessment) AND (observed_value > threshold)))) OR ((metric <> 'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric) AND (((assessment = 'threshold_exceeded'::qp_feedback_drift_assessment) AND (observed_value >= threshold)) OR ((assessment = 'within_threshold'::qp_feedback_drift_assessment) AND (observed_value < threshold))))))) AND ((octet_length(detail_uri) >= 1) AND (octet_length(detail_uri) <= 4096)) AND (detail_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text) AND (detail_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (report_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "definition": "CHECK (((((kind = 'data'::qp_feedback_drift_kind) AND (metric = ANY (ARRAY['population_stability_index'::qp_feedback_drift_metric, 'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric]))) OR ((kind = 'concept'::qp_feedback_drift_kind) AND (metric = 'target_rank_ic_drop'::qp_feedback_drift_metric)) OR ((kind = 'label'::qp_feedback_drift_kind) AND (metric = 'jensen_shannon_divergence'::qp_feedback_drift_metric))) AND (baseline_window_start < baseline_window_end) AND (baseline_window_end <= evaluation_window_start) AND (evaluation_window_start < evaluation_window_end) AND (evaluation_window_end <= label_cutoff) AND (label_cutoff <= observed_at) AND (observed_at <= created_at) AND (sample_count >= 0) AND (threshold <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND (threshold > (0)::numeric) AND ((metric = 'population_stability_index'::qp_feedback_drift_metric) OR (threshold <= (1)::numeric)) AND ((observed_value IS NULL) OR ((observed_value <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND (observed_value >= (0)::numeric) AND ((metric = 'population_stability_index'::qp_feedback_drift_metric) OR (observed_value <= (1)::numeric)))) AND (((assessment = 'insufficient_evidence'::qp_feedback_drift_assessment) AND (observed_value IS NULL)) OR ((assessment <> 'insufficient_evidence'::qp_feedback_drift_assessment) AND (observed_value IS NOT NULL) AND (sample_count > 0) AND (((metric = 'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric) AND (((assessment = 'threshold_exceeded'::qp_feedback_drift_assessment) AND (observed_value <= threshold)) OR ((assessment = 'within_threshold'::qp_feedback_drift_assessment) AND (observed_value > threshold)))) OR ((metric <> 'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric) AND (((assessment = 'threshold_exceeded'::qp_feedback_drift_assessment) AND (observed_value >= threshold)) OR ((assessment = 'within_threshold'::qp_feedback_drift_assessment) AND (observed_value < threshold))))))) AND ((octet_length(detail_uri) >= 1) AND (octet_length(detail_uri) <= 4096)) AND (detail_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text) AND (detail_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (report_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
       "initially_deferred": false,
       "name": "ck_quant_drift_report",
       "table": "quant_drift_report",
@@ -26260,7 +26936,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((char_length(market_id) > 0) AND (char_length(token_id) > 0) AND (runtime_mode = ANY (ARRAY['semi_auto'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode])) AND (requested_shares > (0)::numeric) AND (filled_shares >= (0)::numeric) AND (filled_shares <= requested_shares) AND ((entry_avg_price IS NULL) OR ((entry_avg_price >= (0)::numeric) AND (entry_avg_price <= (1)::numeric))) AND ((exit_avg_price IS NULL) OR ((exit_avg_price >= (0)::numeric) AND (exit_avg_price <= (1)::numeric))) AND ((entry_fee_usd IS NULL) OR (entry_fee_usd >= (0)::numeric)) AND ((exit_fee_usd IS NULL) OR (exit_fee_usd >= (0)::numeric)) AND ((settlement_payout_usd IS NULL) OR (settlement_payout_usd >= (0)::numeric)) AND (terminal_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (execution_fact_schema_version > 0) AND ((source_checkpoint_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((execution_fact_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((outcome_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND (((terminal_state = 'unfilled'::qp_execution_attempt_terminal_state) AND (filled_shares = (0)::numeric) AND (no_fill_reason IS NOT NULL) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state])) AND (position_id IS NULL) AND (entry_avg_price IS NULL) AND (entry_filled_at IS NULL) AND (position_terminal_state IS NULL) AND (exit_reason IS NULL) AND (exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL) AND (settlement_payout_usd IS NULL) AND (realized_pnl_usd IS NULL)) OR ((terminal_state = ANY (ARRAY['partially_filled'::qp_execution_attempt_terminal_state, 'fully_filled'::qp_execution_attempt_terminal_state])) AND (no_fill_reason IS NULL) AND (position_id IS NOT NULL) AND (entry_avg_price IS NOT NULL) AND (entry_filled_at IS NOT NULL) AND (entry_filled_at <= terminal_at) AND (position_terminal_state = ANY (ARRAY['closed'::qp_position_ledger_state, 'settled'::qp_position_ledger_state])) AND (realized_pnl_usd IS NOT NULL) AND (((terminal_state = 'partially_filled'::qp_execution_attempt_terminal_state) AND (filled_shares > (0)::numeric) AND (filled_shares < requested_shares) AND (entry_order_state = 'partially_filled'::qp_execution_order_state)) OR ((terminal_state = 'fully_filled'::qp_execution_attempt_terminal_state) AND (filled_shares = requested_shares) AND (entry_order_state = 'filled'::qp_execution_order_state))) AND (((position_terminal_state = 'closed'::qp_position_ledger_state) AND (exit_reason IS NOT NULL) AND (exit_reason <> 'resolution_redeem'::qp_exit_reason) AND (exit_filled_shares = filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at = terminal_at) AND (settlement_payout_usd IS NULL)) OR ((position_terminal_state = 'settled'::qp_position_ledger_state) AND (exit_reason = 'resolution_redeem'::qp_exit_reason) AND (settlement_payout_usd IS NOT NULL) AND (((exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL)) OR ((exit_filled_shares > (0)::numeric) AND (exit_filled_shares < filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at IS NOT NULL) AND (exit_at <= terminal_at)))))))))",
+      "definition": "CHECK (((char_length(market_id) > 0) AND (char_length(token_id) > 0) AND (runtime_mode = ANY (ARRAY['semi_auto'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode])) AND (requested_shares > (0)::numeric) AND (filled_shares >= (0)::numeric) AND (filled_shares <= requested_shares) AND ((entry_avg_price IS NULL) OR ((entry_avg_price >= (0)::numeric) AND (entry_avg_price <= (1)::numeric))) AND ((exit_avg_price IS NULL) OR ((exit_avg_price >= (0)::numeric) AND (exit_avg_price <= (1)::numeric))) AND ((entry_fee_usd IS NULL) OR (entry_fee_usd >= (0)::numeric)) AND ((exit_fee_usd IS NULL) OR (exit_fee_usd >= (0)::numeric)) AND ((settlement_payout_usd IS NULL) OR (settlement_payout_usd >= (0)::numeric)) AND (terminal_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (execution_fact_schema_version > 0) AND ((source_checkpoint_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((execution_fact_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((outcome_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND (((terminal_state = 'unfilled'::qp_execution_attempt_terminal_state) AND (filled_shares = (0)::numeric) AND (no_fill_reason IS NOT NULL) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state])) AND (position_id IS NULL) AND (entry_avg_price IS NULL) AND (entry_filled_at IS NULL) AND (position_terminal_state IS NULL) AND (exit_reason IS NULL) AND (exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL) AND (settlement_payout_usd IS NULL) AND (realized_pnl_usd IS NULL)) OR ((terminal_state = ANY (ARRAY['partially_filled'::qp_execution_attempt_terminal_state, 'fully_filled'::qp_execution_attempt_terminal_state])) AND (no_fill_reason IS NULL) AND (position_id IS NOT NULL) AND (entry_avg_price IS NOT NULL) AND (entry_filled_at IS NOT NULL) AND (entry_filled_at <= terminal_at) AND (position_terminal_state = ANY (ARRAY['closed'::qp_position_ledger_state, 'settled'::qp_position_ledger_state])) AND (realized_pnl_usd IS NOT NULL) AND (((terminal_state = 'partially_filled'::qp_execution_attempt_terminal_state) AND (filled_shares > (0)::numeric) AND (filled_shares < requested_shares) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state]))) OR ((terminal_state = 'fully_filled'::qp_execution_attempt_terminal_state) AND (filled_shares = requested_shares) AND (entry_order_state = 'filled'::qp_execution_order_state))) AND (((position_terminal_state = 'closed'::qp_position_ledger_state) AND (exit_reason IS NOT NULL) AND (exit_reason <> 'resolution_redeem'::qp_exit_reason) AND (exit_filled_shares = filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at = terminal_at) AND (settlement_payout_usd IS NULL)) OR ((position_terminal_state = 'settled'::qp_position_ledger_state) AND (exit_reason = 'resolution_redeem'::qp_exit_reason) AND (settlement_payout_usd IS NOT NULL) AND (((exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL)) OR ((exit_filled_shares > (0)::numeric) AND (exit_filled_shares < filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at IS NOT NULL) AND (exit_at <= terminal_at)))))))))",
       "initially_deferred": false,
       "name": "ck_quant_execution_attempt_outcome_contract",
       "table": "quant_execution_attempt_outcome",
@@ -26431,6 +27107,87 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((fee_usd >= (0)::numeric) AND ((char_length(source_identity) >= 1) AND (char_length(source_identity) <= 512)) AND ((fee_rate_bps IS NULL) OR (fee_rate_bps >= (0)::numeric)) AND ((exchange_address IS NULL) OR (exchange_address ~ '^0x[0-9a-f]{40}$'::text)) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= observed_at) AND (((stage = 'on_chain_settled'::qp_fee_measurement_stage) AND (chain_id > 0) AND (protocol_version = 2) AND (exchange_address IS NOT NULL) AND (transaction_hash IS NOT NULL) AND (log_index >= 0)) OR ((stage <> 'on_chain_settled'::qp_fee_measurement_stage) AND (chain_id IS NULL) AND (protocol_version IS NULL) AND (exchange_address IS NULL) AND (log_index IS NULL)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_execution_fee_measurement_evidence",
+      "table": "quant_execution_fee_measurement",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_fill_id) REFERENCES quant_execution_fill(execution_fill_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_execution_fee_measurement-execution_fill_id",
+      "table": "quant_execution_fee_measurement",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (execution_fee_measurement_id)",
+      "initially_deferred": false,
+      "name": "quant_execution_fee_measurement_pkey",
+      "table": "quant_execution_fee_measurement",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((char_length(venue_trade_id) >= 1) AND (char_length(venue_trade_id) <= 256) AND (venue_bucket_index >= 0) AND (char_length(venue_order_id) >= 1) AND (char_length(venue_order_id) <= 256) AND (shares > (0)::numeric) AND (price > (0)::numeric) AND (price <= (1)::numeric) AND (principal_usd = round((shares * price), 28)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= matched_at)))",
+      "initially_deferred": false,
+      "name": "ck_quant_execution_fill_economics",
+      "table": "quant_execution_fill",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_execution_fill-execution_account_id",
+      "table": "quant_execution_fill",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_order_id) REFERENCES quant_execution_order(execution_order_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_execution_fill-execution_order_id",
+      "table": "quant_execution_fill",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (order_intent_id) REFERENCES quant_order_intent(order_intent_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_execution_fill-order_intent_id",
+      "table": "quant_execution_fill",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (execution_fill_id)",
+      "initially_deferred": false,
+      "name": "quant_execution_fill_pkey",
+      "table": "quant_execution_fill",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (venue_trade_id)",
+      "initially_deferred": false,
+      "name": "quant_execution_fill_venue_trade_id_key",
+      "table": "quant_execution_fill",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (market_id) REFERENCES market(market_id)",
       "initially_deferred": false,
       "name": "fk-quant_execution_order-market_id",
@@ -26494,7 +27251,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((char_length(venue_trade_id) >= 1) AND (char_length(venue_trade_id) <= 256) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND ((trade_status IS NULL) OR (trade_status <> ALL (ARRAY['mined'::qp_venue_trade_status, 'confirmed'::qp_venue_trade_status])) OR (transaction_hash IS NOT NULL))))",
+      "definition": "CHECK (((char_length(venue_trade_id) >= 1) AND (char_length(venue_trade_id) <= 256) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND ((trade_status IS NULL) OR (trade_status <> 'mined'::qp_venue_trade_status) OR (transaction_hash IS NOT NULL))))",
       "initially_deferred": false,
       "name": "ck_quant_execution_trade_ref_identity",
       "table": "quant_execution_trade_ref",
@@ -27331,7 +28088,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((revision > 0) AND (template_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(route) = 'string'::text) AND (route = ANY (ARRAY['\"pooled\"'::jsonb, '\"crypto\"'::jsonb, '\"weather\"'::jsonb])) AND ((octet_length((governance_reason)::text) >= 1) AND (octet_length((governance_reason)::text) <= 2048)) AND ((governance_reason)::text = btrim((governance_reason)::text)) AND ((governance_reason)::text !~ '[[:cntrl:]]'::text) AND (jsonb_typeof(template) = 'object'::text) AND (template ?& ARRAY['format_version'::text, 'recipe_template_id'::text, 'revision'::text, 'template_hash'::text, 'profile_ref'::text, 'route'::text, 'model_family'::text, 'training_spec'::text, 'calibration_spec'::text, 'cpcv_spec'::text, 'downside_spec'::text, 'diagnostic_spec'::text, 'responsive_triggers'::text, 'catalog_priority'::text, 'resource_budget'::text, 'status'::text, 'approved_by_user_id'::text, 'approved_by_role'::text, 'approved_at'::text, 'governance_reason'::text]) AND ((template - ARRAY['format_version'::text, 'recipe_template_id'::text, 'revision'::text, 'template_hash'::text, 'profile_ref'::text, 'route'::text, 'model_family'::text, 'training_spec'::text, 'calibration_spec'::text, 'cpcv_spec'::text, 'downside_spec'::text, 'diagnostic_spec'::text, 'responsive_triggers'::text, 'catalog_priority'::text, 'resource_budget'::text, 'status'::text, 'approved_by_user_id'::text, 'approved_by_role'::text, 'approved_at'::text, 'governance_reason'::text]) = '{}'::jsonb) AND (((template ->> 'format_version'::text))::integer = 3) AND (((template ->> 'recipe_template_id'::text))::uuid = recipe_template_id) AND (((template ->> 'revision'::text))::integer = revision) AND ((template ->> 'template_hash'::text) = template_hash) AND ((template -> 'route'::text) = route) AND ((template ->> 'model_family'::text) = (model_family)::text) AND ((((template -> 'training_spec'::text) ->> 'model_spec_id'::text))::uuid = model_spec_id) AND ((template ->> 'status'::text) = (status)::text) AND (((template ->> 'catalog_priority'::text))::integer = catalog_priority) AND ((template ->> 'governance_reason'::text) = (governance_reason)::text) AND (((template -> 'training_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (((template -> 'training_spec'::text) ->> 'model_spec_definition_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'training_spec'::text) ->> 'training_window_days'::text))::numeric > (0)::numeric) AND (((template -> 'calibration_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'calibration_spec'::text) ->> 'calibration_window_days'::text))::numeric > (0)::numeric) AND (jsonb_typeof((template -> 'cpcv_spec'::text)) = 'object'::text) AND ((template -> 'cpcv_spec'::text) ?& ARRAY['spec_hash'::text, 'validation'::text, 'target_horizon_secs'::text, 'purge_embargo_secs'::text]) AND (((template -> 'cpcv_spec'::text) - ARRAY['spec_hash'::text, 'validation'::text, 'target_horizon_secs'::text, 'purge_embargo_secs'::text]) = '{}'::jsonb) AND (((template -> 'cpcv_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'cpcv_spec'::text) ->> 'target_horizon_secs'::text))::numeric > (0)::numeric) AND ((((template -> 'cpcv_spec'::text) ->> 'purge_embargo_secs'::text))::numeric > (0)::numeric) AND (jsonb_typeof(((template -> 'cpcv_spec'::text) -> 'validation'::text)) = 'object'::text) AND (((template -> 'cpcv_spec'::text) -> 'validation'::text) ?& ARRAY['purge'::text, 'cpcv'::text, 'trials'::text, 'pbo'::text, 'gates'::text]) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) - ARRAY['purge'::text, 'cpcv'::text, 'trials'::text, 'pbo'::text, 'gates'::text]) = '{}'::jsonb) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ?& ARRAY['embargo_pct'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) - ARRAY['embargo_pct'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ->> 'embargo_pct'::text))::numeric >= (0)::numeric) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ->> 'embargo_pct'::text))::numeric < (1)::numeric) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ?& ARRAY['n_groups'::text, 'k_test'::text, 'nested_estimator_holdout_bps'::text, 'nested_estimator_min_groups'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) - ARRAY['n_groups'::text, 'k_test'::text, 'nested_estimator_holdout_bps'::text, 'nested_estimator_min_groups'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'n_groups'::text))::integer > 1) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'k_test'::text))::integer > 0) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'k_test'::text))::integer < (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'n_groups'::text))::integer) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'nested_estimator_holdout_bps'::text))::integer > 0) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'nested_estimator_holdout_bps'::text))::integer < 10000) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'nested_estimator_min_groups'::text))::integer >= 4) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) ?& ARRAY['lambda_multipliers'::text, 'rank_loss_kinds'::text, 'forest_n_trees_multipliers'::text, 'linear_alpha_multipliers'::text, 'max_trials'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) - ARRAY['lambda_multipliers'::text, 'rank_loss_kinds'::text, 'forest_n_trees_multipliers'::text, 'linear_alpha_multipliers'::text, 'max_trials'::text]) = '{}'::jsonb) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'lambda_multipliers'::text)) > 0) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'rank_loss_kinds'::text)) > 0) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'forest_n_trees_multipliers'::text)) > 0) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'linear_alpha_multipliers'::text)) > 0) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) ->> 'max_trials'::text))::integer > 0) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ?& ARRAY['block_count'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) - ARRAY['block_count'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ->> 'block_count'::text))::integer >= 4) AND (mod((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ->> 'block_count'::text))::integer, 2) = 0) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) ?& ARRAY['min_cpcv_paths'::text, 'rank_ic_min'::text, 'dsr_significance'::text, 'max_pbo'::text, 'max_turnover'::text, 'min_tail_loss_bps'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) - ARRAY['min_cpcv_paths'::text, 'rank_ic_min'::text, 'dsr_significance'::text, 'max_pbo'::text, 'max_turnover'::text, 'min_tail_loss_bps'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) ->> 'min_cpcv_paths'::text))::integer >= 21) AND (((template -> 'downside_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(((template -> 'diagnostic_spec'::text) -> 'accepted_artifact_kinds'::text)) = 'array'::text) AND (jsonb_array_length(((template -> 'diagnostic_spec'::text) -> 'accepted_artifact_kinds'::text)) > 0) AND ((((template -> 'diagnostic_spec'::text) ->> 'minimum_evidence_count'::text))::numeric > (0)::numeric) AND (jsonb_typeof((template -> 'responsive_triggers'::text)) = 'array'::text) AND (jsonb_array_length((template -> 'responsive_triggers'::text)) > 0) AND (jsonb_typeof((template -> 'resource_budget'::text)) = 'object'::text) AND ((((template -> 'resource_budget'::text) ->> 'max_concurrency'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'max_working_set_bytes'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'max_resident_model_bytes'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'deadline_secs'::text))::numeric > (0)::numeric) AND (((template -> 'profile_ref'::text) ->> 'content_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (research_profile_artifact_id = ((((('rpa:'::text || ((template -> 'profile_ref'::text) ->> 'id'::text)) || ':'::text) || ((template -> 'profile_ref'::text) ->> 'version'::text)) || ':'::text) || ((template -> 'profile_ref'::text) ->> 'content_hash'::text))) AND (NOT (((template ->> 'approved_by_user_id'::text))::uuid IS DISTINCT FROM approved_by_user_id)) AND (NOT ((template ->> 'approved_by_role'::text) IS DISTINCT FROM (approved_by_role)::text)) AND (NOT (((template ->> 'approved_at'::text))::timestamp with time zone IS DISTINCT FROM approved_at)) AND (((status = 'draft'::qp_feedback_recipe_template_status) AND (approved_by_user_id IS NULL) AND (approved_by_role IS NULL) AND (approved_at IS NULL)) OR ((status = ANY (ARRAY['approved'::qp_feedback_recipe_template_status, 'retired'::qp_feedback_recipe_template_status])) AND (approved_by_user_id IS NOT NULL) AND ((approved_by_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text) AND (approved_at IS NOT NULL) AND (approved_at <= created_at)))))",
+      "definition": "CHECK (((revision > 0) AND (template_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(route) = 'string'::text) AND (route = ANY (ARRAY['\"pooled\"'::jsonb, '\"crypto\"'::jsonb, '\"weather\"'::jsonb])) AND ((octet_length((governance_reason)::text) >= 1) AND (octet_length((governance_reason)::text) <= 2048)) AND ((governance_reason)::text = btrim((governance_reason)::text)) AND ((governance_reason)::text !~ '[[:cntrl:]]'::text) AND (jsonb_typeof(template) = 'object'::text) AND (template ?& ARRAY['format_version'::text, 'recipe_template_id'::text, 'revision'::text, 'template_hash'::text, 'profile_ref'::text, 'route'::text, 'model_family'::text, 'training_spec'::text, 'calibration_spec'::text, 'cpcv_spec'::text, 'downside_spec'::text, 'diagnostic_spec'::text, 'responsive_triggers'::text, 'catalog_priority'::text, 'resource_budget'::text, 'status'::text, 'approved_by_user_id'::text, 'approved_by_role'::text, 'approved_at'::text, 'governance_reason'::text]) AND ((template - ARRAY['format_version'::text, 'recipe_template_id'::text, 'revision'::text, 'template_hash'::text, 'profile_ref'::text, 'route'::text, 'model_family'::text, 'training_spec'::text, 'calibration_spec'::text, 'cpcv_spec'::text, 'downside_spec'::text, 'diagnostic_spec'::text, 'responsive_triggers'::text, 'catalog_priority'::text, 'resource_budget'::text, 'status'::text, 'approved_by_user_id'::text, 'approved_by_role'::text, 'approved_at'::text, 'governance_reason'::text]) = '{}'::jsonb) AND (((template ->> 'format_version'::text))::integer = 3) AND (((template ->> 'recipe_template_id'::text))::uuid = recipe_template_id) AND (((template ->> 'revision'::text))::integer = revision) AND ((template ->> 'template_hash'::text) = template_hash) AND ((template -> 'route'::text) = route) AND ((template ->> 'model_family'::text) = (model_family)::text) AND ((((template -> 'training_spec'::text) ->> 'model_spec_id'::text))::uuid = model_spec_id) AND ((template ->> 'status'::text) = (status)::text) AND (((template ->> 'catalog_priority'::text))::integer = catalog_priority) AND ((template ->> 'governance_reason'::text) = (governance_reason)::text) AND (((template -> 'training_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (((template -> 'training_spec'::text) ->> 'model_spec_definition_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'training_spec'::text) ->> 'training_window_days'::text))::numeric > (0)::numeric) AND (((template -> 'calibration_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'calibration_spec'::text) ->> 'calibration_window_days'::text))::numeric > (0)::numeric) AND (jsonb_typeof((template -> 'cpcv_spec'::text)) = 'object'::text) AND ((template -> 'cpcv_spec'::text) ?& ARRAY['spec_hash'::text, 'validation'::text, 'target_horizon_secs'::text, 'purge_embargo_secs'::text]) AND (((template -> 'cpcv_spec'::text) - ARRAY['spec_hash'::text, 'validation'::text, 'target_horizon_secs'::text, 'purge_embargo_secs'::text]) = '{}'::jsonb) AND (((template -> 'cpcv_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND ((((template -> 'cpcv_spec'::text) ->> 'target_horizon_secs'::text))::numeric > (0)::numeric) AND ((((template -> 'cpcv_spec'::text) ->> 'purge_embargo_secs'::text))::numeric > (0)::numeric) AND (jsonb_typeof(((template -> 'cpcv_spec'::text) -> 'validation'::text)) = 'object'::text) AND (((template -> 'cpcv_spec'::text) -> 'validation'::text) ?& ARRAY['purge'::text, 'cpcv'::text, 'trials'::text, 'pbo'::text, 'gates'::text]) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) - ARRAY['purge'::text, 'cpcv'::text, 'trials'::text, 'pbo'::text, 'gates'::text]) = '{}'::jsonb) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ?& ARRAY['embargo_pct'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) - ARRAY['embargo_pct'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ->> 'embargo_pct'::text))::numeric >= (0)::numeric) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'purge'::text) ->> 'embargo_pct'::text))::numeric < (1)::numeric) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ?& ARRAY['n_groups'::text, 'k_test'::text, 'nested_estimator_holdout_bps'::text, 'nested_estimator_min_groups'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) - ARRAY['n_groups'::text, 'k_test'::text, 'nested_estimator_holdout_bps'::text, 'nested_estimator_min_groups'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'n_groups'::text))::integer > 1) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'k_test'::text))::integer > 0) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'k_test'::text))::integer < (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'n_groups'::text))::integer) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'nested_estimator_holdout_bps'::text))::integer > 0) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'nested_estimator_holdout_bps'::text))::integer < 10000) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'cpcv'::text) ->> 'nested_estimator_min_groups'::text))::integer >= 4) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) ?& ARRAY['lambda_multipliers'::text, 'rank_loss_kinds'::text, 'logistic_alpha_multipliers'::text, 'max_trials'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) - ARRAY['lambda_multipliers'::text, 'rank_loss_kinds'::text, 'logistic_alpha_multipliers'::text, 'max_trials'::text]) = '{}'::jsonb) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'lambda_multipliers'::text)) > 0) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'rank_loss_kinds'::text)) > 0) AND (jsonb_array_length(((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) -> 'logistic_alpha_multipliers'::text)) > 0) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'trials'::text) ->> 'max_trials'::text))::integer > 0) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ?& ARRAY['block_count'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) - ARRAY['block_count'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ->> 'block_count'::text))::integer >= 4) AND (mod((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'pbo'::text) ->> 'block_count'::text))::integer, 2) = 0) AND (jsonb_typeof((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text)) = 'object'::text) AND ((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) ?& ARRAY['min_cpcv_paths'::text, 'target_rank_ic_min'::text, 'dsr_significance'::text, 'max_pbo'::text, 'max_turnover'::text, 'min_tail_loss_bps'::text]) AND (((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) - ARRAY['min_cpcv_paths'::text, 'target_rank_ic_min'::text, 'dsr_significance'::text, 'max_pbo'::text, 'max_turnover'::text, 'min_tail_loss_bps'::text]) = '{}'::jsonb) AND ((((((template -> 'cpcv_spec'::text) -> 'validation'::text) -> 'gates'::text) ->> 'min_cpcv_paths'::text))::integer >= 21) AND (((template -> 'downside_spec'::text) ->> 'spec_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(((template -> 'diagnostic_spec'::text) -> 'accepted_artifact_kinds'::text)) = 'array'::text) AND (jsonb_array_length(((template -> 'diagnostic_spec'::text) -> 'accepted_artifact_kinds'::text)) > 0) AND ((((template -> 'diagnostic_spec'::text) ->> 'minimum_evidence_count'::text))::numeric > (0)::numeric) AND (jsonb_typeof((template -> 'responsive_triggers'::text)) = 'array'::text) AND (jsonb_array_length((template -> 'responsive_triggers'::text)) > 0) AND (jsonb_typeof((template -> 'resource_budget'::text)) = 'object'::text) AND ((((template -> 'resource_budget'::text) ->> 'max_concurrency'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'max_working_set_bytes'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'max_resident_model_bytes'::text))::numeric > (0)::numeric) AND ((((template -> 'resource_budget'::text) ->> 'deadline_secs'::text))::numeric > (0)::numeric) AND (((template -> 'profile_ref'::text) ->> 'content_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (research_profile_artifact_id = ((((('rpa:'::text || ((template -> 'profile_ref'::text) ->> 'id'::text)) || ':'::text) || ((template -> 'profile_ref'::text) ->> 'version'::text)) || ':'::text) || ((template -> 'profile_ref'::text) ->> 'content_hash'::text))) AND (NOT (((template ->> 'approved_by_user_id'::text))::uuid IS DISTINCT FROM approved_by_user_id)) AND (NOT ((template ->> 'approved_by_role'::text) IS DISTINCT FROM (approved_by_role)::text)) AND (NOT (((template ->> 'approved_at'::text))::timestamp with time zone IS DISTINCT FROM approved_at)) AND (((status = 'draft'::qp_feedback_recipe_template_status) AND (approved_by_user_id IS NULL) AND (approved_by_role IS NULL) AND (approved_at IS NULL)) OR ((status = ANY (ARRAY['approved'::qp_feedback_recipe_template_status, 'retired'::qp_feedback_recipe_template_status])) AND (approved_by_user_id IS NOT NULL) AND ((approved_by_role)::text ~ '^[a-z][a-z0-9_]{0,63}$'::text) AND (approved_at IS NOT NULL) AND (approved_at <= created_at)))))",
       "initially_deferred": false,
       "name": "ck_quant_feedback_recipe_template",
       "table": "quant_feedback_recipe_template",
@@ -28483,7 +29240,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof((input_contract -> 'inputs'::text)) = 'array'::text) AND (jsonb_array_length((input_contract -> 'inputs'::text)) > 0) AND (jsonb_typeof(training_contract) = 'object'::text) AND (training_contract ?& ARRAY['target'::text, 'validation_folds'::text, 'evaluation_trade_policy_artifact_id'::text]) AND ((training_contract - ARRAY['target'::text, 'validation_folds'::text, 'evaluation_trade_policy_artifact_id'::text]) = '{}'::jsonb) AND (jsonb_typeof((training_contract -> 'target'::text)) = 'object'::text) AND ((((training_contract #>> '{target,kind}'::text[]) = 'outcome_payout'::text) AND (((training_contract -> 'target'::text) - 'kind'::text) = '{}'::jsonb) AND (model_family = ANY (ARRAY['weighted_factor'::qp_model_family, 'classical_logistic_regression'::qp_model_family]))) OR (((training_contract #>> '{target,kind}'::text[]) = 'forward_return'::text) AND ((training_contract -> 'target'::text) ?& ARRAY['kind'::text, 'horizon_secs'::text]) AND (((training_contract -> 'target'::text) - ARRAY['kind'::text, 'horizon_secs'::text]) = '{}'::jsonb) AND (jsonb_typeof((training_contract #> '{target,horizon_secs}'::text[])) = 'number'::text) AND (((training_contract #>> '{target,horizon_secs}'::text[]))::bigint > 0) AND (model_family = ANY (ARRAY['classical_gradient_boosted_trees'::qp_model_family, 'classical_random_forest'::qp_model_family, 'classical_extra_trees'::qp_model_family, 'classical_ridge'::qp_model_family, 'classical_lasso'::qp_model_family, 'classical_elastic_net'::qp_model_family]))) OR (((training_contract #>> '{target,kind}'::text[]) = 'hold_vs_exit_alpha'::text) AND (((training_contract -> 'target'::text) - 'kind'::text) = '{}'::jsonb) AND (model_family = 'hold_vs_exit_weighted'::qp_model_family))) AND ((((training_contract ->> 'validation_folds'::text))::integer >= 2) AND (((training_contract ->> 'validation_folds'::text))::integer <= 20)) AND (((training_contract -> 'evaluation_trade_policy_artifact_id'::text) = 'null'::jsonb) OR ((jsonb_typeof((training_contract -> 'evaluation_trade_policy_artifact_id'::text)) = 'string'::text) AND (((training_contract ->> 'evaluation_trade_policy_artifact_id'::text))::uuid IS NOT NULL))) AND ((definition_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "definition": "CHECK (((jsonb_typeof(input_contract) = 'object'::text) AND (jsonb_typeof((input_contract -> 'inputs'::text)) = 'array'::text) AND (jsonb_array_length((input_contract -> 'inputs'::text)) > 0) AND (jsonb_typeof(training_contract) = 'object'::text) AND (training_contract ?& ARRAY['target'::text, 'validation_folds'::text, 'evaluation_trade_policy_artifact_id'::text]) AND ((training_contract - ARRAY['target'::text, 'validation_folds'::text, 'evaluation_trade_policy_artifact_id'::text]) = '{}'::jsonb) AND (jsonb_typeof((training_contract -> 'target'::text)) = 'object'::text) AND ((((training_contract #>> '{target,kind}'::text[]) = 'outcome_payout'::text) AND (((training_contract -> 'target'::text) - 'kind'::text) = '{}'::jsonb) AND (model_family = ANY (ARRAY['weighted_factor'::qp_model_family, 'classical_logistic_regression'::qp_model_family]))) OR (((training_contract #>> '{target,kind}'::text[]) = 'hold_vs_exit_alpha'::text) AND (((training_contract -> 'target'::text) - 'kind'::text) = '{}'::jsonb) AND (model_family = 'hold_vs_exit_weighted'::qp_model_family))) AND ((((training_contract ->> 'validation_folds'::text))::integer >= 2) AND (((training_contract ->> 'validation_folds'::text))::integer <= 20)) AND (((training_contract -> 'evaluation_trade_policy_artifact_id'::text) = 'null'::jsonb) OR ((jsonb_typeof((training_contract -> 'evaluation_trade_policy_artifact_id'::text)) = 'string'::text) AND (((training_contract ->> 'evaluation_trade_policy_artifact_id'::text))::uuid IS NOT NULL))) AND ((definition_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text)))",
       "initially_deferred": false,
       "name": "quant_model_spec_check",
       "table": "quant_model_spec",
@@ -28537,7 +29294,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((jsonb_typeof(training_objective) = 'object'::text) AND (training_objective ?& ARRAY['format_version'::text, 'definition'::text]) AND ((training_objective - ARRAY['format_version'::text, 'definition'::text]) = '{}'::jsonb) AND (((training_objective ->> 'format_version'::text))::integer = 2) AND (jsonb_typeof((training_objective -> 'definition'::text)) = 'object'::text) AND (((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'spec'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'spec'::text]) = '{}'::jsonb) AND (jsonb_typeof(((training_objective -> 'definition'::text) -> 'spec'::text)) = 'object'::text) AND (((training_objective -> 'definition'::text) -> 'spec'::text) ?& ARRAY['rank_loss'::text, 'optimizer'::text, 'lambda_tail'::text, 'tail_fraction'::text, 'lambda_turnover'::text, 'lambda_l2'::text, 'ndcg_k'::text, 'pseudo_top_n'::text]) AND ((((training_objective -> 'definition'::text) -> 'spec'::text) - ARRAY['rank_loss'::text, 'optimizer'::text, 'lambda_tail'::text, 'tail_fraction'::text, 'lambda_turnover'::text, 'lambda_l2'::text, 'ndcg_k'::text, 'pseudo_top_n'::text]) = '{}'::jsonb)) OR ((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'model_kind'::text, 'validation_metric'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'model_kind'::text, 'validation_metric'::text]) = '{}'::jsonb) AND (jsonb_typeof(((training_objective -> 'definition'::text) -> 'model_kind'::text)) = 'string'::text) AND (((training_objective -> 'definition'::text) ->> 'validation_metric'::text) = 'mean_rolling_fold_rank_ic'::text)) OR ((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'governed_sell_estimator'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'fit_status'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'fit_status'::text]) = '{}'::jsonb) AND (((training_objective -> 'definition'::text) ->> 'fit_status'::text) = 'oof_predictions_required'::text)) OR ((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'hand_authored'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'rationale'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'rationale'::text]) = '{}'::jsonb) AND (jsonb_typeof(((training_objective -> 'definition'::text) -> 'rationale'::text)) = 'string'::text) AND ((char_length(btrim(((training_objective -> 'definition'::text) ->> 'rationale'::text))) >= 1) AND (char_length(btrim(((training_objective -> 'definition'::text) ->> 'rationale'::text))) <= 2048))))))",
+      "definition": "CHECK (((jsonb_typeof(training_objective) = 'object'::text) AND (training_objective ?& ARRAY['format_version'::text, 'definition'::text]) AND ((training_objective - ARRAY['format_version'::text, 'definition'::text]) = '{}'::jsonb) AND (((training_objective ->> 'format_version'::text))::integer = 2) AND (jsonb_typeof((training_objective -> 'definition'::text)) = 'object'::text) AND (((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'spec'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'spec'::text]) = '{}'::jsonb) AND (jsonb_typeof(((training_objective -> 'definition'::text) -> 'spec'::text)) = 'object'::text) AND (((training_objective -> 'definition'::text) -> 'spec'::text) ?& ARRAY['rank_loss'::text, 'optimizer'::text, 'lambda_tail'::text, 'tail_fraction'::text, 'lambda_turnover'::text, 'lambda_l2'::text, 'ndcg_k'::text, 'pseudo_top_n'::text]) AND ((((training_objective -> 'definition'::text) -> 'spec'::text) - ARRAY['rank_loss'::text, 'optimizer'::text, 'lambda_tail'::text, 'tail_fraction'::text, 'lambda_turnover'::text, 'lambda_l2'::text, 'ndcg_k'::text, 'pseudo_top_n'::text]) = '{}'::jsonb)) OR ((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'model_kind'::text, 'validation_metric'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'model_kind'::text, 'validation_metric'::text]) = '{}'::jsonb) AND (jsonb_typeof(((training_objective -> 'definition'::text) -> 'model_kind'::text)) = 'string'::text) AND (((training_objective -> 'definition'::text) ->> 'validation_metric'::text) = 'mean_rolling_fold_target_rank_ic'::text)) OR ((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'governed_sell_estimator'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'fit_status'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'fit_status'::text]) = '{}'::jsonb) AND (((training_objective -> 'definition'::text) ->> 'fit_status'::text) = 'oof_predictions_required'::text)) OR ((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'hand_authored'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'rationale'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'rationale'::text]) = '{}'::jsonb) AND (jsonb_typeof(((training_objective -> 'definition'::text) -> 'rationale'::text)) = 'string'::text) AND ((char_length(btrim(((training_objective -> 'definition'::text) ->> 'rationale'::text))) >= 1) AND (char_length(btrim(((training_objective -> 'definition'::text) ->> 'rationale'::text))) <= 2048))))))",
       "initially_deferred": false,
       "name": "ck_quant_model_version_training_objective",
       "table": "quant_model_version",
@@ -30904,6 +31661,51 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((amount_usd >= (0)::numeric) AND ((char_length(source_partition) >= 1) AND (char_length(source_partition) <= 512)) AND ((char_length(source_identity) >= 1) AND (char_length(source_identity) <= 600)) AND ((source_schedule_hash IS NULL) OR (source_schedule_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= observed_at) AND (((stage = 'estimated_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NOT NULL) AND (market_id IS NOT NULL) AND (source_schedule_hash IS NOT NULL)) OR ((stage = 'venue_awarded'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NULL) AND (market_id IS NOT NULL) AND (source_schedule_hash IS NULL)) OR ((stage = 'wallet_credited'::qp_venue_incentive_stage) AND (execution_fill_id IS NULL) AND (source_schedule_hash IS NULL)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_venue_incentive_event_evidence",
+      "table": "quant_venue_incentive_event",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_venue_incentive_event-execution_account_id",
+      "table": "quant_venue_incentive_event",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_fill_id) REFERENCES quant_execution_fill(execution_fill_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_venue_incentive_event-execution_fill_id",
+      "table": "quant_venue_incentive_event",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (venue_incentive_event_id)",
+      "initially_deferred": false,
+      "name": "quant_venue_incentive_event_pkey",
+      "table": "quant_venue_incentive_event",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (source_identity)",
+      "initially_deferred": false,
+      "name": "quant_venue_incentive_event_source_identity_key",
+      "table": "quant_venue_incentive_event",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "PRIMARY KEY (source_id, instrument_key, local_date, temperature_statistic)",
       "initially_deferred": false,
       "name": "pk-quant_weather_daily_temperature_projection",
@@ -31205,6 +32007,7 @@
         "not_binary",
         "invalid_token_pair",
         "unsupported_tick_size",
+        "invalid_fee_schedule",
         "duplicate_entity_id",
         "malformed_entity",
         "cursor_protocol_violation"
@@ -31558,6 +32361,21 @@
     },
     {
       "labels": [
+        "taker",
+        "maker"
+      ],
+      "name": "qp_fee_liquidity_role"
+    },
+    {
+      "labels": [
+        "prepared_expected",
+        "authenticated_trade_derived",
+        "on_chain_settled"
+      ],
+      "name": "qp_fee_measurement_stage"
+    },
+    {
+      "labels": [
         "model_learning",
         "model_score_learning",
         "execution_learning",
@@ -31605,7 +32423,7 @@
       "labels": [
         "population_stability_index",
         "kolmogorov_smirnov_p_value",
-        "rank_ic_drop",
+        "target_rank_ic_drop",
         "jensen_shannon_divergence"
       ],
       "name": "qp_feedback_drift_metric"
@@ -31852,13 +32670,7 @@
     {
       "labels": [
         "weighted_factor",
-        "classical_gradient_boosted_trees",
-        "classical_random_forest",
-        "classical_extra_trees",
         "classical_logistic_regression",
-        "classical_ridge",
-        "classical_lasso",
-        "classical_elastic_net",
         "hold_vs_exit_weighted"
       ],
       "name": "qp_model_family"
@@ -32569,6 +33381,21 @@
     },
     {
       "labels": [
+        "maker_rebate",
+        "taker_rebate"
+      ],
+      "name": "qp_venue_incentive_kind"
+    },
+    {
+      "labels": [
+        "estimated_accrual",
+        "venue_awarded",
+        "wallet_credited"
+      ],
+      "name": "qp_venue_incentive_stage"
+    },
+    {
+      "labels": [
         "filled",
         "partially_filled",
         "rejected",
@@ -32756,7 +33583,7 @@
       "volatility": "i"
     },
     {
-      "definition": "CREATE OR REPLACE FUNCTION public.validate_factor_serving_plane(plane jsonb, feature_hash text, feature_version integer, model_family_name text)\n RETURNS boolean\n LANGUAGE plpgsql\n IMMUTABLE STRICT\nAS $function$\nDECLARE\n    item jsonb;\n    definition jsonb;\n    definition_name text;\n    definition_id text;\n    definition_hash text;\n    previous_name text := NULL;\n    seen_ids text[] := ARRAY[]::text[];\n    seen_hashes text[] := ARRAY[]::text[];\n    definition_count integer;\nBEGIN\n    IF jsonb_typeof(plane) <> 'object'\n       OR NOT plane ?& ARRAY['format_version', 'factor_schema_hash', 'definitions']\n       OR (plane - ARRAY['format_version', 'factor_schema_hash', 'definitions']) <> '{}'::jsonb\n       OR jsonb_typeof(plane->'format_version') <> 'number'\n       OR plane->>'format_version' <> '2'\n       OR jsonb_typeof(plane->'factor_schema_hash') <> 'string'\n       OR (plane->>'factor_schema_hash') !~ '^blake3:[0-9a-f]{64}$'\n       OR jsonb_typeof(plane->'definitions') <> 'array'\n       OR feature_hash !~ '^blake3:[0-9a-f]{64}$'\n       OR feature_version < 1\n    THEN\n        RETURN FALSE;\n    END IF;\n\n    definition_count := jsonb_array_length(plane->'definitions');\n    IF model_family_name = ANY (ARRAY[\n           'classical_gradient_boosted_trees',\n           'classical_random_forest', 'classical_extra_trees',\n           'classical_logistic_regression', 'classical_ridge',\n           'classical_lasso', 'classical_elastic_net'\n       ])\n    THEN\n        IF definition_count <> 0 THEN\n            RETURN FALSE;\n        END IF;\n    ELSIF model_family_name = ANY (ARRAY['weighted_factor', 'hold_vs_exit_weighted']) THEN\n        IF definition_count = 0 THEN\n            RETURN FALSE;\n        END IF;\n    ELSE\n        RETURN FALSE;\n    END IF;\n\n    FOR item IN SELECT value FROM jsonb_array_elements(plane->'definitions')\n    LOOP\n        IF jsonb_typeof(item) <> 'object'\n           OR NOT item ?& ARRAY[\n               'revision_version', 'factor_definition_id', 'definition_hash',\n               'feature_contract_hash', 'input_schema_version',\n               'output_schema_version', 'definition'\n           ]\n           OR (item - ARRAY[\n               'revision_version', 'factor_definition_id', 'definition_hash',\n               'feature_contract_hash', 'input_schema_version',\n               'output_schema_version', 'definition'\n           ]) <> '{}'::jsonb\n           OR jsonb_typeof(item->'revision_version') <> 'number'\n           OR item->>'revision_version' <> '2'\n           OR jsonb_typeof(item->'factor_definition_id') <> 'string'\n           OR (item->>'factor_definition_id') !~\n              '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'\n           OR jsonb_typeof(item->'definition_hash') <> 'string'\n           OR (item->>'definition_hash') !~ '^blake3:[0-9a-f]{64}$'\n           OR jsonb_typeof(item->'feature_contract_hash') <> 'string'\n           OR item->>'feature_contract_hash' <> feature_hash\n           OR jsonb_typeof(item->'input_schema_version') <> 'number'\n           OR item->>'input_schema_version' !~ '^[1-9][0-9]*$'\n           OR (item->>'input_schema_version')::integer <> feature_version\n           OR jsonb_typeof(item->'output_schema_version') <> 'number'\n           OR item->>'output_schema_version' !~ '^[1-9][0-9]*$'\n           OR (item->>'output_schema_version')::numeric > 2147483647::numeric\n           OR NOT public.validate_factor_definition_document(item->'definition')\n        THEN\n            RETURN FALSE;\n        END IF;\n\n        definition := item->'definition';\n        definition_name := definition->>'name';\n        definition_id := item->>'factor_definition_id';\n        definition_hash := item->>'definition_hash';\n        IF previous_name IS NOT NULL\n           AND previous_name COLLATE \"C\" >= definition_name COLLATE \"C\"\n           OR definition_id = ANY (seen_ids)\n           OR definition_hash = ANY (seen_hashes)\n        THEN\n            RETURN FALSE;\n        END IF;\n        previous_name := definition_name;\n        seen_ids := array_append(seen_ids, definition_id);\n        seen_hashes := array_append(seen_hashes, definition_hash);\n    END LOOP;\n    RETURN TRUE;\nEXCEPTION WHEN OTHERS THEN\n    RETURN FALSE;\nEND;\n$function$\n",
+      "definition": "CREATE OR REPLACE FUNCTION public.validate_factor_serving_plane(plane jsonb, feature_hash text, feature_version integer, model_family_name text)\n RETURNS boolean\n LANGUAGE plpgsql\n IMMUTABLE STRICT\nAS $function$\nDECLARE\n    item jsonb;\n    definition jsonb;\n    definition_name text;\n    definition_id text;\n    definition_hash text;\n    previous_name text := NULL;\n    seen_ids text[] := ARRAY[]::text[];\n    seen_hashes text[] := ARRAY[]::text[];\n    definition_count integer;\nBEGIN\n    IF jsonb_typeof(plane) <> 'object'\n       OR NOT plane ?& ARRAY['format_version', 'factor_schema_hash', 'definitions']\n       OR (plane - ARRAY['format_version', 'factor_schema_hash', 'definitions']) <> '{}'::jsonb\n       OR jsonb_typeof(plane->'format_version') <> 'number'\n       OR plane->>'format_version' <> '2'\n       OR jsonb_typeof(plane->'factor_schema_hash') <> 'string'\n       OR (plane->>'factor_schema_hash') !~ '^blake3:[0-9a-f]{64}$'\n       OR jsonb_typeof(plane->'definitions') <> 'array'\n       OR feature_hash !~ '^blake3:[0-9a-f]{64}$'\n       OR feature_version < 1\n    THEN\n        RETURN FALSE;\n    END IF;\n\n    definition_count := jsonb_array_length(plane->'definitions');\n    IF model_family_name = 'classical_logistic_regression'\n    THEN\n        IF definition_count <> 0 THEN\n            RETURN FALSE;\n        END IF;\n    ELSIF model_family_name = ANY (ARRAY['weighted_factor', 'hold_vs_exit_weighted']) THEN\n        IF definition_count = 0 THEN\n            RETURN FALSE;\n        END IF;\n    ELSE\n        RETURN FALSE;\n    END IF;\n\n    FOR item IN SELECT value FROM jsonb_array_elements(plane->'definitions')\n    LOOP\n        IF jsonb_typeof(item) <> 'object'\n           OR NOT item ?& ARRAY[\n               'revision_version', 'factor_definition_id', 'definition_hash',\n               'feature_contract_hash', 'input_schema_version',\n               'output_schema_version', 'definition'\n           ]\n           OR (item - ARRAY[\n               'revision_version', 'factor_definition_id', 'definition_hash',\n               'feature_contract_hash', 'input_schema_version',\n               'output_schema_version', 'definition'\n           ]) <> '{}'::jsonb\n           OR jsonb_typeof(item->'revision_version') <> 'number'\n           OR item->>'revision_version' <> '2'\n           OR jsonb_typeof(item->'factor_definition_id') <> 'string'\n           OR (item->>'factor_definition_id') !~\n              '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'\n           OR jsonb_typeof(item->'definition_hash') <> 'string'\n           OR (item->>'definition_hash') !~ '^blake3:[0-9a-f]{64}$'\n           OR jsonb_typeof(item->'feature_contract_hash') <> 'string'\n           OR item->>'feature_contract_hash' <> feature_hash\n           OR jsonb_typeof(item->'input_schema_version') <> 'number'\n           OR item->>'input_schema_version' !~ '^[1-9][0-9]*$'\n           OR (item->>'input_schema_version')::integer <> feature_version\n           OR jsonb_typeof(item->'output_schema_version') <> 'number'\n           OR item->>'output_schema_version' !~ '^[1-9][0-9]*$'\n           OR (item->>'output_schema_version')::numeric > 2147483647::numeric\n           OR NOT public.validate_factor_definition_document(item->'definition')\n        THEN\n            RETURN FALSE;\n        END IF;\n\n        definition := item->'definition';\n        definition_name := definition->>'name';\n        definition_id := item->>'factor_definition_id';\n        definition_hash := item->>'definition_hash';\n        IF previous_name IS NOT NULL\n           AND previous_name COLLATE \"C\" >= definition_name COLLATE \"C\"\n           OR definition_id = ANY (seen_ids)\n           OR definition_hash = ANY (seen_hashes)\n        THEN\n            RETURN FALSE;\n        END IF;\n        previous_name := definition_name;\n        seen_ids := array_append(seen_ids, definition_id);\n        seen_hashes := array_append(seen_hashes, definition_hash);\n    END LOOP;\n    RETURN TRUE;\nEXCEPTION WHEN OTHERS THEN\n    RETURN FALSE;\nEND;\n$function$\n",
       "identity_arguments": "plane jsonb, feature_hash text, feature_version integer, model_family_name text",
       "language": "plpgsql",
       "name": "validate_factor_serving_plane",
@@ -35123,6 +35950,104 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_execution_fee_measurement",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fee_measurement",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fee_measurement",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fee_measurement",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fee_measurement",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fee_measurement",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fee_measurement",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fill",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fill",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fill",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fill",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fill",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fill",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_execution_fill",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_execution_order",
       "privilege": "DELETE"
     },
@@ -38694,6 +39619,55 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_training_dataset",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_event",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_event",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_event",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_event",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_event",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_event",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_event",
       "privilege": "UPDATE"
     },
     {
@@ -40723,6 +41697,66 @@
       "primary": true,
       "ready": true,
       "table": "quant_execution_attempt_reconciliation_task",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_execution_fee_measurement_pkey ON public.quant_execution_fee_measurement USING btree (execution_fee_measurement_id)",
+      "method": "btree",
+      "name": "quant_execution_fee_measurement_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_execution_fee_measurement",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_execution_fee_measurement_stage ON public.quant_execution_fee_measurement USING btree (execution_fill_id, stage)",
+      "method": "btree",
+      "name": "uq_quant_execution_fee_measurement_stage",
+      "primary": false,
+      "ready": true,
+      "table": "quant_execution_fee_measurement",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_execution_fill_account ON public.quant_execution_fill USING btree (execution_account_id, matched_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_execution_fill_account",
+      "primary": false,
+      "ready": true,
+      "table": "quant_execution_fill",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_execution_fill_order ON public.quant_execution_fill USING btree (execution_order_id, matched_at)",
+      "method": "btree",
+      "name": "idx_quant_execution_fill_order",
+      "primary": false,
+      "ready": true,
+      "table": "quant_execution_fill",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_execution_fill_pkey ON public.quant_execution_fill USING btree (execution_fill_id)",
+      "method": "btree",
+      "name": "quant_execution_fill_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_execution_fill",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_execution_fill_venue_trade_id_key ON public.quant_execution_fill USING btree (venue_trade_id)",
+      "method": "btree",
+      "name": "quant_execution_fill_venue_trade_id_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_execution_fill",
       "unique": true,
       "valid": true
     },
@@ -43527,6 +44561,56 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_venue_incentive_account_date ON public.quant_venue_incentive_event USING btree (execution_account_id, program_date DESC, stage)",
+      "method": "btree",
+      "name": "idx_quant_venue_incentive_account_date",
+      "primary": false,
+      "ready": true,
+      "table": "quant_venue_incentive_event",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_venue_incentive_latest ON public.quant_venue_incentive_event USING btree (source_partition, available_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_venue_incentive_latest",
+      "primary": false,
+      "ready": true,
+      "table": "quant_venue_incentive_event",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_venue_incentive_market_date ON public.quant_venue_incentive_event USING btree (market_id, program_date DESC) WHERE (market_id IS NOT NULL)",
+      "method": "btree",
+      "name": "idx_quant_venue_incentive_market_date",
+      "primary": false,
+      "ready": true,
+      "table": "quant_venue_incentive_event",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_venue_incentive_event_pkey ON public.quant_venue_incentive_event USING btree (venue_incentive_event_id)",
+      "method": "btree",
+      "name": "quant_venue_incentive_event_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_venue_incentive_event",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_venue_incentive_event_source_identity_key ON public.quant_venue_incentive_event USING btree (source_identity)",
+      "method": "btree",
+      "name": "quant_venue_incentive_event_source_identity_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_venue_incentive_event",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_weather_daily_temperature_open ON public.quant_weather_daily_temperature_projection USING btree (day_closed, local_date, station)",
       "method": "btree",
       "name": "idx_quant_weather_daily_temperature_open",
@@ -44080,6 +45164,20 @@
     },
     {
       "kind": "r",
+      "name": "quant_execution_fee_measurement",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_execution_fill",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_execution_order",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -44591,6 +45689,13 @@
     },
     {
       "kind": "r",
+      "name": "quant_venue_incentive_event",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_weather_daily_temperature_projection",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -44896,6 +46001,18 @@
       "enabled": "O",
       "name": "trg_quant_execution_attempt_task_updated_at",
       "table": "quant_execution_attempt_reconciliation_task"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_execution_fee_measurement_append_only BEFORE DELETE OR UPDATE ON public.quant_execution_fee_measurement FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_execution_fee_measurement_append_only",
+      "table": "quant_execution_fee_measurement"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_execution_fill_append_only BEFORE DELETE OR UPDATE ON public.quant_execution_fill FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_execution_fill_append_only",
+      "table": "quant_execution_fill"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_execution_order_updated_at BEFORE UPDATE ON public.quant_execution_order FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
@@ -45244,6 +46361,12 @@
       "enabled": "O",
       "name": "trg_quant_training_dataset_lifecycle_guard",
       "table": "quant_training_dataset"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_venue_incentive_event_append_only BEFORE DELETE OR UPDATE ON public.quant_venue_incentive_event FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_venue_incentive_event_append_only",
+      "table": "quant_venue_incentive_event"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_weather_daily_temperature_projection_updated_at BEFORE UPDATE ON public.quant_weather_daily_temperature_projection FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",

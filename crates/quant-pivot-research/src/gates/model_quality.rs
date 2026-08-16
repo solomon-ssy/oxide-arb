@@ -151,7 +151,7 @@ pub struct ValidationGateThresholds {
     /// Minimum number of complete reconstructed CPCV paths (hard gate).
     pub min_cpcv_paths: u64,
     /// Minimum CPCV path-set median rank IC (hard gate).
-    pub rank_ic_min: Decimal,
+    pub target_rank_ic_min: Decimal,
     /// Target significance (`α`) the Deflated Sharpe Ratio must clear:
     /// `deflated_sharpe >= 1 - dsr_significance`.
     pub dsr_significance: Decimal,
@@ -169,7 +169,7 @@ impl ValidationGateThresholds {
     pub fn conservative() -> Self {
         Self {
             min_cpcv_paths: 21,
-            rank_ic_min: Decimal::new(2, 2),
+            target_rank_ic_min: Decimal::new(2, 2),
             dsr_significance: Decimal::new(5, 2),
             max_pbo: Decimal::new(5, 2),
             max_turnover: Decimal::new(50, 2),
@@ -194,7 +194,7 @@ pub struct CpcvPathSetGateInput {
     pub path_count: u64,
     /// `C(N, k)` purge/train/evaluate folds, retained for audit context.
     pub combination_count: u64,
-    pub median_rank_ic: Decimal,
+    pub median_target_rank_ic: Decimal,
     pub deflated_sharpe: Decimal,
     pub pbo: Decimal,
     pub min_track_record_length_secs: Option<i64>,
@@ -219,8 +219,8 @@ pub struct SellQualityGateThresholds {
     pub min_label_coverage: Decimal,
     /// Minimum CPCV path-set median rank IC. This hard gate replaces the
     /// retired single-path soft `min_exit_alpha_rank_ic` and mirrors the
-    /// Buy-side [`ValidationGateThresholds::rank_ic_min`].
-    pub rank_ic_min: Decimal,
+    /// Buy-side [`ValidationGateThresholds::target_rank_ic_min`].
+    pub target_rank_ic_min: Decimal,
     /// Maximum tolerated Probability of Backtest Overfitting (hard gate).
     pub max_pbo: Decimal,
     pub min_l2_book_fidelity_ratio: Decimal,
@@ -232,7 +232,7 @@ impl Default for SellQualityGateThresholds {
         Self {
             min_sample_count: 200,
             min_label_coverage: Decimal::new(60, 2),
-            rank_ic_min: Decimal::new(2, 2),
+            target_rank_ic_min: Decimal::new(2, 2),
             max_pbo: Decimal::new(5, 2),
             min_l2_book_fidelity_ratio: Decimal::new(50, 2),
             max_fallback_ratio: Decimal::new(50, 2),
@@ -494,7 +494,7 @@ fn evaluate_sell_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
         backtest_window,
         AlphaSignificanceThresholds {
             min_cpcv_paths: input.validation_thresholds.min_cpcv_paths,
-            rank_ic_min: t.rank_ic_min,
+            target_rank_ic_min: t.target_rank_ic_min,
             dsr_significance: input.validation_thresholds.dsr_significance,
             max_pbo: t.max_pbo,
         },
@@ -817,7 +817,7 @@ fn evaluate_cpcv_alpha_gates(input: &QualityGateInput, ledger: &mut GateLedger) 
         backtest_window,
         AlphaSignificanceThresholds {
             min_cpcv_paths: validation.min_cpcv_paths,
-            rank_ic_min: validation.rank_ic_min,
+            target_rank_ic_min: validation.target_rank_ic_min,
             dsr_significance: validation.dsr_significance,
             max_pbo: validation.max_pbo,
         },
@@ -829,7 +829,7 @@ fn evaluate_cpcv_alpha_gates(input: &QualityGateInput, ledger: &mut GateLedger) 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AlphaSignificanceThresholds {
     min_cpcv_paths: u64,
-    rank_ic_min: Decimal,
+    target_rank_ic_min: Decimal,
     dsr_significance: Decimal,
     max_pbo: Decimal,
 }
@@ -840,7 +840,7 @@ struct AlphaSignificanceThresholds {
 ///
 /// Both families' route-activation readiness is judged by the identical persisted
 /// [`BacktestPathSet`](crate::validation::BacktestPathSet) methodology
-/// (`CpcvRequired`/`RankIc`/`DeflatedSharpe`/`Pbo`/`MinTrackRecordLength`
+/// (`CpcvRequired`/`TargetRankIc`/`DeflatedSharpe`/`Pbo`/`MinTrackRecordLength`
 /// reuse the exact same [`GateId`] variants for both families — mirroring how
 /// `SampleCount`/`LabelCoverage` are already shared in
 /// [`evaluate_coverage_gates`] and [`evaluate_sell_gates`] — only the
@@ -873,10 +873,10 @@ fn evaluate_alpha_significance_gates(
             "complete reconstructed CPCV path count below minimum",
         );
         ledger.hard(
-            GateId::RankIc,
-            path_set.median_rank_ic >= thresholds.rank_ic_min,
-            path_set.median_rank_ic.to_string(),
-            thresholds.rank_ic_min.to_string(),
+            GateId::TargetRankIc,
+            path_set.median_target_rank_ic >= thresholds.target_rank_ic_min,
+            path_set.median_target_rank_ic.to_string(),
+            thresholds.target_rank_ic_min.to_string(),
             "CPCV median rank IC below minimum",
         );
         ledger.hard(
@@ -931,9 +931,9 @@ fn evaluate_alpha_significance_gates(
         "requires a CPCV path set",
     );
     ledger.not_applicable(
-        GateId::RankIc,
+        GateId::TargetRankIc,
         GateClass::Hard,
-        thresholds.rank_ic_min.to_string(),
+        thresholds.target_rank_ic_min.to_string(),
         "requires a CPCV path set",
     );
     ledger.not_applicable(
@@ -1162,7 +1162,7 @@ mod tests {
                 coverage: dec!(0.99),
                 sample_count: 2_000,
                 missing_feature_count: 0,
-                rank_ic: dec!(0.15),
+                realized_return_rank_correlation: dec!(0.15),
                 sharpe: dec!(1.2),
                 hit_rate: Probability::new(dec!(0.62)),
                 expected_vs_realized: ExpectedVsRealized {
@@ -1210,7 +1210,7 @@ mod tests {
                 validation_regime: CpcvFoldValidationRegime::PortfolioEconomics,
                 path_count: 21,
                 combination_count: 56,
-                median_rank_ic: dec!(0.15),
+                median_target_rank_ic: dec!(0.15),
                 deflated_sharpe: dec!(0.97),
                 pbo: dec!(0.02),
                 min_track_record_length_secs: Some(86_400),
@@ -1622,9 +1622,9 @@ mod tests {
     }
 
     #[test]
-    fn rank_ic_reads_median() {
+    fn target_rank_ic_median() {
         let mut input = passing_input(GateIntent::RouteActivation);
-        input.path_set.as_mut().unwrap().median_rank_ic = dec!(0.001);
+        input.path_set.as_mut().unwrap().median_target_rank_ic = dec!(0.001);
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)
             .expect("evaluate");
@@ -1634,7 +1634,7 @@ mod tests {
                 .report()
                 .hard_failures
                 .iter()
-                .any(|failure| failure.gate == GateId::RankIc)
+                .any(|failure| failure.gate == GateId::TargetRankIc)
         );
     }
 

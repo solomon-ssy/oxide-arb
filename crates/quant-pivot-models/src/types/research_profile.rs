@@ -503,7 +503,7 @@ pub struct ResearchFeedbackPolicy {
     pub minimum_coverage: Decimal,
     pub data_drift_psi_threshold: Decimal,
     pub data_drift_ks_p_value: Decimal,
-    pub concept_rank_ic_drop: Decimal,
+    pub concept_target_rank_ic_drop: Decimal,
     pub label_js_divergence: Decimal,
     pub minimum_effect_bps: Bps,
     pub effect_confidence: Decimal,
@@ -672,7 +672,10 @@ impl ResearchFeedbackPolicy {
         for (name, value) in [
             ("minimum_coverage", self.minimum_coverage),
             ("data_drift_ks_p_value", self.data_drift_ks_p_value),
-            ("concept_rank_ic_drop", self.concept_rank_ic_drop),
+            (
+                "concept_target_rank_ic_drop",
+                self.concept_target_rank_ic_drop,
+            ),
             ("label_js_divergence", self.label_js_divergence),
             ("effect_confidence", self.effect_confidence),
         ] {
@@ -1199,7 +1202,7 @@ fn production_feedback_policy(
         minimum_coverage: Decimal::new(95, 2),
         data_drift_psi_threshold: Decimal::new(2, 1),
         data_drift_ks_p_value: Decimal::new(5, 2),
-        concept_rank_ic_drop: Decimal::new(3, 1),
+        concept_target_rank_ic_drop: Decimal::new(3, 1),
         label_js_divergence: Decimal::new(1, 1),
         minimum_effect_bps: Bps::new(Decimal::from(25)),
         effect_confidence: Decimal::new(95, 2),
@@ -1262,15 +1265,15 @@ mod tests {
         assert_eq!(weather.profile_ref.version, 5);
         assert_eq!(
             pooled.profile_ref.content_hash.to_string(),
-            "blake3:f99b2bb7b6a22ba717cfdb2a850e0b3d2a674e36f74826cb22f31d10d3c1faf0"
+            "blake3:c758bfc3d6307f58aea8db2b153f7cf120cb1e29584c9d0c3465241e248be2f3"
         );
         assert_eq!(
             crypto.profile_ref.content_hash.to_string(),
-            "blake3:2828a9149f0c6250c6a5f8f9ebec1f264144adfb7f8be613876fe9c496047c8b"
+            "blake3:61657584a6794a28447389ba9f75ab5c2cf2be580cc8d081aadde67da4bdd49a"
         );
         assert_eq!(
             weather.profile_ref.content_hash.to_string(),
-            "blake3:95b8ffcefbd83d4ab5d899a20e19df3e2cf45e769e73e473ece8fcfadfc663f4"
+            "blake3:3b2eacbcf3ab5015afea2fb997a47ed9b5a8da0a8cff477d80ca43e27e55315e"
         );
         assert_eq!(pooled.spec.feedback_policy.feedback_cadence_secs, 86_400);
         assert_eq!(
@@ -1340,11 +1343,12 @@ mod tests {
         );
         assert_eq!(weather.spec.required_days().expect("required days"), 100);
         assert_eq!(minimum_raw_retention_days().expect("retention"), 200);
-        for bootstrap_id in [
+        let bootstrap_ids = [
             POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID,
             CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID,
             WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID,
-        ] {
+        ];
+        for bootstrap_id in bootstrap_ids {
             let bootstrap = profiles
                 .iter()
                 .find(|profile| profile.profile_ref.id.as_str() == bootstrap_id)
@@ -1363,13 +1367,13 @@ mod tests {
             );
             let expected_hash = match bootstrap_id {
                 POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:18f411fd77187bf7ecd4311023e441b097fea27a6f41cd6b6ca129fbfe6b618b"
+                    "blake3:1f047f98bc5e190699807adc17a97b3423cebd642d99be6d45c09b00783b893c"
                 }
                 CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:7a811668eae2f13a69dbd9bca737b0859a28c18f15bc51c6d3d81a427b4216b0"
+                    "blake3:2781adf5aca31683001926b6b8300fdb6fb4a41bb36fe88aee1a9735a4a27ea5"
                 }
                 WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:01016435b027394b7dc866810596a47cd28f310288c6666e5f6f4ab459c3f610"
+                    "blake3:1d020798301ffef16d89408155de6a8bd4fad8b54b3f49ef9b3cfe09213ac49e"
                 }
                 _ => unreachable!("closed bootstrap profile registry"),
             };
@@ -1648,13 +1652,13 @@ mod tests {
             );
             let expected = match profile.profile_ref.id.as_str() {
                 POOLED_1H_CONTROL_PROFILE_ID | POOLED_BINARY_1H_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:9e05d22176e953c73af29ab778f344eae7a9646037aea2933416ecf614d4a6d5"
+                    "blake3:b90bf30d5f4e377784104540413a2101ee8ccf71401eb4cd0d47abef4c649934"
                 }
                 CRYPTO_PRICE_15M_PROFILE_ID | CRYPTO_PRICE_15M_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:b42bf8118ff05fee22f7b5c8e7a719c39d459b335bd0a4e305b66b084f1bc023"
+                    "blake3:2bf7e831cc4969a2f9a624696747cb79741928596319322859afade8e90d77f9"
                 }
                 WEATHER_FORECAST_24H_PROFILE_ID | WEATHER_FORECAST_24H_BOOTSTRAP_PROFILE_ID => {
-                    "blake3:2cdedc124bd6db3f3e6ca17a76549e2a447a93a9609deeb5f70955fce6d8a256"
+                    "blake3:a37d8ce342764b69520df70f663a197040a9866804bc9a028718bb9bddf96810"
                 }
                 other => panic!("unexpected built-in profile {other}"),
             };

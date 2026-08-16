@@ -224,6 +224,43 @@ impl AdmissionInput {
     pub fn order_notional(&self) -> Usd {
         self.intent.entry_order_json.notional()
     }
+
+    fn validate_entry_spec(&self) -> QuantResult<()> {
+        let spec = &self.intent.entry_order_json;
+        if spec.side != Side::Buy {
+            return Err(ExecutionError::IntentDenied {
+                reason: "opening entry must be a BUY".to_owned(),
+            }
+            .into());
+        }
+        if spec.maker_rebate_schedule.is_some() && !spec.post_only {
+            return Err(ExecutionError::IntentDenied {
+                reason: "only a passive post-only entry may carry maker-rebate terms".to_owned(),
+            }
+            .into());
+        }
+        let Some(rebate) = spec.maker_rebate_schedule else {
+            return Ok(());
+        };
+        rebate
+            .validate_at(self.now)
+            .map_err(|detail| ExecutionError::IntentDenied {
+                reason: detail.to_owned(),
+            })?;
+        let clob_fees_enabled = !self.fee_schedule.platform_rate.is_zero();
+        if rebate.fees_enabled != clob_fees_enabled
+            || rebate.platform_rate != self.fee_schedule.platform_rate
+            || rebate.exponent != self.fee_schedule.exponent
+            || rebate.taker_only != self.fee_schedule.taker_only
+        {
+            return Err(ExecutionError::IntentDenied {
+                reason: "frozen Gamma rebate terms disagree with admitted CLOB fee terms"
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok(())
+    }
 }
 
 /// Outcome of one admission check, captured for the audit trace.
@@ -343,12 +380,7 @@ impl AdmissionInput {
     /// the dispatcher. The dispatcher must submit this object verbatim.
     pub fn prepare_entry_order(&self) -> QuantResult<PreparedVenueOrder> {
         let spec = &self.intent.entry_order_json;
-        if spec.side != Side::Buy {
-            return Err(ExecutionError::IntentDenied {
-                reason: "opening entry must be a BUY".to_owned(),
-            }
-            .into());
-        }
+        self.validate_entry_spec()?;
         let book = self
             .book
             .as_ref()
@@ -396,7 +428,7 @@ impl AdmissionInput {
                     reason: format!("cash-budget execution preparation failed: {error:?}"),
                 })?;
                 if fill.outcome == BookWalkOutcome::Unfilled
-                    || !fill.gross_order_amount.is_positive()
+                    || !fill.immediate_cost.principal_usd.is_positive()
                 {
                     return Err(ExecutionError::IntentDenied {
                         reason: "cash budget cannot be executed from the admitted L2 book"
@@ -404,7 +436,7 @@ impl AdmissionInput {
                     }
                     .into());
                 }
-                if fill.gross_order_amount.inner() + fill.expected_fee.inner() > budget.inner() {
+                if fill.immediate_cost.cash_outlay_usd > budget {
                     return Err(ExecutionError::IntentDenied {
                         reason: "prepared BUY exceeds governed cash budget".to_owned(),
                     }
@@ -412,9 +444,9 @@ impl AdmissionInput {
                 }
                 (
                     Some(budget),
-                    VenueOrderAmount::GrossUsd(fill.gross_order_amount),
-                    fill.expected_fee,
-                    fill.total_cash_delta,
+                    VenueOrderAmount::GrossUsd(fill.immediate_cost.principal_usd),
+                    fill.immediate_cost.total_fee_usd(),
+                    fill.account_cash_delta_usd,
                     fill.filled_shares,
                     fill.worst_price.unwrap_or(spec.limit_price),
                 )
@@ -448,7 +480,7 @@ impl AdmissionInput {
                 let expected_fee = if spec.post_only {
                     Usd::ZERO
                 } else {
-                    fill.expected_fee
+                    fill.immediate_cost.total_fee_usd()
                 };
                 (
                     None,
@@ -457,7 +489,7 @@ impl AdmissionInput {
                     if spec.post_only {
                         -(shares * spec.limit_price).inner()
                     } else {
-                        fill.total_cash_delta
+                        fill.account_cash_delta_usd
                     },
                     if spec.post_only {
                         shares
@@ -484,6 +516,7 @@ impl AdmissionInput {
             book_hash,
             clob_market_info_hash: self.venue_metadata.clob_market_info_hash,
             fee_schedule: self.prepared_fee_schedule(),
+            maker_rebate_schedule: spec.maker_rebate_schedule,
             prepared_at: self.now,
             valid_until: spec.valid_until,
         })

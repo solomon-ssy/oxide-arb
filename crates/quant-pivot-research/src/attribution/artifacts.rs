@@ -20,8 +20,6 @@ use crate::{
     model::factor_heads::{FactorHeadSpec, score_factor_heads},
 };
 
-use super::{TreeEnsembleInput, TreeEnsembleSpec, TreeShapExplainer};
-
 const ATTRIBUTION_SCHEMA_VERSION: u32 = 2;
 const MAX_EFFICIENCY_RESIDUAL: Decimal = Decimal::from_parts(1, 0, 0, false, 12);
 const ASSOCIATION_ESTIMATOR_DOMAIN: &str = "quant-pivot/attribution-association-estimator";
@@ -123,7 +121,6 @@ impl AttributionLineage {
 pub enum PredictionOutputKind {
     CanonicalYesAlpha,
     CalibratedWinProbability,
-    ClassicalRawPrediction,
 }
 
 /// One exact feature/factor allocation.
@@ -191,7 +188,6 @@ pub struct PredictionExplanationArtifact {
 #[serde(rename_all = "snake_case")]
 pub enum PredictionExplanationMethod {
     WeightedClosedForm,
-    ExactTreeShap,
 }
 
 impl PredictionExplanationArtifact {
@@ -343,32 +339,6 @@ impl PredictionExplanationArtifact {
             predicted_output: score.yes_alpha,
             contributions,
             efficiency_residual: score.yes_alpha - allocated,
-        };
-        artifact.validate()?;
-        Ok(artifact)
-    }
-
-    pub fn tree_shap(
-        lineage: AttributionLineage,
-        model_version_id: ModelVersionId,
-        recommendation_id: RecommendationId,
-        model_artifact_hash: ContentHash,
-        spec: &TreeEnsembleSpec,
-        input: &TreeEnsembleInput,
-    ) -> QuantResult<Self> {
-        let explanation = TreeShapExplainer::explain(spec, input)?;
-        let artifact = Self {
-            lineage,
-            model_version_id,
-            recommendation_id,
-            model_artifact_hash,
-            input_contract_hash: spec.input_contract_hash,
-            output_kind: PredictionOutputKind::ClassicalRawPrediction,
-            method: PredictionExplanationMethod::ExactTreeShap,
-            baseline_output: explanation.baseline_output,
-            predicted_output: explanation.predicted_output,
-            contributions: explanation.contributions,
-            efficiency_residual: explanation.efficiency_residual,
         };
         artifact.validate()?;
         Ok(artifact)

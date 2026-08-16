@@ -84,6 +84,26 @@ pub struct PositionFill {
     pub source: AccountSource,
 }
 
+/// Venue-authoritative cumulative entry fill used by reconciliation.
+///
+/// Unlike [`PositionFill`], this is not an increment. The repository compares
+/// it with the locked per-intent lot and applies only the missing cumulative
+/// state, making repeated sweeps and crash recovery idempotent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CumulativePositionFill {
+    pub order_intent_id: OrderIntentId,
+    pub execution_account_id: ExecutionAccountId,
+    pub token_id: TokenId,
+    pub market_id: MarketId,
+    pub event_id: Option<EventId>,
+    pub category: MarketCategory,
+    pub side: OutcomeSide,
+    pub cumulative_shares: Shares,
+    pub cumulative_cost_usd: Usd,
+    pub observed_at: DateTime<Utc>,
+    pub source: AccountSource,
+}
+
 /// Exit fact used to reduce or close an existing position.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionExit {
@@ -92,5 +112,29 @@ pub struct PositionExit {
     pub proceeds_usd: Usd,
     pub realized_pnl_usd: Usd,
     pub exited_at: DateTime<Utc>,
+    pub reason: ExitReason,
+}
+
+/// Venue-authoritative cumulative exit state for one execution order.
+///
+/// Reconciliation compares this state with the previously committed summary
+/// and applies only the delta. A later exact fee measurement may change
+/// cumulative proceeds and realized `PnL` without changing cumulative shares.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CumulativePositionExit {
+    pub cumulative_shares: Shares,
+    pub avg_price: Price,
+    pub cumulative_proceeds_usd: Usd,
+    pub cumulative_realized_pnl_usd: Usd,
+    pub observed_at: DateTime<Utc>,
+    pub reason: ExitReason,
+}
+
+/// Delta derived from two cumulative exit states and applied to one lot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PositionExitReconciliation {
+    pub shares_delta: Shares,
+    pub realized_pnl_delta_usd: Usd,
+    pub observed_at: DateTime<Utc>,
     pub reason: ExitReason,
 }

@@ -1337,7 +1337,7 @@ pub async fn attribution_pit_contracts() {
         &fixture,
         fixture.profile_ref.clone(),
         BuyModelRoute::Pooled,
-        ModelFamily::ClassicalRidge,
+        ModelFamily::ClassicalLogisticRegression,
         fixture.second_label_cutoff - Duration::hours(2),
     );
     let profile_cycle = isolated_cycle(
@@ -1506,7 +1506,11 @@ pub async fn recipe_catalog_contracts() {
     );
     assert!(
         repository
-            .list_approved(&base.profile_ref, base.route, ModelFamily::ClassicalRidge,)
+            .list_approved(
+                &base.profile_ref,
+                base.route,
+                ModelFamily::ClassicalLogisticRegression,
+            )
             .await
             .expect("list family-isolated catalog")
             .is_empty()

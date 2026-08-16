@@ -83,6 +83,8 @@ pub struct Model {
     pub quant_entry_condition_instance: BelongsTo<super::quant_entry_condition_instance::Entity>,
     #[sea_orm(has_many)]
     pub quant_execution_orders: HasMany<super::quant_execution_order::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_execution_fills: HasMany<super::quant_execution_fill::Entity>,
     #[sea_orm(
         belongs_to,
         from = "model_version_id",

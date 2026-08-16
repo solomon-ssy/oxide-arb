@@ -44,7 +44,7 @@ pub use calibrator::{
 #[cfg(feature = "ml-classical")]
 pub use classical::{
     CLASSICAL_CRATE_NAME, CLASSICAL_CRATE_VERSION, ClassicalAdapterRegistry, ClassicalModelAdapter,
-    ClassicalParams, ClassicalTrainOutput, ForestParams, LinearParams, replay_training_matrix,
+    ClassicalParams, ClassicalTrainOutput, replay_training_matrix,
 };
 #[cfg(feature = "ml-classical")]
 pub use classical_runtime::{ClassicalDecisionProjection, ClassicalRuntime};

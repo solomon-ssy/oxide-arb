@@ -23,6 +23,8 @@ mod entry_condition;
 mod execution;
 mod execution_account;
 mod execution_attempt_outcome;
+mod execution_fee_measurement;
+mod execution_fill;
 mod exit_training;
 mod factor;
 mod feature;
@@ -88,6 +90,7 @@ mod source_slice;
 #[allow(clippy::needless_update)] // Insert DTOs omit DB-managed timestamps.
 mod trade_policy;
 mod trade_policy_trial;
+mod venue_incentive;
 
 pub use account::{
     AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery, LiveAccountSnapshot,
@@ -114,8 +117,9 @@ pub use dataset::{
     TrainingDatasetMaterialization,
 };
 pub use economic_tier::{
-    CapitalOccupancyBucket, EntryEconomics, ExecutableEconomicTier, RecommendationEconomics,
-    ScenarioCashflow,
+    AggressiveEntryEconomics, EntryExecutionEconomics, ExecutableEconomicTier,
+    HardReservationBucket, PassiveEntryEconomics, RecommendationEconomics,
+    ScenarioCapitalOccupancySlice, ScenarioEntryExecution, ScenarioExecutionCashflow,
 };
 pub use entry_condition::{
     ApplyEntryConditionEvaluation, ApplyEntryConditionEvaluationOutcome, CryptoPriceProjectionInfo,
@@ -134,6 +138,8 @@ pub use execution_account::{ExecutionAccountInfo, NewExecutionAccount};
 pub use execution_attempt_outcome::{
     ExecutionAttemptOutcomeContractError, ExecutionAttemptOutcomeInfo, NewExecutionAttemptOutcome,
 };
+pub use execution_fee_measurement::{ExecutionFeeMeasurementInfo, NewExecutionFeeMeasurement};
+pub use execution_fill::{ExecutionFillInfo, NewExecutionFill, PendingExecutionFeeSettlement};
 pub use exit_training::{ExitTrainingLotRow, LotExitEventRow};
 pub use factor::{
     FactorDefinitionInfo, FactorDefinitionProjectionError, FactorRegistrationOutcome,
@@ -182,9 +188,9 @@ pub use fresh_boot::{
     NewFreshBootRunEvent, ResumeFreshBootRun, SupersedeFreshBootRun,
 };
 pub use global_portfolio_plan::{
-    ExactVerificationEvidence, ExistingPortfolioState, GlobalPortfolioPlan,
+    CapitalOccupancyBucket, ExactVerificationEvidence, ExistingPortfolioState, GlobalPortfolioPlan,
     PortfolioConstraintEvidence, PortfolioDecisionResult, PortfolioObjectiveEvidence,
-    SolverEvidence,
+    ScenarioCashflow, SolverEvidence,
 };
 pub use governance_audit::{
     ModelGovernanceAuditDetail, ModelGovernanceAuditInfo, NewModelGovernanceAudit,
@@ -238,7 +244,10 @@ pub use portfolio_scenario::{
     ScenarioMarketOutcome, ScenarioPayoutState, ScenarioWeight, StructuralExclusivityGroup,
     StructuralOutcomeRef,
 };
-pub use position::{NewPosition, PositionExit, PositionFill, PositionInfo};
+pub use position::{
+    CumulativePositionExit, CumulativePositionFill, NewPosition, PositionExit,
+    PositionExitReconciliation, PositionFill, PositionInfo,
+};
 pub use promotion_permit::{
     CommitModelRoutePromotion, IssuePromotionPermit, ModelRoutePromotionPolicy,
     ModelRoutePromotionRecord, ModelRoutePromotionRecordInput, ModelRoutePromotionRoute,
@@ -322,3 +331,6 @@ pub use trade_policy::{
     TradePolicyValidationRunInfo,
 };
 pub use trade_policy_trial::{NewTradePolicyTrialAttempt, TradePolicyTrialAttemptInfo};
+pub use venue_incentive::{
+    NewVenueIncentiveEvent, VenueIncentiveEventInfo, VenueIncentiveReconciliation,
+};

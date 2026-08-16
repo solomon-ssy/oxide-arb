@@ -13,6 +13,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
+    clickhouse::BookL2LedgerRow,
     config::WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
     domain::{
         data_plane::{
@@ -22,7 +23,8 @@ use quant_pivot_models::{
         quant::{LinkageOutcome, MarketLinkage, MarketSubject, ModelVersionInfo},
     },
     enums::{
-        common::{MarketCategory, TickSize},
+        clickhouse::{ChCanonicalBookEventType, ChLedgerTradeSide},
+        common::{MarketCategory, Side, TickSize},
         domain::LinkageSourceRole,
         execution::ExitReason,
         quant::{OutcomeSide, PriceComparison},
@@ -35,17 +37,19 @@ use quant_pivot_models::{
         EntryConditionArtifactV1, EntryConditionBinding, EntryConditionFactorBinding,
         EntryConditionFoldState, EntryConditionInputSet, EntryConditionSourceBinding,
         EntryConditionTemplate, EntryConditionTemplateV1, EntryConditionV1, EntryOrderTemplate,
-        ExecutablePriceInput, FactorCondition, FactorSnapshotInput, MarketEventCondition,
-        MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, Price,
-        PriceCondition, RecommendationId, ResearchProfileArtifact, ShadowLatencyProfileV1,
+        EvmTransactionHash, ExecutablePriceInput, FactorCondition, FactorSnapshotInput,
+        MarketEventCondition, MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId,
+        ModelVersionId, PassiveFillDistribution, PassiveFillState, PassiveFillStateKind, Price,
+        PriceCondition, RecommendationId, ResearchProfileArtifact, ShadowLatencyProfileV1, Shares,
         StructuralVolatilityOosEvidence, StructuralVolatilityOosFoldRow, TemperatureCelsius,
         TokenId, TradePolicyCandidateSpec, TradePolicyCandidateTrialRow, TradePolicyCohort,
         TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortTrialRow,
-        TradePolicyCoverageGapRow, TradePolicyCpcvPathRow, TradePolicyEvidenceFillOutcome,
-        TradePolicyEvidenceLiquidityRole, TradePolicyEvidenceObjectKind,
-        TradePolicyFillEvidenceRow, TradePolicyLatencyScenario, TradePolicyObservationCapability,
-        TradePolicyObservationEligibilityRow, TradePolicyParameterSource, TradePolicyQualityGate,
-        TradePolicyReplayGap, TradePolicyStatisticalSummaryRow, Usd, VerticalGateEvidence,
+        TradePolicyCoverageGapRow, TradePolicyCpcvPathRow, TradePolicyEntryRoute,
+        TradePolicyEvidenceFillOutcome, TradePolicyEvidenceLiquidityRole,
+        TradePolicyEvidenceObjectKind, TradePolicyFillEvidenceRow, TradePolicyLatencyScenario,
+        TradePolicyObservationCapability, TradePolicyObservationEligibilityRow,
+        TradePolicyParameterSource, TradePolicyQualityGate, TradePolicyReplayGap,
+        TradePolicyStatisticalSummaryRow, Usd, VerticalGateEvidence,
         WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
         WeatherDailyTemperatureInput, WeatherObservationDayClosedOutsideBand,
         WeatherTemperatureStatistic,
@@ -66,7 +70,7 @@ use quant_pivot_research::{
     },
     training::TrainingExample,
 };
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy, prelude::ToPrimitive};
 use uuid::Uuid;
 
 use crate::{
@@ -416,11 +420,6 @@ struct WeatherLatencyRun {
 pub(super) fn evaluate_weather_policy_evidence(
     request: &WeatherEvidenceRequest<'_>,
 ) -> QuantResult<WeatherPolicyEvidence> {
-    let candidate_ids = request
-        .candidates
-        .iter()
-        .map(|candidate| candidate.candidate_id.clone())
-        .collect::<Vec<_>>();
     let mut evidence = WeatherPolicyEvidence {
         observation_eligibility: Vec::new(),
         fills: Vec::new(),
@@ -437,60 +436,91 @@ pub(super) fn evaluate_weather_policy_evidence(
         all_gates_passed: request.structural_volatility_oos.valid,
     };
     for cash_budget in &request.profile.spec.allowed_cash_budget_tiers {
-        let cohort = pooled_weather_cohort(request.profile, *cash_budget)?;
-        let cohort_hash = CanonicalDigest::content_hash_json(&cohort)?;
-        append_row_evidence(
-            &mut evidence,
-            request,
-            &cohort_hash,
-            *cash_budget,
-            &candidate_ids,
-        )?;
-        let mut runs = Vec::new();
-        for latency_multiplier in [Decimal::ONE, Decimal::TWO] {
-            let run = evaluate_weather_latency_run(
+        let mut budget_published = false;
+        for entry_route in [
+            TradePolicyEntryRoute::Aggressive,
+            TradePolicyEntryRoute::PassivePostOnly,
+        ] {
+            let route_candidate_ids = request
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.entry_execution.route() == entry_route)
+                .map(|candidate| candidate.candidate_id.clone())
+                .collect::<Vec<_>>();
+            if route_candidate_ids.is_empty() {
+                continue;
+            }
+            let cohort = pooled_weather_cohort(request.profile, *cash_budget, entry_route)?;
+            let cohort_hash = CanonicalDigest::content_hash_json(&cohort)?;
+            append_row_evidence(
+                &mut evidence,
                 request,
-                &candidate_ids,
+                &cohort_hash,
                 *cash_budget,
-                latency_multiplier,
+                &route_candidate_ids,
             )?;
-            append_weather_latency_evidence(&mut evidence, request, &cohort, &cohort_hash, &run)?;
-            evidence.all_gates_passed &= run.passed;
-            runs.push(run);
+            let mut runs = Vec::new();
+            for latency_multiplier in [Decimal::ONE, Decimal::TWO] {
+                let run = evaluate_weather_latency_run(
+                    request,
+                    &route_candidate_ids,
+                    *cash_budget,
+                    latency_multiplier,
+                )?;
+                append_weather_latency_evidence(
+                    &mut evidence,
+                    request,
+                    &cohort,
+                    &cohort_hash,
+                    &run,
+                )?;
+                runs.push(run);
+            }
+            let first = runs.first().ok_or_else(|| {
+                methodology("Weather policy evidence produced no 1x run".to_owned())
+            })?;
+            let second = runs.get(1).ok_or_else(|| {
+                methodology("Weather policy evidence produced no 2x run".to_owned())
+            })?;
+            let route_published = first.passed
+                && second.passed
+                && first.summary.selected_candidate_id == second.summary.selected_candidate_id;
+            if route_published {
+                let selected = request
+                    .candidates
+                    .iter()
+                    .find(|candidate| {
+                        candidate.candidate_id == second.summary.selected_candidate_id
+                    })
+                    .ok_or_else(|| {
+                        methodology("selected Weather candidate is unavailable".to_owned())
+                    })?;
+                evidence.cohorts.push(fitted_cohort(FittedCohortRequest {
+                    key: cohort,
+                    cohort_hash,
+                    selected,
+                    one_x: &first.summary,
+                    two_x: &second.summary,
+                    one_x_metrics: &first.selected_metrics,
+                    two_x_metrics: &second.selected_metrics,
+                    replayed: request.replayed,
+                    trial_count: u32::try_from(route_candidate_ids.len()).map_err(|error| {
+                        methodology(format!(
+                            "Weather route candidate count does not fit u32: {error}"
+                        ))
+                    })?,
+                })?);
+                budget_published = true;
+            }
+            evidence
+                .statistical_runs
+                .extend(runs.into_iter().map(|run| PolicyStatisticalRun {
+                    cohort_hash,
+                    latency_multiplier: run.latency_multiplier,
+                    summary: run.summary,
+                }));
         }
-        let first = runs
-            .first()
-            .ok_or_else(|| methodology("Weather policy evidence produced no 1x run".to_owned()))?;
-        let second = runs
-            .get(1)
-            .ok_or_else(|| methodology("Weather policy evidence produced no 2x run".to_owned()))?;
-        if first.summary.selected_candidate_id != second.summary.selected_candidate_id {
-            evidence.all_gates_passed = false;
-        }
-        let selected = request
-            .candidates
-            .iter()
-            .find(|candidate| candidate.candidate_id == second.summary.selected_candidate_id)
-            .ok_or_else(|| methodology("selected Weather candidate is unavailable".to_owned()))?;
-        evidence.cohorts.push(fitted_cohort(FittedCohortRequest {
-            key: cohort,
-            cohort_hash,
-            selected,
-            one_x: &first.summary,
-            two_x: &second.summary,
-            one_x_metrics: &first.selected_metrics,
-            two_x_metrics: &second.selected_metrics,
-            trial_count: u32::try_from(request.candidates.len()).map_err(|error| {
-                methodology(format!("Weather candidate count does not fit u32: {error}"))
-            })?,
-        })?);
-        evidence
-            .statistical_runs
-            .extend(runs.into_iter().map(|run| PolicyStatisticalRun {
-                cohort_hash,
-                latency_multiplier: run.latency_multiplier,
-                summary: run.summary,
-            }));
+        evidence.all_gates_passed &= budget_published;
     }
     Ok(evidence)
 }
@@ -628,6 +658,23 @@ fn append_weather_latency_evidence(
     Ok(())
 }
 
+fn evidence_horizon_end(
+    replay: &WeatherExampleReplay,
+    horizon_secs: u64,
+) -> QuantResult<DateTime<Utc>> {
+    replay
+        .example
+        .decision_at()
+        .checked_add_signed(Duration::seconds(i64::try_from(horizon_secs).map_err(
+            |error| {
+                methodology(format!(
+                    "Weather evidence horizon does not fit chrono: {error}"
+                ))
+            },
+        )?))
+        .ok_or_else(|| methodology("Weather evidence horizon overflows chrono".to_owned()))
+}
+
 fn append_row_evidence(
     evidence: &mut WeatherPolicyEvidence,
     request: &WeatherEvidenceRequest<'_>,
@@ -636,17 +683,7 @@ fn append_row_evidence(
     candidate_ids: &[String],
 ) -> QuantResult<()> {
     for replay in request.replayed {
-        let horizon_end = replay
-            .example
-            .decision_at()
-            .checked_add_signed(Duration::seconds(
-                i64::try_from(request.profile.spec.target_horizon_secs).map_err(|error| {
-                    methodology(format!(
-                        "Weather evidence horizon does not fit chrono: {error}"
-                    ))
-                })?,
-            ))
-            .ok_or_else(|| methodology("Weather evidence horizon overflows chrono".to_owned()))?;
+        let horizon_end = evidence_horizon_end(replay, request.profile.spec.target_horizon_secs)?;
         let common = |multiplier| {
             candidate_ids.iter().all(|candidate_id| {
                 replay.outcomes.iter().any(|outcome| {
@@ -720,6 +757,8 @@ fn append_row_evidence(
                     terminal_at: outcome.terminal_at,
                     terminal_reason: outcome.terminal_reason,
                     entry_fill_ratio: outcome.entry_fill_ratio,
+                    entry_fill_latency_ms: outcome.entry_fill_latency_ms,
+                    post_fill_markout_bps: outcome.post_fill_markout_bps,
                     exit_fill_ratio: outcome.exit_fill_ratio,
                     entry_filled_shares: outcome.entry_filled_shares,
                     exited_shares: outcome.exited_shares,
@@ -928,12 +967,14 @@ fn statistical_gate_passes(
 fn pooled_weather_cohort(
     profile: &ResearchProfileArtifact,
     cash_budget: Usd,
+    entry_route: TradePolicyEntryRoute,
 ) -> QuantResult<TradePolicyCohortKey> {
     let methodology_hash = CanonicalDigest::content_hash_json(&(
         WEATHER_REPLAY_ORCHESTRATOR_VERSION,
         "pooled_weather",
         &profile.profile_ref,
         cash_budget,
+        entry_route,
     ))?;
     let dimension = |name: &str| TradePolicyCohortDimension {
         methodology_id: format!("weather_{name}_pooled_v1"),
@@ -944,6 +985,7 @@ fn pooled_weather_cohort(
         profile_ref: profile.profile_ref.clone(),
         category: MarketCategory::Weather,
         horizon_secs: profile.spec.target_horizon_secs,
+        entry_route,
         entry_price_min: Price::ZERO,
         entry_price_max: Price::ONE,
         cash_budget_tier: cash_budget,
@@ -960,7 +1002,157 @@ struct FittedCohortRequest<'a> {
     two_x: &'a PolicyPerformanceSummary,
     one_x_metrics: &'a CandidateTrialMetrics,
     two_x_metrics: &'a CandidateTrialMetrics,
+    replayed: &'a [WeatherExampleReplay],
     trial_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PassiveStateKey {
+    kind: PassiveFillStateKind,
+    fill_ratio_bps: u32,
+    fill_latency_ms: u64,
+    post_fill_markout_bps: Bps,
+}
+
+fn passive_distribution(
+    candidate: &TradePolicyCandidateSpec,
+    cash_budget: Usd,
+    replayed: &[WeatherExampleReplay],
+) -> QuantResult<Option<PassiveFillDistribution>> {
+    if !matches!(
+        candidate.entry_execution,
+        EntryOrderTemplate::PassivePostOnly { .. }
+    ) {
+        return Ok(None);
+    }
+    let outcomes = replayed
+        .iter()
+        .filter_map(|replay| {
+            replay.outcomes.iter().find(|outcome| {
+                outcome.candidate_id == candidate.candidate_id
+                    && outcome.cash_budget == cash_budget
+                    && outcome.latency.stress_multiplier == Decimal::ONE
+            })
+        })
+        .collect::<Vec<_>>();
+    if outcomes.is_empty()
+        || outcomes
+            .iter()
+            .any(|outcome| outcome.passive_reconciled_trade_covered != Some(true))
+    {
+        return Ok(None);
+    }
+    let sample_count = u64::try_from(outcomes.len())
+        .map_err(|error| methodology(format!("passive sample count does not fit u64: {error}")))?;
+    let mut grouped = BTreeMap::<PassiveStateKey, usize>::new();
+    for outcome in &outcomes {
+        let key = if outcome.entry_fill_ratio.is_zero() {
+            PassiveStateKey {
+                kind: PassiveFillStateKind::NoFill,
+                fill_ratio_bps: 0,
+                fill_latency_ms: 0,
+                post_fill_markout_bps: Bps::ZERO,
+            }
+        } else {
+            let kind = if outcome.entry_fill_ratio >= Decimal::ONE {
+                PassiveFillStateKind::FullFill
+            } else {
+                PassiveFillStateKind::PartialFill
+            };
+            let fill_ratio_bps = match kind {
+                PassiveFillStateKind::FullFill => 10_000,
+                PassiveFillStateKind::PartialFill => (outcome.entry_fill_ratio
+                    * Decimal::from(10_000_u32))
+                .round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
+                .to_u32()
+                .ok_or_else(|| methodology("partial fill ratio does not fit u32".to_owned()))?
+                .clamp(1, 9_999),
+                PassiveFillStateKind::NoFill => 0,
+            };
+            let (Some(fill_latency_ms), Some(post_fill_markout_bps)) =
+                (outcome.entry_fill_latency_ms, outcome.post_fill_markout_bps)
+            else {
+                return Ok(None);
+            };
+            PassiveStateKey {
+                kind,
+                fill_ratio_bps,
+                fill_latency_ms,
+                post_fill_markout_bps,
+            }
+        };
+        let count = grouped.entry(key).or_default();
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| methodology("passive joint-state count overflow".to_owned()))?;
+    }
+    let counts = grouped.values().copied().collect::<Vec<_>>();
+    let probabilities = state_probabilities(&counts, outcomes.len())?;
+    let states = grouped
+        .keys()
+        .copied()
+        .zip(probabilities)
+        .filter_map(|(key, probability_bps)| {
+            (probability_bps > 0).then_some(PassiveFillState {
+                kind: key.kind,
+                probability_bps,
+                fill_ratio_bps: key.fill_ratio_bps,
+                fill_latency_ms: key.fill_latency_ms,
+                post_fill_markout_bps: key.post_fill_markout_bps,
+            })
+        })
+        .collect::<Vec<_>>();
+    let source_evidence_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/passive-fill-distribution-evidence",
+        2,
+        &(candidate.candidate_id.as_str(), cash_budget, &outcomes),
+    )?;
+    let distribution = PassiveFillDistribution {
+        sample_count,
+        source_evidence_hash,
+        states,
+    };
+    distribution.validate().map_err(methodology)?;
+    Ok(Some(distribution))
+}
+
+fn state_probabilities(counts: &[usize], total: usize) -> QuantResult<Vec<u32>> {
+    if total == 0 || counts.iter().sum::<usize>() != total {
+        return Err(methodology(
+            "passive state counts do not cover the OOS population".to_owned(),
+        ));
+    }
+    let total = u64::try_from(total)
+        .map_err(|error| methodology(format!("passive population does not fit u64: {error}")))?;
+    let mut probabilities = vec![0_u32; counts.len()];
+    let mut remainders = Vec::with_capacity(counts.len());
+    let mut allocated = 0_u32;
+    for (index, count) in counts.iter().copied().enumerate() {
+        let count = u64::try_from(count).map_err(|error| {
+            methodology(format!("passive state count does not fit u64: {error}"))
+        })?;
+        let scaled = count
+            .checked_mul(10_000)
+            .ok_or_else(|| methodology("passive probability mass overflow".to_owned()))?;
+        probabilities[index] = u32::try_from(scaled / total).map_err(|error| {
+            methodology(format!("passive probability does not fit u32: {error}"))
+        })?;
+        allocated = allocated
+            .checked_add(probabilities[index])
+            .ok_or_else(|| methodology("passive allocated probability overflow".to_owned()))?;
+        remainders.push((scaled % total, index));
+    }
+    remainders.sort_by(|left, right| right.cmp(left));
+    for (_, index) in
+        remainders
+            .into_iter()
+            .take(usize::try_from(10_000_u32 - allocated).map_err(|error| {
+                methodology(format!("passive remainder does not fit usize: {error}"))
+            })?)
+    {
+        probabilities[index] += 1;
+    }
+    Ok(probabilities)
 }
 
 fn fitted_cohort(request: FittedCohortRequest<'_>) -> QuantResult<TradePolicyCohort> {
@@ -972,8 +1164,14 @@ fn fitted_cohort(request: FittedCohortRequest<'_>) -> QuantResult<TradePolicyCoh
         two_x,
         one_x_metrics,
         two_x_metrics,
+        replayed,
         trial_count,
     } = request;
+    if candidate.entry_execution.route() != key.entry_route {
+        return Err(methodology(
+            "selected candidate route differs from fitted cohort route".to_owned(),
+        ));
+    }
     let (max_slippage_bps, max_book_age_ms) = match candidate.entry_execution {
         EntryOrderTemplate::Aggressive {
             max_slippage_bps,
@@ -1001,6 +1199,8 @@ fn fitted_cohort(request: FittedCohortRequest<'_>) -> QuantResult<TradePolicyCoh
         }
         _ => Some(Decimal::ZERO),
     };
+    let passive_fill_distribution =
+        passive_distribution(candidate, key.cash_budget_tier, replayed)?;
     Ok(TradePolicyCohort {
         key,
         selected_candidate_id: candidate.candidate_id.clone(),
@@ -1035,6 +1235,7 @@ fn fitted_cohort(request: FittedCohortRequest<'_>) -> QuantResult<TradePolicyCoh
             two_x.common_candidate_support,
         ),
         passive_reconciled_trade_coverage,
+        passive_fill_distribution,
         fee_catalog_coverage: min_metric(
             one_x_metrics.fee_catalog_coverage,
             two_x_metrics.fee_catalog_coverage,
@@ -1284,6 +1485,7 @@ fn base_observations(
     books: Vec<Option<BookSnapshotAt>>,
 ) -> QuantResult<Vec<PolicyReplayObservation>> {
     let mut previous_at = example.decision_at() - Duration::milliseconds(1);
+    let mut previous_session_id = None;
     timeline
         .iter()
         .zip(boundaries)
@@ -1315,8 +1517,11 @@ fn base_observations(
                 previous_at,
                 *at,
                 boundary,
+                book.as_ref().map(|book| book.stream_session_id),
+                previous_session_id,
             );
             previous_at = *at;
+            previous_session_id = book.as_ref().map(|book| book.stream_session_id);
             Ok(PolicyReplayObservation {
                 at: *at,
                 decision_tick: *decision_tick,
@@ -1389,19 +1594,95 @@ fn market_info_at<'a>(
         })
 }
 
-const fn passive_trades(
-    _page: &ReplayPage,
-    _token_id: &TokenId,
-    _after: DateTime<Utc>,
-    _at: DateTime<Utc>,
-    _boundary: &DecisionBoundary,
+fn passive_trades(
+    page: &ReplayPage,
+    token_id: &TokenId,
+    after: DateTime<Utc>,
+    at: DateTime<Utc>,
+    boundary: &DecisionBoundary,
+    session_id: Option<Uuid>,
+    previous_session_id: Option<Uuid>,
 ) -> (Vec<PolicyReplayTrade>, bool) {
-    // Finalized Polygon executions have exact economic identity but cannot be
-    // bound retroactively to a historical CLOB stream session. Treating them
-    // as queue-depleting prints would invent execution fidelity. Passive replay
-    // therefore remains fail-closed; bootstrap profiles never build a
-    // TradePolicy and use a separate reference-scenario contract.
-    (Vec::new(), false)
+    let Some(session_id) = session_id else {
+        return (Vec::new(), false);
+    };
+    if previous_session_id.is_some_and(|previous| previous != session_id)
+        || page.gaps.iter().any(|gap| {
+            gap.token_id == token_id.as_str()
+                && gap.session_id == session_id.to_string()
+                && gap.invalidated_at <= boundary.decision_at()
+        })
+    {
+        return (Vec::new(), false);
+    }
+    let mut session_rows = page
+        .l2_ledger
+        .iter()
+        .filter(|row| &row.token_id == token_id && row.stream_session_id == session_id)
+        .collect::<Vec<_>>();
+    session_rows.sort_by_key(|row| row.token_sequence);
+    if session_rows.is_empty()
+        || session_rows.iter().any(|row| {
+            row.schema_version != BookL2LedgerRow::SCHEMA_VERSION
+                || row.event_type == ChCanonicalBookEventType::Gap
+        })
+        || session_rows.windows(2).any(|pair| {
+            pair[0].token_sequence.checked_add(1) != Some(pair[1].token_sequence)
+                || pair[0].event_hash == pair[1].event_hash
+        })
+    {
+        return (Vec::new(), false);
+    }
+    let source_cutoff = boundary.cutoff_for(DecisionSource::Book);
+    let decision_at = boundary.decision_at();
+    let mut trades = Vec::new();
+    for row in session_rows.into_iter().filter(|row| {
+        row.event_type == ChCanonicalBookEventType::LastTrade
+            && row.venue_event_time > after.timestamp_millis()
+            && row.venue_event_time <= at.timestamp_millis()
+            && row.venue_event_time <= source_cutoff.timestamp_millis()
+            && row.persisted_time <= decision_at.timestamp_millis()
+    }) {
+        let (Some(print_price), Some(aggressor), Some(traded_size)) =
+            (row.trade_price, row.trade_side, row.trade_size)
+        else {
+            return (Vec::new(), false);
+        };
+        let side = match aggressor {
+            ChLedgerTradeSide::Buy => Side::Buy,
+            ChLedgerTradeSide::Sell => Side::Sell,
+            ChLedgerTradeSide::Unknown => return (Vec::new(), false),
+        };
+        if row
+            .trade_transaction_hash
+            .as_deref()
+            .is_some_and(|hash| EvmTransactionHash::parse(hash).is_err())
+        {
+            return (Vec::new(), false);
+        }
+        let Some(event_at) = DateTime::from_timestamp_millis(row.venue_event_time) else {
+            return (Vec::new(), false);
+        };
+        let Some(available_at) = DateTime::from_timestamp_millis(row.persisted_time) else {
+            return (Vec::new(), false);
+        };
+        let price = Price::from(print_price);
+        let shares = Shares::from(traded_size);
+        if !price.is_positive() || price > Price::ONE || !shares.is_positive() {
+            return (Vec::new(), false);
+        }
+        trades.push(PolicyReplayTrade {
+            event_at,
+            available_at,
+            stream_session_id: session_id,
+            token_sequence: row.token_sequence,
+            side,
+            price,
+            shares,
+            source_event_id: ContentHash::from(row.event_hash).to_string(),
+        });
+    }
+    (trades, true)
 }
 
 fn resolution_at(

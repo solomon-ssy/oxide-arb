@@ -7,9 +7,10 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     thread::Builder as ThreadBuilder,
+    time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Error as AnyhowError, Result, anyhow};
 use chrono::{DateTime, Utc};
 use quant_pivot_migration::apply as apply_postgres_migrations;
 use quant_pivot_models::{config::PostgresConfig, security::hash_password};
@@ -20,12 +21,15 @@ use testcontainers_modules::postgres::Postgres;
 use tokio::{
     runtime::Builder as RuntimeBuilder,
     sync::{Mutex, OwnedMutexGuard, Semaphore, oneshot},
+    time::sleep,
 };
 
 use crate::stack::BOOTSTRAP_ADMIN_PASSWORD;
 
 const MAINTENANCE_DATABASE: &str = "postgres";
 const LARGE_SCENARIO_STACK_BYTES: usize = 16 * 1024 * 1024;
+const MAINTENANCE_CONNECT_ATTEMPTS: usize = 5;
+const MAINTENANCE_CONNECT_DELAY: Duration = Duration::from_millis(200);
 const MAX_PARALLEL_POSTGRES_SUITES: usize = 4;
 const TEMPLATE_DATABASE: &str = "quant_pivot_repository_template";
 const POSTGRES_IMAGE_TAG: &str = "16";
@@ -77,9 +81,7 @@ impl PostgresSuite {
             verify_session_params: true,
             ..PostgresConfig::default()
         };
-        let maintenance = PostgresPool::connect_existing(&config)
-            .await
-            .context("connect repository PostgreSQL maintenance pool")?;
+        let maintenance = Self::connect(&config).await?;
 
         let mut template_config = config.clone();
         TEMPLATE_DATABASE.clone_into(&mut template_config.database);
@@ -102,6 +104,25 @@ impl PostgresSuite {
             next_database: AtomicU64::new(1),
             _container: container,
         })
+    }
+
+    async fn connect(config: &PostgresConfig) -> Result<PostgresPool> {
+        let mut last_error = None;
+        for attempt in 1..=MAINTENANCE_CONNECT_ATTEMPTS {
+            match PostgresPool::connect_existing(config).await {
+                Ok(pool) => return Ok(pool),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < MAINTENANCE_CONNECT_ATTEMPTS {
+                        sleep(MAINTENANCE_CONNECT_DELAY).await;
+                    }
+                }
+            }
+        }
+        let error = last_error
+            .map(AnyhowError::new)
+            .ok_or_else(|| anyhow!("PostgreSQL maintenance connection made no attempts"))?;
+        Err(error).context("connect repository PostgreSQL maintenance pool")
     }
 
     async fn checkout(self: &Arc<Self>) -> Result<(PostgresPool, ScenarioDatabase)> {

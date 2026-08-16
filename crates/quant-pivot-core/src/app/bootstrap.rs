@@ -39,6 +39,7 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
     ctx.register_runtime_tasks(&mut runner).await?;
     ctx.register_periodic_services(&mut runner);
     ctx.register_equity_snapshot_worker(&mut runner);
+    ctx.register_venue_incentive_worker(&mut runner);
     ctx.register_report_coordinator(&mut runner);
     ctx.register_report_expire_sweep(&mut runner);
     ctx.register_recommendation_deadline_scheduler(&mut runner);

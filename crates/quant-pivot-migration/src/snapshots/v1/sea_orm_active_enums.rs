@@ -131,6 +131,8 @@ pub enum QpCatalogRejectionReason {
     InvalidTokenPair,
     #[sea_orm(string_value = "unsupported_tick_size")]
     UnsupportedTickSize,
+    #[sea_orm(string_value = "invalid_fee_schedule")]
+    InvalidFeeSchedule,
     #[sea_orm(string_value = "duplicate_entity_id")]
     DuplicateEntityId,
     #[sea_orm(string_value = "malformed_entity")]
@@ -379,6 +381,58 @@ pub enum QpExecutionOrderPhase {
     Entry,
     #[sea_orm(string_value = "exit")]
     Exit,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_fee_liquidity_role"
+)]
+pub enum QpFeeLiquidityRole {
+    #[sea_orm(string_value = "taker")]
+    Taker,
+    #[sea_orm(string_value = "maker")]
+    Maker,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_fee_measurement_stage"
+)]
+pub enum QpFeeMeasurementStage {
+    #[sea_orm(string_value = "prepared_expected")]
+    PreparedExpected,
+    #[sea_orm(string_value = "authenticated_trade_derived")]
+    AuthenticatedTradeDerived,
+    #[sea_orm(string_value = "on_chain_settled")]
+    OnChainSettled,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_venue_incentive_kind"
+)]
+pub enum QpVenueIncentiveKind {
+    #[sea_orm(string_value = "maker_rebate")]
+    MakerRebate,
+    #[sea_orm(string_value = "taker_rebate")]
+    TakerRebate,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_venue_incentive_stage"
+)]
+pub enum QpVenueIncentiveStage {
+    #[sea_orm(string_value = "estimated_accrual")]
+    EstimatedAccrual,
+    #[sea_orm(string_value = "venue_awarded")]
+    VenueAwarded,
+    #[sea_orm(string_value = "wallet_credited")]
+    WalletCredited,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
@@ -913,20 +967,8 @@ pub enum QpFreshBootBlockedReason {
 pub enum QpModelFamily {
     #[sea_orm(string_value = "weighted_factor")]
     WeightedFactor,
-    #[sea_orm(string_value = "classical_gradient_boosted_trees")]
-    ClassicalGradientBoostedTrees,
-    #[sea_orm(string_value = "classical_random_forest")]
-    ClassicalRandomForest,
-    #[sea_orm(string_value = "classical_extra_trees")]
-    ClassicalExtraTrees,
     #[sea_orm(string_value = "classical_logistic_regression")]
     ClassicalLogisticRegression,
-    #[sea_orm(string_value = "classical_ridge")]
-    ClassicalRidge,
-    #[sea_orm(string_value = "classical_lasso")]
-    ClassicalLasso,
-    #[sea_orm(string_value = "classical_elastic_net")]
-    ClassicalElasticNet,
     #[sea_orm(string_value = "hold_vs_exit_weighted")]
     HoldVsExitWeighted,
 }
@@ -2484,8 +2526,8 @@ pub enum QpFeedbackDriftMetric {
     PopulationStabilityIndex,
     #[sea_orm(string_value = "kolmogorov_smirnov_p_value")]
     KolmogorovSmirnovPValue,
-    #[sea_orm(string_value = "rank_ic_drop")]
-    RankIcDrop,
+    #[sea_orm(string_value = "target_rank_ic_drop")]
+    TargetRankIcDrop,
     #[sea_orm(string_value = "jensen_shannon_divergence")]
     JensenShannonDivergence,
 }

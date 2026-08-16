@@ -33,6 +33,7 @@ pub struct BookL2LedgerRow {
     pub trade_side: Option<ChLedgerTradeSide>,
     pub trade_size: Option<ChShares>,
     pub fee_rate_bps: Option<ChBps>,
+    pub trade_transaction_hash: Option<String>,
     pub venue_event_time: i64,
     pub ingress_time: i64,
     pub persisted_time: i64,
@@ -64,7 +65,7 @@ impl From<&BookL2LedgerRow> for BookLedgerReplayAnchor {
 }
 
 impl BookL2LedgerRow {
-    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion::FIRST;
+    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
 
     /// Compute the domain-separated canonical event digest without allocation.
     pub fn canonical_event_hash(&self) -> Result<ContentHash, CanonicalDigestError> {
@@ -94,6 +95,7 @@ impl BookL2LedgerRow {
                 update_optional_u8(&mut hasher, self.trade_side.map(|side| side as u8));
                 update_optional_i128(&mut hasher, self.trade_size.map(ChShares::scaled_i128));
                 update_optional_i128(&mut hasher, self.fee_rate_bps.map(ChBps::scaled_i128));
+                update_optional_bytes(&mut hasher, self.trade_transaction_hash.as_deref())?;
             }
         }
         Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
@@ -162,6 +164,22 @@ fn update_optional_u8(hasher: &mut Hasher, value: Option<u8>) {
     }
 }
 
+fn update_optional_bytes(
+    hasher: &mut Hasher,
+    value: Option<&str>,
+) -> Result<(), CanonicalDigestError> {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            update_len_prefixed(hasher, value.as_bytes())?;
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use rust_decimal::Decimal;
@@ -191,6 +209,7 @@ mod tests {
                 trade_side: None,
                 trade_size: None,
                 fee_rate_bps: None,
+                trade_transaction_hash: None,
                 venue_event_time: 1_718_000_000_123,
                 ingress_time: 1_718_000_000_124,
                 persisted_time: 1_718_000_000_125,
@@ -211,7 +230,7 @@ mod tests {
         assert_eq!(first.canonical_event_hash().expect("hash"), expected);
         assert_eq!(
             expected.to_string(),
-            "blake3:b97f5f46452d817119b4c4f8d993f675dac88a718e4ab0f5eb029b48df3831f6"
+            "blake3:cb28f58176689cdf3156d56694f4560522749743207bd6b947fec17432d0cc15"
         );
     }
 
@@ -238,15 +257,16 @@ mod tests {
         trade.trade_side = Some(ChLedgerTradeSide::Buy);
         trade.trade_size = Some(ChShares::from(Shares::new(Decimal::new(10, 0))));
         trade.fee_rate_bps = Some(ChBps::from(Decimal::new(25, 1)));
+        trade.trade_transaction_hash = Some(format!("0x{}", "ab".repeat(32)));
         let trade = trade.canonical_event_hash().expect("trade");
 
         let hashes = [snapshot, delta, tick, gap, trade];
         let expected = [
-            "blake3:b97f5f46452d817119b4c4f8d993f675dac88a718e4ab0f5eb029b48df3831f6",
-            "blake3:2c5e29f0b553d07bb2c3b72fe2989f2c11e5da648e4e121954df046597ad8464",
-            "blake3:9abd9dffd384bc17377cf45c79f42b854e08e6c8d6cb6ce30b9f9c66137320f5",
-            "blake3:2c2d79950633e289ad07e44d19745e4750f63f3ff580569d55ba7d095e9fb3f6",
-            "blake3:38819b360bbc513a96be2a4a0e67ae388d2b6208f9051a4e75e62931d263f7b0",
+            "blake3:cb28f58176689cdf3156d56694f4560522749743207bd6b947fec17432d0cc15",
+            "blake3:f4b69f16f16a0835d008e2f081089a6f2c4e5f253f69f6fc21c54710f2f62290",
+            "blake3:76b2e15661f8e0236365ed46bad7aba5700e88e8c4a63d8d61eb78db770d4f8e",
+            "blake3:83e2fbfacc5ebae31abe6e9deeb48616eee5b2c7d214156625fcda5191103bc9",
+            "blake3:92569f4899a80b635c549386b2dfe8481727383af6dce583b590168017dd7074",
         ];
         for (hash, expected) in hashes.iter().zip(expected) {
             assert_eq!(hash.to_string(), expected);

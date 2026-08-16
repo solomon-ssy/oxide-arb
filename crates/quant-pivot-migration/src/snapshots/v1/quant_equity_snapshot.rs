@@ -17,6 +17,7 @@ pub struct Model {
     pub available_usd: Decimal,
     pub reserved_usd: Decimal,
     pub realized_pnl_cumulative_usd: Decimal,
+    pub incentive_credit_cumulative_usd: Decimal,
     pub unrealized_pnl_usd: Decimal,
     pub high_water_mark_usd: Decimal,
     pub drawdown_pct: Decimal,

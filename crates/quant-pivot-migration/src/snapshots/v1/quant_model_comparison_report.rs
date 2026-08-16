@@ -13,7 +13,7 @@ pub struct Model {
     pub baseline_report_id: Uuid,
     pub candidate_report_id: Uuid,
     pub model_run_id: Uuid,
-    pub rank_ic_delta: Decimal,
+    pub realized_return_rank_correlation_delta: Decimal,
     pub hit_rate_delta: Decimal,
     pub realized_pnl_delta: Decimal,
     pub score_correlation: Decimal,

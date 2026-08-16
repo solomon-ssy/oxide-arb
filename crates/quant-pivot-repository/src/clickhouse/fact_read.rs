@@ -9,14 +9,14 @@ use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookLedgerReplayAnchor, BookMicrostructureRow, BookStreamSessionRow,
         CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
-        ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
+        ExchangeEventRow, ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
         MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
         WeatherForecastFactRow, WeatherObservationFactRow,
     },
     domain::data_plane::HistorySealChunkRef,
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
-        RecommendationReportId, TokenId,
+        OrderId, RecommendationReportId, TokenId,
     },
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
@@ -33,10 +33,10 @@ use crate::{
             DOMAIN_OBSERVATIONS_BETWEEN, ENTRY_EVALUATION_LATEST, EXECUTION_PARTICIPANTS_BETWEEN,
             LAST_EXECUTIONS, MARKET_EXECUTION_WINDOW, MARKET_EXECUTIONS_BETWEEN,
             MICROSTRUCTURE_SERIES, MICROSTRUCTURE_WINDOW, MID_PRICE_SERIES,
-            OBSERVED_MARKETS_BETWEEN, REPORT_FUNNEL_BETWEEN, REPORT_FUNNEL_COUNT,
-            REPORT_FUNNEL_COUNTS, REPORT_FUNNEL_PAGE, RESOLUTION_AT, RESOLUTION_BY_CHECKPOINT,
-            RESOLUTION_BY_MARKET, RESOLUTIONS_BETWEEN, WEATHER_FORECASTS_BETWEEN,
-            WEATHER_OBSERVATIONS_BETWEEN,
+            OBSERVED_MARKETS_BETWEEN, ORDER_FILLED_EVENTS, REPORT_FUNNEL_BETWEEN,
+            REPORT_FUNNEL_COUNT, REPORT_FUNNEL_COUNTS, REPORT_FUNNEL_PAGE, RESOLUTION_AT,
+            RESOLUTION_BY_CHECKPOINT, RESOLUTION_BY_MARKET, RESOLUTIONS_BETWEEN,
+            WEATHER_FORECASTS_BETWEEN, WEATHER_OBSERVATIONS_BETWEEN,
         },
     },
     traits::QuantFactReadRepository,
@@ -140,6 +140,39 @@ fn validate_market_resolution(row: &MarketResolutionRow) -> Result<(), StorageEr
 
 #[async_trait]
 impl QuantFactReadRepository for ChQuantFactReadRepository {
+    async fn order_filled_events(
+        &self,
+        order_ids: Vec<OrderId>,
+    ) -> Result<Vec<ExchangeEventRow>, StorageError> {
+        let order_ids = canonical_values(
+            order_ids
+                .into_iter()
+                .map(|order_id| order_id.as_str().to_owned())
+                .collect(),
+        );
+        if order_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut rows = Vec::new();
+        for order_chunk in query_chunks(&order_ids, String::len, "quant_exchange_event")? {
+            let page = ORDER_FILLED_EVENTS
+                .query(
+                    self.pool.client(),
+                    "SELECT ?fields FROM quant_exchange_event \
+                     WHERE order_hash IN ? \
+                     AND event_kind = 'OrderFilled' \
+                     AND exchange_version = 'V2' \
+                     AND chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1) \
+                     ORDER BY order_hash, block_number, transaction_index, log_index",
+                )
+                .bind(order_chunk.to_vec())
+                .fetch_all::<ExchangeEventRow>()
+                .await?;
+            extend_rows(&mut rows, page, ORDER_FILLED_EVENTS, "quant_exchange_event")?;
+        }
+        Ok(rows)
+    }
+
     async fn validate_execution_history_chunks(
         &self,
         history_chunks: Vec<HistorySealChunkRef>,

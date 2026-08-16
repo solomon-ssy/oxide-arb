@@ -460,8 +460,11 @@ async fn assert_recommendation_roundtrip(
     let sizing = &recs[0].trade_plan.sizing;
     assert_eq!(sizing.economic_tier_id, recs[0].economic_tier_id);
     assert_eq!(
-        sizing.suggested_usd,
-        recs[0].economic_tier_json.entry.notional_usd
+        sizing.hard_reserved_cash_usd,
+        recs[0]
+            .economic_tier_json
+            .entry_execution
+            .hard_reserved_cash_usd()
     );
 }
 
@@ -509,6 +512,7 @@ async fn assert_reserved_tracks_intent(
                     post_only: false,
                     limit_price: Price::new(dec!(0.6)),
                     amount: OrderAmount::Shares(Shares::new(dec!(416.66))),
+                    maker_rebate_schedule: None,
                     max_slippage_bps: Bps::new(dec!(50)),
                     valid_until: Utc::now(),
                 },
@@ -669,7 +673,8 @@ async fn append_and_resolve_reconciliation(
             venue_cash_delta_usd: None,
             realized_pnl_usd: None,
             expected_fee_usd: None,
-            observed_fee_usd: None,
+            derived_fee_usd: None,
+            settled_fee_usd: None,
             fee_delta_usd: None,
             resolved_by: None,
             resolved_at: None,
@@ -713,7 +718,8 @@ async fn append_and_resolve_reconciliation(
                 venue_cash_delta_usd: NullablePatch::set(Usd::ZERO),
                 realized_pnl_usd: NullablePatch::Keep,
                 expected_fee_usd: NullablePatch::set(Usd::ZERO),
-                observed_fee_usd: NullablePatch::set(Usd::ZERO),
+                derived_fee_usd: NullablePatch::Keep,
+                settled_fee_usd: NullablePatch::set(Usd::ZERO),
                 fee_delta_usd: NullablePatch::set(Usd::ZERO),
                 resolved_by: NullablePatch::set("operator".to_owned()),
                 resolved_at: NullablePatch::set(Utc::now()),
@@ -848,6 +854,7 @@ async fn create_pending_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderIn
                     post_only: false,
                     limit_price: Price::new(dec!(0.6)),
                     amount: OrderAmount::Shares(Shares::new(dec!(416.66))),
+                    maker_rebate_schedule: None,
                     max_slippage_bps: Bps::new(dec!(50)),
                     valid_until: Utc::now(),
                 },

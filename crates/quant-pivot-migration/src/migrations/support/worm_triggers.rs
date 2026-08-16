@@ -195,6 +195,18 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::SetUpdatedAt,
     },
     TriggerSpec {
+        name: "trg_quant_execution_fill_append_only",
+        table: "quant_execution_fill",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_execution_fee_measurement_append_only",
+        table: "quant_execution_fee_measurement",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
         name: "trg_quant_execution_trade_ref_updated_at",
         table: "quant_execution_trade_ref",
         events: TriggerEvents::Update,
@@ -203,6 +215,12 @@ const TRIGGERS: &[TriggerSpec] = &[
     TriggerSpec {
         name: "trg_quant_execution_transaction_ref_append_only",
         table: "quant_execution_transaction_ref",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_venue_incentive_event_append_only",
+        table: "quant_venue_incentive_event",
         events: TriggerEvents::DeleteOrUpdate,
         program: TriggerProgram::DenyWrite,
     },

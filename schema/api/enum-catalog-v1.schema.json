@@ -485,6 +485,10 @@
           "wire_value": "unsupported_tick_size"
         },
         {
+          "rust_variant": "InvalidFeeSchedule",
+          "wire_value": "invalid_fee_schedule"
+        },
+        {
           "rust_variant": "DuplicateEntityId",
           "wire_value": "duplicate_entity_id"
         },
@@ -591,32 +595,8 @@
       "kind": "wire",
       "members": [
         {
-          "rust_variant": "GradientBoostedTrees",
-          "wire_value": "gradient_boosted_trees"
-        },
-        {
-          "rust_variant": "RandomForest",
-          "wire_value": "random_forest"
-        },
-        {
-          "rust_variant": "ExtraTrees",
-          "wire_value": "extra_trees"
-        },
-        {
           "rust_variant": "LogisticRegression",
           "wire_value": "logistic_regression"
-        },
-        {
-          "rust_variant": "Ridge",
-          "wire_value": "ridge"
-        },
-        {
-          "rust_variant": "Lasso",
-          "wire_value": "lasso"
-        },
-        {
-          "rust_variant": "ElasticNet",
-          "wire_value": "elastic_net"
         }
       ]
     },
@@ -1541,6 +1521,40 @@
       ]
     },
     {
+      "name": "FeeLiquidityRole",
+      "module": "fee",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Taker",
+          "wire_value": "taker"
+        },
+        {
+          "rust_variant": "Maker",
+          "wire_value": "maker"
+        }
+      ]
+    },
+    {
+      "name": "FeeMeasurementStage",
+      "module": "fee",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "PreparedExpected",
+          "wire_value": "prepared_expected"
+        },
+        {
+          "rust_variant": "AuthenticatedTradeDerived",
+          "wire_value": "authenticated_trade_derived"
+        },
+        {
+          "rust_variant": "OnChainSettled",
+          "wire_value": "on_chain_settled"
+        }
+      ]
+    },
+    {
       "name": "FeedbackCohort",
       "module": "quant",
       "kind": "postgres",
@@ -1669,8 +1683,8 @@
           "wire_value": "kolmogorov_smirnov_p_value"
         },
         {
-          "rust_variant": "RankIcDrop",
-          "wire_value": "rank_ic_drop"
+          "rust_variant": "TargetRankIcDrop",
+          "wire_value": "target_rank_ic_drop"
         },
         {
           "rust_variant": "JensenShannonDivergence",
@@ -2482,32 +2496,8 @@
           "wire_value": "weighted_factor"
         },
         {
-          "rust_variant": "ClassicalGradientBoostedTrees",
-          "wire_value": "classical_gradient_boosted_trees"
-        },
-        {
-          "rust_variant": "ClassicalRandomForest",
-          "wire_value": "classical_random_forest"
-        },
-        {
-          "rust_variant": "ClassicalExtraTrees",
-          "wire_value": "classical_extra_trees"
-        },
-        {
           "rust_variant": "ClassicalLogisticRegression",
           "wire_value": "classical_logistic_regression"
-        },
-        {
-          "rust_variant": "ClassicalRidge",
-          "wire_value": "classical_ridge"
-        },
-        {
-          "rust_variant": "ClassicalLasso",
-          "wire_value": "classical_lasso"
-        },
-        {
-          "rust_variant": "ClassicalElasticNet",
-          "wire_value": "classical_elastic_net"
         },
         {
           "rust_variant": "HoldVsExitWeighted",
@@ -3417,6 +3407,10 @@
         {
           "rust_variant": "ClobTrades",
           "wire_value": "clob_trades"
+        },
+        {
+          "rust_variant": "OnChainSettlement",
+          "wire_value": "on_chain_settlement"
         },
         {
           "rust_variant": "TokenBalanceDelta",
@@ -4813,6 +4807,40 @@
         {
           "rust_variant": "Disabled",
           "wire_value": "disabled"
+        }
+      ]
+    },
+    {
+      "name": "VenueIncentiveKind",
+      "module": "fee",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "MakerRebate",
+          "wire_value": "maker_rebate"
+        },
+        {
+          "rust_variant": "TakerRebate",
+          "wire_value": "taker_rebate"
+        }
+      ]
+    },
+    {
+      "name": "VenueIncentiveStage",
+      "module": "fee",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "EstimatedAccrual",
+          "wire_value": "estimated_accrual"
+        },
+        {
+          "rust_variant": "VenueAwarded",
+          "wire_value": "venue_awarded"
+        },
+        {
+          "rust_variant": "WalletCredited",
+          "wire_value": "wallet_credited"
         }
       ]
     },

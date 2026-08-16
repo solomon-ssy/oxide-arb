@@ -130,7 +130,7 @@ impl RecommendationInfo {
 
 fn total_suggested(recs: &[RecommendationInfo]) -> Usd {
     recs.iter()
-        .map(|rec| rec.trade_plan.sizing.suggested_usd)
+        .map(|rec| rec.trade_plan.sizing.hard_reserved_cash_usd)
         .sum()
 }
 
@@ -202,8 +202,8 @@ fn recommendation_delta(
     let ((Some(anchor), _) | (None, Some(anchor))) = (base, compare) else {
         return None;
     };
-    let base_usd = base.map(|rec| rec.trade_plan.sizing.suggested_usd);
-    let compare_usd = compare.map(|rec| rec.trade_plan.sizing.suggested_usd);
+    let base_usd = base.map(|rec| rec.trade_plan.sizing.hard_reserved_cash_usd);
+    let compare_usd = compare.map(|rec| rec.trade_plan.sizing.hard_reserved_cash_usd);
     let delta = compare_usd.unwrap_or(Usd::ZERO) - base_usd.unwrap_or(Usd::ZERO);
     Some(RecommendationDelta {
         market_id: anchor.market_id.clone(),

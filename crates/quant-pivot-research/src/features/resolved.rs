@@ -16,7 +16,7 @@ use quant_pivot_models::{
         data_plane::ExecutionParticipantPrint,
         market::{
             book::{BookLevel, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
-            fee::MarketFeeSchedule,
+            fee::{MarketFeeSchedule, MarketMakerRebateSchedule},
             registry::MarketRegistryInfo,
         },
     },
@@ -334,6 +334,8 @@ pub struct ResolvedMarketContext {
     pub created_at: Option<DateTime<Utc>>,
     /// Point-in-time fee schedule from the independently versioned CLOB market-info source.
     pub fee_schedule: Option<MarketFeeSchedule>,
+    /// Point-in-time maker incentive schedule from the Gamma catalog source.
+    pub maker_rebate_schedule: Option<MarketMakerRebateSchedule>,
 }
 
 impl ResolvedMarketContext {
@@ -350,6 +352,7 @@ impl ResolvedMarketContext {
             end_date: info.end_date,
             created_at: info.created_at,
             fee_schedule: None,
+            maker_rebate_schedule: info.maker_rebate_schedule.clone(),
         }
     }
 }
@@ -366,6 +369,7 @@ impl From<MarketContextAt> for ResolvedMarketContext {
             end_date: context.end_date,
             created_at: context.created_at,
             fee_schedule: context.fee_schedule,
+            maker_rebate_schedule: context.maker_rebate_schedule,
         }
     }
 }

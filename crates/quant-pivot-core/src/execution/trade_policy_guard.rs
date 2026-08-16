@@ -92,7 +92,7 @@ pub async fn require_frozen_trade_policy(
         )
         .into());
     }
-    if cohort.key.cash_budget_tier != sizing.suggested_usd {
+    if sizing.hard_reserved_cash_usd > cohort.key.cash_budget_tier {
         return Err(denied(
             "recommendation sizing does not exactly match the validated cash-budget tier",
         )

@@ -107,6 +107,14 @@ impl DeployConfig {
             });
         }
         let workers = &self.quant.workers;
+        if workers.venue_incentive_reconciliation_secs == 0
+            || !(1..=366).contains(&workers.venue_incentive_lookback_days)
+        {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "quant.workers.venue_incentive_reconciliation",
+                detail: "cadence must be positive and lookback_days must be in 1..=366".to_owned(),
+            });
+        }
         if workers.report_schedule_poll_secs == 0
             || workers.report_run_lease_secs == 0
             || workers.report_run_heartbeat_secs == 0

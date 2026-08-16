@@ -57,10 +57,16 @@ pub mod entity {
     pub const QUANT_EXECUTION_ORDER: &str = "quant_execution_order";
     /// `quant_execution_trade_ref`.
     pub const QUANT_EXECUTION_TRADE_REF: &str = "quant_execution_trade_ref";
+    /// `quant_execution_fill`.
+    pub const QUANT_EXECUTION_FILL: &str = "quant_execution_fill";
+    /// `quant_execution_fee_measurement`.
+    pub const QUANT_EXECUTION_FEE_MEASUREMENT: &str = "quant_execution_fee_measurement";
     /// `quant_execution_transaction_ref`.
     pub const QUANT_EXECUTION_TRANSACTION_REF: &str = "quant_execution_transaction_ref";
     /// `quant_execution_account`.
     pub const QUANT_EXECUTION_ACCOUNT: &str = "quant_execution_account";
+    /// `quant_venue_incentive_event`.
+    pub const QUANT_VENUE_INCENTIVE_EVENT: &str = "quant_venue_incentive_event";
     /// `quant_capital_allocation`.
     pub const QUANT_CAPITAL_ALLOCATION: &str = "quant_capital_allocation";
     /// `quant_position`.

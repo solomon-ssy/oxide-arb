@@ -394,6 +394,16 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
+        table: "quant_execution_fill",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_execution_fee_measurement",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
         table: "quant_execution_trade_ref",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
@@ -405,6 +415,11 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     },
     ColumnDefaultSpec {
         table: "quant_execution_transaction_ref",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_venue_incentive_event",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },

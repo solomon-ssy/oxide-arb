@@ -807,6 +807,20 @@ fn project_entry_order_spec(
     const GTD_SECURITY_BUFFER_SECS: i64 = 60;
     let entry_plan = &rec.trade_plan.entry;
     let sizing = &rec.trade_plan.sizing;
+    if sizing.maker_rebate_schedule.is_some()
+        && !matches!(entry_plan.order_policy, EntryOrderPolicy::Passive { .. })
+    {
+        return Err(ExecutionError::IntentDenied {
+            reason: "aggressive entry cannot carry maker-rebate terms".to_owned(),
+        });
+    }
+    if let Some(schedule) = sizing.maker_rebate_schedule {
+        schedule
+            .validate_at(entry_plan.valid_from)
+            .map_err(|detail| ExecutionError::IntentDenied {
+                reason: detail.to_owned(),
+            })?;
+    }
     let (limit_price, order_type, amount, post_only) = match entry_plan.order_policy {
         EntryOrderPolicy::Aggressive {
             worst_price,
@@ -819,7 +833,7 @@ fn project_entry_order_spec(
             (
                 worst_price,
                 order_type,
-                OrderAmount::CashBudget(sizing.suggested_usd),
+                OrderAmount::CashBudget(sizing.hard_reserved_cash_usd),
                 false,
             )
         }
@@ -856,7 +870,7 @@ fn project_entry_order_spec(
             (
                 limit_price,
                 OrderType::Gtd { expiration },
-                OrderAmount::Shares(sizing.suggested_shares),
+                OrderAmount::Shares(sizing.requested_shares),
                 true,
             )
         }
@@ -868,6 +882,7 @@ fn project_entry_order_spec(
         post_only,
         limit_price,
         amount,
+        maker_rebate_schedule: sizing.maker_rebate_schedule,
         max_slippage_bps: entry_plan.max_slippage_bps,
         valid_until: entry_plan.valid_until,
     })
@@ -1074,6 +1089,7 @@ mod tests {
             post_only: false,
             limit_price: Price::new(dec!(0.60)),
             amount: OrderAmount::Shares(Shares::new(dec!(100))),
+            maker_rebate_schedule: None,
             max_slippage_bps: Bps::new(dec!(50)),
             valid_until: Utc::now(),
         }
@@ -1164,7 +1180,7 @@ mod tests {
         let spec = project_entry_order_spec(&rec, now).expect("projection");
         assert_eq!(spec.token_id, rec.token_id);
         assert_eq!(spec.side, Side::Buy);
-        assert_eq!(spec.projected_shares(), sizing(&rec).suggested_shares);
+        assert_eq!(spec.projected_shares(), sizing(&rec).requested_shares);
         assert!(spec.post_only);
         assert_eq!(
             spec.order_type,
@@ -1189,7 +1205,7 @@ mod tests {
         assert!(!spec.post_only);
         assert_eq!(
             spec.amount,
-            OrderAmount::CashBudget(sizing(&rec).suggested_usd)
+            OrderAmount::CashBudget(sizing(&rec).hard_reserved_cash_usd)
         );
     }
 
@@ -1205,7 +1221,7 @@ mod tests {
         assert!(!spec.post_only);
         assert_eq!(
             spec.amount,
-            OrderAmount::CashBudget(sizing(&rec).suggested_usd)
+            OrderAmount::CashBudget(sizing(&rec).hard_reserved_cash_usd)
         );
     }
 

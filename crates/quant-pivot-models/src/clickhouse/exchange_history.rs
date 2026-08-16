@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    clickhouse::{ChAssetAmount, ChDigest, ChPrice, ChSchemaVersion, ChShares, ChUsd},
+    clickhouse::{ChDigest, ChPrice, ChSchemaVersion, ChShares, ChUsd},
     enums::clickhouse::{
         ChAvailabilityBasis, ChExchangeEventKind, ChExchangeSide, ChExchangeVersion,
         ChExecutionParticipantRole,
@@ -45,6 +45,7 @@ pub struct ExchangeLogRawRow {
 pub struct ExchangeEventRow {
     pub event_id: ChDigest,
     pub raw_log_hash: ChDigest,
+    pub chain_id: u64,
     pub event_kind: ChExchangeEventKind,
     pub contract_key: String,
     pub exchange_version: ChExchangeVersion,
@@ -67,6 +68,32 @@ pub struct ExchangeEventRow {
     pub fee_amount: Option<String>,
     pub builder: Option<String>,
     pub metadata: Option<String>,
+    pub observed_at: i64,
+    pub model_available_at: i64,
+    pub availability_policy_hash: ChDigest,
+    #[serde(with = "clickhouse::serde::uuid")]
+    pub chunk_id: Uuid,
+    pub schema_version: ChSchemaVersion,
+}
+
+/// Transaction-level V2 fee transfer. `FeeCharged` has no order identity, so
+/// it remains a separate fact and is used only for transaction conservation.
+#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+pub struct ExchangeFeeChargeRow {
+    pub fee_charge_id: ChDigest,
+    pub raw_log_hash: ChDigest,
+    pub chain_id: u64,
+    pub contract_key: String,
+    pub exchange_version: ChExchangeVersion,
+    pub contract_address: String,
+    pub block_number: u64,
+    pub block_hash: String,
+    pub block_timestamp: i64,
+    pub transaction_hash: String,
+    pub transaction_index: u64,
+    pub log_index: u64,
+    pub receiver: String,
+    pub amount_usd: ChUsd,
     pub observed_at: i64,
     pub model_available_at: i64,
     pub availability_policy_hash: ChDigest,
@@ -109,8 +136,10 @@ pub struct MarketExecutionRow {
     pub maker_order_filled_event_id: ChDigest,
     pub market_id: MarketId,
     pub token_id: TokenId,
+    pub order_hash: String,
     pub contract_key: String,
     pub exchange_version: ChExchangeVersion,
+    pub contract_address: String,
     pub transaction_hash: String,
     pub block_number: u64,
     pub transaction_index: u64,
@@ -121,8 +150,8 @@ pub struct MarketExecutionRow {
     pub price: ChPrice,
     pub size_shares: ChShares,
     pub notional_usd: ChUsd,
-    pub fee_amount: ChAssetAmount,
-    pub fee_asset_id: String,
+    pub fee_usd: ChUsd,
+    pub builder: Option<String>,
     pub effective_at: i64,
     pub observed_at: i64,
     pub model_available_at: i64,
@@ -193,23 +222,27 @@ pub struct ExecutionParticipantFactRow {
 }
 
 impl ExchangeLogRawRow {
-    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(1);
+    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
 }
 
 impl ExchangeEventRow {
-    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(1);
+    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
+}
+
+impl ExchangeFeeChargeRow {
+    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
 }
 
 impl ExchangeMatchRow {
-    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(1);
+    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
 }
 
 impl MarketExecutionRow {
-    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(1);
+    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
 }
 
 impl ExecutionParticipantRow {
-    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(1);
+    pub const SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
 }
 
 impl ExchangeHistoryAcceptanceRow {

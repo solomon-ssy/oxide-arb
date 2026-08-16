@@ -244,6 +244,7 @@ fn domain_test_registry(
         min_order_size: dec!(1),
         liquidity_usd: Some(Usd::new(dec!(100))),
         volume_24h: None,
+        maker_rebate_schedule: None,
         start_date: context.start_date,
         end_date: context.end_date,
         resolved_at: None,
@@ -272,6 +273,7 @@ fn build_domain_test_vector(
         end_date: Some(as_of + Duration::days(1)),
         created_at: Some(as_of - Duration::days(1)),
         fee_schedule: None,
+        maker_rebate_schedule: None,
     };
     let registry = domain_test_registry(&market, &market_ctx, cutoff);
     let lag_secs = u64::try_from((as_of - cutoff).num_seconds()).map_err(|error| {
@@ -560,8 +562,8 @@ fn dataset_hash_changes_added() {
             feature_vector,
             factor_values: Vec::new(),
             labels: vec![TrainingLabel {
-                label_name: LabelName::from_static("return_to_horizon"),
-                horizon_secs: 60,
+                label_name: LabelName::from_static("token_payout_ratio"),
+                horizon_secs: 0,
                 value: Decimal::ONE,
                 is_resolved: true,
                 matured_at: as_of + Duration::seconds(60),
@@ -579,7 +581,7 @@ fn dataset_hash_changes_added() {
     let h0 = TrainingDatasetArtifact::compute_dataset_hash(
         DatasetHashContract {
             model_spec_id: &spec,
-            model_family: ModelFamily::ClassicalRandomForest,
+            model_family: ModelFamily::ClassicalLogisticRegression,
             window_start: as_of,
             window_end: as_of,
             purpose: DatasetPurpose::Training,
@@ -593,7 +595,7 @@ fn dataset_hash_changes_added() {
     let h1 = TrainingDatasetArtifact::compute_dataset_hash(
         DatasetHashContract {
             model_spec_id: &spec,
-            model_family: ModelFamily::ClassicalRandomForest,
+            model_family: ModelFamily::ClassicalLogisticRegression,
             window_start: as_of,
             window_end: as_of,
             purpose: DatasetPurpose::Training,

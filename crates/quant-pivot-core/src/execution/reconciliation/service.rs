@@ -9,7 +9,7 @@
 //! must be reconciled regardless of the current runtime mode.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -25,9 +25,9 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     domain::{
         quant::{
-            CapitalReconcileSettlement, ExecutionOrderIdentityRefs, ExecutionOrderInfo,
-            OrderIntentInfo, PositionExit, PositionFill, PositionInfo, RecommendationInfo,
-            ReconciliationLedgerWrite,
+            CapitalReconcileSettlement, CumulativePositionExit, CumulativePositionFill,
+            ExecutionOrderIdentityRefs, ExecutionOrderInfo, OrderIntentInfo, PositionInfo,
+            RecommendationInfo, ReconciliationLedgerWrite,
         },
         runtime::{CoreEvent, CoreEventPublisher, ReconciliationLifecycleEvent},
     },
@@ -37,11 +37,13 @@ use quant_pivot_models::{
             ExecutionOrderPhase, ExitReason, ExitState, ReconciliationEvidenceKind,
             ReconciliationResult, VenueOrderStatus,
         },
+        fee::FeeLiquidityRole,
         quant::{AccountSource, ExecutionOrderState, OrderIntentStatus},
     },
     types::{
-        ExecutionAccountId, ExecutionOrderId, FeeEvidence, FeeEvidencePriority, OrderIntentId,
-        Price, RecommendationId, ReconciliationEvidence, ReconciliationEvidenceChain, Shares, Usd,
+        ExecutionAccountId, ExecutionOrderId, FeeMeasurement, OrderIntentId, Price,
+        RecommendationId, ReconciliationEvidence, ReconciliationEvidenceChain, Shares, Usd,
+        VenueTradeId,
     },
 };
 use quant_pivot_repository::traits::{
@@ -321,6 +323,8 @@ impl ReconciliationService {
             result: decision.result,
             filled_shares: decision.filled_shares,
             avg_price: decision.avg_price,
+            venue_terminal: decision.venue_terminal,
+            expired: decision.expired,
             resolved_by: WORKER_ACTOR.to_owned(),
             exit_reason: intent.exit_reason,
         };
@@ -333,7 +337,10 @@ impl ReconciliationService {
             ReconciliationEvidenceChain(evidence),
             now,
         )?;
-        let exit_realized_pnl = write.exit.as_ref().map(|exit| exit.realized_pnl_usd);
+        let exit_realized_pnl = write
+            .cumulative_exit
+            .as_ref()
+            .map(|exit| exit.cumulative_realized_pnl_usd);
         let recorded = self
             .deps
             .submission
@@ -405,6 +412,8 @@ impl ReconciliationService {
             result: resolution.result,
             filled_shares: resolution.filled_shares.unwrap_or(Shares::ZERO),
             avg_price: resolution.avg_price,
+            venue_terminal: true,
+            expired: false,
             resolved_by: resolution.operator.clone(),
             exit_reason: intent.exit_reason,
         };
@@ -417,7 +426,10 @@ impl ReconciliationService {
             ReconciliationEvidenceChain(vec![note]),
             now,
         )?;
-        let exit_realized_pnl = write.exit.as_ref().map(|exit| exit.realized_pnl_usd);
+        let exit_realized_pnl = write
+            .cumulative_exit
+            .as_ref()
+            .map(|exit| exit.cumulative_realized_pnl_usd);
         let recorded = self
             .deps
             .submission
@@ -531,9 +543,8 @@ impl ReconciliationService {
             cancelled_at: None,
             error_message: Some(detail.clone()),
             capital: CapitalReconcileSettlement::Impair,
-            fill: None,
-            exit: None,
-            exit_fully: false,
+            cumulative_fill: None,
+            cumulative_exit: None,
             exit_state: None,
             revert_lot: false,
             result: ReconciliationResult::Unresolvable,
@@ -544,7 +555,8 @@ impl ReconciliationService {
             venue_cash_delta_usd: None,
             realized_pnl_usd: None,
             expected_fee_usd: None,
-            observed_fee_usd: None,
+            derived_fee_usd: None,
+            settled_fee_usd: None,
             fee_delta_usd: None,
             resolved_by: None,
             resolved_at: None,
@@ -626,7 +638,10 @@ impl ReconciliationService {
             let TerminalDecision {
                 filled_shares,
                 avg_price,
+                venue_terminal,
+                expired,
                 resolved_by,
+                exit_reason,
                 ..
             } = decision;
             return exit_reconcile_write(ExitReconcileWriteInput {
@@ -635,8 +650,10 @@ impl ReconciliationService {
                 lot,
                 filled_shares,
                 avg_price,
+                venue_terminal,
+                expired,
                 resolved_by,
-                exit_reason: decision.exit_reason.unwrap_or(ExitReason::Manual),
+                exit_reason: exit_reason.unwrap_or(ExitReason::Manual),
                 now,
             });
         }
@@ -659,6 +676,8 @@ struct TerminalDecision {
     result: ReconciliationResult,
     filled_shares: Shares,
     avg_price: Option<Price>,
+    venue_terminal: bool,
+    expired: bool,
     resolved_by: String,
     /// Frozen exit trigger on the intent (exit-order reconciliation only).
     exit_reason: Option<ExitReason>,
@@ -675,8 +694,17 @@ struct EntryReconcileInput<'a> {
 
 struct ReconciliationFee {
     expected: Usd,
-    observed: Option<Usd>,
+    derived: Option<Usd>,
+    settled: Option<Usd>,
     applied: Usd,
+}
+
+#[derive(Clone, Copy)]
+struct TradeFeeAggregate {
+    shares: Shares,
+    expected: Usd,
+    derived: Option<Usd>,
+    settled: Option<Usd>,
 }
 
 fn reconciliation_fee(
@@ -687,12 +715,7 @@ fn reconciliation_fee(
     matched_at: DateTime<Utc>,
 ) -> QuantResult<ReconciliationFee> {
     let prepared = &order.prepared_order_json.fee_schedule;
-    let role = if order.prepared_order_json.post_only {
-        LiquidityRole::Maker
-    } else {
-        LiquidityRole::Taker
-    };
-    let expected = PitFeeSchedule {
+    let schedule = PitFeeSchedule {
         schedule_hash: prepared.schedule_hash,
         effective_at: prepared.effective_at,
         available_at: prepared.available_at,
@@ -702,30 +725,125 @@ fn reconciliation_fee(
         builder_maker_fee_bps: prepared.builder_maker_fee_bps,
         builder_taker_fee_bps: prepared.builder_taker_fee_bps,
         builder_attribution: prepared.builder_attribution,
+    };
+    let mut trades = BTreeMap::<VenueTradeId, TradeFeeAggregate>::new();
+    for item in &evidence.0 {
+        let Some(measurement) = item.fee_evidence.as_ref() else {
+            continue;
+        };
+        let (trade_id, role, observed_at, derived, settled) = match measurement {
+            FeeMeasurement::PreparedExpected { .. } => continue,
+            FeeMeasurement::AuthenticatedTradeDerived {
+                trade_id,
+                liquidity_role,
+                derived_fee,
+                matched_at,
+                ..
+            } => (
+                trade_id.clone(),
+                *liquidity_role,
+                *matched_at,
+                Some(*derived_fee),
+                None,
+            ),
+            FeeMeasurement::OnChainSettled {
+                venue_trade_id,
+                liquidity_role,
+                settled_fee,
+                matched_at,
+                ..
+            } => (
+                venue_trade_id.clone(),
+                *liquidity_role,
+                *matched_at,
+                None,
+                Some(*settled_fee),
+            ),
+        };
+        let shares = item
+            .shares
+            .ok_or_else(|| ExecutionError::ReconciliationUnresolvable {
+                reason: format!("fee evidence for trade {trade_id} has no fill shares"),
+            })?;
+        let fill_price = item
+            .price
+            .ok_or_else(|| ExecutionError::ReconciliationUnresolvable {
+                reason: format!("fee evidence for trade {trade_id} has no fill price"),
+            })?;
+        let liquidity_role = match role {
+            FeeLiquidityRole::Maker => LiquidityRole::Maker,
+            FeeLiquidityRole::Taker => LiquidityRole::Taker,
+        };
+        let expected = schedule
+            .fee(liquidity_role, fill_price, shares, observed_at)
+            .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+                reason: format!(
+                    "frozen fee schedule cannot price authenticated trade {trade_id}: {error:?}"
+                ),
+            })?;
+        trades
+            .entry(trade_id.clone())
+            .and_modify(|current| {
+                if let Some(value) = derived {
+                    current.derived = Some(value);
+                }
+                if let Some(value) = settled {
+                    current.settled = Some(value);
+                }
+            })
+            .or_insert(TradeFeeAggregate {
+                shares,
+                expected,
+                derived,
+                settled,
+            });
     }
-    .fee(role, price, filled_shares, matched_at)
-    .map_err(|error| ExecutionError::ReconciliationUnresolvable {
-        reason: format!("frozen fee schedule cannot price reconciled fill: {error:?}"),
-    })?;
-    let strongest = evidence
-        .0
-        .iter()
-        .filter_map(|item| item.fee_evidence.as_ref())
-        .map(FeeEvidence::priority)
-        .filter(|priority| *priority != FeeEvidencePriority::PreparedScheduleExpected)
-        .max();
-    let observed = strongest.map(|priority| {
-        evidence
-            .0
-            .iter()
-            .filter_map(|item| item.fee_evidence.as_ref())
-            .filter(|item| item.priority() == priority)
-            .fold(Usd::ZERO, |total, item| total + item.fee())
+    if trades.is_empty() {
+        let role = if order.prepared_order_json.post_only {
+            LiquidityRole::Maker
+        } else {
+            LiquidityRole::Taker
+        };
+        let expected = schedule
+            .fee(role, price, filled_shares, matched_at)
+            .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+                reason: format!("frozen fee schedule cannot price operator fill: {error:?}"),
+            })?;
+        return Ok(ReconciliationFee {
+            expected,
+            derived: None,
+            settled: None,
+            applied: expected,
+        });
+    }
+    let authenticated_shares = trades
+        .values()
+        .fold(Shares::ZERO, |total, trade| total + trade.shares);
+    if authenticated_shares != filled_shares {
+        return Err(ExecutionError::ReconciliationUnresolvable {
+            reason: format!(
+                "authenticated trade shares {authenticated_shares} differ from cumulative fill {filled_shares}"
+            ),
+        }
+        .into());
+    }
+    let expected = trades
+        .values()
+        .fold(Usd::ZERO, |total, trade| total + trade.expected);
+    let derived = trades.values().try_fold(Usd::ZERO, |total, trade| {
+        trade.derived.map(|fee| total + fee)
+    });
+    let settled = trades.values().try_fold(Usd::ZERO, |total, trade| {
+        trade.settled.map(|fee| total + fee)
+    });
+    let applied = trades.values().fold(Usd::ZERO, |total, trade| {
+        total + trade.settled.or(trade.derived).unwrap_or(trade.expected)
     });
     Ok(ReconciliationFee {
         expected,
-        observed,
-        applied: observed.unwrap_or(expected),
+        derived,
+        settled,
+        applied,
     })
 }
 
@@ -744,9 +862,8 @@ fn neutral_terminal_write(
         cancelled_at: None,
         error_message: None,
         capital: CapitalReconcileSettlement::Hold,
-        fill: None,
-        exit: None,
-        exit_fully: false,
+        cumulative_fill: None,
+        cumulative_exit: None,
         exit_state: None,
         revert_lot: false,
         result,
@@ -757,7 +874,8 @@ fn neutral_terminal_write(
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
         expected_fee_usd: None,
-        observed_fee_usd: None,
+        derived_fee_usd: None,
+        settled_fee_usd: None,
         fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
@@ -778,6 +896,8 @@ fn entry_reconcile_write(
                 result,
                 filled_shares,
                 avg_price,
+                venue_terminal,
+                expired,
                 resolved_by,
                 exit_reason: _,
             },
@@ -791,6 +911,12 @@ fn entry_reconcile_write(
             let full = result == ReconciliationResult::Filled;
             write.order_state = if full {
                 ExecutionOrderState::Filled
+            } else if venue_terminal {
+                if expired {
+                    ExecutionOrderState::Failed
+                } else {
+                    ExecutionOrderState::Cancelled
+                }
             } else {
                 ExecutionOrderState::PartiallyFilled
             };
@@ -801,17 +927,24 @@ fn entry_reconcile_write(
             };
             write.venue_status = Some(if full {
                 VenueOrderStatus::Filled
+            } else if venue_terminal && expired {
+                VenueOrderStatus::Expired
+            } else if venue_terminal {
+                VenueOrderStatus::Cancelled
             } else {
                 VenueOrderStatus::PartiallyFilled
             });
-            write.filled_at = Some(now);
-            write.capital = CapitalReconcileSettlement::Settle { spent_usd: spent };
-            write.fill = Some(position_fill(
+            write.filled_at = order.filled_at.or(Some(now));
+            write.capital = if full || venue_terminal {
+                CapitalReconcileSettlement::Settle { spent_usd: spent }
+            } else {
+                CapitalReconcileSettlement::SettlePartial { spent_usd: spent }
+            };
+            write.cumulative_fill = Some(cumulative_position_fill(
                 order,
                 recommendation,
                 execution_account_id,
                 filled_shares,
-                price,
                 spent,
                 now,
             ));
@@ -820,15 +953,16 @@ fn entry_reconcile_write(
             write.expected_cash_delta_usd =
                 Some(Usd::new(order.prepared_order_json.total_cash_delta));
             write.expected_fee_usd = Some(fee.expected);
-            write.observed_fee_usd = fee.observed;
-            if let Some(observed) = fee.observed {
-                write.venue_cash_delta_usd = Some(Usd::new(
-                    -((filled_shares * price).inner() + observed.inner()),
-                ));
-                write.fee_delta_usd = Some(observed - fee.expected);
+            write.derived_fee_usd = fee.derived;
+            write.settled_fee_usd = fee.settled;
+            write.venue_cash_delta_usd = Some(Usd::new(
+                -((filled_shares * price).inner() + fee.applied.inner()),
+            ));
+            write.fee_delta_usd = fee.settled.map(|settled| settled - fee.expected);
+            if full || venue_terminal {
+                write.resolved_by = Some(resolved_by);
+                write.resolved_at = Some(now);
             }
-            write.resolved_by = Some(resolved_by);
-            write.resolved_at = Some(now);
         }
         // `NotFilled` (GTD lapse) and `Cancelled` both release capital; only
         // the recorded terminal order/intent state differs.
@@ -886,6 +1020,8 @@ struct ExitReconcileWriteInput<'a> {
     lot: Option<&'a PositionInfo>,
     filled_shares: Shares,
     avg_price: Option<Price>,
+    venue_terminal: bool,
+    expired: bool,
     resolved_by: String,
     exit_reason: ExitReason,
     now: DateTime<Utc>,
@@ -900,6 +1036,8 @@ fn exit_reconcile_write(
         lot,
         filled_shares,
         avg_price,
+        venue_terminal,
+        expired,
         resolved_by,
         exit_reason,
         now,
@@ -909,19 +1047,32 @@ fn exit_reconcile_write(
             let full = write.result == ReconciliationResult::Filled;
             write.order_state = if full {
                 ExecutionOrderState::Filled
+            } else if venue_terminal && expired {
+                ExecutionOrderState::Failed
+            } else if venue_terminal {
+                ExecutionOrderState::Cancelled
             } else {
                 ExecutionOrderState::PartiallyFilled
             };
             write.venue_status = Some(if full {
                 VenueOrderStatus::Filled
+            } else if venue_terminal && expired {
+                VenueOrderStatus::Expired
+            } else if venue_terminal {
+                VenueOrderStatus::Cancelled
             } else {
                 VenueOrderStatus::PartiallyFilled
             });
-            write.filled_at = Some(now);
+            write.filled_at = order.filled_at.or(Some(now));
+            if venue_terminal && !full {
+                write.cancelled_at = Some(now);
+            }
             write.venue_filled_shares = Some(filled_shares);
             write.venue_avg_price = avg_price;
-            write.resolved_by = Some(resolved_by);
-            write.resolved_at = Some(now);
+            if full || venue_terminal {
+                write.resolved_by = Some(resolved_by);
+                write.resolved_at = Some(now);
+            }
 
             // Without the lot we cannot price the realized PnL — fail closed:
             // leave the order terminal but route the lot to manual review.
@@ -935,30 +1086,23 @@ fn exit_reconcile_write(
             let proceeds_usd = filled_shares * exit_price - exit_fee;
             let cost_basis = lot.avg_price * filled_shares;
             let realized_pnl_usd = proceeds_usd - cost_basis;
-            let fully_exited = filled_shares >= lot.shares;
             write.expected_cash_delta_usd =
                 Some(Usd::new(order.prepared_order_json.total_cash_delta));
-            write.venue_cash_delta_usd = fee
-                .observed
-                .map(|observed| filled_shares * exit_price - observed);
+            write.venue_cash_delta_usd = Some(proceeds_usd);
             write.realized_pnl_usd = Some(realized_pnl_usd);
             write.expected_fee_usd = Some(fee.expected);
-            write.observed_fee_usd = fee.observed;
-            write.fee_delta_usd = fee.observed.map(|observed| observed - fee.expected);
-            write.exit = Some(PositionExit {
-                shares: filled_shares,
+            write.derived_fee_usd = fee.derived;
+            write.settled_fee_usd = fee.settled;
+            write.fee_delta_usd = fee.settled.map(|settled| settled - fee.expected);
+            write.cumulative_exit = Some(CumulativePositionExit {
+                cumulative_shares: filled_shares,
                 avg_price: exit_price,
-                proceeds_usd,
-                realized_pnl_usd,
-                exited_at: now,
+                cumulative_proceeds_usd: proceeds_usd,
+                cumulative_realized_pnl_usd: realized_pnl_usd,
+                observed_at: now,
                 reason: exit_reason,
             });
-            write.exit_fully = fully_exited;
-            write.exit_state = Some(if fully_exited {
-                ExitState::Exited
-            } else {
-                ExitState::PartiallyExited
-            });
+            write.exit_state = Some(ExitState::PartiallyExited);
         }
         // Confirmed non-fill / cancel: the lot never left — re-monitor it.
         ReconciliationResult::NotFilled | ReconciliationResult::Cancelled => {
@@ -1008,16 +1152,15 @@ async fn recollect_after_stale_cancel(
 }
 
 /// Build the position upsert for a confirmed fill.
-fn position_fill(
+fn cumulative_position_fill(
     order: &ExecutionOrderInfo,
     recommendation: &RecommendationInfo,
     execution_account_id: ExecutionAccountId,
     shares: Shares,
-    price: Price,
     cost_usd: Usd,
     now: DateTime<Utc>,
-) -> PositionFill {
-    PositionFill {
+) -> CumulativePositionFill {
+    CumulativePositionFill {
         order_intent_id: order.order_intent_id,
         execution_account_id,
         token_id: order.token_id.clone(),
@@ -1025,10 +1168,9 @@ fn position_fill(
         event_id: Some(recommendation.event_id.clone()),
         category: recommendation.identity.category,
         side: recommendation.outcome_side,
-        shares,
-        price,
-        cost_usd,
-        filled_at: now,
+        cumulative_shares: shares,
+        cumulative_cost_usd: cost_usd,
+        observed_at: now,
         source: AccountSource::Polymarket,
     }
 }
@@ -1164,12 +1306,14 @@ mod tests {
             lot: Some(&position),
             filled_shares: Shares::new(dec!(100)),
             avg_price: Some(Price::new(dec!(0.55))),
+            venue_terminal: true,
+            expired: false,
             resolved_by: "test".to_owned(),
             exit_reason: ExitReason::StopLoss,
             now: Utc::now(),
         })
         .expect("frozen fee fixture");
-        assert!(filled.exit.is_some());
+        assert!(filled.cumulative_exit.is_some());
         let cancelled = exit_reconcile_write(ExitReconcileWriteInput {
             write: neutral_terminal_write(
                 &order,
@@ -1180,12 +1324,14 @@ mod tests {
             lot: Some(&position),
             filled_shares: Shares::ZERO,
             avg_price: None,
+            venue_terminal: true,
+            expired: false,
             resolved_by: "test".to_owned(),
             exit_reason: ExitReason::Manual,
             now: Utc::now(),
         })
         .expect("non-fill does not quote fees");
-        assert!(cancelled.exit.is_none());
+        assert!(cancelled.cumulative_exit.is_none());
     }
 
     #[test]
@@ -1202,13 +1348,15 @@ mod tests {
             lot: Some(&position),
             filled_shares: Shares::new(dec!(100)),
             avg_price: Some(Price::new(dec!(0.55))),
+            venue_terminal: true,
+            expired: false,
             resolved_by: "test".to_owned(),
             exit_reason: ExitReason::StopLoss,
             now: Utc::now(),
         })
         .expect("CLOB fee fixture");
         assert_eq!(
-            write.exit.as_ref().expect("exit fill").reason,
+            write.cumulative_exit.as_ref().expect("exit fill").reason,
             ExitReason::StopLoss
         );
     }

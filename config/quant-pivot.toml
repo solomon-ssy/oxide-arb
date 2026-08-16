@@ -6769,6 +6769,8 @@ execution_breaker_tick_secs = 5
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
 equity_snapshot_secs = 300
+venue_incentive_reconciliation_secs = 3600
+venue_incentive_lookback_days = 35
 
 [quant.account]
 # Field: quant.account.wallet_kind

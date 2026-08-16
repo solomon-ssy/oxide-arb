@@ -14,7 +14,7 @@ use quant_pivot_models::{
     enums::common::MarketCategory,
     types::{
         ContentHash, ModelVersionId,
-        backtest::{CategoryRankIcDelta, ModelComparisonHashInput},
+        backtest::{CategoryRealizedReturnRankCorrelationDelta, ModelComparisonHashInput},
     },
 };
 use rust_decimal::Decimal;
@@ -38,7 +38,7 @@ pub struct ModelComparisonReport {
     /// Candidate report content hash (provenance).
     pub candidate_report_hash: ContentHash,
     /// `candidate − baseline` rank IC over all resolved samples.
-    pub rank_ic_delta: Decimal,
+    pub realized_return_rank_correlation_delta: Decimal,
     /// `candidate − baseline` hit rate.
     pub hit_rate_delta: Decimal,
     /// `candidate − baseline` realized `PnL` (USD).
@@ -50,7 +50,7 @@ pub struct ModelComparisonReport {
     /// Number of `(as_of, market, token)` keys both models resolved.
     pub common_samples: u64,
     /// Per-category rank-IC diff (union of both reports' categories).
-    pub category_breakdown_diff: Vec<CategoryRankIcDelta>,
+    pub category_breakdown_diff: Vec<CategoryRealizedReturnRankCorrelationDelta>,
     /// Canonical hash over every field above.
     pub comparison_hash: ContentHash,
 }
@@ -63,7 +63,7 @@ impl ModelComparisonReport {
             candidate_model_version_id: &self.candidate_model_version_id,
             baseline_report_hash: &self.baseline_report_hash,
             candidate_report_hash: &self.candidate_report_hash,
-            rank_ic_delta: self.rank_ic_delta,
+            realized_return_rank_correlation_delta: self.realized_return_rank_correlation_delta,
             hit_rate_delta: self.hit_rate_delta,
             realized_pnl_delta: self.realized_pnl_delta,
             score_correlation: self.score_correlation,
@@ -114,8 +114,10 @@ impl BacktestRunResult {
             }
             .into());
         }
-        let rank_ic_delta =
-            (candidate.report.rank_ic - self.report.rank_ic).round_dp(RESEARCH_DECIMAL_SCALE);
+        let realized_return_rank_correlation_delta =
+            (candidate.report.realized_return_rank_correlation
+                - self.report.realized_return_rank_correlation)
+                .round_dp(RESEARCH_DECIMAL_SCALE);
         let hit_rate_delta = (candidate.report.hit_rate.inner() - self.report.hit_rate.inner())
             .round_dp(RESEARCH_DECIMAL_SCALE);
         let realized_pnl_delta = (candidate.report.report_pnl_simulation.realized_pnl_usd
@@ -132,7 +134,7 @@ impl BacktestRunResult {
             candidate_model_version_id: &candidate.report.model_version_id,
             baseline_report_hash: &self.report.report_hash,
             candidate_report_hash: &candidate.report.report_hash,
-            rank_ic_delta,
+            realized_return_rank_correlation_delta,
             hit_rate_delta,
             realized_pnl_delta,
             score_correlation,
@@ -147,7 +149,7 @@ impl BacktestRunResult {
             candidate_model_version_id: candidate.report.model_version_id,
             baseline_report_hash: self.report.report_hash,
             candidate_report_hash: candidate.report.report_hash,
-            rank_ic_delta,
+            realized_return_rank_correlation_delta,
             hit_rate_delta,
             realized_pnl_delta,
             score_correlation,
@@ -198,18 +200,18 @@ fn joined_divergence(
 
 /// Per-category rank-IC diff over the union of both reports' categories.
 impl BacktestRunResult {
-    fn category_diff(&self, candidate: &Self) -> Vec<CategoryRankIcDelta> {
+    fn category_diff(&self, candidate: &Self) -> Vec<CategoryRealizedReturnRankCorrelationDelta> {
         let baseline_by_cat: BTreeMap<MarketCategory, Decimal> = self
             .report
             .category_breakdown
             .iter()
-            .map(|c| (c.category, c.rank_ic))
+            .map(|c| (c.category, c.realized_return_rank_correlation))
             .collect();
         let candidate_by_cat: BTreeMap<MarketCategory, Decimal> = candidate
             .report
             .category_breakdown
             .iter()
-            .map(|c| (c.category, c.rank_ic))
+            .map(|c| (c.category, c.realized_return_rank_correlation))
             .collect();
 
         let mut categories: Vec<MarketCategory> = baseline_by_cat
@@ -223,20 +225,22 @@ impl BacktestRunResult {
         categories
             .into_iter()
             .map(|category| {
-                let baseline_rank_ic = baseline_by_cat
+                let baseline_realized_return_rank_correlation = baseline_by_cat
                     .get(&category)
                     .copied()
                     .unwrap_or(Decimal::ZERO);
-                let candidate_rank_ic = candidate_by_cat
+                let candidate_realized_return_rank_correlation = candidate_by_cat
                     .get(&category)
                     .copied()
                     .unwrap_or(Decimal::ZERO);
-                CategoryRankIcDelta {
+                CategoryRealizedReturnRankCorrelationDelta {
                     category,
-                    baseline_rank_ic,
-                    candidate_rank_ic,
-                    rank_ic_delta: (candidate_rank_ic - baseline_rank_ic)
-                        .round_dp(RESEARCH_DECIMAL_SCALE),
+                    baseline_realized_return_rank_correlation,
+                    candidate_realized_return_rank_correlation,
+                    realized_return_rank_correlation_delta:
+                        (candidate_realized_return_rank_correlation
+                            - baseline_realized_return_rank_correlation)
+                            .round_dp(RESEARCH_DECIMAL_SCALE),
                 }
             })
             .collect()
@@ -324,7 +328,7 @@ mod tests {
 
     fn result(
         report_seed: &str,
-        rank_ic: Decimal,
+        realized_return_rank_correlation: Decimal,
         realized_pnl: Decimal,
         samples: Vec<SampleOutcome>,
     ) -> BacktestRunResult {
@@ -338,7 +342,7 @@ mod tests {
             coverage: dec!(1),
             sample_count: samples.len() as u64,
             missing_feature_count: 0,
-            rank_ic,
+            realized_return_rank_correlation,
             sharpe: dec!(0),
             hit_rate: Probability::new(dec!(0.5)),
             expected_vs_realized: ExpectedVsRealized {
@@ -353,7 +357,7 @@ mod tests {
             category_breakdown: vec![CategoryMetric {
                 category: MarketCategory::Crypto,
                 sample_count: samples.len() as u64,
-                rank_ic,
+                realized_return_rank_correlation,
                 hit_rate: Probability::new(dec!(0.5)),
                 mean_realized_bps: dec!(0),
             }],
@@ -413,7 +417,7 @@ mod tests {
 
         let comparison = baseline.compare(&candidate).expect("compare");
         assert_eq!(
-            comparison.rank_ic_delta,
+            comparison.realized_return_rank_correlation_delta,
             dec!(0.15),
             "candidate − baseline rank IC"
         );
@@ -427,7 +431,7 @@ mod tests {
         assert!(comparison.score_correlation > dec!(0.9), "scores track");
         assert_eq!(comparison.category_breakdown_diff.len(), 1);
         assert_eq!(
-            comparison.category_breakdown_diff[0].rank_ic_delta,
+            comparison.category_breakdown_diff[0].realized_return_rank_correlation_delta,
             dec!(0.15)
         );
         assert!(
@@ -438,7 +442,7 @@ mod tests {
         );
         comparison.verify_hash().expect("comparison hash preimage");
         let mut tampered = comparison;
-        tampered.rank_ic_delta += dec!(0.01);
+        tampered.realized_return_rank_correlation_delta += dec!(0.01);
         assert!(
             tampered.verify_hash().is_err(),
             "a cached comparison field mutation must invalidate its canonical hash"

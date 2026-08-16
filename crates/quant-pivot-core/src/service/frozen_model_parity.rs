@@ -48,7 +48,7 @@ use quant_pivot_research::{
         },
         fit_frozen_reference_quantiles, model_input_contract_hash, weighted_training_input_hash,
     },
-    training::{LabelName, RETURN_TO_HORIZON, TOKEN_PAYOUT_RATIO, TrainingExample},
+    training::{LabelName, TOKEN_PAYOUT_RATIO, TrainingExample},
 };
 #[cfg(feature = "ml-classical")]
 use quant_pivot_research::{
@@ -578,24 +578,19 @@ fn verify_classical_binding(
         .into());
     }
     let target = spec.training_contract.target.label_name();
-    let target_semantics = if payload.kind == ClassicalKind::LogisticRegression
-        && target == TOKEN_PAYOUT_RATIO.as_str()
-    {
-        ClassicalOutputSemantics::FullPayoutProbability
-    } else if !matches!(payload.kind, ClassicalKind::LogisticRegression)
-        && target == RETURN_TO_HORIZON.as_str()
-        && spec.training_contract.target.label_horizon_secs() == prediction_horizon_secs
-    {
-        ClassicalOutputSemantics::ForwardReturnBps
-    } else {
-        return Err(ResearchError::Determinism {
-            detail: format!(
-                "classical kind {} has unsupported frozen target `{target}` at {}s",
-                payload.kind,
-                spec.training_contract.target.label_horizon_secs()
-            ),
+    let target_semantics = match payload.kind {
+        ClassicalKind::LogisticRegression if target == TOKEN_PAYOUT_RATIO.as_str() => {
+            ClassicalOutputSemantics::FullPayoutProbability
         }
-        .into());
+        ClassicalKind::LogisticRegression => {
+            return Err(ResearchError::Determinism {
+                detail: format!(
+                    "classical logistic model has unsupported frozen target `{target}` at {}s",
+                    spec.training_contract.target.label_horizon_secs()
+                ),
+            }
+            .into());
+        }
     };
     if payload.output_semantics != target_semantics {
         return Err(ResearchError::Determinism {
@@ -969,7 +964,7 @@ mod tests {
                 source_lineage: self.source_lineage.clone(),
                 cohort_manifest: None,
                 model_spec_id: self.model_spec_id,
-                model_family: ModelFamily::ClassicalRandomForest,
+                model_family: ModelFamily::ClassicalLogisticRegression,
                 model_spec_definition_hash: self.model_spec_definition_hash,
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,
@@ -1023,16 +1018,15 @@ mod tests {
                     model_version_id: self.model_version_id,
                     model_spec_id: self.model_spec_id,
                     model_spec_definition_hash: self.model_spec_definition_hash,
-                    model_family: ModelFamily::ClassicalRandomForest,
+                    model_family: ModelFamily::ClassicalLogisticRegression,
                     category_scope: None,
                     profile_ref: self.profile_ref.clone(),
                     prediction_horizon_secs: 900,
                     estimator: ModelServingEstimatorBinding::Classical {
-                        kind: ClassicalKind::RandomForest,
+                        kind: ClassicalKind::LogisticRegression,
                         model_payload_hash: hash('9'),
                         serialized_model_hash: hash('a'),
                         serialization_format: ModelSerializationFormat::Bincode,
-                        tree_shap: None,
                     },
                     calibration: None,
                 },
@@ -1052,7 +1046,7 @@ mod tests {
                 model_version_id: self.model_version_id,
                 model_spec_id: self.model_spec_id,
                 model_spec_name: "frozen-parity-test-spec".to_owned(),
-                model_family: ModelFamily::ClassicalRandomForest,
+                model_family: ModelFamily::ClassicalLogisticRegression,
                 model_spec_thesis,
                 model_spec_definition_hash: self.model_spec_definition_hash,
                 model_spec_prediction_horizon_secs: 900,
@@ -1079,7 +1073,7 @@ mod tests {
             TrainingDatasetInfo {
                 training_dataset_id: self.training_dataset_id,
                 model_spec_id: self.model_spec_id,
-                model_family: ModelFamily::ClassicalRandomForest,
+                model_family: ModelFamily::ClassicalLogisticRegression,
                 model_spec_definition_hash: self.model_spec_definition_hash,
                 factor_schema_hash: self.factor_serving_plane.factor_schema_hash(),
                 factor_serving_plane: self.factor_serving_plane.clone(),

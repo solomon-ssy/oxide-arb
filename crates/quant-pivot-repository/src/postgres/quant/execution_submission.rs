@@ -7,25 +7,35 @@
 //! happens between [`create_entry_order`] and
 //! [`record_submission_result`] — never inside a transaction.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{
     StorageError,
     entity::{
-        QUANT_EXECUTION_ORDER, QUANT_EXECUTION_TRADE_REF, QUANT_EXECUTION_TRANSACTION_REF,
-        QUANT_ORDER_INTENT, QUANT_RECOMMENDATION, QUANT_RECOMMENDATION_REPORT,
+        QUANT_EXECUTION_FEE_MEASUREMENT, QUANT_EXECUTION_FILL, QUANT_EXECUTION_ORDER,
+        QUANT_EXECUTION_TRADE_REF, QUANT_EXECUTION_TRANSACTION_REF, QUANT_ORDER_INTENT,
+        QUANT_RECOMMENDATION, QUANT_RECOMMENDATION_REPORT, QUANT_VENUE_INCENTIVE_EVENT,
     },
 };
 use quant_pivot_models::{
     domain::quant::{
-        EntryConditionClaim, EntryConditionInstanceInfo, ExecutionIdentityEnrichment,
-        ExecutionIdentityRefs, ExecutionOrderIdentityRefs, ExecutionOrderInfo, ExecutionTradeRef,
-        ExecutionTransactionRef, ExitLedgerWrite, NewExecutionOrder, NewExecutionTradeRef,
-        NewExecutionTransactionRef, NewReconciliation, OrderIntentInfo, ReconciliationLedgerWrite,
+        CumulativePositionExit, EntryConditionClaim, EntryConditionInstanceInfo,
+        ExecutionIdentityEnrichment, ExecutionIdentityRefs, ExecutionOrderIdentityRefs,
+        ExecutionOrderInfo, ExecutionTradeRef, ExecutionTransactionRef, ExitLedgerWrite,
+        NewExecutionFeeMeasurement, NewExecutionFill, NewExecutionOrder, NewExecutionTradeRef,
+        NewExecutionTransactionRef, NewReconciliation, NewVenueIncentiveEvent, OrderIntentInfo,
+        PendingExecutionFeeSettlement, PositionExitReconciliation, ReconciliationLedgerWrite,
         SubmissionLedgerWrite,
     },
     entities::{
+        quant_execution_fee_measurement::{
+            Column as QuantExecutionFeeMeasurementColumn,
+            Entity as QuantExecutionFeeMeasurementEntity,
+        },
+        quant_execution_fill::{
+            Column as QuantExecutionFillColumn, Entity as QuantExecutionFillEntity,
+        },
         quant_execution_order::{Column, Entity as QuantExecutionOrderEntity},
         quant_execution_trade_ref::{
             Column as QuantExecutionTradeRefColumn, Entity as QuantExecutionTradeRefEntity,
@@ -39,24 +49,30 @@ use quant_pivot_models::{
         quant_recommendation_report::Entity as QuantRecommendationReportEntity,
         quant_reconciliation::{
             Column as QuantReconciliationColumn, Entity as QuantReconciliationEntity,
+            Model as QuantReconciliationModel,
         },
     },
     enums::{
         execution::{ExecutionOrderPhase, ExitReason, ExitState, VenueTradeStatus},
+        fee::{FeeMeasurementStage, VenueIncentiveKind, VenueIncentiveStage},
         quant::{
             ExecutionOrderState, OrderIntentStatus, RecommendationReportStatus,
             RecommendationStatus, ReportKind,
         },
     },
+    hashing::CanonicalDigest,
     types::{
-        EvmTransactionHash, ExecutionOrderId, ExecutionTradeRefId, ExecutionTransactionRefId,
-        ExitReinferenceObservation, FeatureParityStateId, OrderIntentId, PendingScaleOut, Price,
-        RecommendationId, RecommendationReportId, ReconciliationId,
+        ContentHash, EvmTransactionHash, ExecutionAccountId, ExecutionFeeMeasurementId,
+        ExecutionFillId, ExecutionOrderId, ExecutionTradeRefId, ExecutionTransactionRefId,
+        ExitReinferenceObservation, FeatureParityStateId, FeeMeasurement, OrderIntentId,
+        PendingScaleOut, Price, RecommendationId, RecommendationReportId, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, Shares, Usd, VenueIncentiveEventId,
+        VenueTradeId,
     },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait, sea_query::Query,
 };
 
 use crate::{
@@ -73,6 +89,7 @@ use crate::{
             order_intent::{PgOrderIntentRepository, validate_intent_transition},
             position::PgPositionRepository,
             report_scope::ReportScope,
+            venue_incentive::PgVenueIncentiveRepository,
         },
         write::insert_many_chunked,
     },
@@ -80,14 +97,16 @@ use crate::{
 };
 
 /// In-flight execution-order states scanned by boot recovery.
-const DANGLING_STATES: [ExecutionOrderState; 2] = [
+const DANGLING_STATES: [ExecutionOrderState; 3] = [
     ExecutionOrderState::Submitted,
+    ExecutionOrderState::PartiallyFilled,
     ExecutionOrderState::Ambiguous,
 ];
 
 /// Exit-order states that must not overlap on the same intent (double-exit guard).
-const IN_FLIGHT_EXIT_STATES: [ExecutionOrderState; 2] = [
+const IN_FLIGHT_EXIT_STATES: [ExecutionOrderState; 3] = [
     ExecutionOrderState::Submitted,
+    ExecutionOrderState::PartiallyFilled,
     ExecutionOrderState::Ambiguous,
 ];
 
@@ -504,7 +523,6 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
 
         // Lock the intent so its status advances atomically with the ledger.
         let intent = PgOrderIntentRepository::load_intent_for_update(&txn, &intent_id).await?;
-
         let mut order_active = order.into_active_model();
         order_active.state = ActiveValue::Set(write.state);
         order_active.venue_order_id = ActiveValue::Set(write.venue_order_id);
@@ -659,19 +677,6 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         }
 
         for observation in enrichment.trades {
-            if matches!(
-                observation.trade_status,
-                VenueTradeStatus::Mined | VenueTradeStatus::Confirmed
-            ) && observation.transaction_hash.is_none()
-            {
-                return Err(StorageError::invariant_violation(
-                    Some(QUANT_EXECUTION_TRADE_REF),
-                    format!(
-                        "trade {} is {:?} without a transaction hash",
-                        observation.venue_trade_id, observation.trade_status
-                    ),
-                ));
-            }
             let existing = QuantExecutionTradeRefEntity::find()
                 .filter(
                     QuantExecutionTradeRefColumn::VenueTradeId
@@ -690,13 +695,16 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                 }
                 let trade_ref = ExecutionTradeRef::from(existing.clone());
                 validate_trade_status_transition(&trade_ref, observation.trade_status)?;
-                if trade_ref.trade_status == Some(VenueTradeStatus::Confirmed)
-                    && trade_ref.transaction_hash != observation.transaction_hash
+                if trade_ref
+                    .transaction_hash
+                    .as_ref()
+                    .zip(observation.transaction_hash.as_ref())
+                    .is_some_and(|(current, observed)| current != observed)
                 {
                     return Err(StorageError::state_conflict(
                         QUANT_EXECUTION_TRADE_REF,
                         Some(&trade_ref.venue_trade_id),
-                        "confirmed trade transaction hash is immutable",
+                        "authenticated trade transaction hash is immutable once observed",
                     ));
                 }
                 let transaction_hash = observation
@@ -960,6 +968,154 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 
+    async fn unsettled_fills(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<PendingExecutionFeeSettlement>, StorageError> {
+        let settled_ids = Query::select()
+            .column(QuantExecutionFeeMeasurementColumn::ExecutionFillId)
+            .from(QuantExecutionFeeMeasurementEntity)
+            .and_where(
+                QuantExecutionFeeMeasurementColumn::Stage.eq(FeeMeasurementStage::OnChainSettled),
+            )
+            .to_owned();
+        let linked_trade_ids = Query::select()
+            .column(QuantExecutionTradeRefColumn::VenueTradeId)
+            .from(QuantExecutionTradeRefEntity)
+            .and_where(QuantExecutionTradeRefColumn::TransactionHash.is_not_null())
+            .to_owned();
+        let fills = QuantExecutionFillEntity::find()
+            .filter(QuantExecutionFillColumn::VenueTradeId.in_subquery(linked_trade_ids))
+            .filter(QuantExecutionFillColumn::ExecutionFillId.not_in_subquery(settled_ids))
+            .order_by_asc(QuantExecutionFillColumn::MatchedAt)
+            .limit(limit)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        if fills.is_empty() {
+            return Ok(Vec::new());
+        }
+        let trade_ids = fills
+            .iter()
+            .map(|fill| fill.venue_trade_id.clone())
+            .collect::<Vec<_>>();
+        let transaction_by_trade = QuantExecutionTradeRefEntity::find()
+            .filter(QuantExecutionTradeRefColumn::VenueTradeId.is_in(trade_ids))
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .filter_map(|trade| {
+                trade
+                    .transaction_hash
+                    .map(|transaction_hash| (trade.venue_trade_id, transaction_hash))
+            })
+            .collect::<BTreeMap<_, _>>();
+        fills
+            .into_iter()
+            .map(|fill| {
+                let transaction_hash = transaction_by_trade
+                    .get(&fill.venue_trade_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        StorageError::state_conflict(
+                            QUANT_EXECUTION_TRADE_REF,
+                            Some(&fill.venue_trade_id),
+                            "fee-settlement query selected a trade without a transaction hash",
+                        )
+                    })?;
+                Ok(PendingExecutionFeeSettlement {
+                    fill: fill.into(),
+                    transaction_hash,
+                })
+            })
+            .collect()
+    }
+
+    async fn record_fee_settlements(
+        &self,
+        measurements: Vec<FeeMeasurement>,
+    ) -> Result<(), StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        for measurement in measurements {
+            let FeeMeasurement::OnChainSettled {
+                venue_trade_id,
+                chain_id,
+                protocol_version,
+                exchange_address,
+                order_id,
+                liquidity_role,
+                transaction_hash,
+                log_index,
+                matched_at,
+                available_at,
+                settled_fee,
+                ..
+            } = &measurement
+            else {
+                return Err(StorageError::invariant_violation(
+                    Some(QUANT_EXECUTION_FEE_MEASUREMENT),
+                    "fee settlement writer accepts only OnChainSettled evidence",
+                ));
+            };
+            let fill = QuantExecutionFillEntity::find()
+                .filter(QuantExecutionFillColumn::VenueTradeId.eq(venue_trade_id.clone()))
+                .lock_exclusive()
+                .one(&txn)
+                .await
+                .map_err(StorageError::from)?
+                .ok_or_else(|| StorageError::not_found(QUANT_EXECUTION_FILL, venue_trade_id))?;
+            if fill.venue_order_id != *order_id || fill.liquidity_role != *liquidity_role {
+                return Err(StorageError::state_conflict(
+                    QUANT_EXECUTION_FEE_MEASUREMENT,
+                    Some(venue_trade_id),
+                    "on-chain fee settlement does not match the authenticated fill",
+                ));
+            }
+            Self::require_trade_transaction(&txn, venue_trade_id, transaction_hash).await?;
+            let chain_id = i64::try_from(*chain_id).map_err(|error| {
+                StorageError::invariant_violation(
+                    Some(QUANT_EXECUTION_FEE_MEASUREMENT),
+                    format!("on-chain fee chain id is outside PostgreSQL range: {error}"),
+                )
+            })?;
+            let log_index = i64::try_from(*log_index).map_err(|error| {
+                StorageError::invariant_violation(
+                    Some(QUANT_EXECUTION_FEE_MEASUREMENT),
+                    format!("on-chain fee log index is outside PostgreSQL range: {error}"),
+                )
+            })?;
+            let evidence_hash =
+                CanonicalDigest::content_hash_json(&measurement).map_err(|error| {
+                    StorageError::invariant_violation(
+                        Some(QUANT_EXECUTION_FEE_MEASUREMENT),
+                        format!("on-chain fee evidence hash failed: {error}"),
+                    )
+                })?;
+            Self::persist_fee_measurement(
+                &txn,
+                NewExecutionFeeMeasurement {
+                    execution_fee_measurement_id: ExecutionFeeMeasurementId::from_v7(),
+                    execution_fill_id: fill.execution_fill_id,
+                    stage: FeeMeasurementStage::OnChainSettled,
+                    fee_usd: *settled_fee,
+                    fee_rate_bps: None,
+                    source_identity: format!("on_chain:{transaction_hash}:{log_index}"),
+                    chain_id: Some(chain_id),
+                    protocol_version: Some(i32::from(*protocol_version)),
+                    exchange_address: Some(exchange_address.clone()),
+                    transaction_hash: Some(transaction_hash.clone()),
+                    log_index: Some(log_index),
+                    observed_at: *matched_at,
+                    available_at: *available_at,
+                    evidence_hash,
+                },
+            )
+            .await?;
+        }
+        txn.commit().await.map_err(StorageError::from)
+    }
+
     async fn apply_reconciliation(
         &self,
         execution_order_id: &ExecutionOrderId,
@@ -974,15 +1130,34 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
 
-        // Idempotency guard: a terminal order has already had its capital and
-        // position settled (at submit or by a prior reconciliation). Never
-        // re-apply — return it unchanged.
-        if order.state.is_terminal() {
-            txn.commit().await.map_err(StorageError::from)?;
-            return Ok(order.into());
-        }
+        let prior_reconciliation = QuantReconciliationEntity::find()
+            .filter(QuantReconciliationColumn::ExecutionOrderId.eq(*execution_order_id))
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?;
 
         validate_execution_order_transition(order.state, write.order_state, execution_order_id)?;
+        if order.state.is_terminal() {
+            let prior = prior_reconciliation.as_ref().ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some(QUANT_EXECUTION_ORDER),
+                    format!(
+                        "terminal execution order {execution_order_id} has no reconciliation summary"
+                    ),
+                )
+            })?;
+            if prior.result != write.result {
+                return Err(StorageError::state_conflict(
+                    QUANT_EXECUTION_ORDER,
+                    Some(execution_order_id),
+                    "terminal reconciliation replay differs from the persisted result",
+                ));
+            }
+            let unchanged = ExecutionOrderInfo::from(order);
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(unchanged);
+        }
         let intent_id = order.order_intent_id;
         let order_intent_id_for_recon = intent_id;
         let existing_venue_order_id = order.venue_order_id.clone();
@@ -990,6 +1165,13 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
 
         // Lock the intent so its status advances atomically with the ledger.
         let intent = PgOrderIntentRepository::load_intent_for_update(&txn, &intent_id).await?;
+        Self::record_authenticated_fills(
+            &txn,
+            &ExecutionOrderInfo::from(order.clone()),
+            intent.execution_account_id,
+            &write.evidence,
+        )
+        .await?;
 
         let mut order_active = order.into_active_model();
         order_active.state = ActiveValue::Set(write.order_state);
@@ -1008,11 +1190,22 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             // Exit-order reconciliation: the entry intent stays terminal; correct
             // the lot via `apply_exit` (never `apply_fill`) and complete the
             // capital `Spent -> Released` on a full exit.
-            let exit_fill_shares = write.exit.as_ref().map(|exit| exit.shares);
+            let mut exit_fill_shares = None;
             let revert_lot = write.revert_lot;
-            if let Some(exit) = write.exit.take() {
-                PgPositionRepository::apply_exit(&txn, &intent_id, exit).await?;
-                if write.exit_fully {
+            if let Some(exit) = write.cumulative_exit.take()
+                && let Some(adjustment) =
+                    Self::exit_adjustment(&exit, prior_reconciliation.as_ref(), execution_order_id)?
+            {
+                exit_fill_shares = Some(adjustment.shares_delta);
+                let position =
+                    PgPositionRepository::reconcile_exit(&txn, &intent_id, adjustment).await?;
+                let fully_exited = position.shares.is_zero();
+                write.exit_state = Some(if fully_exited {
+                    ExitState::Exited
+                } else {
+                    ExitState::PartiallyExited
+                });
+                if fully_exited {
                     PgCapitalAllocationRepository::complete_exit_capital(
                         &txn,
                         &intent_id,
@@ -1028,7 +1221,8 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             if revert_lot {
                 scale_out_state.pending_target = None;
             } else if let Some(filled) = exit_fill_shares
-                && !write.exit_fully
+                && filled.is_positive()
+                && write.exit_state != Some(ExitState::Exited)
             {
                 scale_out_state.record(filled);
             }
@@ -1050,8 +1244,8 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             )
             .await?;
 
-            if let Some(fill) = write.fill.take() {
-                PgPositionRepository::apply_fill(&txn, fill).await?;
+            if let Some(fill) = write.cumulative_fill.take() {
+                PgPositionRepository::reconcile_fill(&txn, fill).await?;
             }
 
             if write.intent_status != intent.status {
@@ -1070,6 +1264,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             execution_order_id,
             &order_intent_id_for_recon,
             write,
+            prior_reconciliation,
         )
         .await?;
 
@@ -1079,6 +1274,441 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
 }
 
 impl PgExecutionSubmissionRepository {
+    async fn record_authenticated_fills(
+        db: &impl ConnectionTrait,
+        order: &ExecutionOrderInfo,
+        execution_account_id: ExecutionAccountId,
+        evidence: &ReconciliationEvidenceChain,
+    ) -> Result<(), StorageError> {
+        for item in &evidence.0 {
+            Self::record_derived_fill(db, order, execution_account_id, item).await?;
+        }
+        for item in &evidence.0 {
+            Self::record_settled_fee(db, order, item).await?;
+        }
+        Ok(())
+    }
+
+    async fn record_derived_fill(
+        db: &impl ConnectionTrait,
+        order: &ExecutionOrderInfo,
+        execution_account_id: ExecutionAccountId,
+        item: &ReconciliationEvidence,
+    ) -> Result<(), StorageError> {
+        let Some(FeeMeasurement::AuthenticatedTradeDerived {
+            trade_id,
+            bucket_index,
+            order_id,
+            liquidity_role,
+            matched_at,
+            ..
+        }) = item.fee_evidence.as_ref()
+        else {
+            return Ok(());
+        };
+        let shares = item.shares.ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(QUANT_EXECUTION_FILL),
+                format!("authenticated fill {trade_id} has no shares"),
+            )
+        })?;
+        let price = item.price.ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(QUANT_EXECUTION_FILL),
+                format!("authenticated fill {trade_id} has no price"),
+            )
+        })?;
+        let evidence_hash = CanonicalDigest::content_hash_json(item).map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_EXECUTION_TRADE_REF),
+                format!("authenticated fill {trade_id} evidence hash failed: {error}"),
+            )
+        })?;
+        let venue_bucket_index = i32::try_from(*bucket_index).map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_EXECUTION_FILL),
+                format!(
+                    "authenticated fill {trade_id} bucket index is outside PostgreSQL range: {error}"
+                ),
+            )
+        })?;
+        let execution_fill_id = Self::persist_execution_fill(
+            db,
+            NewExecutionFill {
+                execution_fill_id: ExecutionFillId::from_v7(),
+                execution_order_id: order.execution_order_id,
+                order_intent_id: order.order_intent_id,
+                execution_account_id,
+                venue_trade_id: trade_id.clone(),
+                venue_bucket_index,
+                venue_order_id: order_id.clone(),
+                order_phase: order.order_phase,
+                market_id: order.market_id.clone(),
+                token_id: order.token_id.clone(),
+                side: order.side,
+                liquidity_role: *liquidity_role,
+                shares,
+                price,
+                principal_usd: shares * price,
+                matched_at: *matched_at,
+                available_at: item.observed_at,
+                evidence_hash,
+            },
+            trade_id,
+        )
+        .await?;
+        Self::persist_provisional_fees(db, order, execution_fill_id, item, evidence_hash).await?;
+        Self::persist_maker_accrual(db, order, execution_account_id, execution_fill_id, item).await
+    }
+
+    async fn persist_execution_fill(
+        db: &impl ConnectionTrait,
+        fill: NewExecutionFill,
+        trade_id: &VenueTradeId,
+    ) -> Result<ExecutionFillId, StorageError> {
+        let existing = QuantExecutionFillEntity::find()
+            .filter(QuantExecutionFillColumn::VenueTradeId.eq(trade_id.clone()))
+            .one(db)
+            .await
+            .map_err(StorageError::from)?;
+        if let Some(existing) = existing {
+            let exact_retry = existing.execution_order_id == fill.execution_order_id
+                && existing.order_intent_id == fill.order_intent_id
+                && existing.execution_account_id == fill.execution_account_id
+                && existing.venue_bucket_index == fill.venue_bucket_index
+                && existing.venue_order_id == fill.venue_order_id
+                && existing.order_phase == fill.order_phase
+                && existing.market_id == fill.market_id
+                && existing.token_id == fill.token_id
+                && existing.side == fill.side
+                && existing.liquidity_role == fill.liquidity_role
+                && existing.shares == fill.shares
+                && existing.price == fill.price
+                && existing.principal_usd == fill.principal_usd
+                && existing.matched_at == fill.matched_at;
+            if !exact_retry {
+                return Err(StorageError::state_conflict(
+                    QUANT_EXECUTION_FILL,
+                    Some(trade_id),
+                    "authenticated fill identity was replayed with different economics or lineage",
+                ));
+            }
+            return Ok(existing.execution_fill_id);
+        }
+        let execution_fill_id = fill.execution_fill_id;
+        QuantExecutionFillEntity::insert(fill.into_active_model())
+            .exec(db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(execution_fill_id)
+    }
+
+    async fn persist_provisional_fees(
+        db: &impl ConnectionTrait,
+        order: &ExecutionOrderInfo,
+        execution_fill_id: ExecutionFillId,
+        item: &ReconciliationEvidence,
+        evidence_hash: ContentHash,
+    ) -> Result<(), StorageError> {
+        let Some(FeeMeasurement::AuthenticatedTradeDerived {
+            trade_id,
+            fee_rate_bps,
+            expected_fee,
+            derived_fee,
+            transaction_hash,
+            matched_at,
+            ..
+        }) = item.fee_evidence.as_ref()
+        else {
+            return Ok(());
+        };
+        Self::persist_fee_measurement(
+            db,
+            NewExecutionFeeMeasurement {
+                execution_fee_measurement_id: ExecutionFeeMeasurementId::from_v7(),
+                execution_fill_id,
+                stage: FeeMeasurementStage::PreparedExpected,
+                fee_usd: *expected_fee,
+                fee_rate_bps: None,
+                source_identity: format!("prepared:{trade_id}"),
+                chain_id: None,
+                protocol_version: None,
+                exchange_address: None,
+                transaction_hash: None,
+                log_index: None,
+                observed_at: order.prepared_order_json.prepared_at,
+                available_at: order.prepared_order_json.prepared_at,
+                evidence_hash: order.prepared_order_json.fee_schedule.schedule_hash,
+            },
+        )
+        .await?;
+        Self::persist_fee_measurement(
+            db,
+            NewExecutionFeeMeasurement {
+                execution_fee_measurement_id: ExecutionFeeMeasurementId::from_v7(),
+                execution_fill_id,
+                stage: FeeMeasurementStage::AuthenticatedTradeDerived,
+                fee_usd: *derived_fee,
+                fee_rate_bps: Some(*fee_rate_bps),
+                source_identity: format!("authenticated:{trade_id}"),
+                chain_id: None,
+                protocol_version: None,
+                exchange_address: None,
+                transaction_hash: transaction_hash.clone(),
+                log_index: None,
+                observed_at: *matched_at,
+                available_at: item.observed_at,
+                evidence_hash,
+            },
+        )
+        .await
+    }
+
+    async fn persist_maker_accrual(
+        db: &impl ConnectionTrait,
+        order: &ExecutionOrderInfo,
+        execution_account_id: ExecutionAccountId,
+        execution_fill_id: ExecutionFillId,
+        item: &ReconciliationEvidence,
+    ) -> Result<(), StorageError> {
+        let Some(FeeMeasurement::AuthenticatedTradeDerived {
+            trade_id,
+            expected_maker_rebate: Some(incentive),
+            transaction_hash,
+            matched_at,
+            ..
+        }) = item.fee_evidence.as_ref()
+        else {
+            return Ok(());
+        };
+        let evidence_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/maker-rebate-accrual",
+            1,
+            &(trade_id, execution_fill_id, incentive),
+        )
+        .map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_VENUE_INCENTIVE_EVENT),
+                format!("maker rebate accrual hash failed: {error}"),
+            )
+        })?;
+        let source_identity = format!("maker_accrual:{execution_account_id}:{trade_id}");
+        PgVenueIncentiveRepository::persist_on(
+            db,
+            NewVenueIncentiveEvent {
+                venue_incentive_event_id: VenueIncentiveEventId::from_v7(),
+                execution_account_id,
+                execution_fill_id: Some(execution_fill_id),
+                market_id: Some(order.market_id.clone()),
+                kind: VenueIncentiveKind::MakerRebate,
+                stage: VenueIncentiveStage::EstimatedAccrual,
+                program_date: incentive.settlement_date,
+                amount_usd: incentive.expected_rebate_usd,
+                source_schedule_hash: Some(incentive.source_schedule_hash),
+                source_partition: source_identity.clone(),
+                source_identity,
+                transaction_hash: transaction_hash.clone(),
+                observed_at: *matched_at,
+                available_at: item.observed_at,
+                evidence_hash,
+            },
+        )
+        .await
+    }
+
+    async fn record_settled_fee(
+        db: &impl ConnectionTrait,
+        order: &ExecutionOrderInfo,
+        item: &ReconciliationEvidence,
+    ) -> Result<(), StorageError> {
+        let Some(FeeMeasurement::OnChainSettled {
+            venue_trade_id,
+            chain_id,
+            protocol_version,
+            exchange_address,
+            order_id,
+            liquidity_role,
+            transaction_hash,
+            log_index,
+            matched_at,
+            available_at,
+            settled_fee,
+            ..
+        }) = item.fee_evidence.as_ref()
+        else {
+            return Ok(());
+        };
+        let fill = QuantExecutionFillEntity::find()
+            .filter(QuantExecutionFillColumn::VenueTradeId.eq(venue_trade_id.clone()))
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_EXECUTION_FILL, venue_trade_id))?;
+        if fill.execution_order_id != order.execution_order_id
+            || fill.venue_order_id != *order_id
+            || fill.liquidity_role != *liquidity_role
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_EXECUTION_FEE_MEASUREMENT,
+                Some(venue_trade_id),
+                "on-chain fee event does not match the authenticated fill identity",
+            ));
+        }
+        Self::require_trade_transaction(db, venue_trade_id, transaction_hash).await?;
+        let chain_id = i64::try_from(*chain_id).map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_EXECUTION_FEE_MEASUREMENT),
+                format!("on-chain fee chain id is outside PostgreSQL range: {error}"),
+            )
+        })?;
+        let log_index = i64::try_from(*log_index).map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_EXECUTION_FEE_MEASUREMENT),
+                format!("on-chain fee log index is outside PostgreSQL range: {error}"),
+            )
+        })?;
+        let evidence_hash = CanonicalDigest::content_hash_json(item).map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_EXECUTION_FEE_MEASUREMENT),
+                format!("on-chain fee evidence hash failed: {error}"),
+            )
+        })?;
+        Self::persist_fee_measurement(
+            db,
+            NewExecutionFeeMeasurement {
+                execution_fee_measurement_id: ExecutionFeeMeasurementId::from_v7(),
+                execution_fill_id: fill.execution_fill_id,
+                stage: FeeMeasurementStage::OnChainSettled,
+                fee_usd: *settled_fee,
+                fee_rate_bps: None,
+                source_identity: format!("on_chain:{transaction_hash}:{log_index}"),
+                chain_id: Some(chain_id),
+                protocol_version: Some(i32::from(*protocol_version)),
+                exchange_address: Some(exchange_address.clone()),
+                transaction_hash: Some(transaction_hash.clone()),
+                log_index: Some(log_index),
+                observed_at: *matched_at,
+                available_at: *available_at,
+                evidence_hash,
+            },
+        )
+        .await
+    }
+
+    async fn require_trade_transaction(
+        db: &impl ConnectionTrait,
+        venue_trade_id: &VenueTradeId,
+        transaction_hash: &EvmTransactionHash,
+    ) -> Result<(), StorageError> {
+        let trade_ref = QuantExecutionTradeRefEntity::find()
+            .filter(QuantExecutionTradeRefColumn::VenueTradeId.eq(venue_trade_id.clone()))
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_EXECUTION_TRADE_REF, venue_trade_id))?;
+        if trade_ref.transaction_hash.as_ref() != Some(transaction_hash) {
+            return Err(StorageError::state_conflict(
+                QUANT_EXECUTION_TRADE_REF,
+                Some(venue_trade_id),
+                "on-chain fee transaction differs from authenticated trade identity",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn persist_fee_measurement(
+        db: &impl ConnectionTrait,
+        measurement: NewExecutionFeeMeasurement,
+    ) -> Result<(), StorageError> {
+        let existing = QuantExecutionFeeMeasurementEntity::find()
+            .filter(
+                QuantExecutionFeeMeasurementColumn::ExecutionFillId
+                    .eq(measurement.execution_fill_id),
+            )
+            .filter(QuantExecutionFeeMeasurementColumn::Stage.eq(measurement.stage))
+            .one(db)
+            .await
+            .map_err(StorageError::from)?;
+        if let Some(existing) = existing {
+            let exact_retry = existing.fee_usd == measurement.fee_usd
+                && existing.fee_rate_bps == measurement.fee_rate_bps
+                && existing.source_identity == measurement.source_identity
+                && existing.chain_id == measurement.chain_id
+                && existing.protocol_version == measurement.protocol_version
+                && existing.exchange_address == measurement.exchange_address
+                && existing.log_index == measurement.log_index
+                && !matches!(
+                    (&existing.transaction_hash, &measurement.transaction_hash),
+                    (Some(existing), Some(incoming)) if existing != incoming
+                );
+            if exact_retry {
+                return Ok(());
+            }
+            return Err(StorageError::state_conflict(
+                QUANT_EXECUTION_FEE_MEASUREMENT,
+                Some(&measurement.execution_fill_id),
+                "fee measurement stage was replayed with different provenance or value",
+            ));
+        }
+        QuantExecutionFeeMeasurementEntity::insert(measurement.into_active_model())
+            .exec(db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(())
+    }
+
+    fn exit_adjustment(
+        cumulative: &CumulativePositionExit,
+        prior: Option<&QuantReconciliationModel>,
+        execution_order_id: &ExecutionOrderId,
+    ) -> Result<Option<PositionExitReconciliation>, StorageError> {
+        let previous_shares = prior
+            .and_then(|row| row.venue_filled_shares)
+            .unwrap_or(Shares::ZERO);
+        let previous_proceeds = prior
+            .and_then(|row| row.venue_cash_delta_usd)
+            .unwrap_or(Usd::ZERO);
+        let previous_realized_pnl = prior
+            .and_then(|row| row.realized_pnl_usd)
+            .unwrap_or(Usd::ZERO);
+        if previous_shares.is_positive()
+            && prior.is_some_and(|row| {
+                row.venue_cash_delta_usd.is_none() || row.realized_pnl_usd.is_none()
+            })
+        {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_EXECUTION_ORDER),
+                format!(
+                    "exit reconciliation {execution_order_id} has filled shares without cumulative cash and PnL"
+                ),
+            ));
+        }
+        if cumulative.cumulative_shares < previous_shares {
+            return Err(StorageError::state_conflict(
+                QUANT_EXECUTION_ORDER,
+                Some(execution_order_id),
+                format!(
+                    "cumulative exit shares regressed from {previous_shares} to {}",
+                    cumulative.cumulative_shares
+                ),
+            ));
+        }
+        let shares_delta = cumulative.cumulative_shares - previous_shares;
+        let realized_pnl_delta_usd = cumulative.cumulative_realized_pnl_usd - previous_realized_pnl;
+        if shares_delta.is_zero()
+            && cumulative.cumulative_proceeds_usd == previous_proceeds
+            && realized_pnl_delta_usd.is_zero()
+        {
+            return Ok(None);
+        }
+        Ok(Some(PositionExitReconciliation {
+            shares_delta,
+            realized_pnl_delta_usd,
+            observed_at: cumulative.observed_at,
+            reason: cumulative.reason,
+        }))
+    }
+
     /// Upsert the single reconciliation summary row for an execution order.
     ///
     /// Updates the existing row in place (e.g. an `Ambiguous` order's submit-time
@@ -1091,13 +1721,8 @@ impl PgExecutionSubmissionRepository {
         execution_order_id: &ExecutionOrderId,
         order_intent_id: &OrderIntentId,
         write: ReconciliationLedgerWrite,
+        existing: Option<QuantReconciliationModel>,
     ) -> Result<(), StorageError> {
-        let existing = QuantReconciliationEntity::find()
-            .filter(QuantReconciliationColumn::ExecutionOrderId.eq(*execution_order_id))
-            .one(db)
-            .await
-            .map_err(StorageError::from)?;
-
         if let Some(row) = existing {
             let mut chain = row.evidence_json.clone();
             for evidence in write.evidence.into_inner() {
@@ -1112,7 +1737,8 @@ impl PgExecutionSubmissionRepository {
             active.venue_cash_delta_usd = ActiveValue::Set(write.venue_cash_delta_usd);
             active.realized_pnl_usd = ActiveValue::Set(write.realized_pnl_usd);
             active.expected_fee_usd = ActiveValue::Set(write.expected_fee_usd);
-            active.observed_fee_usd = ActiveValue::Set(write.observed_fee_usd);
+            active.derived_fee_usd = ActiveValue::Set(write.derived_fee_usd);
+            active.settled_fee_usd = ActiveValue::Set(write.settled_fee_usd);
             active.fee_delta_usd = ActiveValue::Set(write.fee_delta_usd);
             active.resolved_by = ActiveValue::Set(write.resolved_by);
             active.resolved_at = ActiveValue::Set(write.resolved_at);
@@ -1132,7 +1758,8 @@ impl PgExecutionSubmissionRepository {
             venue_cash_delta_usd: write.venue_cash_delta_usd,
             realized_pnl_usd: write.realized_pnl_usd,
             expected_fee_usd: write.expected_fee_usd,
-            observed_fee_usd: write.observed_fee_usd,
+            derived_fee_usd: write.derived_fee_usd,
+            settled_fee_usd: write.settled_fee_usd,
             fee_delta_usd: write.fee_delta_usd,
             resolved_by: write.resolved_by,
             resolved_at: write.resolved_at,

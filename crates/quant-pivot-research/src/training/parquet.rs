@@ -394,7 +394,7 @@ mod tests {
         let semantic_dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
             DatasetHashContract {
                 model_spec_id: &model_spec_id,
-                model_family: ModelFamily::ClassicalRandomForest,
+                model_family: ModelFamily::ClassicalLogisticRegression,
                 window_start,
                 window_end,
                 purpose: DatasetPurpose::Training,
@@ -411,7 +411,7 @@ mod tests {
             source_lineage: source_lineage(window_start, window_end),
             cohort_manifest: None,
             model_spec_id,
-            model_family: ModelFamily::ClassicalRandomForest,
+            model_family: ModelFamily::ClassicalLogisticRegression,
             model_spec_definition_hash: hash('6'),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,

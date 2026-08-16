@@ -29,10 +29,7 @@ use quant_pivot_models::{
             MarketSelectionMemberInfo, NewAttributionArtifact,
         },
     },
-    enums::{
-        model::ModelFamily,
-        quant::{AttributionCohort, FeedbackCohort, FillRequirement, OutcomeSide},
-    },
+    enums::quant::{AttributionCohort, FeedbackCohort, FillRequirement, OutcomeSide},
     hashing::CanonicalDigest,
     types::{
         Bps, ClobMarketInfoVersion, ContentHash, FactorDefinitionId, FeatureVectorId, ModelRunId,
@@ -60,7 +57,7 @@ use quant_pivot_research::{
         PolicyCounterfactualOutcome, PredictionContribution, PredictionExplanationArtifact,
         ResolutionOutcomeAssociationArtifact, ResolutionOutcomeAssociationInput,
         ResolutionOutcomeAssociationSample, ResolutionOutcomeAssociationTarget, TrajectoryPoint,
-        TrajectoryPointEconomics, TrajectoryPointNotEvaluableReason, TreeEnsembleInput,
+        TrajectoryPointEconomics, TrajectoryPointNotEvaluableReason,
         WeightedFactorExplanationInput,
     },
     execution_semantics::{BookWalkOutcome, LiquidityRole, PitFeeSchedule, walk_sell_exact_shares},
@@ -68,18 +65,13 @@ use quant_pivot_research::{
     features::FeatureVector,
     model::{
         ModelArtifact,
-        artifact::{ClassicalModelPayload, ModelPayload, WeightedFactorModelPayload},
+        artifact::{ModelPayload, WeightedFactorModelPayload},
         factor_heads::score_factor_heads,
         model_input_contract_hash,
     },
     selection::SelectedMarket,
 };
-#[cfg(feature = "ml-classical")]
-use quant_pivot_research::{
-    attribution::TreeEnsembleSpec,
-    model::{ClassicalDecisionProjection, InferenceMatrixRow},
-};
-use rust_decimal::{Decimal, prelude::FromPrimitive};
+use rust_decimal::Decimal;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -166,8 +158,6 @@ struct DecisionUniverse {
 #[derive(Clone)]
 enum DecisionReplayModel {
     Weighted(BTreeMap<DecisionCandidateKey, WeightedReplayState>),
-    #[cfg(feature = "ml-classical")]
-    Tree(Box<TreeReplayModel>),
 }
 
 #[derive(Clone)]
@@ -191,37 +181,6 @@ struct WeightedCandidateReplay {
     state: WeightedReplayState,
 }
 
-#[cfg(feature = "ml-classical")]
-#[derive(Clone)]
-struct TreeReplayModel {
-    payload: ClassicalModelPayload,
-    prediction_horizon_secs: u64,
-    ensemble: TreeEnsembleSpec,
-    candidates: BTreeMap<DecisionCandidateKey, TreeReplayState>,
-}
-
-#[cfg(feature = "ml-classical")]
-#[derive(Clone)]
-struct TreeReplayState {
-    input: TreeEnsembleInput,
-    row: InferenceMatrixRow,
-}
-
-#[cfg(feature = "ml-classical")]
-struct TreeUniverseEvidence<'a> {
-    context: &'a FeedbackRecommendationContext,
-    artifact: &'a ModelArtifact,
-    payload: &'a ClassicalModelPayload,
-    run_inputs: &'a [QuantModelInputEventRow],
-    features: &'a HashMap<FeatureVectorId, FeatureVectorInfo>,
-}
-
-#[cfg(feature = "ml-classical")]
-struct TreeCandidateReplay {
-    key: DecisionCandidateKey,
-    state: TreeReplayState,
-}
-
 impl DecisionUniverse {
     fn replay_prediction(
         &self,
@@ -234,8 +193,6 @@ impl DecisionUniverse {
         };
         let target_present = match &self.replay {
             DecisionReplayModel::Weighted(states) => states.contains_key(&target_key),
-            #[cfg(feature = "ml-classical")]
-            DecisionReplayModel::Tree(model) => model.candidates.contains_key(&target_key),
         };
         if !target_present {
             return Err(FeedbackAttributionMaterializer::invalid(format!(
@@ -283,127 +240,6 @@ impl DecisionUniverse {
         match &self.replay {
             DecisionReplayModel::Weighted(states) => {
                 Self::weighted_interventions(states, prediction, target_key)
-            }
-            #[cfg(feature = "ml-classical")]
-            DecisionReplayModel::Tree(model) => {
-                let state = model.candidates.get(target_key).ok_or_else(|| {
-                    FeedbackAttributionMaterializer::invalid(format!(
-                        "GBDT replay state omitted {}/{}",
-                        target_key.market_id, target_key.token_id
-                    ))
-                })?;
-                Self::ordered_contributions(prediction)
-                    .into_iter()
-                    .map(|contribution| {
-                        let feature_index = model
-                            .ensemble
-                            .feature_names
-                            .iter()
-                            .position(|name| name == &contribution.input_name)
-                            .ok_or_else(|| {
-                                FeedbackAttributionMaterializer::invalid(format!(
-                                    "GBDT explanation input {} is absent from its ensemble",
-                                    contribution.input_name
-                                ))
-                            })?;
-                        let tree_support = model
-                            .ensemble
-                            .feature_supports
-                            .get(feature_index)
-                            .copied()
-                            .ok_or_else(|| {
-                                FeedbackAttributionMaterializer::invalid(format!(
-                                    "GBDT feature support omitted {}",
-                                    contribution.input_name
-                                ))
-                            })?;
-                        let support = DecisionInterventionSupport::try_new(
-                            tree_support.minimum,
-                            tree_support.maximum,
-                        )?;
-                        let proposed_value = Some(Decimal::ZERO);
-                        if contribution.input_value
-                            != state
-                                .input
-                                .values
-                                .get(feature_index)
-                                .copied()
-                                .ok_or_else(|| {
-                                    FeedbackAttributionMaterializer::invalid(format!(
-                                        "GBDT serving input omitted {}",
-                                        contribution.input_name
-                                    ))
-                                })?
-                        {
-                            return Err(FeedbackAttributionMaterializer::invalid(format!(
-                                "GBDT explanation input {} differs from exact serving evidence",
-                                contribution.input_name
-                            )));
-                        }
-                        let evaluation =
-                            Self::blocked_reason(contribution, support, proposed_value)
-                                .map_or_else(
-                                    || {
-                                        let mut input = state.input.clone();
-                                        let input_value = input
-                                            .values
-                                            .get_mut(feature_index)
-                                            .ok_or_else(|| {
-                                                FeedbackAttributionMaterializer::invalid(format!(
-                                                    "GBDT intervention input omitted {}",
-                                                    contribution.input_name
-                                                ))
-                                            })?;
-                                        *input_value = proposed_value;
-                                        let raw_prediction = model.ensemble.predict(&input)?;
-                                        Ok::<DecisionInterventionEvaluation, QuantError>(match ClassicalDecisionProjection::try_project(
-                                            &model.payload,
-                                            model.prediction_horizon_secs,
-                                            raw_prediction,
-                                            &state.row,
-                                        )? {
-                                            None => DecisionInterventionEvaluation::NotEvaluable {
-                                                reason: DecisionInterventionNotEvaluableReason::
-                                                    ProjectionNotAdmissible,
-                                            },
-                                            Some(projected)
-                                                if projected.token_id != target_key.token_id =>
-                                            {
-                                                DecisionInterventionEvaluation::NotEvaluable {
-                                                    reason: DecisionInterventionNotEvaluableReason::
-                                                        TokenSideFlipNotAdmissible,
-                                                }
-                                            }
-                                            Some(_)
-                                                if raw_prediction
-                                                    == prediction.explanation.predicted_output =>
-                                            {
-                                                DecisionInterventionEvaluation::NotEvaluable {
-                                                    reason: DecisionInterventionNotEvaluableReason::
-                                                        NoMaterialModelOutputChange,
-                                                }
-                                            }
-                                            Some(_) => {
-                                                DecisionInterventionEvaluation::Evaluated {
-                                                    intervened_model_output: raw_prediction,
-                                                }
-                                            }
-                                        })
-                                    },
-                                    |reason| {
-                                        Ok(DecisionInterventionEvaluation::NotEvaluable { reason })
-                                    },
-                                )?;
-                        Ok(DecisionInterventionAttempt {
-                            input_name: contribution.input_name.clone(),
-                            model_contribution: contribution.contribution,
-                            observed_value: contribution.input_value,
-                            proposed_value,
-                            support,
-                            evaluation,
-                        })
-                    })
-                    .collect()
             }
         }
     }
@@ -513,80 +349,6 @@ impl DecisionUniverse {
 struct ServingEvidencePage {
     completion_hashes: HashMap<ModelRunId, ContentHash>,
     model_inputs: HashMap<ModelRunId, Vec<QuantModelInputEventRow>>,
-}
-
-struct TreeInputEvidenceContract<'a> {
-    feature_names: &'a [String],
-    model_family: ModelFamily,
-    model_version_id: ModelVersionId,
-    input_contract_hash: ContentHash,
-    input_transform_hash: ContentHash,
-    training_input_hash: ContentHash,
-}
-
-impl TreeInputEvidenceContract<'_> {
-    fn encode(
-        &self,
-        rows: &[&QuantModelInputEventRow],
-        model_run_id: ModelRunId,
-    ) -> QuantResult<TreeEnsembleInput> {
-        if rows.len() != self.feature_names.len() {
-            return Err(FeedbackAttributionMaterializer::invalid(format!(
-                "model run {model_run_id} has {} encoded inputs but GBDT requires {}",
-                rows.len(),
-                self.feature_names.len()
-            )));
-        }
-        let mut encoded = BTreeMap::new();
-        for row in rows {
-            if row.model_run_id != model_run_id
-                || row.model_version_id != self.model_version_id
-                || row.model_family != self.model_family.to_string()
-                || row.input_contract_hash != self.input_contract_hash.to_string()
-                || row.transform_hash != self.input_transform_hash.to_string()
-                || row.training_input_hash != self.training_input_hash.to_string()
-            {
-                return Err(FeedbackAttributionMaterializer::invalid(format!(
-                    "model input {} for run {model_run_id} differs from its serving contract",
-                    row.encoded_column
-                )));
-            }
-            if encoded.insert(row.encoded_column.as_str(), *row).is_some() {
-                return Err(FeedbackAttributionMaterializer::invalid(format!(
-                    "model run {model_run_id} contains duplicate encoded column {}",
-                    row.encoded_column
-                )));
-            }
-        }
-        let values = self
-            .feature_names
-            .iter()
-            .map(|name| {
-                let row = encoded.get(name.as_str()).ok_or_else(|| {
-                    FeedbackAttributionMaterializer::invalid(format!(
-                        "model run {model_run_id} omitted GBDT encoded column {name}"
-                    ))
-                })?;
-                let bits = row.encoded_value_bits.ok_or_else(|| {
-                    FeedbackAttributionMaterializer::invalid(format!(
-                        "GBDT encoded column {name} has no numeric value"
-                    ))
-                })?;
-                let value = f64::from_bits(bits);
-                if !value.is_finite() {
-                    return Err(FeedbackAttributionMaterializer::invalid(format!(
-                        "GBDT encoded column {name} is non-finite"
-                    )));
-                }
-                Decimal::from_f64(value).map(Some).ok_or_else(|| {
-                    FeedbackAttributionMaterializer::invalid(format!(
-                        "GBDT encoded column {name} cannot be represented as Decimal"
-                    ))
-                })
-            })
-            .collect::<QuantResult<Vec<_>>>()?;
-        Ok(TreeEnsembleInput { values })
-    }
 }
 
 struct PredictionPageEvidence<'a> {
@@ -985,9 +747,14 @@ impl FeedbackAttributionMaterializer {
             ModelPayload::WeightedFactor(payload) => {
                 self.weighted_prediction(evidence, candidate, artifact, payload, resolution_hash)
             }
-            ModelPayload::Classical(payload) => {
-                self.tree_prediction(evidence, candidate, artifact, payload, resolution_hash)
+            ModelPayload::Classical(_) => Err(ResearchError::NotEligible {
+                code: "exact_prediction_explanation_unavailable",
+                detail: format!(
+                    "shadow-only classical model {} cannot enter recommendation attribution",
+                    candidate.context().model_version_id()
+                ),
             }
+            .into()),
             ModelPayload::SellScorer(_) => Err(ResearchError::NotEligible {
                 code: "exact_prediction_explanation_unavailable",
                 detail: format!(
@@ -1121,83 +888,6 @@ impl FeedbackAttributionMaterializer {
                 self.metrics
                     .record_attribution_efficiency_failure("weighted_closed_form");
             }
-        })
-    }
-
-    fn tree_prediction(
-        &self,
-        evidence: &PredictionPageEvidence<'_>,
-        candidate: &FeedbackCohortCandidate,
-        artifact: &ModelArtifact,
-        payload: &ClassicalModelPayload,
-        resolution_hash: ContentHash,
-    ) -> QuantResult<PredictionExplanationArtifact> {
-        let context = candidate.context();
-        let tree_shap = payload
-            .tree_shap
-            .as_ref()
-            .ok_or_else(|| ResearchError::NotEligible {
-                code: "exact_prediction_explanation_unavailable",
-                detail: format!(
-                    "classical model {} has no exact local explanation contract",
-                    context.model_version_id()
-                ),
-            })?;
-        let completion_hash = evidence
-            .serving
-            .completion_hashes
-            .get(&context.model_run_id())
-            .copied()
-            .ok_or_else(|| {
-                Self::invalid(format!(
-                    "model run {} has no verified serving completion",
-                    context.model_run_id()
-                ))
-            })?;
-        let run_rows = evidence
-            .serving
-            .model_inputs
-            .get(&context.model_run_id())
-            .ok_or_else(|| {
-                Self::invalid(format!(
-                    "model run {} has no verified model inputs",
-                    context.model_run_id()
-                ))
-            })?;
-        let rows = run_rows
-            .iter()
-            .filter(|row| {
-                row.model_version_id == context.model_version_id()
-                    && &row.market_id == context.market_id()
-                    && row.feature_vector_id == context.feature_vector_id()
-            })
-            .collect::<Vec<_>>();
-        let input = Self::tree_input(payload, artifact, &rows, context.model_run_id())?;
-        let lineage = AttributionLineage::try_new(
-            evidence.params.feedback_cycle_id,
-            AttributionCohort::Evaluation,
-            evidence.params.cutoff,
-            evidence.params.generated_at,
-            vec![
-                evidence.params.truth_artifact.content_hash,
-                artifact.content_hash()?,
-                artifact.header().serving_contract().contract_hash(),
-                tree_shap.ensemble_hash,
-                completion_hash,
-                resolution_hash,
-            ],
-        )?;
-        PredictionExplanationArtifact::tree_shap(
-            lineage,
-            context.model_version_id(),
-            context.recommendation_id(),
-            artifact.content_hash()?,
-            &tree_shap.ensemble,
-            &input,
-        )
-        .inspect_err(|_| {
-            self.metrics
-                .record_attribution_efficiency_failure("exact_tree_shap");
         })
     }
 
@@ -1741,9 +1431,7 @@ impl FeedbackAttributionMaterializer {
         let first = predictions
             .first()
             .ok_or_else(|| Self::invalid("decision replay group is empty"))?;
-        let universe = self
-            .build_decision_universe(params, first, artifact)
-            .await?;
+        let universe = self.build_decision_universe(first, artifact).await?;
         let count = u64::try_from(predictions.len()).map_err(|error| {
             Self::invalid(format!("decision replay group size overflow: {error}"))
         })?;
@@ -1768,7 +1456,6 @@ impl FeedbackAttributionMaterializer {
 
     async fn build_decision_universe(
         &self,
-        params: &FeedbackAttributionJobParams,
         prediction: &MaterializedPrediction,
         artifact: &ModelArtifact,
     ) -> QuantResult<DecisionUniverse> {
@@ -1777,17 +1464,14 @@ impl FeedbackAttributionMaterializer {
                 self.build_weighted_universe(prediction, artifact, payload)
                     .await
             }
-            ModelPayload::Classical(payload) => {
-                #[cfg(feature = "ml-classical")]
-                {
-                    self.build_tree_universe(params, prediction, artifact, payload)
-                        .await
-                }
-                #[cfg(not(feature = "ml-classical"))]
-                {
-                    Self::unavailable_tree_universe(params, prediction, artifact, payload)
-                }
+            ModelPayload::Classical(_) => Err(ResearchError::NotEligible {
+                code: "exact_decision_intervention_replay_unavailable",
+                detail: format!(
+                    "shadow-only classical model {} cannot enter recommendation replay",
+                    prediction.context.model_version_id()
+                ),
             }
+            .into()),
             ModelPayload::SellScorer(_) => Err(ResearchError::NotEligible {
                 code: "exact_decision_intervention_replay_unavailable",
                 detail: format!(
@@ -2037,239 +1721,6 @@ impl FeedbackAttributionMaterializer {
                 alpha_deadband: evidence.payload.factor_head.alpha_deadband,
             },
         }))
-    }
-
-    #[cfg(feature = "ml-classical")]
-    async fn build_tree_universe(
-        &self,
-        params: &FeedbackAttributionJobParams,
-        prediction: &MaterializedPrediction,
-        artifact: &ModelArtifact,
-        payload: &ClassicalModelPayload,
-    ) -> QuantResult<DecisionUniverse> {
-        let context = &prediction.context;
-        let tree_shap = payload
-            .tree_shap
-            .as_ref()
-            .ok_or_else(|| ResearchError::NotEligible {
-                code: "exact_decision_intervention_replay_unavailable",
-                detail: format!(
-                    "classical model {} has no exact TreeSHAP replay contract",
-                    context.model_version_id()
-                ),
-            })?;
-        let serving = self
-            .load_serving_evidence(&[context.model_run_id()], params.cutoff)
-            .await?;
-        let run_inputs = serving
-            .model_inputs
-            .get(&context.model_run_id())
-            .ok_or_else(|| {
-                Self::invalid(format!(
-                    "model run {} has no verified model inputs",
-                    context.model_run_id()
-                ))
-            })?;
-        let mut vector_ids = run_inputs
-            .iter()
-            .map(|row| row.feature_vector_id)
-            .collect::<Vec<_>>();
-        vector_ids.sort_by_key(|vector_id| vector_id.as_uuid());
-        vector_ids.dedup();
-        let features = self
-            .features
-            .find_by_ids(&vector_ids)
-            .await?
-            .into_iter()
-            .map(|feature| (feature.feature_vector_id, feature))
-            .collect::<HashMap<_, _>>();
-        let members = self
-            .selections
-            .list_members(&context.market_selection_id())
-            .await?;
-        let policy = self
-            .policies
-            .load_snapshot(&context.decision_policy_snapshot_id())
-            .await?
-            .ok_or_else(|| {
-                Self::invalid(format!(
-                    "decision policy snapshot {} does not exist",
-                    context.decision_policy_snapshot_id()
-                ))
-            })?;
-        let mut candidates = BTreeMap::new();
-        let evidence = TreeUniverseEvidence {
-            context,
-            artifact,
-            payload,
-            run_inputs,
-            features: &features,
-        };
-        for member in members {
-            let Some(candidate) = Self::tree_candidate(&evidence, &member)? else {
-                continue;
-            };
-            if candidates
-                .insert(candidate.key.clone(), candidate.state)
-                .is_some()
-            {
-                return Err(Self::invalid(format!(
-                    "GBDT replay duplicated candidate {}/{}",
-                    candidate.key.market_id, candidate.key.token_id
-                )));
-            }
-        }
-        if candidates.is_empty() {
-            return Err(Self::invalid(format!(
-                "GBDT model run {} replayed no Route model states",
-                context.model_run_id()
-            )));
-        }
-        let input_contract_hash = model_input_contract_hash(&payload.input_contract)?;
-        if input_contract_hash != prediction.explanation.input_contract_hash {
-            return Err(Self::invalid(format!(
-                "GBDT replay input contract differs from explanation for model {}",
-                context.model_version_id()
-            )));
-        }
-        Ok(DecisionUniverse {
-            policy: DecisionReplayPolicy::try_new(policy.snapshot_hash)?,
-            replay: DecisionReplayModel::Tree(Box::new(TreeReplayModel {
-                payload: payload.clone(),
-                prediction_horizon_secs: artifact.header().prediction_horizon_secs(),
-                ensemble: tree_shap.ensemble.clone(),
-                candidates,
-            })),
-            model_artifact_hash: artifact.content_hash()?,
-            input_contract_hash,
-            input_transform_hash: payload.input_transform.transform_hash()?,
-        })
-    }
-
-    #[cfg(feature = "ml-classical")]
-    fn tree_candidate(
-        evidence: &TreeUniverseEvidence<'_>,
-        member: &MarketSelectionMemberInfo,
-    ) -> QuantResult<Option<TreeCandidateReplay>> {
-        let rows = evidence
-            .run_inputs
-            .iter()
-            .filter(|row| {
-                row.model_version_id == evidence.context.model_version_id()
-                    && row.market_id == member.market_id
-            })
-            .collect::<Vec<_>>();
-        if rows.is_empty() {
-            return Ok(None);
-        }
-        let feature_vector_id = rows[0].feature_vector_id;
-        if rows
-            .iter()
-            .any(|row| row.feature_vector_id != feature_vector_id)
-        {
-            return Err(Self::invalid(format!(
-                "model run {} mixes feature vectors for market {}",
-                evidence.context.model_run_id(),
-                member.market_id
-            )));
-        }
-        let feature = evidence.features.get(&feature_vector_id).ok_or_else(|| {
-            Self::invalid(format!(
-                "model run {} feature vector {feature_vector_id} is missing",
-                evidence.context.model_run_id()
-            ))
-        })?;
-        let vector = FeatureVector::try_from(feature)?;
-        let selected = SelectedMarket {
-            market_id: member.market_id.clone(),
-            event_id: member.event_id.clone(),
-            category: member.category,
-            primary_token_id: member.primary_token_id.clone(),
-            secondary_token_id: member.secondary_token_id.clone(),
-            liquidity_usd: member.liquidity_usd,
-            volume_24h_usd: member.volume_24h_usd,
-            source_refs: Vec::new(),
-        };
-        let Some(inference_context) = build_market_inference_context(&vector, &selected) else {
-            return Ok(None);
-        };
-        let input = Self::tree_input(
-            evidence.payload,
-            evidence.artifact,
-            &rows,
-            evidence.context.model_run_id(),
-        )?;
-        let tree_shap = evidence.payload.tree_shap.as_ref().ok_or_else(|| {
-            Self::invalid("classical decision replay lost its verified TreeSHAP contract")
-        })?;
-        let raw_prediction = tree_shap.ensemble.predict(&input)?;
-        let row = InferenceMatrixRow {
-            market_id: member.market_id.clone(),
-            token_id: member.primary_token_id.clone(),
-            features: Vec::new(),
-            context: inference_context,
-        };
-        let Some(projected) = ClassicalDecisionProjection::try_project(
-            evidence.payload,
-            evidence.artifact.header().prediction_horizon_secs(),
-            raw_prediction,
-            &row,
-        )?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(TreeCandidateReplay {
-            key: DecisionCandidateKey {
-                market_id: member.market_id.clone(),
-                token_id: projected.token_id,
-            },
-            state: TreeReplayState { input, row },
-        }))
-    }
-
-    #[cfg(not(feature = "ml-classical"))]
-    fn unavailable_tree_universe(
-        _params: &FeedbackAttributionJobParams,
-        prediction: &MaterializedPrediction,
-        _artifact: &ModelArtifact,
-        _payload: &ClassicalModelPayload,
-    ) -> QuantResult<DecisionUniverse> {
-        Err(ResearchError::NotEligible {
-            code: "exact_decision_intervention_replay_unavailable",
-            detail: format!(
-                "classical model {} replay requires the ml-classical runtime",
-                prediction.context.model_version_id()
-            ),
-        }
-        .into())
-    }
-
-    fn tree_input(
-        payload: &ClassicalModelPayload,
-        artifact: &ModelArtifact,
-        rows: &[&QuantModelInputEventRow],
-        model_run_id: ModelRunId,
-    ) -> QuantResult<TreeEnsembleInput> {
-        let tree_shap = payload
-            .tree_shap
-            .as_ref()
-            .ok_or_else(|| ResearchError::NotEligible {
-                code: "exact_prediction_explanation_unavailable",
-                detail: format!(
-                    "classical model {} has no exact local explanation contract",
-                    artifact.header().model_version_id()
-                ),
-            })?;
-        let bindings = artifact.header().serving_contract().bindings();
-        TreeInputEvidenceContract {
-            feature_names: &tree_shap.ensemble.feature_names,
-            model_family: bindings.model.model_family,
-            model_version_id: bindings.model.model_version_id,
-            input_contract_hash: bindings.transform.input_contract_hash,
-            input_transform_hash: bindings.transform.input_transform_hash,
-            training_input_hash: bindings.transform.training_input_hash,
-        }
-        .encode(rows, model_run_id)
     }
 
     async fn materialize_trajectories(
@@ -2722,9 +2173,9 @@ impl FeedbackAttributionMaterializer {
                     depth_levels_consumed,
                     best_bid_price,
                     executable_exit_price,
-                    gross_exit_proceeds_usd: fill.gross_order_amount,
-                    exit_fee_usd: fill.expected_fee,
-                    net_exit_proceeds_usd: Usd::new(fill.total_cash_delta),
+                    gross_exit_proceeds_usd: fill.immediate_cost.principal_usd,
+                    exit_fee_usd: fill.immediate_cost.total_fee_usd(),
+                    net_exit_proceeds_usd: Usd::new(fill.account_cash_delta_usd),
                     fee_schedule_hash: fee_schedule.schedule_hash,
                     slippage_bps,
                 })
@@ -2744,9 +2195,9 @@ impl FeedbackAttributionMaterializer {
                     depth_levels_consumed,
                     best_bid_price,
                     partial_vwap,
-                    partial_gross_proceeds_usd: fill.gross_order_amount,
-                    partial_exit_fee_usd: fill.expected_fee,
-                    partial_net_proceeds_usd: Usd::new(fill.total_cash_delta),
+                    partial_gross_proceeds_usd: fill.immediate_cost.principal_usd,
+                    partial_exit_fee_usd: fill.immediate_cost.total_fee_usd(),
+                    partial_net_proceeds_usd: Usd::new(fill.account_cash_delta_usd),
                     fee_schedule_hash: fee_schedule.schedule_hash,
                     partial_slippage_bps,
                 })
@@ -2931,123 +2382,5 @@ impl FeedbackAttributionMaterializer {
 
     fn invalid_contract(error: impl Display) -> QuantError {
         Self::invalid(error.to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use quant_pivot_models::{
-        clickhouse::QuantModelInputEventRow,
-        enums::model::ModelFamily,
-        hashing::CanonicalDigest,
-        types::{ContentHash, FeatureVectorId, MarketId, ModelRunId, ModelVersionId},
-    };
-    use rust_decimal::Decimal;
-
-    use super::TreeInputEvidenceContract;
-
-    fn hash(seed: &str) -> ContentHash {
-        CanonicalDigest::content_hash_json(&seed).expect("fixture content hash")
-    }
-
-    fn input_row(
-        contract: &TreeInputEvidenceContract<'_>,
-        model_run_id: ModelRunId,
-        encoded_column: &str,
-        encoded_value: f64,
-    ) -> QuantModelInputEventRow {
-        QuantModelInputEventRow {
-            event_time: 1,
-            format_version: 1,
-            decision_at: 1,
-            knowledge_cutoff: 1,
-            model_run_id,
-            model_version_id: contract.model_version_id,
-            market_id: MarketId::new("0xattribution"),
-            feature_vector_id: FeatureVectorId::from_v7(),
-            model_family: contract.model_family.to_string(),
-            raw_input_name: encoded_column.to_owned(),
-            raw_state: "observed".to_owned(),
-            raw_value: Some(encoded_value.to_string()),
-            encoded_column: encoded_column.to_owned(),
-            encoded_value_bits: Some(encoded_value.to_bits()),
-            input_contract_hash: contract.input_contract_hash.to_string(),
-            transform_hash: contract.input_transform_hash.to_string(),
-            training_input_hash: contract.training_input_hash.to_string(),
-            audit_fingerprint: format!("fingerprint-{encoded_column}"),
-            ingestion_time: 2,
-        }
-    }
-
-    #[test]
-    fn tree_input_preserves_order() {
-        let feature_names = vec!["feature.z".to_owned(), "feature.a".to_owned()];
-        let contract = TreeInputEvidenceContract {
-            feature_names: &feature_names,
-            model_family: ModelFamily::ClassicalGradientBoostedTrees,
-            model_version_id: ModelVersionId::from_v7(),
-            input_contract_hash: hash("input-contract"),
-            input_transform_hash: hash("input-transform"),
-            training_input_hash: hash("training-input"),
-        };
-        let model_run_id = ModelRunId::from_v7();
-        let second = input_row(&contract, model_run_id, "feature.a", -2.0);
-        let first = input_row(&contract, model_run_id, "feature.z", 1.5);
-
-        let encoded = contract
-            .encode(&[&second, &first], model_run_id)
-            .expect("encoded input");
-
-        assert_eq!(
-            encoded.values,
-            vec![Some(Decimal::new(15, 1)), Some(Decimal::new(-20, 1))]
-        );
-    }
-
-    #[test]
-    fn tree_input_rejects_drift() {
-        let feature_names = vec!["feature.value".to_owned()];
-        let contract = TreeInputEvidenceContract {
-            feature_names: &feature_names,
-            model_family: ModelFamily::ClassicalGradientBoostedTrees,
-            model_version_id: ModelVersionId::from_v7(),
-            input_contract_hash: hash("input-contract"),
-            input_transform_hash: hash("input-transform"),
-            training_input_hash: hash("training-input"),
-        };
-        let model_run_id = ModelRunId::from_v7();
-        let mut row = input_row(&contract, model_run_id, "feature.value", 1.0);
-        row.training_input_hash = hash("different-training-input").to_string();
-
-        let error = contract
-            .encode(&[&row], model_run_id)
-            .expect_err("contract drift must fail closed");
-
-        assert!(
-            error
-                .to_string()
-                .contains("differs from its serving contract")
-        );
-    }
-
-    #[test]
-    fn tree_input_rejects_nonfinite() {
-        let feature_names = vec!["feature.value".to_owned()];
-        let contract = TreeInputEvidenceContract {
-            feature_names: &feature_names,
-            model_family: ModelFamily::ClassicalGradientBoostedTrees,
-            model_version_id: ModelVersionId::from_v7(),
-            input_contract_hash: hash("input-contract"),
-            input_transform_hash: hash("input-transform"),
-            training_input_hash: hash("training-input"),
-        };
-        let model_run_id = ModelRunId::from_v7();
-        let row = input_row(&contract, model_run_id, "feature.value", f64::NAN);
-
-        let error = contract
-            .encode(&[&row], model_run_id)
-            .expect_err("non-finite input must fail closed");
-
-        assert!(error.to_string().contains("non-finite"));
     }
 }

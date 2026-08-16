@@ -80,7 +80,7 @@ use quant_pivot_research::{
     structural_volatility::evaluate_structural_volatility_oos,
     training::{
         LIQUIDITY_EXIT_POSSIBLE, MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS,
-        RETURN_TO_HORIZON, TrainingExample, TrainingLabel,
+        TrainingExample, TrainingLabel,
     },
     weather_proxy_validation::evaluate_weather_proxy_gate,
 };
@@ -4218,7 +4218,6 @@ fn raw_trajectory_labels_matured(
     pit_cutoff: DateTime<Utc>,
 ) -> Option<bool> {
     let required = [
-        RETURN_TO_HORIZON,
         MAX_FAVORABLE_EXCURSION_BPS,
         MAX_ADVERSE_EXCURSION_BPS,
         LIQUIDITY_EXIT_POSSIBLE,
@@ -4261,7 +4260,7 @@ mod tests {
         policy_evidence::PolicyEvidenceRecord,
         training::{
             LIQUIDITY_EXIT_POSSIBLE, MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS,
-            RETURN_TO_HORIZON, TrainingLabel,
+            TrainingLabel,
         },
     };
     use rust_decimal::Decimal;
@@ -4300,7 +4299,6 @@ mod tests {
         let horizon_secs = 86_400;
         let matured_at = decision_at + Duration::seconds(86_400);
         let labels = [
-            RETURN_TO_HORIZON,
             MAX_FAVORABLE_EXCURSION_BPS,
             MAX_ADVERSE_EXCURSION_BPS,
             LIQUIDITY_EXIT_POSSIBLE,
@@ -4316,7 +4314,7 @@ mod tests {
         .collect::<Vec<_>>();
 
         assert_eq!(
-            raw_trajectory_labels_matured(&labels[..3], horizon_secs, decision_at, matured_at,),
+            raw_trajectory_labels_matured(&labels[..2], horizon_secs, decision_at, matured_at,),
             None
         );
         assert_eq!(

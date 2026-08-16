@@ -77,11 +77,11 @@ use quant_pivot_research::{
         ExitDecisionLabelContext, ForwardWindow, HoldVsExitProceedsLabeler, LabelBuildInput,
         LabelBuildOutput, LabelName, Labeler, LiquidityExitLabeler, LotSamplePlan,
         LotTerminalSnapshot, LotTrainingContext, MaxAdverseExcursionLabeler,
-        MaxFavorableExcursionLabeler, PlanMarket, ReturnToHorizonLabeler, SamplePlan,
-        TokenPayoutRatioLabeler, TrainingDatasetArtifact, TrainingDatasetBuilder,
-        TrainingDatasetPlanner, TrainingExample, TrainingLabel, assert_no_future_leakage,
-        count_samples, dataset_source_fingerprint, label_names_for_sources,
-        plan_lot_timeline_samples, plan_samples, probe_matrix_coverage, remaining_shares_at,
+        MaxFavorableExcursionLabeler, PlanMarket, SamplePlan, TokenPayoutRatioLabeler,
+        TrainingDatasetArtifact, TrainingDatasetBuilder, TrainingDatasetPlanner, TrainingExample,
+        TrainingLabel, assert_no_future_leakage, count_samples, dataset_source_fingerprint,
+        label_names_for_sources, plan_lot_timeline_samples, plan_samples, probe_matrix_coverage,
+        remaining_shares_at,
     },
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -301,7 +301,6 @@ impl KeepRateGrid {
 #[must_use]
 pub fn default_labelers() -> Vec<Box<dyn Labeler>> {
     vec![
-        Box::new(ReturnToHorizonLabeler),
         Box::new(MaxFavorableExcursionLabeler),
         Box::new(MaxAdverseExcursionLabeler),
         Box::new(LiquidityExitLabeler),

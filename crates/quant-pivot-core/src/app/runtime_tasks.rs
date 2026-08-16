@@ -18,8 +18,9 @@ use quant_pivot_models::types::DomainSourceId;
 use quant_pivot_models::{
     clickhouse::{
         CryptoPriceReportRow, DomainEventRow, DomainObservationRow, ExchangeEventRow,
-        ExchangeHistoryAcceptanceRow, ExchangeLogRawRow, ExchangeMatchRow, ExecutionParticipantRow,
-        MarketExecutionRow, WeatherForecastFactRow, WeatherObservationFactRow,
+        ExchangeFeeChargeRow, ExchangeHistoryAcceptanceRow, ExchangeLogRawRow, ExchangeMatchRow,
+        ExecutionParticipantRow, MarketExecutionRow, WeatherForecastFactRow,
+        WeatherObservationFactRow,
     },
     config::BinanceSourceConfig,
 };
@@ -573,6 +574,11 @@ impl AppContext {
                 Arc::clone(&self.infra.ch),
                 Arc::clone(&self.infra.ch_write_manager),
                 "quant_exchange_event",
+            )),
+            fee_charges: Arc::new(ChFactWriter::<ExchangeFeeChargeRow>::new(
+                Arc::clone(&self.infra.ch),
+                Arc::clone(&self.infra.ch_write_manager),
+                "quant_exchange_fee_charge",
             )),
             matches: Arc::new(ChFactWriter::<ExchangeMatchRow>::new(
                 Arc::clone(&self.infra.ch),

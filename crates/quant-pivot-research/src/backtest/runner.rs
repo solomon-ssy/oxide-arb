@@ -10,12 +10,15 @@
 use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        market::book::BookLevel,
-        quant::{ExecutableEconomicTier, PortfolioScenarioVisibility},
+        market::{book::BookLevel, fee::ImmediateExecutionCost},
+        quant::{
+            AggressiveEntryEconomics, EntryExecutionEconomics, ExecutableEconomicTier,
+            PassiveEntryEconomics, PortfolioScenarioVisibility,
+        },
     },
     enums::{
         common::MarketCategory,
@@ -45,8 +48,8 @@ use crate::{
         PrecomputedBacktestTick, SampleOutcome, metrics, simulator,
     },
     execution_semantics::{
-        BookWalkFill, BookWalkOutcome, LiquidityRole, PitFeeSchedule, ResolutionBuySettlement,
-        walk_buy_exact_shares, walk_sell_exact_shares,
+        BookWalkFill, BookWalkOutcome, LiquidityRole, PassiveQueueState, PassiveTrade,
+        PitFeeSchedule, ResolutionBuySettlement, walk_buy_exact_shares, walk_sell_exact_shares,
     },
     model::{
         QuantModelRuntime, SignalCandidate,
@@ -404,7 +407,7 @@ impl OpenReplayPosition {
                     self.token_id
                 ),
             })?;
-            if fill.total_cash_delta.is_sign_negative()
+            if fill.account_cash_delta_usd.is_sign_negative()
                 || fill.filled_shares > self.shares
                 || (fill.filled_shares.is_positive() && fill.outcome == BookWalkOutcome::Unfilled)
             {
@@ -416,13 +419,18 @@ impl OpenReplayPosition {
                     }
                     .into());
             }
-            let value = Usd::new(quantize_venue_amount(fill.total_cash_delta));
+            let value = Usd::new(quantize_venue_amount(fill.account_cash_delta_usd));
             let mark = if value.is_positive() {
                 Price::new(value.inner() / self.shares.inner())
             } else {
                 Price::ZERO
             };
-            (value, mark, fill.filled_shares, fill.expected_fee)
+            (
+                value,
+                mark,
+                fill.filled_shares,
+                fill.immediate_cost.total_fee_usd(),
+            )
         } else {
             (Usd::ZERO, Price::ZERO, Shares::ZERO, Usd::ZERO)
         };
@@ -1083,12 +1091,14 @@ fn replay_selected(
             entry_tick_index,
         }
         .replay()?;
-        executed_entry_count = executed_entry_count.checked_add(1).ok_or_else(|| {
-            ResearchError::ValidationMethodology {
-                detail: "backtest executed entry count overflowed u64".to_owned(),
-            }
-        })?;
-        opened_positions.push(opened);
+        if let Some(opened) = opened {
+            executed_entry_count = executed_entry_count.checked_add(1).ok_or_else(|| {
+                ResearchError::ValidationMethodology {
+                    detail: "backtest executed entry count overflowed u64".to_owned(),
+                }
+            })?;
+            opened_positions.push(opened);
+        }
     }
     Ok(TickReplaySummary {
         executed_entry_count,
@@ -1106,11 +1116,21 @@ struct CandidateReplayContext<'a> {
 }
 
 impl<'a> CandidateReplayContext<'a> {
-    fn replay(self) -> QuantResult<OpenReplayPosition> {
+    fn replay(self) -> QuantResult<Option<OpenReplayPosition>> {
         self.validate_binding()?;
         let market = self.market()?;
         let snapshot = self.snapshot()?;
-        let fill = self.walk(snapshot)?;
+        let Some(fill) = self.entry_fill(snapshot)? else {
+            return Ok(None);
+        };
+        let entry_vwap = fill
+            .vwap
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: format!(
+                    "filled backtest entry for token {} has no executable VWAP",
+                    self.candidate.token_id
+                ),
+            })?;
         let (resolved_at, token_payout_ratio) = self.resolution()?;
         let settlement =
             simulator::settle_executed_buy(&fill, token_payout_ratio).map_err(|error| {
@@ -1126,9 +1146,11 @@ impl<'a> CandidateReplayContext<'a> {
             market,
             snapshot,
             &settlement,
+            entry_vwap,
             resolved_at,
             token_payout_ratio,
         )
+        .map(Some)
     }
 
     fn validate_binding(self) -> QuantResult<()> {
@@ -1188,11 +1210,24 @@ impl<'a> CandidateReplayContext<'a> {
         Ok(snapshot)
     }
 
-    fn walk(self, snapshot: &BacktestExecutionSnapshot) -> QuantResult<BookWalkFill> {
+    fn entry_fill(self, snapshot: &BacktestExecutionSnapshot) -> QuantResult<Option<BookWalkFill>> {
+        match &self.allocation.tier.entry_execution {
+            EntryExecutionEconomics::Aggressive(entry) => {
+                self.aggressive_fill(snapshot, entry).map(Some)
+            }
+            EntryExecutionEconomics::Passive(entry) => self.passive_fill(snapshot, entry),
+        }
+    }
+
+    fn aggressive_fill(
+        self,
+        snapshot: &BacktestExecutionSnapshot,
+        entry: &AggressiveEntryEconomics,
+    ) -> QuantResult<BookWalkFill> {
         let tier = &self.allocation.tier;
         let fill = walk_buy_exact_shares(
             &snapshot.asks,
-            tier.shares,
+            entry.filled_shares,
             snapshot.limit_price,
             FillRequirement::AllOrNothing,
             &snapshot.fee_schedule,
@@ -1206,8 +1241,8 @@ impl<'a> CandidateReplayContext<'a> {
             ),
         })?;
         if fill.outcome != BookWalkOutcome::Filled
-            || fill.filled_shares != tier.shares
-            || fill.vwap != Some(tier.entry.entry_vwap)
+            || fill.filled_shares != entry.filled_shares
+            || fill.vwap != Some(entry.entry_vwap)
         {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
@@ -1218,6 +1253,116 @@ impl<'a> CandidateReplayContext<'a> {
             .into());
         }
         Ok(fill)
+    }
+
+    fn passive_fill(
+        self,
+        snapshot: &BacktestExecutionSnapshot,
+        entry: &PassiveEntryEconomics,
+    ) -> QuantResult<Option<BookWalkFill>> {
+        let tape = &snapshot.passive_tape;
+        let expires_at = entry
+            .decision_at
+            .checked_add_signed(Duration::seconds(
+                i64::try_from(entry.good_til_secs).map_err(|error| {
+                    ResearchError::ValidationMethodology {
+                        detail: format!("passive GTD does not fit chrono: {error}"),
+                    }
+                })?,
+            ))
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "passive GTD overflows chrono".to_owned(),
+            })?;
+        if tape.coverage_through < expires_at {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "passive tape for token {} covers only through {}, before GTD {}",
+                    self.candidate.token_id, tape.coverage_through, expires_at
+                ),
+            }
+            .into());
+        }
+        let queue_ahead = snapshot
+            .bids
+            .iter()
+            .find(|level| level.price_decimal() == entry.limit_price)
+            .map_or(Shares::ZERO, |level| level.size_decimal());
+        let mut queue = PassiveQueueState::new(
+            tape.stream_session_id,
+            entry.limit_price,
+            queue_ahead,
+            entry.requested_shares,
+        );
+        let mut prior_sequence = tape.anchor_token_sequence;
+        let mut principal = Usd::ZERO;
+        let mut fee = Usd::ZERO;
+        for trade in tape
+            .trades
+            .iter()
+            .filter(|trade| trade.event_at >= entry.decision_at && trade.event_at <= expires_at)
+        {
+            if trade.stream_session_id != tape.stream_session_id
+                || trade.token_sequence <= prior_sequence
+            {
+                return Err(ResearchError::ValidationMethodology {
+                    detail: format!(
+                        "passive tape for token {} resets, duplicates, or reorders its session",
+                        self.candidate.token_id
+                    ),
+                }
+                .into());
+            }
+            prior_sequence = trade.token_sequence;
+            let filled = queue.apply_trade(PassiveTrade {
+                stream_session_id: trade.stream_session_id,
+                side: trade.side,
+                price: trade.price,
+                shares: trade.shares,
+            });
+            if filled.is_positive() {
+                principal += filled * entry.limit_price;
+                fee += snapshot
+                    .fee_schedule
+                    .fee(
+                        LiquidityRole::Maker,
+                        entry.limit_price,
+                        filled,
+                        trade.event_at,
+                    )
+                    .map_err(|error| ResearchError::ValidationMethodology {
+                        detail: format!(
+                            "passive fill fee failed for token {}: {error:?}",
+                            self.candidate.token_id
+                        ),
+                    })?;
+            }
+            if queue.remaining_shares.is_zero() {
+                break;
+            }
+        }
+        if queue.filled_shares.is_zero() {
+            return Ok(None);
+        }
+        let immediate_cost =
+            ImmediateExecutionCost::new(principal, fee, Usd::ZERO).map_err(|detail| {
+                ResearchError::ValidationMethodology {
+                    detail: format!("passive immediate cost is invalid: {detail}"),
+                }
+            })?;
+        Ok(Some(BookWalkFill {
+            outcome: if queue.remaining_shares.is_zero() {
+                BookWalkOutcome::Filled
+            } else {
+                BookWalkOutcome::Partial
+            },
+            vwap: Some(entry.limit_price),
+            worst_price: Some(entry.limit_price),
+            filled_shares: queue.filled_shares,
+            immediate_cost,
+            account_cash_delta_usd: -immediate_cost.cash_outlay_usd.inner(),
+            unfilled_cash_budget: Usd::ZERO,
+            unfilled_shares: queue.remaining_shares,
+        }))
     }
 
     fn resolution(self) -> QuantResult<(DateTime<Utc>, PayoutRatio)> {
@@ -1260,18 +1405,23 @@ impl<'a> CandidateReplayContext<'a> {
 
     fn validate_economics(self, settlement: &ResolutionBuySettlement) -> QuantResult<()> {
         let tier = &self.allocation.tier;
-        if settlement.economics.cash_outlay != tier.entry.notional_usd
-            || settlement.economics.entry_fee != tier.entry.fee_usd
-            || settlement.economics.filled_shares != tier.shares
-        {
+        let valid = match &tier.entry_execution {
+            EntryExecutionEconomics::Aggressive(entry) => {
+                settlement.economics.cash_outlay == entry.immediate_cost.cash_outlay_usd
+                    && settlement.economics.entry_fee == entry.immediate_cost.total_fee_usd()
+                    && settlement.economics.filled_shares == entry.filled_shares
+            }
+            EntryExecutionEconomics::Passive(entry) => {
+                settlement.economics.cash_outlay <= entry.hard_reserved_cash_usd
+                    && settlement.economics.filled_shares <= entry.requested_shares
+            }
+        };
+        if !valid {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
                     "selected economic tier {} entry economics drifted during replay: \
-                     expected notional={} fee={} shares={}, actual notional={} fee={} shares={}",
+                     actual notional={} fee={} shares={}",
                     tier.economic_tier_id,
-                    tier.entry.notional_usd,
-                    tier.entry.fee_usd,
-                    tier.shares,
                     settlement.economics.cash_outlay,
                     settlement.economics.entry_fee,
                     settlement.economics.filled_shares,
@@ -1287,6 +1437,7 @@ impl<'a> CandidateReplayContext<'a> {
         market: &BacktestMarketMeta,
         snapshot: &BacktestExecutionSnapshot,
         settlement: &ResolutionBuySettlement,
+        entry_vwap: Price,
         resolved_at: DateTime<Utc>,
         token_payout_ratio: PayoutRatio,
     ) -> QuantResult<OpenReplayPosition> {
@@ -1310,7 +1461,7 @@ impl<'a> CandidateReplayContext<'a> {
             token_id: self.candidate.token_id.clone(),
             outcome_side: self.candidate.outcome_side,
             shares: settlement.economics.filled_shares,
-            entry_vwap: tier.entry.entry_vwap,
+            entry_vwap,
             cash_outlay: allocated_usd,
             current_mark: Price::ZERO,
             current_value: Usd::ZERO,
@@ -2218,7 +2369,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
     } else {
         Decimal::ZERO
     };
-    let rank_ic = metrics::rank_ic(m.samples);
+    let realized_return_rank_correlation = metrics::realized_return_rank_correlation(m.samples);
     let sharpe = metrics::sharpe_ratio(m.tick_returns, Decimal::ONE);
     let hit_rate = metrics::hit_rate(m.samples);
     let expected_vs_realized = metrics::expected_vs_realized(m.samples);
@@ -2250,7 +2401,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
         coverage,
         sample_count,
         missing_feature_count: m.missing_feature_count,
-        rank_ic,
+        realized_return_rank_correlation,
         sharpe,
         hit_rate,
         expected_vs_realized: &expected_vs_realized,
@@ -2274,7 +2425,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
         coverage,
         sample_count,
         missing_feature_count: m.missing_feature_count,
-        rank_ic,
+        realized_return_rank_correlation,
         sharpe,
         hit_rate,
         expected_vs_realized,
@@ -2302,7 +2453,7 @@ impl BacktestReport {
             coverage: self.coverage,
             sample_count: self.sample_count,
             missing_feature_count: self.missing_feature_count,
-            rank_ic: self.rank_ic,
+            realized_return_rank_correlation: self.realized_return_rank_correlation,
             sharpe: self.sharpe,
             hit_rate: self.hit_rate,
             expected_vs_realized: &self.expected_vs_realized,
@@ -2376,7 +2527,7 @@ mod tests {
     use crate::{
         backtest::{
             BacktestDownsidePoint, BacktestDownsideTrajectory, BacktestExecutionSnapshot,
-            BacktestInputs, BacktestLiquidationSnapshot, BacktestMarketMeta,
+            BacktestInputs, BacktestLiquidationSnapshot, BacktestMarketMeta, BacktestPassiveTape,
             BacktestPortfolioContract, BacktestRankTarget, BacktestRequest,
             BacktestScenarioContext, BacktestTick, Backtester, MarketOutcome,
         },
@@ -3004,6 +3155,12 @@ mod tests {
             fill_at: at,
             limit_price: Price::new(price),
             book_hash: hash(if token_id == "yes" { "1" } else { "2" }),
+            passive_tape: BacktestPassiveTape {
+                stream_session_id: Uuid::from_u128(1),
+                anchor_token_sequence: 1,
+                coverage_through: at + Duration::days(1),
+                trades: Vec::new(),
+            },
         }
     }
 
@@ -3073,7 +3230,7 @@ mod tests {
         );
         report.verify_hash().expect("report hash preimage");
         let mut tampered = report.clone();
-        tampered.rank_ic += dec!(0.01);
+        tampered.realized_return_rank_correlation += dec!(0.01);
         assert!(
             tampered.verify_hash().is_err(),
             "a cached report field mutation must invalidate its canonical hash"

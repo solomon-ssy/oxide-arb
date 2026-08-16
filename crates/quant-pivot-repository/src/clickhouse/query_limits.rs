@@ -58,6 +58,11 @@ pub const MICROSTRUCTURE_SERIES: ClickHouseQueryLimits = ClickHouseQueryLimits::
 );
 pub const LAST_EXECUTIONS: ClickHouseQueryLimits =
     ClickHouseQueryLimits::new("ch.repository.last_executions.v1", ONLINE_ROWS, 128 * MIB);
+pub const ORDER_FILLED_EVENTS: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.order_filled_events.v1",
+    ONLINE_ROWS,
+    128 * MIB,
+);
 pub const MARKET_EXECUTION_WINDOW: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
     "ch.repository.market_execution_window.v1",
     RESEARCH_ROWS,

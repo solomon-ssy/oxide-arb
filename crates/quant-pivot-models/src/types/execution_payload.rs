@@ -15,7 +15,7 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::market::fee::BuilderFeeAttribution,
+    domain::market::fee::{BuilderFeeAttribution, FrozenMakerRebateSchedule},
     enums::{
         common::{OrderType, Side},
         quant::{ExitSettlementMode, RedeemPolicy},
@@ -80,6 +80,8 @@ pub struct PreparedVenueOrder {
     pub book_hash: ContentHash,
     pub clob_market_info_hash: ContentHash,
     pub fee_schedule: PreparedFeeSchedule,
+    /// Decision-time Gamma terms used only for actual maker-fill accrual.
+    pub maker_rebate_schedule: Option<FrozenMakerRebateSchedule>,
     pub prepared_at: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
 }
@@ -176,6 +178,9 @@ pub struct EntryOrderSpec {
     pub limit_price: Price,
     /// Venue amount with side/order-type semantics frozen at intent creation.
     pub amount: OrderAmount,
+    /// Frozen independently sourced maker-rebate terms. Only a passive,
+    /// post-only entry may carry this evidence.
+    pub maker_rebate_schedule: Option<FrozenMakerRebateSchedule>,
     /// Maximum tolerated slippage from the reference price.
     pub max_slippage_bps: Bps,
     /// Latest time the order may be submitted.

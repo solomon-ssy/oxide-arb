@@ -4,12 +4,13 @@ use quant_pivot_models::{
     domain::quant::{
         EntryConditionClaim, EntryConditionInstanceInfo, ExecutionIdentityEnrichment,
         ExecutionOrderIdentityRefs, ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder,
-        OrderIntentInfo, ReconciliationLedgerWrite, SubmissionLedgerWrite,
+        OrderIntentInfo, PendingExecutionFeeSettlement, ReconciliationLedgerWrite,
+        SubmissionLedgerWrite,
     },
     enums::execution::ExitReason,
     types::{
-        ExecutionOrderId, ExitReinferenceObservation, FeatureParityStateId, OrderIntentId,
-        PendingScaleOut, Price,
+        ExecutionOrderId, ExitReinferenceObservation, FeatureParityStateId, FeeMeasurement,
+        OrderIntentId, PendingScaleOut, Price,
     },
 };
 
@@ -139,6 +140,21 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
     /// Boot recovery: in-flight orders (`Submitted` / `Ambiguous`) with no
     /// terminal resolution, handed to reconciliation after a process crash.
     async fn recover_dangling(&self, limit: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError>;
+
+    /// Authenticated fills whose exact V2 fee has not yet arrived from the
+    /// finalized chain projection.
+    async fn unsettled_fills(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<PendingExecutionFeeSettlement>, StorageError>;
+
+    /// Idempotently append exact chain-settled fee measurements. Existing
+    /// expected/derived rows are immutable and remain available for variance
+    /// analysis.
+    async fn record_fee_settlements(
+        &self,
+        measurements: Vec<FeeMeasurement>,
+    ) -> Result<(), StorageError>;
 
     /// Apply a reconciliation verdict in one txn: advance the entry
     /// order to its terminal state, correct the capital (state-guarded and

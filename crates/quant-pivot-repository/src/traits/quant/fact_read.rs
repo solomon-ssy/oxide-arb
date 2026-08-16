@@ -15,14 +15,14 @@ use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookLedgerReplayAnchor, BookMicrostructureRow, BookStreamSessionRow,
         CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
-        ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
+        ExchangeEventRow, ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
         MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
         WeatherForecastFactRow, WeatherObservationFactRow,
     },
     domain::data_plane::HistorySealChunkRef,
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
-        RecommendationReportId, TokenId,
+        OrderId, RecommendationReportId, TokenId,
     },
 };
 use uuid::Uuid;
@@ -31,6 +31,15 @@ use uuid::Uuid;
 /// point-in-time historical state.
 #[async_trait::async_trait]
 pub trait QuantFactReadRepository: Send + Sync {
+    /// Finalized V2 `OrderFilled` events for exact governed order hashes.
+    /// Only events from active, accepted exchange-history chunks are returned.
+    async fn order_filled_events(
+        &self,
+        _order_ids: Vec<OrderId>,
+    ) -> Result<Vec<ExchangeEventRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
     /// Verify that every exact sealed chunk revision is still the active
     /// `ClickHouse` acceptance revision. Production implementations must fail
     /// closed when this capability is unavailable.

@@ -57,6 +57,8 @@ pub mod quant_exchange_history_quarantine_resolution;
 pub mod quant_execution_account;
 pub mod quant_execution_attempt_outcome;
 pub mod quant_execution_attempt_reconciliation_task;
+pub mod quant_execution_fee_measurement;
+pub mod quant_execution_fill;
 pub mod quant_execution_order;
 pub mod quant_execution_rollup_reconciliation_task;
 pub mod quant_execution_trade_ref;
@@ -131,6 +133,7 @@ pub mod quant_trade_policy_trial_attempt;
 pub mod quant_trade_policy_validation;
 pub mod quant_trade_policy_validation_row;
 pub mod quant_training_dataset;
+pub mod quant_venue_incentive_event;
 #[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_weather_daily_temperature_projection;
 #[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]

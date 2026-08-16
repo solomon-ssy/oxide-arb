@@ -591,10 +591,9 @@ impl CpcvBacktestConfig {
             |values: &[DecimalValue]| values.iter().map(|value| value.value).collect::<Vec<_>>();
         let trials = if model_family.is_classical() {
             TrialGridSpec::Classical(ClassicalTrialGrid {
-                forest_n_trees_multipliers: multipliers(
-                    &validation.trials.forest_n_trees_multipliers,
+                logistic_alpha_multipliers: multipliers(
+                    &validation.trials.logistic_alpha_multipliers,
                 ),
-                linear_alpha_multipliers: multipliers(&validation.trials.linear_alpha_multipliers),
                 max_trials: validation.trials.max_trials,
             })
         } else {
@@ -1216,12 +1215,8 @@ impl CpcvBacktestService {
             ),
             TrialGridSpec::Classical(grid) => CanonicalDigest::content_hash_typed(
                 "quant-pivot/cpcv-classical-trials",
-                1,
-                &(
-                    &grid.forest_n_trees_multipliers,
-                    &grid.linear_alpha_multipliers,
-                    grid.max_trials,
-                ),
+                2,
+                &(&grid.logistic_alpha_multipliers, grid.max_trials),
             ),
         }
         .map_err(|error| methodology_hash_error(&error))?;
@@ -3578,7 +3573,6 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
             serialized_model_hash: output.model_bytes_hash,
             serialization_format: output.serialization_format,
             input_transform: output.input_transform.clone(),
-            tree_shap: output.tree_shap.clone(),
             metrics: output.metrics.clone(),
         };
         let artifact = FoldArtifactInput {
@@ -4716,7 +4710,7 @@ mod tests {
                     group_returns: selection_returns.clone(),
                     scenario_residuals: vec![None, None],
                     sharpe: dec!(0.25),
-                    rank_ic: dec!(0.1),
+                    target_rank_ic: dec!(0.1),
                     max_drawdown: dec!(0.005),
                     tail_loss: dec!(-0.005),
                     turnover: Some(dec!(0.1)),
@@ -4727,7 +4721,7 @@ mod tests {
                     group_returns: vec![dec!(0.02), dec!(0.01)],
                     scenario_residuals: vec![None, None],
                     sharpe: dec!(2),
-                    rank_ic: dec!(0.2),
+                    target_rank_ic: dec!(0.2),
                     max_drawdown: Decimal::ZERO,
                     tail_loss: dec!(0.01),
                     turnover: Some(dec!(0.1)),
@@ -4745,7 +4739,7 @@ mod tests {
                 median_turnover: Some(dec!(0.1)),
                 baseline_uplift: None,
             },
-            median_rank_ic: dec!(0.15),
+            median_target_rank_ic: dec!(0.15),
         };
         let binding = CpcvTrialPathBinding::try_new(0, vec![0]).expect("selection-path binding");
         let matrix = TrialPerformanceMatrix::from_columns(

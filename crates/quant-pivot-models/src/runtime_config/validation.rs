@@ -970,8 +970,8 @@ fn validate_quality_gate(config: &DecisionPolicySnapshot, report: &mut ConfigVal
         report,
     );
     non_negative_decimal(
-        "quality_gate.sell.rank_ic_min",
-        &gate.sell.rank_ic_min,
+        "quality_gate.sell.target_rank_ic_min",
+        &gate.sell.target_rank_ic_min,
         report,
     );
     unit_ratio("quality_gate.sell.max_pbo", &gate.sell.max_pbo, report);
@@ -1547,37 +1547,21 @@ fn validate_research_validation_trials(
             detail: "must not be empty".to_owned(),
         });
     }
-    if trials.forest_n_trees_multipliers.is_empty() {
+    if trials.logistic_alpha_multipliers.is_empty() {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "research.validation.trials.forest_n_trees_multipliers",
+            field: "research.validation.trials.logistic_alpha_multipliers",
             detail: "must not be empty".to_owned(),
         });
     }
-    for multiplier in &trials.forest_n_trees_multipliers {
+    for multiplier in &trials.logistic_alpha_multipliers {
         non_negative_decimal(
-            "research.validation.trials.forest_n_trees_multipliers",
-            multiplier,
-            report,
-        );
-    }
-    if trials.linear_alpha_multipliers.is_empty() {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "research.validation.trials.linear_alpha_multipliers",
-            detail: "must not be empty".to_owned(),
-        });
-    }
-    for multiplier in &trials.linear_alpha_multipliers {
-        non_negative_decimal(
-            "research.validation.trials.linear_alpha_multipliers",
+            "research.validation.trials.logistic_alpha_multipliers",
             multiplier,
             report,
         );
     }
     let weighted_expanded = trials.lambda_multipliers.len() * trials.rank_loss_kinds.len();
-    // Forest and linear multipliers apply to disjoint ClassicalKind families —
-    // sum, not Cartesian product (matches `validation::trials::generate_classical`).
-    let classical_expanded =
-        trials.forest_n_trees_multipliers.len() + trials.linear_alpha_multipliers.len();
+    let classical_expanded = trials.logistic_alpha_multipliers.len();
     let expanded_trials = weighted_expanded.max(classical_expanded);
     if trials.max_trials == 0 || (expanded_trials as u64) > u64::from(trials.max_trials) {
         report.errors.push(ConfigValidationError::InvalidValue {
@@ -1604,8 +1588,8 @@ fn validate_pbo_gates(validation: &ResearchValidationConfig, report: &mut Config
 
     let gates = &validation.gates;
     non_negative_decimal(
-        "research.validation.gates.rank_ic_min",
-        &gates.rank_ic_min,
+        "research.validation.gates.target_rank_ic_min",
+        &gates.target_rank_ic_min,
         report,
     );
     half_open_unit(

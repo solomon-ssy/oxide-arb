@@ -537,8 +537,9 @@ fn reconciliation_row(
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
         expected_fee_usd: Some(result.expected_fee),
-        observed_fee_usd: result.observed_fee,
-        fee_delta_usd: result.observed_fee.map(|fee| fee - result.expected_fee),
+        derived_fee_usd: None,
+        settled_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by,
         resolved_at,
     }

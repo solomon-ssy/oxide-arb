@@ -470,9 +470,9 @@ pub struct BacktestPathSet {
     pub combination_count: u64,
     /// Distribution of [`BacktestPath::sharpe`] across `paths`.
     pub sharpe_distribution: SharpeDistribution,
-    /// Median of [`BacktestPath::rank_ic`] across `paths` — the
-    /// hard `RankIc` gate's data source (replacing the single-path number).
-    pub median_rank_ic: Decimal,
+    /// Median of [`BacktestPath::target_rank_ic`] across `paths` — the
+    /// hard `TargetRankIc` gate's data source (replacing the single-path number).
+    pub median_target_rank_ic: Decimal,
 }
 
 /// Inputs to one CPCV run. `groups` must be sorted ascending by `as_of`
@@ -686,14 +686,15 @@ impl CombinatorialPurgedBacktester for DefaultCombinatorialPurgedBacktester {
             .map_err(|error| methodology(format!("CPCV path count does not fit usize: {error}")))?;
         let paths = reconstruct_paths(groups, n_groups, path_count, &partitions, &folds, replay)?;
         let sharpe_distribution = sharpe_distribution(&paths)?;
-        let median_rank_ic = median(&paths.iter().map(|p| p.rank_ic).collect::<Vec<_>>())?;
+        let median_target_rank_ic =
+            median(&paths.iter().map(|p| p.target_rank_ic).collect::<Vec<_>>())?;
 
         Ok(BacktestPathSet {
             path_set_id,
             paths,
             combination_count: cpcv.combination_count()?,
             sharpe_distribution,
-            median_rank_ic,
+            median_target_rank_ic,
         })
     }
 }
@@ -976,7 +977,7 @@ fn build_path(
     // (Buy-side) *and* well-defined for a single-candidate atomic unit (one
     // Sell lot per group, where a per-group correlation is structurally
     // undefined).
-    let rank_ic =
+    let target_rank_ic =
         stats::spearman(&pooled_scores, &pooled_realized).round_dp(RESEARCH_DECIMAL_SCALE);
     let max_drawdown = max_drawdown_from_returns(&group_returns);
     let tail_loss = tail_loss_from_returns(&group_returns, Decimal::new(10, 2))?;
@@ -986,7 +987,7 @@ fn build_path(
         group_returns,
         scenario_residuals,
         sharpe,
-        rank_ic,
+        target_rank_ic,
         max_drawdown,
         tail_loss,
         turnover: path_turnover,
@@ -1607,13 +1608,13 @@ mod tests {
         // could ever produce (every per-group Spearman would be 0/undefined).
         for path in &result.paths {
             assert_eq!(
-                path.rank_ic,
+                path.target_rank_ic,
                 Decimal::ONE,
-                "path {} rank_ic",
+                "path {} target_rank_ic",
                 path.path_index
             );
         }
-        assert_eq!(result.median_rank_ic, Decimal::ONE);
+        assert_eq!(result.median_target_rank_ic, Decimal::ONE);
     }
 
     /// [`FoldRuntime::as_sell`] must fail closed (never panic) when the

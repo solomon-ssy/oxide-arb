@@ -49,6 +49,7 @@ pub use quant::{
     ShadowBindingCommitOutcome, ShadowBindingRejectCommit, ShadowBindingRejectOutcome,
     ShadowComparisonRepository, ShadowComparisonWriteOutcome, ShadowLatencyObservation,
     SourceSliceRepository, TradePolicyRepository, TrainingDatasetRepository,
+    VenueIncentiveRepository,
 };
 pub use rbac::{
     MenuRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository, UserRepository,

@@ -41,7 +41,7 @@ use crate::{
         signal::{ModelExplanation, SignalCandidate, SignalWarning},
     },
     precision::RESEARCH_DECIMAL_SCALE,
-    training::{RETURN_TO_HORIZON, TOKEN_PAYOUT_RATIO, model_input_cell},
+    training::{TOKEN_PAYOUT_RATIO, model_input_cell},
 };
 /// A long binary outcome token can lose at most its full cost basis.
 const MAX_LONG_DOWNSIDE_BPS: i64 = 10_000;
@@ -101,9 +101,6 @@ impl ClassicalDecisionProjection {
         row: &InferenceMatrixRow,
     ) -> QuantResult<Option<Self>> {
         let economic = match payload.output_semantics {
-            ClassicalOutputSemantics::ForwardReturnBps => {
-                project_forward_return(raw_prediction, row)?
-            }
             ClassicalOutputSemantics::FullPayoutProbability => {
                 project_full_payout_probability(raw_prediction, row)?
             }
@@ -355,7 +352,6 @@ impl ClassicalRuntime {
         };
         let context = &row.context;
         let semantics = match self.payload.output_semantics {
-            ClassicalOutputSemantics::ForwardReturnBps => "forward_return_bps",
             ClassicalOutputSemantics::FullPayoutProbability => "full_payout_probability",
         };
         let signal_candidate_id = SignalCandidate::id_for(
@@ -558,10 +554,6 @@ impl QuantModelRuntime for ClassicalRuntime {
         for (row, prediction) in matrix.rows.iter().zip(predictions) {
             let raw_prediction = f64_to_decimal(prediction)?;
             let target = match self.payload.output_semantics {
-                ClassicalOutputSemantics::ForwardReturnBps => ModelRankTarget {
-                    label_name: RETURN_TO_HORIZON,
-                    label_horizon_secs: self.header.prediction_horizon_secs(),
-                },
                 ClassicalOutputSemantics::FullPayoutProbability => ModelRankTarget {
                     label_name: TOKEN_PAYOUT_RATIO,
                     label_horizon_secs: 0,
@@ -638,53 +630,6 @@ fn classical_raw_evidence(
         })
         .transpose()?;
     Ok((state, raw_value))
-}
-
-fn project_forward_return(
-    raw_return_bps: Decimal,
-    row: &InferenceMatrixRow,
-) -> QuantResult<Option<ClassicalEconomicProjection>> {
-    let yes_entry = row.context.yes_price.inner();
-    if yes_entry <= Decimal::ZERO || yes_entry > Decimal::ONE {
-        return Err(ResearchError::Inference {
-            detail: format!("classical YES entry price must be within (0, 1], got {yes_entry}"),
-        }
-        .into());
-    }
-    let growth = checked_add(
-        "classical forward-return growth",
-        Decimal::ONE,
-        checked_div(
-            "classical forward-return bps conversion",
-            raw_return_bps,
-            Decimal::from(MAX_LONG_DOWNSIDE_BPS),
-        )?,
-    )?;
-    let yes_exit = checked_mul("classical projected YES exit", yes_entry, growth)?
-        .clamp(Decimal::ZERO, Decimal::ONE);
-    let yes_return_bps = return_bps(yes_entry, yes_exit)?;
-    let yes = positive_projection(
-        OutcomeSide::Yes,
-        row.token_id.clone(),
-        row.context.yes_price,
-        yes_return_bps,
-        raw_return_bps,
-    );
-
-    let no = if let Some((token_id, entry_price)) = resolve_entry(row, OutcomeSide::No) {
-        let no_exit = checked_sub("classical projected NO exit", Decimal::ONE, yes_exit)?;
-        let no_return_bps = return_bps(entry_price.inner(), no_exit)?;
-        positive_projection(
-            OutcomeSide::No,
-            token_id,
-            entry_price,
-            no_return_bps,
-            raw_return_bps,
-        )
-    } else {
-        None
-    };
-    Ok(stronger_projection(yes, no))
 }
 
 fn project_full_payout_probability(
@@ -791,23 +736,6 @@ fn stronger_projection(
         (Some(yes), _) => Some(yes),
         (None, no) => no,
     }
-}
-
-fn return_bps(entry: Decimal, exit: Decimal) -> QuantResult<Decimal> {
-    if entry <= Decimal::ZERO {
-        return Err(ResearchError::Inference {
-            detail: "classical return projection requires a positive entry price".to_owned(),
-        }
-        .into());
-    }
-    let change = checked_sub("classical projected price change", exit, entry)?;
-    let fraction = checked_div("classical projected return fraction", change, entry)?;
-    checked_mul(
-        "classical projected return bps",
-        fraction,
-        Decimal::from(MAX_LONG_DOWNSIDE_BPS),
-    )
-    .map(|value| value.round_dp(RESEARCH_DECIMAL_SCALE))
 }
 
 fn bounded_edge_strength(expected_return_bps: Decimal) -> QuantResult<Decimal> {
@@ -1017,11 +945,7 @@ mod tests {
                 kind: self.kind,
                 crate_name: self.crate_name.clone(),
                 crate_version: self.crate_version.clone(),
-                output_semantics: if self.kind == ClassicalKind::LogisticRegression {
-                    ClassicalOutputSemantics::FullPayoutProbability
-                } else {
-                    ClassicalOutputSemantics::ForwardReturnBps
-                },
+                output_semantics: ClassicalOutputSemantics::FullPayoutProbability,
                 multipliers: ScoreMultiplierSpec::conservative(),
                 substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
                 input_contract: self.input_contract.clone(),
@@ -1029,7 +953,6 @@ mod tests {
                 serialized_model_hash: self.model_bytes_hash,
                 serialization_format: self.serialization_format,
                 input_transform: self.input_transform.clone(),
-                tree_shap: self.tree_shap.clone(),
                 metrics: self.metrics.clone(),
             }
         }
@@ -1102,7 +1025,7 @@ mod tests {
 
     #[tokio::test]
     async fn classical_adapter_train_roundtrip() {
-        let output = ClassicalAdapterRegistry::adapter_for(ClassicalKind::RandomForest)
+        let output = ClassicalAdapterRegistry::adapter_for(ClassicalKind::LogisticRegression)
             .train(&TrainingMatrix::runtime_fixture())
             .expect("train");
         assert_eq!(output.crate_name, CLASSICAL_CRATE_NAME);
@@ -1112,7 +1035,7 @@ mod tests {
         let runtime = ClassicalRuntime::load(output.artifact(), &output.model_bytes).expect("load");
         assert_eq!(
             runtime.model_family(),
-            ModelFamily::from_classical(ClassicalKind::RandomForest)
+            ModelFamily::from_classical(ClassicalKind::LogisticRegression)
         );
 
         let matrix = InferenceMatrix {
@@ -1183,7 +1106,7 @@ mod tests {
 
     #[tokio::test]
     async fn classical_artifact_serialize_check() {
-        let output = ClassicalAdapterRegistry::adapter_for(ClassicalKind::RandomForest)
+        let output = ClassicalAdapterRegistry::adapter_for(ClassicalKind::LogisticRegression)
             .train(&TrainingMatrix::runtime_fixture())
             .expect("train");
 
@@ -1205,7 +1128,7 @@ mod tests {
 
     #[test]
     fn classical_freezes_rejects_drift() {
-        let output = ClassicalAdapterRegistry::adapter_for(ClassicalKind::RandomForest)
+        let output = ClassicalAdapterRegistry::adapter_for(ClassicalKind::LogisticRegression)
             .train(&TrainingMatrix::runtime_fixture())
             .expect("train");
         assert_eq!(
@@ -1242,13 +1165,6 @@ mod tests {
         assert!(
             malformed.validate().is_err(),
             "duplicate raw inputs must fail closed"
-        );
-
-        let mut wrong_semantics = output.payload();
-        wrong_semantics.output_semantics = ClassicalOutputSemantics::FullPayoutProbability;
-        assert!(
-            wrong_semantics.validate().is_err(),
-            "regressor artifact cannot masquerade as a full-payout probability"
         );
     }
 }

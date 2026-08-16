@@ -20,7 +20,9 @@ use quant_pivot_models::{
             RouteContractHash, TrainingDatasetInfo,
         },
     },
-    enums::{model::ModelFamily, quant::QuantRuntimeMode, runtime_config::ConfigResourceKind},
+    enums::{
+        model::ServingEligibility, quant::QuantRuntimeMode, runtime_config::ConfigResourceKind,
+    },
     runtime_config::{ActivePolicyBundle, BuyModelRoute, PortfolioScenarioModelArtifactBinding},
     types::{ModelVersionId, ServingAuthority, backtest::CpcvFoldValidationRegime},
 };
@@ -271,10 +273,7 @@ impl ModelRouteBootstrapService {
                 "in-memory serving generation already contains the bootstrap target route",
             ));
         }
-        if !matches!(
-            model.model_family,
-            ModelFamily::WeightedFactor | ModelFamily::ClassicalGradientBoostedTrees
-        ) {
+        if model.model_family.serving_eligibility() != ServingEligibility::ActiveBuyCapable {
             return Err(Self::invalid(
                 "bootstrap candidate family is not executable by the canonical runtime",
             ));

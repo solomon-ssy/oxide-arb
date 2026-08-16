@@ -374,7 +374,7 @@ impl ExecutionAttemptSourceGraph {
                 requested_shares: entry.shares,
                 filled_shares,
                 entry_avg_price: None,
-                entry_fee_usd: reconciliation.observed_fee_usd,
+                entry_fee_usd: reconciliation.settled_fee_usd,
                 entry_filled_at: None,
                 position_terminal_state: None,
                 exit_reason: None,
@@ -466,7 +466,7 @@ impl ExecutionAttemptSourceGraph {
                 requested_shares: entry.shares,
                 filled_shares,
                 entry_avg_price: Some(entry_avg_price),
-                entry_fee_usd: entry_reconciliation.observed_fee_usd,
+                entry_fee_usd: entry_reconciliation.settled_fee_usd,
                 entry_filled_at: entry.filled_at,
                 position_terminal_state: Some(position.state),
                 exit_reason: self.intent.exit_reason,
@@ -539,7 +539,7 @@ impl ExecutionAttemptSourceGraph {
                     }
                     shares += filled;
                     weighted_price += filled.inner() * avg_price.inner();
-                    fee = match (fee, reconciliation.observed_fee_usd) {
+                    fee = match (fee, reconciliation.settled_fee_usd) {
                         (Some(total), Some(actual)) => Some(total + actual),
                         _ => None,
                     };
@@ -652,9 +652,10 @@ fn terminal_state(
             ExecutionOrderState::Failed | ExecutionOrderState::Cancelled,
             ReconciliationResult::NotFilled | ReconciliationResult::Cancelled,
         ) if filled_shares.is_zero() => Ok(ExecutionAttemptTerminalState::Unfilled),
-        (ExecutionOrderState::PartiallyFilled, ReconciliationResult::PartiallyFilled)
-            if filled_shares.is_positive() && filled_shares < entry.shares =>
-        {
+        (
+            ExecutionOrderState::Cancelled | ExecutionOrderState::Failed,
+            ReconciliationResult::PartiallyFilled,
+        ) if filled_shares.is_positive() && filled_shares < entry.shares => {
             Ok(ExecutionAttemptTerminalState::PartiallyFilled)
         }
         (ExecutionOrderState::Filled, ReconciliationResult::Filled)

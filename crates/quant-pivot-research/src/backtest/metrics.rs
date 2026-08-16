@@ -21,7 +21,7 @@ fn probability(value: Decimal) -> Probability {
 
 /// Spearman rank IC between composite score and realized return.
 #[must_use]
-pub fn rank_ic(samples: &[SampleOutcome]) -> Decimal {
+pub fn realized_return_rank_correlation(samples: &[SampleOutcome]) -> Decimal {
     let scores: Vec<Decimal> = samples.iter().map(|s| s.composite_score.inner()).collect();
     let realized: Vec<Decimal> = samples.iter().map(|s| s.realized_return_bps).collect();
     stats::spearman(&scores, &realized).round_dp(RESEARCH_DECIMAL_SCALE)
@@ -72,7 +72,7 @@ pub fn category_breakdown(samples: &[SampleOutcome]) -> Vec<CategoryMetric> {
             CategoryMetric {
                 category,
                 sample_count: group.len() as u64,
-                rank_ic: rank_ic(&group),
+                realized_return_rank_correlation: realized_return_rank_correlation(&group),
                 hit_rate: hit_rate(&group),
                 mean_realized_bps: stats::mean(&realized).round_dp(RESEARCH_DECIMAL_SCALE),
             }

@@ -7,13 +7,15 @@ use quant_pivot_models::{
         common::{CategorySet, TickSize},
         market::{EventStatus, MarketStatus},
     },
-    types::Usd,
+    hashing::CanonicalDigest,
+    types::{ContentHash, Usd},
 };
 use rust_decimal::Decimal;
+use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
-use super::wire::{WireEvent, WireMarket};
+use super::wire::{WireEvent, WireFeeSchedule, WireMarket};
 
 /// Tradeable token row after Gamma wire normalization.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +31,21 @@ pub struct CatalogSettlement {
     pub winning_token_id: String,
     /// The winning leg's outcome label (team name, Over/Under, Yes/No, …).
     pub winning_outcome: String,
+}
+
+/// Complete, validated Gamma fee/rebate subdocument.
+///
+/// Incomplete upstream documents are retained as unavailable rather than
+/// defaulted. A present but out-of-range value rejects the market revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CatalogMakerRebateSchedule {
+    pub fees_enabled: bool,
+    pub platform_rate: Decimal,
+    pub exponent: Decimal,
+    pub taker_only: bool,
+    pub rebate_rate: Decimal,
+    pub effective_at: DateTime<Utc>,
+    pub catalog_change_hash: ContentHash,
 }
 
 /// Market row ready for domain mapping and persistence.
@@ -60,6 +77,7 @@ pub struct CatalogMarket {
     pub liquidity_usd: Option<Usd>,
     /// Gamma-reported trailing 24h volume in USD (`volume24hr`); absent when upstream omits the field.
     pub volume_24h_usd: Option<Usd>,
+    pub maker_rebate_schedule: Option<CatalogMakerRebateSchedule>,
     pub tick_size: TickSize,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
@@ -119,6 +137,8 @@ pub enum CatalogMarketReject {
     InvalidTokenPair { reason: String },
     #[error("unsupported tick size: {value}")]
     UnsupportedTickSize { value: String },
+    #[error("invalid Gamma fee schedule: {reason}")]
+    InvalidFeeSchedule { reason: String },
 }
 
 impl CatalogMarketReject {
@@ -131,6 +151,7 @@ impl CatalogMarketReject {
             Self::NotBinary { .. } => "not_binary",
             Self::InvalidTokenPair { .. } => "invalid_token_pair",
             Self::UnsupportedTickSize { .. } => "unsupported_tick_size",
+            Self::InvalidFeeSchedule { .. } => "invalid_fee_schedule",
         }
     }
 }
@@ -239,6 +260,13 @@ impl TryFrom<WireMarket> for CatalogMarket {
         };
         let start_date = wire.start_date();
         let end_date = wire.end_date();
+        let created_at = parse_gamma_timestamp(wire.created_at.as_deref());
+        let updated_at = parse_gamma_timestamp(wire.updated_at.as_deref());
+        let maker_rebate_schedule = normalize_maker_rebate_schedule(
+            wire.fees_enabled,
+            wire.fee_schedule.as_ref(),
+            updated_at.or(created_at),
+        )?;
         let closed = wire.closed.unwrap_or(false);
         let filter_reasons = wire.filter_reasons_from_wire();
         let status = market_status_from_wire(closed, filter_reasons);
@@ -268,11 +296,82 @@ impl TryFrom<WireMarket> for CatalogMarket {
             min_order_size: wire.order_min_size.unwrap_or(Decimal::ONE),
             liquidity_usd: wire.liquidity_num.map(Usd::new),
             volume_24h_usd: wire.volume_24hr.map(Usd::new),
+            maker_rebate_schedule,
             tick_size,
-            created_at: parse_gamma_timestamp(wire.created_at.as_deref()),
-            updated_at: parse_gamma_timestamp(wire.updated_at.as_deref()),
+            created_at,
+            updated_at,
         })
     }
+}
+
+fn normalize_maker_rebate_schedule(
+    fees_enabled: Option<bool>,
+    schedule: Option<&WireFeeSchedule>,
+    effective_at: Option<DateTime<Utc>>,
+) -> Result<Option<CatalogMakerRebateSchedule>, CatalogMarketReject> {
+    let Some(schedule) = schedule else {
+        return Ok(None);
+    };
+    for (name, value) in [
+        ("rate", schedule.rate),
+        ("rebateRate", schedule.rebate_rate),
+    ] {
+        if value.is_some_and(|value| !(Decimal::ZERO..=Decimal::ONE).contains(&value)) {
+            return Err(CatalogMarketReject::InvalidFeeSchedule {
+                reason: format!("{name} must be within [0, 1]"),
+            });
+        }
+    }
+    if schedule
+        .exponent
+        .is_some_and(|value| value <= Decimal::ZERO || value > Decimal::from(8))
+    {
+        return Err(CatalogMarketReject::InvalidFeeSchedule {
+            reason: "exponent must be within (0, 8]".to_owned(),
+        });
+    }
+    let (
+        Some(fees_enabled),
+        Some(platform_rate),
+        Some(exponent),
+        Some(taker_only),
+        Some(rebate_rate),
+        Some(effective_at),
+    ) = (
+        fees_enabled,
+        schedule.rate,
+        schedule.exponent,
+        schedule.taker_only,
+        schedule.rebate_rate,
+        effective_at,
+    )
+    else {
+        return Ok(None);
+    };
+    let catalog_change_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/gamma-maker-rebate-schedule",
+        1,
+        &(
+            fees_enabled,
+            platform_rate,
+            exponent,
+            taker_only,
+            rebate_rate,
+            effective_at,
+        ),
+    )
+    .map_err(|error| CatalogMarketReject::InvalidFeeSchedule {
+        reason: format!("canonical schedule hash failed: {error}"),
+    })?;
+    Ok(Some(CatalogMakerRebateSchedule {
+        fees_enabled,
+        platform_rate,
+        exponent,
+        taker_only,
+        rebate_rate,
+        effective_at,
+        catalog_change_hash,
+    }))
 }
 
 /// Derive the settlement conclusion from `outcomePrices` (fail-closed).
@@ -381,6 +480,7 @@ mod tests {
         },
         types::Usd,
     };
+    use rust_decimal_macros::dec;
 
     use super::{CatalogEvent, CatalogMarket, CatalogMarketReject};
     use crate::gamma::wire::{WireEvent, WireMarket};
@@ -706,6 +806,105 @@ mod tests {
         .expect("wire market");
         let zero_market = CatalogMarket::try_from(zero).expect("market");
         assert_eq!(zero_market.volume_24h_usd, Some(Usd::ZERO));
+    }
+
+    #[test]
+    fn rebate_requires_complete_evidence() {
+        let complete: WireMarket = serde_json::from_str(
+            r#"{
+                "conditionId": "0xrebate",
+                "question": "Q?",
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"],
+                "feesEnabled": true,
+                "updatedAt": "2026-08-01T00:00:00Z",
+                "feeSchedule": {
+                    "rate": "0.07",
+                    "exponent": "1",
+                    "takerOnly": true,
+                    "rebateRate": "0.20"
+                }
+            }"#,
+        )
+        .expect("wire market");
+        let market = CatalogMarket::try_from(complete).expect("complete schedule");
+        let schedule = market.maker_rebate_schedule.expect("rebate schedule");
+        assert_eq!(schedule.platform_rate, dec!(0.07));
+        assert_eq!(schedule.rebate_rate, dec!(0.20));
+
+        let incomplete: WireMarket = serde_json::from_str(
+            r#"{
+                "conditionId": "0xincomplete",
+                "question": "Q?",
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"],
+                "feesEnabled": true,
+                "updatedAt": "2026-08-01T00:00:00Z",
+                "feeSchedule": { "rate": "0.07", "exponent": "1" }
+            }"#,
+        )
+        .expect("wire market");
+        assert!(
+            CatalogMarket::try_from(incomplete)
+                .expect("incomplete schedule is unavailable")
+                .maker_rebate_schedule
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rebate_rejects_invalid_rate() {
+        let wire: WireMarket = serde_json::from_str(
+            r#"{
+                "conditionId": "0xinvalid",
+                "question": "Q?",
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"],
+                "feesEnabled": true,
+                "updatedAt": "2026-08-01T00:00:00Z",
+                "feeSchedule": {
+                    "rate": "0.07",
+                    "exponent": "1",
+                    "takerOnly": true,
+                    "rebateRate": "1.01"
+                }
+            }"#,
+        )
+        .expect("wire market");
+        assert!(matches!(
+            CatalogMarket::try_from(wire),
+            Err(CatalogMarketReject::InvalidFeeSchedule { .. })
+        ));
+    }
+
+    #[test]
+    fn rebate_rule_changes_hash() {
+        let wire = |rebate_rate: &str| {
+            serde_json::from_value::<WireMarket>(serde_json::json!({
+                "conditionId": "0xhash",
+                "question": "Q?",
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"],
+                "feesEnabled": true,
+                "updatedAt": "2026-08-01T00:00:00Z",
+                "feeSchedule": {
+                    "rate": "0.07",
+                    "exponent": "1",
+                    "takerOnly": true,
+                    "rebateRate": rebate_rate
+                }
+            }))
+            .expect("wire market")
+        };
+        let first = CatalogMarket::try_from(wire("0.20"))
+            .expect("first")
+            .maker_rebate_schedule
+            .expect("schedule");
+        let second = CatalogMarket::try_from(wire("0.25"))
+            .expect("second")
+            .maker_rebate_schedule
+            .expect("schedule");
+        assert_ne!(first.catalog_change_hash, second.catalog_change_hash);
     }
 
     #[test]

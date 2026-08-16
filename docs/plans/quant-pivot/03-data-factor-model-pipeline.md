@@ -327,21 +327,23 @@ SignalCandidate 还不是 recommendation。必须进入 portfolio planner。
 
 ### 6.2 标签
 
-标签按 horizon 定义：
+监督目标是封闭集合：
 
-- `return_to_horizon`
-- `max_favorable_excursion`
-- `max_adverse_excursion`
-- `hit_take_profit`
-- `hit_stop_loss`
-- `liquidity_exit_possible`
-- `settlement_outcome`
-- `recommendation_realized_pnl`
+- Buy：`token_payout_ratio`，来自 canonical resolution truth，保留 `0 / 0.5 / 1` payout 语义；
+- Sell：`hold_vs_exit_alpha_bps`，仅服务已有 lot 的退出判断。
+
+以下字段是 policy evaluation 或诊断证据，不得伪装成 Buy 监督目标：
+
+- `max_favorable_excursion_bps` / `max_adverse_excursion_bps`；
+- `liquidity_exit_possible`；
+- `policy_net_return_bps` / `policy_net_positive`；
+- `policy_entry_fill_ratio` / `policy_exit_fill_ratio`；
+- execution attribution 中的真实成交、费用和 PnL。
 
 标签可用时间：
 
-- price horizon label：horizon 结束后可用。
-- settlement label：市场 resolved 后可用。
+- path diagnostic / policy label：完整路径成熟后可用。
+- payout label：市场 canonical resolution 成熟后可用。
 - execution label：订单生命周期终结后可用。
 
 ### 6.3 防泄漏规则
@@ -767,19 +769,14 @@ pub async fn build_training_dataset(
 
 ## 15. Label 设计
 
-### 15.1 Price Horizon Label
+### 15.1 Outcome Payout Label
 
-定义：
+Buy 唯一监督标签是 `token_payout_ratio`。它读取 selected token 的 canonical terminal payout，且只在
+resolution truth 对该 decision boundary 可用后成熟。价格、金额、路由、fee、fill、exit policy 与资金成本
+均不进入该标签；这些经济信息只在独立 Trade Policy/scenario replay 中组合。
 
-```text
-return_to_horizon = (future_exit_price - entry_reference_price) / entry_reference_price
-```
-
-要求：
-
-- future price 只能来自 `as_of + horizon` 后已成熟事实。
-- 若 horizon 内无可退出流动性，label 标记 `liquidity_exit_missing`。
-- 不用 settlement 结果替代短 horizon label。
+旧 `return_to_horizon` 与 `ForwardReturn` 任务已 clean-break 删除。系统不读取旧 target、旧 artifact 或旧
+wire 值，也不保留 regression family。
 
 ### 15.2 Excursion Labels
 
@@ -824,8 +821,13 @@ policy leakage，并在下游再次应用价格、费用和退出策略时重复
 
 Weighted factor 的训练只优化对 terminal payout 的样本外排序/预测质量，并使用 purged rolling validation、
 复杂度约束和完整 trial ledger。raw score 不能被解释为概率或 USD return；它必须在独立 calibration partition
-上转换为受验证的 payout distribution。`ForwardReturn` 只允许用于明确标记的 research-only classical
-regressor，不能成为 production Buy Champion；`HoldVsExitAlpha` 只属于 sell-side model family。
+上转换为受验证的 payout distribution。`ClassicalLogisticRegression` 只允许作为 payout research/shadow
+family；没有经过独立校准的完整 payout distribution 时不得 active serving。`HoldVsExitAlpha` 只属于
+sell-side model family。
+
+`TargetRankIc` 始终显式绑定声明的监督目标；Buy 对 `token_payout_ratio` 排序，Sell 对
+`hold_vs_exit_alpha_bps` 排序。组合 Sharpe、drawdown、tail loss 和可执行净收益继续来自 stateful
+net-of-cost replay。预测质量与经济质量是两条门禁，不把执行成本回灌进预测标签。
 
 Trade Policy 通过独立、prospective 或 cross-fitted OOS policy-evaluation evidence 评估 executable cashflow、
 fee、slippage、capital occupancy 与 tail loss。最终收益目标只存在于

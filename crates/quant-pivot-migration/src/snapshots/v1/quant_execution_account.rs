@@ -30,6 +30,10 @@ pub struct Model {
     #[sea_orm(has_many)]
     pub quant_order_intents: HasMany<super::quant_order_intent::Entity>,
     #[sea_orm(has_many)]
+    pub quant_execution_fills: HasMany<super::quant_execution_fill::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_venue_incentive_events: HasMany<super::quant_venue_incentive_event::Entity>,
+    #[sea_orm(has_many)]
     pub quant_positions: HasMany<super::quant_position::Entity>,
     #[sea_orm(has_many)]
     pub quant_settlement_redeems: HasMany<super::quant_settlement_redeem::Entity>,

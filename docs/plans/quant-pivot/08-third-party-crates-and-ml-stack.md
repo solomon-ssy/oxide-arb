@@ -192,12 +192,8 @@ score = Σ normalized_factor_i * weight_i * confidence_i
 
 用途：
 
-- Random Forest。
-- Extra Trees。
-- XGBoost-style regressor。
-- Logistic/Ridge/Lasso/ElasticNet。
-- KNN/SVM/Naive Bayes。
-- model selection。
+- `LogisticRegression` payout classifier。
+- model selection 与冻结 preprocessing。
 
 推荐用法：
 
@@ -208,9 +204,8 @@ score = Σ normalized_factor_i * weight_i * confidence_i
 
 适合：
 
-- 非线性 factor interaction。
-- category-specific models。
-- feature importance 分析。
+- outcome-payout binary research baseline。
+- coefficient-based feature importance 与 shadow comparison。
 
 风险：
 

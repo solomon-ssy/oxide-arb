@@ -58,6 +58,7 @@ pub mod settlement_redeem;
 mod shadow_comparison;
 mod source_slice;
 mod trade_policy;
+mod venue_incentive;
 
 pub use account_snapshot::AccountSnapshotRepository;
 pub use attribution_artifact::{AttributionArtifactRepository, AttributionArtifactWriteOutcome};
@@ -140,3 +141,4 @@ pub use selection::MarketSelectionRepository;
 pub use shadow_comparison::{ShadowComparisonRepository, ShadowComparisonWriteOutcome};
 pub use source_slice::SourceSliceRepository;
 pub use trade_policy::TradePolicyRepository;
+pub use venue_incentive::VenueIncentiveRepository;
