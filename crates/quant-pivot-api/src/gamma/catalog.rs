@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
+    domain::market::fee::{MakerRebateField, MakerRebateUnavailableReason},
     enums::{
         catalog::{CatalogFilterReason, CatalogFilterReasonSet, CatalogPrelistingFilterReason},
         common::{CategorySet, TickSize},
@@ -35,17 +36,33 @@ pub struct CatalogSettlement {
 
 /// Complete, validated Gamma fee/rebate subdocument.
 ///
-/// Incomplete upstream documents are retained as unavailable rather than
-/// defaulted. A present but out-of-range value rejects the market revision.
+/// Incomplete or invalid upstream documents are retained as unavailable rather
+/// than defaulted or used to delete an otherwise tradeable market.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CatalogMakerRebateSchedule {
-    pub fees_enabled: bool,
     pub platform_rate: Decimal,
     pub exponent: Decimal,
     pub taker_only: bool,
     pub rebate_rate: Decimal,
-    pub effective_at: DateTime<Utc>,
-    pub catalog_change_hash: ContentHash,
+    pub terms_hash: ContentHash,
+}
+
+/// Complete Gamma maker-rebate source state without local observation clocks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum CatalogMakerRebateEvidence {
+    NoProgram {
+        terms_hash: ContentHash,
+    },
+    Available {
+        schedule: CatalogMakerRebateSchedule,
+    },
+    Unavailable {
+        reason: MakerRebateUnavailableReason,
+        missing_fields: Vec<MakerRebateField>,
+        invalid_fields: Vec<MakerRebateField>,
+        terms_hash: ContentHash,
+    },
 }
 
 /// Market row ready for domain mapping and persistence.
@@ -77,7 +94,7 @@ pub struct CatalogMarket {
     pub liquidity_usd: Option<Usd>,
     /// Gamma-reported trailing 24h volume in USD (`volume24hr`); absent when upstream omits the field.
     pub volume_24h_usd: Option<Usd>,
-    pub maker_rebate_schedule: Option<CatalogMakerRebateSchedule>,
+    pub maker_rebate_evidence: CatalogMakerRebateEvidence,
     pub tick_size: TickSize,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
@@ -262,11 +279,8 @@ impl TryFrom<WireMarket> for CatalogMarket {
         let end_date = wire.end_date();
         let created_at = parse_gamma_timestamp(wire.created_at.as_deref());
         let updated_at = parse_gamma_timestamp(wire.updated_at.as_deref());
-        let maker_rebate_schedule = normalize_maker_rebate_schedule(
-            wire.fees_enabled,
-            wire.fee_schedule.as_ref(),
-            updated_at.or(created_at),
-        )?;
+        let maker_rebate_evidence =
+            normalize_maker_rebate_evidence(wire.fees_enabled, wire.fee_schedule.as_ref())?;
         let closed = wire.closed.unwrap_or(false);
         let filter_reasons = wire.filter_reasons_from_wire();
         let status = market_status_from_wire(closed, filter_reasons);
@@ -296,7 +310,7 @@ impl TryFrom<WireMarket> for CatalogMarket {
             min_order_size: wire.order_min_size.unwrap_or(Decimal::ONE),
             liquidity_usd: wire.liquidity_num.map(Usd::new),
             volume_24h_usd: wire.volume_24hr.map(Usd::new),
-            maker_rebate_schedule,
+            maker_rebate_evidence,
             tick_size,
             created_at,
             updated_at,
@@ -304,74 +318,113 @@ impl TryFrom<WireMarket> for CatalogMarket {
     }
 }
 
-fn normalize_maker_rebate_schedule(
+fn normalize_maker_rebate_evidence(
     fees_enabled: Option<bool>,
     schedule: Option<&WireFeeSchedule>,
-    effective_at: Option<DateTime<Utc>>,
-) -> Result<Option<CatalogMakerRebateSchedule>, CatalogMarketReject> {
-    let Some(schedule) = schedule else {
-        return Ok(None);
+) -> Result<CatalogMakerRebateEvidence, CatalogMarketReject> {
+    let terms_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/gamma-maker-rebate-terms",
+        3,
+        &(
+            fees_enabled,
+            schedule.and_then(|value| value.rate),
+            schedule.and_then(|value| value.exponent),
+            schedule.and_then(|value| value.taker_only),
+            schedule.and_then(|value| value.rebate_rate),
+        ),
+    )
+    .map_err(|error| CatalogMarketReject::InvalidFeeSchedule {
+        reason: format!("canonical terms hash failed: {error}"),
+    })?;
+    let Some(fees_enabled) = fees_enabled else {
+        return Ok(CatalogMakerRebateEvidence::Unavailable {
+            reason: MakerRebateUnavailableReason::FeesFlagMissing,
+            missing_fields: vec![MakerRebateField::FeesEnabled],
+            invalid_fields: Vec::new(),
+            terms_hash,
+        });
     };
-    for (name, value) in [
-        ("rate", schedule.rate),
-        ("rebateRate", schedule.rebate_rate),
+    let Some(schedule) = schedule else {
+        return Ok(if fees_enabled {
+            CatalogMakerRebateEvidence::Unavailable {
+                reason: MakerRebateUnavailableReason::EnabledScheduleMissing,
+                missing_fields: vec![MakerRebateField::FeeSchedule],
+                invalid_fields: Vec::new(),
+                terms_hash,
+            }
+        } else {
+            CatalogMakerRebateEvidence::NoProgram { terms_hash }
+        });
+    };
+    let mut invalid_fields = Vec::new();
+    for (field, value) in [
+        (MakerRebateField::PlatformRate, schedule.rate),
+        (MakerRebateField::RebateRate, schedule.rebate_rate),
     ] {
         if value.is_some_and(|value| !(Decimal::ZERO..=Decimal::ONE).contains(&value)) {
-            return Err(CatalogMarketReject::InvalidFeeSchedule {
-                reason: format!("{name} must be within [0, 1]"),
-            });
+            invalid_fields.push(field);
         }
     }
     if schedule
         .exponent
         .is_some_and(|value| value <= Decimal::ZERO || value > Decimal::from(8))
     {
-        return Err(CatalogMarketReject::InvalidFeeSchedule {
-            reason: "exponent must be within (0, 8]".to_owned(),
+        invalid_fields.push(MakerRebateField::Exponent);
+    }
+    if !fees_enabled {
+        return Ok(CatalogMakerRebateEvidence::Unavailable {
+            reason: MakerRebateUnavailableReason::DisabledSchedulePresent,
+            missing_fields: Vec::new(),
+            invalid_fields,
+            terms_hash,
         });
     }
-    let (
-        Some(fees_enabled),
-        Some(platform_rate),
-        Some(exponent),
-        Some(taker_only),
-        Some(rebate_rate),
-        Some(effective_at),
-    ) = (
-        fees_enabled,
+    let mut missing_fields = Vec::new();
+    for (field, missing) in [
+        (MakerRebateField::PlatformRate, schedule.rate.is_none()),
+        (MakerRebateField::Exponent, schedule.exponent.is_none()),
+        (MakerRebateField::TakerOnly, schedule.taker_only.is_none()),
+        (MakerRebateField::RebateRate, schedule.rebate_rate.is_none()),
+    ] {
+        if missing {
+            missing_fields.push(field);
+        }
+    }
+    if !missing_fields.is_empty() {
+        return Ok(CatalogMakerRebateEvidence::Unavailable {
+            reason: MakerRebateUnavailableReason::ScheduleIncomplete,
+            missing_fields,
+            invalid_fields: Vec::new(),
+            terms_hash,
+        });
+    }
+    if !invalid_fields.is_empty() {
+        return Ok(CatalogMakerRebateEvidence::Unavailable {
+            reason: MakerRebateUnavailableReason::InvalidSchedule,
+            missing_fields: Vec::new(),
+            invalid_fields,
+            terms_hash,
+        });
+    }
+    let (Some(platform_rate), Some(exponent), Some(taker_only), Some(rebate_rate)) = (
         schedule.rate,
         schedule.exponent,
         schedule.taker_only,
         schedule.rebate_rate,
-        effective_at,
-    )
-    else {
-        return Ok(None);
+    ) else {
+        return Err(CatalogMarketReject::InvalidFeeSchedule {
+            reason: "complete schedule lost a required field".to_owned(),
+        });
     };
-    let catalog_change_hash = CanonicalDigest::content_hash_typed(
-        "quant-pivot/gamma-maker-rebate-schedule",
-        1,
-        &(
-            fees_enabled,
+    Ok(CatalogMakerRebateEvidence::Available {
+        schedule: CatalogMakerRebateSchedule {
             platform_rate,
             exponent,
             taker_only,
             rebate_rate,
-            effective_at,
-        ),
-    )
-    .map_err(|error| CatalogMarketReject::InvalidFeeSchedule {
-        reason: format!("canonical schedule hash failed: {error}"),
-    })?;
-    Ok(Some(CatalogMakerRebateSchedule {
-        fees_enabled,
-        platform_rate,
-        exponent,
-        taker_only,
-        rebate_rate,
-        effective_at,
-        catalog_change_hash,
-    }))
+            terms_hash,
+        },
+    })
 }
 
 /// Derive the settlement conclusion from `outcomePrices` (fail-closed).
@@ -473,6 +526,7 @@ fn parse_gamma_timestamp(raw: Option<&str>) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use quant_pivot_models::{
+        domain::market::fee::{MakerRebateField, MakerRebateUnavailableReason},
         enums::{
             catalog::{CatalogFilterReason, CatalogPrelistingFilterReason},
             common::{MarketCategory, TickSize},
@@ -482,7 +536,7 @@ mod tests {
     };
     use rust_decimal_macros::dec;
 
-    use super::{CatalogEvent, CatalogMarket, CatalogMarketReject};
+    use super::{CatalogEvent, CatalogMakerRebateEvidence, CatalogMarket, CatalogMarketReject};
     use crate::gamma::wire::{WireEvent, WireMarket};
 
     #[test]
@@ -828,7 +882,10 @@ mod tests {
         )
         .expect("wire market");
         let market = CatalogMarket::try_from(complete).expect("complete schedule");
-        let schedule = market.maker_rebate_schedule.expect("rebate schedule");
+        let CatalogMakerRebateEvidence::Available { schedule } = market.maker_rebate_evidence
+        else {
+            panic!("complete rebate schedule must be available");
+        };
         assert_eq!(schedule.platform_rate, dec!(0.07));
         assert_eq!(schedule.rebate_rate, dec!(0.20));
 
@@ -844,16 +901,37 @@ mod tests {
             }"#,
         )
         .expect("wire market");
-        assert!(
-            CatalogMarket::try_from(incomplete)
-                .expect("incomplete schedule is unavailable")
-                .maker_rebate_schedule
-                .is_none()
-        );
+        let incomplete = CatalogMarket::try_from(incomplete)
+            .expect("incomplete schedule is retained as unavailable");
+        assert!(matches!(
+            incomplete.maker_rebate_evidence,
+            CatalogMakerRebateEvidence::Unavailable {
+                reason: MakerRebateUnavailableReason::ScheduleIncomplete,
+                ..
+            }
+        ));
+
+        let disabled: WireMarket = serde_json::from_str(
+            r#"{
+                "conditionId": "0xdisabled",
+                "question": "Q?",
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"],
+                "feesEnabled": false,
+                "feeSchedule": null
+            }"#,
+        )
+        .expect("wire market");
+        assert!(matches!(
+            CatalogMarket::try_from(disabled)
+                .expect("disabled program")
+                .maker_rebate_evidence,
+            CatalogMakerRebateEvidence::NoProgram { .. }
+        ));
     }
 
     #[test]
-    fn rebate_rejects_invalid_rate() {
+    fn rebate_marks_invalid_rate() {
         let wire: WireMarket = serde_json::from_str(
             r#"{
                 "conditionId": "0xinvalid",
@@ -871,9 +949,14 @@ mod tests {
             }"#,
         )
         .expect("wire market");
+        let market = CatalogMarket::try_from(wire).expect("market remains catalog eligible");
         assert!(matches!(
-            CatalogMarket::try_from(wire),
-            Err(CatalogMarketReject::InvalidFeeSchedule { .. })
+            market.maker_rebate_evidence,
+            CatalogMakerRebateEvidence::Unavailable {
+                reason: MakerRebateUnavailableReason::InvalidSchedule,
+                ref invalid_fields,
+                ..
+            } if invalid_fields == &[MakerRebateField::RebateRate]
         ));
     }
 
@@ -896,15 +979,21 @@ mod tests {
             }))
             .expect("wire market")
         };
-        let first = CatalogMarket::try_from(wire("0.20"))
-            .expect("first")
-            .maker_rebate_schedule
-            .expect("schedule");
-        let second = CatalogMarket::try_from(wire("0.25"))
-            .expect("second")
-            .maker_rebate_schedule
-            .expect("schedule");
-        assert_ne!(first.catalog_change_hash, second.catalog_change_hash);
+        let CatalogMakerRebateEvidence::Available { schedule: first } =
+            CatalogMarket::try_from(wire("0.20"))
+                .expect("first")
+                .maker_rebate_evidence
+        else {
+            panic!("first schedule must be available");
+        };
+        let CatalogMakerRebateEvidence::Available { schedule: second } =
+            CatalogMarket::try_from(wire("0.25"))
+                .expect("second")
+                .maker_rebate_evidence
+        else {
+            panic!("second schedule must be available");
+        };
+        assert_ne!(first.terms_hash, second.terms_hash);
     }
 
     #[test]

@@ -5,20 +5,21 @@ use std::sync::Arc;
 use chrono::{DateTime, Days, Duration, NaiveDate, NaiveTime, Utc};
 use futures_util::{StreamExt, stream};
 use quant_pivot_api::{
-    clob::{ClobClient, MakerRebateAward},
+    clob::{ClobClient, MakerRebateReportedAccrual},
     data_api::{DataApiClient, VenueIncentiveCredit, VenueIncentiveCreditKind},
 };
 use quant_pivot_error::{QuantResult, api::ApiError, infra::InfraError};
 use quant_pivot_models::{
     domain::quant::venue_incentive::{
-        NewVenueIncentiveAwardSnapshot, NewVenueIncentiveEvent,
-        NewVenueIncentiveReconciliationScan, VenueIncentiveScanHealth,
+        MakerRebateProgramDayStatus, NewVenueIncentiveEvent, NewVenueIncentiveReconciliationScan,
+        NewVenueIncentiveReportedAccrualSnapshot, VenueIncentiveScanHealth,
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
         fee::{VenueIncentiveKind, VenueIncentiveReconciliationScanStatus, VenueIncentiveStage},
     },
     hashing::CanonicalDigest,
+    runtime_config::MakerRebatePolicy,
     types::{
         ContentHash, EvmAddress, ExecutionAccountId, Usd, VenueIncentiveEventId,
         ids::VenueIncentiveReconciliationScanId,
@@ -33,7 +34,7 @@ use crate::observability::{
 
 /// Runtime dependencies and the cadence required for durable health alerts.
 pub struct VenueIncentiveReconciliationDependencies {
-    pub award_source: Arc<dyn VenueAwardSource>,
+    pub reported_accrual_source: Arc<dyn VenueReportedAccrualSource>,
     pub credit_source: Arc<dyn VenueCreditSource>,
     pub repository: Arc<dyn VenueIncentiveRepository>,
     pub metrics: Arc<MetricsHub>,
@@ -41,12 +42,13 @@ pub struct VenueIncentiveReconciliationDependencies {
     pub execution_account_id: ExecutionAccountId,
     pub funder: EvmAddress,
     pub cadence_secs: u64,
+    pub maker_rebate_policy: MakerRebatePolicy,
 }
 
 /// Reconciles venue incentive stages without feeding wallet credits back into
 /// recommendation or execution economics.
 pub struct VenueIncentiveReconciliationService {
-    award_source: Arc<dyn VenueAwardSource>,
+    reported_accrual_source: Arc<dyn VenueReportedAccrualSource>,
     credit_source: Arc<dyn VenueCreditSource>,
     repository: Arc<dyn VenueIncentiveRepository>,
     metrics: Arc<MetricsHub>,
@@ -54,6 +56,7 @@ pub struct VenueIncentiveReconciliationService {
     execution_account_id: ExecutionAccountId,
     funder: EvmAddress,
     cadence_secs: u64,
+    maker_rebate_policy: MakerRebatePolicy,
 }
 
 const RECONCILIATION_CONCURRENCY: usize = 4;
@@ -71,14 +74,20 @@ struct SuccessfulScanInput {
 
 /// Adapter boundary for the venue's complete maker-award day snapshot.
 #[async_trait::async_trait]
-pub trait VenueAwardSource: Send + Sync {
-    async fn maker_awards(&self, date: NaiveDate) -> Result<Vec<MakerRebateAward>, ApiError>;
+pub trait VenueReportedAccrualSource: Send + Sync {
+    async fn maker_awards(
+        &self,
+        date: NaiveDate,
+    ) -> Result<Vec<MakerRebateReportedAccrual>, ApiError>;
 }
 
 #[async_trait::async_trait]
-impl VenueAwardSource for ClobClient {
-    async fn maker_awards(&self, date: NaiveDate) -> Result<Vec<MakerRebateAward>, ApiError> {
-        self.maker_rebate_awards(date).await
+impl VenueReportedAccrualSource for ClobClient {
+    async fn maker_awards(
+        &self,
+        date: NaiveDate,
+    ) -> Result<Vec<MakerRebateReportedAccrual>, ApiError> {
+        self.maker_rebate_reported_accruals(date).await
     }
 }
 
@@ -109,7 +118,7 @@ impl VenueIncentiveReconciliationService {
     #[must_use]
     pub fn new(dependencies: VenueIncentiveReconciliationDependencies) -> Self {
         Self {
-            award_source: dependencies.award_source,
+            reported_accrual_source: dependencies.reported_accrual_source,
             credit_source: dependencies.credit_source,
             repository: dependencies.repository,
             metrics: dependencies.metrics,
@@ -117,6 +126,7 @@ impl VenueIncentiveReconciliationService {
             execution_account_id: dependencies.execution_account_id,
             funder: dependencies.funder,
             cadence_secs: dependencies.cadence_secs,
+            maker_rebate_policy: dependencies.maker_rebate_policy,
         }
     }
 
@@ -187,30 +197,31 @@ impl VenueIncentiveReconciliationService {
             .repository
             .reconciliation_cumulative(&self.execution_account_id, now)
             .await?;
-        let outstanding_since = self
+        let events = self
             .repository
-            .maker_credit_outstanding_since(&self.execution_account_id, now)
+            .maker_valuation_events(&self.execution_account_id, now)
             .await?;
+        let program_days = MakerRebateProgramDayStatus::project(
+            &events,
+            Usd::new(self.maker_rebate_policy.payout_threshold_usd.value),
+            self.maker_rebate_policy
+                .fallback_lag_from_program_close_secs,
+        );
         self.metrics.set_venue_incentive_health(
             health.last_success_at.map(|value| value.timestamp()),
             health.incomplete_day_count,
-            reconciliation.estimate_to_award_delta(),
-            reconciliation.award_to_credit_delta(),
+            reconciliation.estimate_to_reported_delta(),
+            reconciliation.reported_to_credit_delta(),
         );
-        self.publish_health_alerts(
-            now,
-            health,
-            reconciliation.venue_awarded_maker_usd - reconciliation.wallet_credited_maker_usd,
-            outstanding_since,
-        );
+        self.publish_health_alerts(now, health, &program_days);
         tracing::info!(
             execution_account_id = %self.execution_account_id,
             estimated_maker_accrual_usd = %reconciliation.estimated_maker_accrual_usd,
-            venue_awarded_maker_usd = %reconciliation.venue_awarded_maker_usd,
+            venue_reported_maker_accrual_usd = %reconciliation.venue_reported_maker_accrual_usd,
             wallet_credited_maker_usd = %reconciliation.wallet_credited_maker_usd,
             wallet_credited_taker_usd = %reconciliation.wallet_credited_taker_usd,
-            estimate_to_award_delta_usd = %reconciliation.estimate_to_award_delta(),
-            award_to_credit_delta_usd = %reconciliation.award_to_credit_delta(),
+            estimate_to_reported_delta_usd = %reconciliation.estimate_to_reported_delta(),
+            reported_to_credit_delta_usd = %reconciliation.reported_to_credit_delta(),
             incomplete_day_count = health.incomplete_day_count,
             "venue incentive reconciliation updated"
         );
@@ -221,8 +232,7 @@ impl VenueIncentiveReconciliationService {
         &self,
         now: DateTime<Utc>,
         health: VenueIncentiveScanHealth,
-        award_outstanding_usd: Usd,
-        outstanding_since: Option<DateTime<Utc>>,
+        program_days: &[MakerRebateProgramDayStatus],
     ) {
         let stale_seconds = self.cadence_secs.saturating_mul(2);
         let stale = health.last_success_at.is_none_or(|last| {
@@ -273,20 +283,51 @@ impl VenueIncentiveReconciliationService {
                 .with_dedupe_secs(self.cadence_secs),
             );
         }
-        let credit_overdue = award_outstanding_usd >= Usd::ONE
-            && outstanding_since.is_some_and(|observed_at| {
-                now.signed_duration_since(observed_at) >= Duration::hours(48)
-            });
-        if credit_overdue {
+        let below_threshold_dates = program_days
+            .iter()
+            .filter(|day| day.venue_reported_accrual_usd.is_positive() && !day.threshold_met)
+            .map(|day| day.program_date.to_string())
+            .collect::<Vec<_>>();
+        if !below_threshold_dates.is_empty() {
+            self.alerts.dispatch_background(
+                Alert::new(
+                    "venue-incentive-reconciliation:below-daily-threshold",
+                    AlertLevel::Info,
+                    AlertCategory::OperatorNotice,
+                    AlertSource::Settlement,
+                    "Venue maker accrual is below its daily payout threshold",
+                    format!(
+                        "Program day(s) {} remain below the configured threshold; dates never roll over.",
+                        below_threshold_dates.join(", ")
+                    ),
+                    now,
+                )
+                .with_affects_trading(false)
+                .with_visible_toast(false)
+                .with_dedupe_secs(self.cadence_secs),
+            );
+        }
+        let overdue = program_days
+            .iter()
+            .filter(|day| {
+                day.threshold_met && day.outstanding_usd.is_positive() && day.expected_by <= now
+            })
+            .collect::<Vec<_>>();
+        if !overdue.is_empty() {
             self.alerts.dispatch_background(
                 Alert::new(
                     "venue-incentive-reconciliation:award-credit-overdue",
                     AlertLevel::Warning,
                     AlertCategory::OperatorNotice,
                     AlertSource::Settlement,
-                    "Venue maker award has not reached the wallet",
+                    "Venue maker accrual has not reached the wallet",
                     format!(
-                        "{award_outstanding_usd} of venue-awarded maker incentive remains uncredited for at least 48 hours."
+                        "Threshold-qualified program day(s) {} remain uncredited past their configured expected-by time.",
+                        overdue
+                            .iter()
+                            .map(|day| day.program_date.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                     now,
                 )
@@ -298,7 +339,7 @@ impl VenueIncentiveReconciliationService {
     }
 
     async fn reconcile_day(&self, date: NaiveDate) -> QuantResult<()> {
-        let award_result = self.reconcile_awards(date).await;
+        let award_result = self.reconcile_reported_accruals(date).await;
         let start = DateTime::<Utc>::from_naive_utc_and_offset(date.and_time(NaiveTime::MIN), Utc);
         let next_date =
             date.checked_add_days(Days::new(1))
@@ -320,14 +361,14 @@ impl VenueIncentiveReconciliationService {
         }
     }
 
-    async fn reconcile_awards(&self, date: NaiveDate) -> QuantResult<()> {
+    async fn reconcile_reported_accruals(&self, date: NaiveDate) -> QuantResult<()> {
         let started_at = Utc::now();
-        let mut awards = match self.award_source.maker_awards(date).await {
+        let mut awards = match self.reported_accrual_source.maker_awards(date).await {
             Ok(awards) => awards,
             Err(error) => {
                 self.record_failed_scan(
                     VenueIncentiveKind::MakerRebate,
-                    VenueIncentiveStage::VenueAwarded,
+                    VenueIncentiveStage::VenueReportedAccrual,
                     date,
                     started_at,
                     "maker_award_upstream_failed",
@@ -347,13 +388,13 @@ impl VenueIncentiveReconciliationService {
         )?;
         let events = awards
             .iter()
-            .map(|award| self.award_event(award, completed_at))
+            .map(|award| self.reported_accrual_event(award, completed_at))
             .collect::<QuantResult<Vec<_>>>()?;
         self.repository
-            .apply_award_snapshot(NewVenueIncentiveAwardSnapshot {
+            .apply_reported_accrual_snapshot(NewVenueIncentiveReportedAccrualSnapshot {
                 scan: self.successful_scan(SuccessfulScanInput {
                     kind: VenueIncentiveKind::MakerRebate,
-                    stage: VenueIncentiveStage::VenueAwarded,
+                    stage: VenueIncentiveStage::VenueReportedAccrual,
                     program_date: date,
                     started_at,
                     completed_at,
@@ -499,9 +540,9 @@ impl VenueIncentiveReconciliationService {
         }
     }
 
-    fn award_event(
+    fn reported_accrual_event(
         &self,
-        award: &MakerRebateAward,
+        award: &MakerRebateReportedAccrual,
         available_at: DateTime<Utc>,
     ) -> QuantResult<NewVenueIncentiveEvent> {
         let evidence_hash =
@@ -516,10 +557,10 @@ impl VenueIncentiveReconciliationService {
             execution_fill_id: None,
             market_id: Some(award.market_id.clone()),
             kind: VenueIncentiveKind::MakerRebate,
-            stage: VenueIncentiveStage::VenueAwarded,
+            stage: VenueIncentiveStage::VenueReportedAccrual,
             program_date: award.program_date,
             amount_usd: award.amount_usd,
-            source_schedule_hash: None,
+            source_terms_hash: None,
             source_identity: format!("{source_partition}:{evidence_hash}"),
             source_partition,
             transaction_hash: None,
@@ -566,7 +607,7 @@ impl VenueIncentiveReconciliationService {
             stage: VenueIncentiveStage::WalletCredited,
             program_date: credit.occurred_at.date_naive(),
             amount_usd: credit.amount_usd,
-            source_schedule_hash: None,
+            source_terms_hash: None,
             source_identity: source_partition.clone(),
             source_partition,
             transaction_hash: Some(credit.transaction_hash.clone()),
@@ -582,27 +623,28 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
-    use quant_pivot_api::{clob::MakerRebateAward, data_api::VenueIncentiveCredit};
+    use quant_pivot_api::{clob::MakerRebateReportedAccrual, data_api::VenueIncentiveCredit};
     use quant_pivot_error::{api::ApiError, storage::StorageError};
     use quant_pivot_models::{
         domain::{
             api::quant_incentive::VenueIncentiveEventListQuery,
             pagination::Paginated,
             quant::venue_incentive::{
-                NewVenueIncentiveAwardSnapshot, NewVenueIncentiveEvent,
-                NewVenueIncentiveReconciliationScan, VenueIncentiveEventInfo,
-                VenueIncentiveReconciliation, VenueIncentiveReconciliationScanInfo,
-                VenueIncentiveScanHealth,
+                MakerRebateProgramDayStatus, NewVenueIncentiveEvent,
+                NewVenueIncentiveReconciliationScan, NewVenueIncentiveReportedAccrualSnapshot,
+                VenueIncentiveEventInfo, VenueIncentiveReconciliation,
+                VenueIncentiveReconciliationScanInfo, VenueIncentiveScanHealth,
             },
         },
+        runtime_config::MakerRebatePolicy,
         types::{EvmAddress, ExecutionAccountId, Usd},
     };
     use quant_pivot_repository::traits::VenueIncentiveRepository;
     use rust_decimal_macros::dec;
 
     use super::{
-        VenueAwardSource, VenueCreditSource, VenueIncentiveReconciliationDependencies,
-        VenueIncentiveReconciliationService,
+        VenueCreditSource, VenueIncentiveReconciliationDependencies,
+        VenueIncentiveReconciliationService, VenueReportedAccrualSource,
     };
     use crate::observability::{
         alert_dispatcher::{Alert, AlertDispatcher},
@@ -615,8 +657,11 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl VenueAwardSource for AwardSourceFixture {
-        async fn maker_awards(&self, date: NaiveDate) -> Result<Vec<MakerRebateAward>, ApiError> {
+    impl VenueReportedAccrualSource for AwardSourceFixture {
+        async fn maker_awards(
+            &self,
+            date: NaiveDate,
+        ) -> Result<Vec<MakerRebateReportedAccrual>, ApiError> {
             self.calls.lock().expect("award calls lock").push(date);
             if date == self.failed_date {
                 return Err(ApiError::Timeout {
@@ -699,9 +744,9 @@ mod tests {
             Ok(())
         }
 
-        async fn apply_award_snapshot(
+        async fn apply_reported_accrual_snapshot(
             &self,
-            snapshot: NewVenueIncentiveAwardSnapshot,
+            snapshot: NewVenueIncentiveReportedAccrualSnapshot,
         ) -> Result<(), StorageError> {
             self.push_scan(snapshot.scan);
             Ok(())
@@ -723,13 +768,13 @@ mod tests {
             Ok(VenueIncentiveReconciliation {
                 as_of,
                 estimated_maker_accrual_usd: Usd::ZERO,
-                venue_awarded_maker_usd: Usd::ZERO,
+                venue_reported_maker_accrual_usd: Usd::ZERO,
                 wallet_credited_maker_usd: Usd::ZERO,
                 wallet_credited_taker_usd: Usd::ZERO,
             })
         }
 
-        async fn maker_credit_outstanding_since(
+        async fn maker_credit_pending_since(
             &self,
             _execution_account_id: &ExecutionAccountId,
             _as_of: DateTime<Utc>,
@@ -750,6 +795,14 @@ mod tests {
                 .collect())
         }
 
+        async fn maker_valuation_events(
+            &self,
+            _execution_account_id: &ExecutionAccountId,
+            _as_of: DateTime<Utc>,
+        ) -> Result<Vec<VenueIncentiveEventInfo>, StorageError> {
+            Ok(Vec::new())
+        }
+
         async fn page_events(
             &self,
             _execution_account_id: &ExecutionAccountId,
@@ -766,7 +819,7 @@ mod tests {
             .single()
             .expect("fixture time");
         let failed_date = NaiveDate::from_ymd_opt(2026, 8, 15).expect("fixture date");
-        let award_source = Arc::new(AwardSourceFixture {
+        let reported_accrual_source = Arc::new(AwardSourceFixture {
             failed_date,
             calls: Mutex::new(Vec::new()),
         });
@@ -774,7 +827,8 @@ mod tests {
         let repository = Arc::new(RepositoryFixture::default());
         let service =
             VenueIncentiveReconciliationService::new(VenueIncentiveReconciliationDependencies {
-                award_source: Arc::clone(&award_source) as Arc<dyn VenueAwardSource>,
+                reported_accrual_source: Arc::clone(&reported_accrual_source)
+                    as Arc<dyn VenueReportedAccrualSource>,
                 credit_source: Arc::clone(&credit_source) as Arc<dyn VenueCreditSource>,
                 repository: Arc::clone(&repository) as Arc<dyn VenueIncentiveRepository>,
                 metrics: Arc::new(MetricsHub::new()),
@@ -784,12 +838,17 @@ mod tests {
                 execution_account_id: ExecutionAccountId::from_v7(),
                 funder: EvmAddress::parse(format!("0x{}", "1".repeat(40))).expect("fixture funder"),
                 cadence_secs: 3_600,
+                maker_rebate_policy: MakerRebatePolicy::default(),
             });
 
         let result = service.reconcile_pass(now, 3).await;
         assert!(result.is_err());
 
-        let mut award_dates = award_source.calls.lock().expect("award calls lock").clone();
+        let mut award_dates = reported_accrual_source
+            .calls
+            .lock()
+            .expect("award calls lock")
+            .clone();
         award_dates.sort_unstable();
         assert_eq!(
             award_dates,
@@ -818,7 +877,7 @@ mod tests {
         let recordings = Arc::new(Mutex::new(Vec::<Alert>::new()));
         let service =
             VenueIncentiveReconciliationService::new(VenueIncentiveReconciliationDependencies {
-                award_source: Arc::new(AwardSourceFixture {
+                reported_accrual_source: Arc::new(AwardSourceFixture {
                     failed_date: now.date_naive(),
                     calls: Mutex::new(Vec::new()),
                 }),
@@ -829,6 +888,7 @@ mod tests {
                 execution_account_id: ExecutionAccountId::from_v7(),
                 funder: EvmAddress::parse(format!("0x{}", "1".repeat(40))).expect("fixture funder"),
                 cadence_secs: 3_600,
+                maker_rebate_policy: MakerRebatePolicy::default(),
             });
 
         service.publish_health_alerts(
@@ -841,8 +901,14 @@ mod tests {
                 ),
                 incomplete_day_count: 1,
             },
-            Usd::new(dec!(1.25)),
-            Some(now - Duration::hours(48)),
+            &[MakerRebateProgramDayStatus {
+                program_date: NaiveDate::from_ymd_opt(2026, 8, 14).expect("fixture date"),
+                venue_reported_accrual_usd: Usd::new(dec!(1.25)),
+                attributed_wallet_credit_usd: Usd::ZERO,
+                outstanding_usd: Usd::new(dec!(1.25)),
+                threshold_met: true,
+                expected_by: now - Duration::seconds(1),
+            }],
         );
         for _ in 0..4 {
             tokio::task::yield_now().await;

@@ -48,13 +48,14 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, DecisionPolicySnapshotId, EvmBlockHash, OrderAmount, PreparedFeeSchedule,
-        PreparedVenueOrder, ResearchProfileRef, Usd, VenueOrderAmount,
+        ContentHash, DecisionPolicySnapshotId, EntryMakerRebateTerms, EvmBlockHash, OrderAmount,
+        PreparedFeeSchedule, PreparedVenueOrder, ResearchProfileRef, Usd, VenueOrderAmount,
     },
 };
 use quant_pivot_research::{
     execution_semantics::{
-        BookWalkOutcome, LiquidityRole, PitFeeSchedule, walk_buy_cash_budget, walk_buy_exact_shares,
+        BookWalkOutcome, LiquidityRole, PitFeeSchedule, PitMakerRebateEvidence,
+        walk_buy_cash_budget, walk_buy_exact_shares,
     },
     portfolio::AccountSnapshot,
 };
@@ -103,6 +104,9 @@ pub struct StateVersion {
     pub account_as_of: DateTime<Utc>,
     pub book_version: Option<u64>,
     pub book_as_of_ms: Option<u64>,
+    pub fee_schedule_hash: ContentHash,
+    pub maker_rebate_terms_hash: ContentHash,
+    pub maker_rebate_decidable: bool,
     pub kill_switch_state: KillSwitchState,
     pub settlement_write_policy: SettlementWritePolicy,
     pub settlement_deployment_digest: Option<ContentHash>,
@@ -168,6 +172,8 @@ pub struct AdmissionInput {
     pub book: Option<Arc<BookSnapshot>>,
     /// Point-in-time fee schedule visible before this admission decision.
     pub fee_schedule: PitFeeSchedule,
+    /// Current Gamma program truth independently re-read at final admission.
+    pub maker_rebate_evidence: PitMakerRebateEvidence,
     /// Governed total budget cap (`portfolio.budget.total_budget_usd`), distilled
     /// from the active config at build time.
     pub budget_total_usd: Usd,
@@ -233,31 +239,60 @@ impl AdmissionInput {
             }
             .into());
         }
-        if spec.maker_rebate_schedule.is_some() && !spec.post_only {
-            return Err(ExecutionError::IntentDenied {
-                reason: "only a passive post-only entry may carry maker-rebate terms".to_owned(),
+        match spec.maker_rebate_terms {
+            EntryMakerRebateTerms::AggressiveNotApplicable if !spec.post_only => {}
+            EntryMakerRebateTerms::PassiveNoProgram {
+                terms_hash,
+                available_at,
+            } if spec.post_only
+                && available_at <= self.now
+                && self.fee_schedule.platform_rate.is_zero()
+                && matches!(
+                    &self.maker_rebate_evidence,
+                    PitMakerRebateEvidence::NoProgram {
+                        terms_hash: current,
+                        ..
+                    } if *current == terms_hash
+                ) => {}
+            EntryMakerRebateTerms::PassiveProgram { schedule } if spec.post_only => {
+                schedule
+                    .validate_at(self.now)
+                    .map_err(|detail| ExecutionError::IntentDenied {
+                        reason: detail.to_owned(),
+                    })?;
+                if schedule.platform_rate != self.fee_schedule.platform_rate
+                    || schedule.exponent != self.fee_schedule.exponent
+                    || schedule.taker_only != self.fee_schedule.taker_only
+                {
+                    return Err(ExecutionError::IntentDenied {
+                        reason: "frozen Gamma rebate terms disagree with admitted CLOB fee terms"
+                            .to_owned(),
+                    }
+                    .into());
+                }
+                if !matches!(
+                    &self.maker_rebate_evidence,
+                    PitMakerRebateEvidence::Available { schedule: current }
+                        if current.terms_hash == schedule.terms_hash
+                        && current.platform_rate == schedule.platform_rate
+                        && current.exponent == schedule.exponent
+                        && current.taker_only == schedule.taker_only
+                        && current.rebate_rate == schedule.rebate_rate
+                ) {
+                    return Err(ExecutionError::IntentDenied {
+                        reason:
+                            "maker-rebate terms drifted after recommendation or intent creation"
+                                .to_owned(),
+                    }
+                    .into());
+                }
             }
-            .into());
-        }
-        let Some(rebate) = spec.maker_rebate_schedule else {
-            return Ok(());
-        };
-        rebate
-            .validate_at(self.now)
-            .map_err(|detail| ExecutionError::IntentDenied {
-                reason: detail.to_owned(),
-            })?;
-        let clob_fees_enabled = !self.fee_schedule.platform_rate.is_zero();
-        if rebate.fees_enabled != clob_fees_enabled
-            || rebate.platform_rate != self.fee_schedule.platform_rate
-            || rebate.exponent != self.fee_schedule.exponent
-            || rebate.taker_only != self.fee_schedule.taker_only
-        {
-            return Err(ExecutionError::IntentDenied {
-                reason: "frozen Gamma rebate terms disagree with admitted CLOB fee terms"
-                    .to_owned(),
+            _ => {
+                return Err(ExecutionError::IntentDenied {
+                    reason: "entry route and maker-rebate terms are not admissible".to_owned(),
+                }
+                .into());
             }
-            .into());
         }
         Ok(())
     }
@@ -516,7 +551,7 @@ impl AdmissionInput {
             book_hash,
             clob_market_info_hash: self.venue_metadata.clob_market_info_hash,
             fee_schedule: self.prepared_fee_schedule(),
-            maker_rebate_schedule: spec.maker_rebate_schedule,
+            maker_rebate_terms: spec.maker_rebate_terms,
             prepared_at: self.now,
             valid_until: spec.valid_until,
         })

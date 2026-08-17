@@ -540,7 +540,10 @@ mod tests {
 
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::market::{TokenInfo, book::BookLevel, registry::MarketRegistryInfo},
+        domain::market::{
+            TokenInfo, book::BookLevel, fee::MarketMakerRebateEvidence,
+            registry::MarketRegistryInfo,
+        },
         enums::{
             catalog::CatalogFilterReasonSet,
             common::{CategorySet, MarketCategory, TickSize},
@@ -624,7 +627,7 @@ mod tests {
             min_order_size: dec!(1),
             liquidity_usd: None,
             volume_24h: None,
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
             start_date: None,
             end_date: None,
             resolved_at: None,
@@ -656,7 +659,7 @@ mod tests {
             end_date: None,
             created_at: Some(as_of),
             fee_schedule: None,
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         };
         let selected = SelectedMarket {
             market_id: MarketId::new("0xm"),

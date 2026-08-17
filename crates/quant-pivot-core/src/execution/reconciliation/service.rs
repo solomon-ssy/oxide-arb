@@ -14,6 +14,7 @@ use std::{
 };
 
 use chrono::{DateTime, Duration, Utc};
+use futures_util::future::join_all;
 use quant_pivot_error::{
     QuantResult,
     execution::ExecutionError,
@@ -24,6 +25,7 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
+        data_plane::DecisionClock,
         quant::{
             CapitalReconcileSettlement, CumulativePositionExit, CumulativePositionFill,
             ExecutionOrderIdentityRefs, ExecutionOrderInfo, OrderIntentInfo, PositionInfo,
@@ -41,16 +43,19 @@ use quant_pivot_models::{
         quant::{AccountSource, ExecutionOrderState, OrderIntentStatus},
     },
     types::{
-        ExecutionAccountId, ExecutionOrderId, FeeMeasurement, OrderIntentId, Price,
-        RecommendationId, ReconciliationEvidence, ReconciliationEvidenceChain, Shares, Usd,
-        VenueTradeId,
+        EntryMakerRebateTerms, ExecutionAccountId, ExecutionOrderId, FeeMeasurement, MarketId,
+        OrderIntentId, Price, RecommendationId, ReconciliationEvidence,
+        ReconciliationEvidenceChain, Shares, Usd, VenueTradeId,
     },
 };
 use quant_pivot_repository::traits::{
-    CapitalAllocationRepository, ExecutionOrderRepository, ExecutionSubmissionRepository,
-    OrderIntentRepository, PositionRepository, RecommendationRepository, ReconciliationRepository,
+    CapitalAllocationRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
+    ExecutionOrderRepository, ExecutionSubmissionRepository, OrderIntentRepository,
+    PositionRepository, RecommendationRepository, ReconciliationRepository,
 };
-use quant_pivot_research::execution_semantics::{LiquidityRole, PitFeeSchedule};
+use quant_pivot_research::execution_semantics::{
+    LiquidityRole, PitFeeSchedule, PitMakerRebateEvidence, PitMarketExecutionEconomics,
+};
 
 use super::{CollectedReconciliation, EvidenceCollector, VenuePresence};
 use crate::{
@@ -79,6 +84,24 @@ const WORKER_ACTOR: &str = "system:reconciliation_worker";
 struct ReconcileContextMaps {
     intents_by_id: HashMap<OrderIntentId, OrderIntentInfo>,
     recommendations_by_id: HashMap<RecommendationId, RecommendationInfo>,
+    terms_by_market: HashMap<MarketId, CurrentExecutionTerms>,
+}
+
+enum CurrentExecutionTerms {
+    Available(Box<PitMarketExecutionEconomics>),
+    Unavailable(String),
+}
+
+struct TermsDriftRequest<'a> {
+    original_order: &'a ExecutionOrderInfo,
+    effective_order: &'a ExecutionOrderInfo,
+    identity_refs: &'a ExecutionOrderIdentityRefs,
+    recommendation: &'a RecommendationInfo,
+    intent_status: OrderIntentStatus,
+    collected: CollectedReconciliation,
+    context: &'a ReconcileContextMaps,
+    now: DateTime<Utc>,
+    stale_after: Duration,
 }
 
 fn load_reconcile_context(
@@ -109,6 +132,8 @@ pub struct ReconciliationServiceDeps {
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
+    pub catalog_ledger: Arc<dyn CatalogLedgerRepository>,
+    pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     pub breaker: Arc<ExecutionBreaker>,
     pub metrics: Arc<MetricsHub>,
     pub config: Arc<DecisionPolicyStore>,
@@ -149,6 +174,87 @@ impl ReconciliationService {
         Self { deps }
     }
 
+    fn passive_terms_drifted(
+        order: &ExecutionOrderInfo,
+        context: &ReconcileContextMaps,
+    ) -> QuantResult<bool> {
+        if !order.prepared_order_json.post_only {
+            return Ok(false);
+        }
+        let current = match context.terms_by_market.get(&order.market_id) {
+            Some(CurrentExecutionTerms::Available(current)) => current,
+            Some(CurrentExecutionTerms::Unavailable(reason)) => {
+                return Err(ExecutionError::ReconciliationUnresolvable {
+                    reason: reason.clone(),
+                }
+                .into());
+            }
+            None => return Ok(true),
+        };
+        if current.fee_schedule.schedule_hash
+            != order.prepared_order_json.fee_schedule.schedule_hash
+        {
+            return Ok(true);
+        }
+        Ok(
+            match (
+                order.prepared_order_json.maker_rebate_terms,
+                &current.maker_rebate_evidence,
+            ) {
+                (
+                    EntryMakerRebateTerms::PassiveNoProgram { terms_hash, .. },
+                    PitMakerRebateEvidence::NoProgram {
+                        terms_hash: current,
+                        ..
+                    },
+                ) => terms_hash != *current,
+                (
+                    EntryMakerRebateTerms::PassiveProgram { schedule },
+                    PitMakerRebateEvidence::Available { schedule: current },
+                ) => {
+                    schedule.terms_hash != current.terms_hash
+                        || schedule.platform_rate != current.platform_rate
+                        || schedule.exponent != current.exponent
+                        || schedule.taker_only != current.taker_only
+                        || schedule.rebate_rate != current.rebate_rate
+                }
+                _ => true,
+            },
+        )
+    }
+
+    async fn current_execution_terms(
+        &self,
+        market_id: &MarketId,
+        now: DateTime<Utc>,
+    ) -> QuantResult<PitMarketExecutionEconomics> {
+        let boundary = DecisionClock::new(0).boundary(now)?;
+        let (catalog, clob) = tokio::join!(
+            self.deps.catalog_ledger.market_at(market_id, &boundary),
+            self.deps.clob_market_info.at(market_id, now, now),
+        );
+        let catalog = catalog?.ok_or_else(|| ExecutionError::ReconciliationUnresolvable {
+            reason: format!("current Gamma catalog evidence is missing for market {market_id}"),
+        })?;
+        let clob = clob?.ok_or_else(|| ExecutionError::ReconciliationUnresolvable {
+            reason: format!("current CLOB market-info evidence is missing for market {market_id}"),
+        })?;
+        let market = catalog.verified_payload().map_err(|error| {
+            ExecutionError::ReconciliationUnresolvable {
+                reason: format!("current Gamma catalog object is invalid: {error}"),
+            }
+        })?;
+        Ok(PitMarketExecutionEconomics::resolve(
+            &clob.fee_schedule(),
+            &market.maker_rebate_evidence,
+            catalog.available_at,
+            now,
+        )
+        .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+            reason: format!("current resting-order terms are invalid: {error:?}"),
+        })?)
+    }
+
     /// One sweep: reconcile every order whose venue truth is still unknown.
     pub async fn reconcile_pass(&self, now: DateTime<Utc>) -> QuantResult<()> {
         let policy = self
@@ -169,7 +275,43 @@ impl ReconciliationService {
             .execution_orders
             .find_reconcilable(RECONCILE_BATCH)
             .await?;
-        let context = self.preload_reconcile_context(&orders).await?;
+        self.reconcile_orders(orders, now, stale_after).await
+    }
+
+    /// Immediately guard resting orders in markets whose committed execution
+    /// terms changed. The periodic pass remains the durable recovery backstop.
+    pub async fn reconcile_terms_changes(
+        &self,
+        now: DateTime<Utc>,
+        market_ids: &[MarketId],
+    ) -> QuantResult<()> {
+        if market_ids.is_empty() {
+            return Ok(());
+        }
+        let policy = self
+            .deps
+            .config
+            .current()
+            .execution_risk
+            .reconciliation
+            .clone();
+        let stale_after =
+            Duration::seconds(i64::try_from(policy.stale_open_secs).unwrap_or(i64::MAX));
+        let orders = self
+            .deps
+            .execution_orders
+            .find_reconcilable_for_markets(market_ids, RECONCILE_BATCH)
+            .await?;
+        self.reconcile_orders(orders, now, stale_after).await
+    }
+
+    async fn reconcile_orders(
+        &self,
+        orders: Vec<ExecutionOrderInfo>,
+        now: DateTime<Utc>,
+        stale_after: Duration,
+    ) -> QuantResult<()> {
+        let context = self.preload_reconcile_context(&orders, now).await?;
         for order in orders {
             if let Err(error) = self.reconcile_one(&order, now, stale_after, &context).await {
                 tracing::warn!(
@@ -186,6 +328,7 @@ impl ReconciliationService {
     async fn preload_reconcile_context(
         &self,
         orders: &[ExecutionOrderInfo],
+        now: DateTime<Utc>,
     ) -> QuantResult<ReconcileContextMaps> {
         let intent_ids: Vec<OrderIntentId> = orders
             .iter()
@@ -213,10 +356,120 @@ impl ReconciliationService {
             .into_iter()
             .map(|rec| (rec.recommendation_id, rec))
             .collect();
+        let market_ids = orders
+            .iter()
+            .filter(|order| order.prepared_order_json.post_only)
+            .map(|order| order.market_id.clone())
+            .collect::<HashSet<_>>();
+        let terms_by_market = join_all(market_ids.into_iter().map(|market_id| async move {
+            let terms = self
+                .current_execution_terms(&market_id, now)
+                .await
+                .map_or_else(
+                    |error| CurrentExecutionTerms::Unavailable(error.to_string()),
+                    |terms| CurrentExecutionTerms::Available(Box::new(terms)),
+                );
+            (market_id, terms)
+        }))
+        .await
+        .into_iter()
+        .collect();
         Ok(ReconcileContextMaps {
             intents_by_id,
             recommendations_by_id,
+            terms_by_market,
         })
+    }
+
+    async fn cancel_terms_drift(
+        &self,
+        request: TermsDriftRequest<'_>,
+    ) -> QuantResult<Option<CollectedReconciliation>> {
+        let TermsDriftRequest {
+            original_order,
+            effective_order,
+            identity_refs,
+            recommendation,
+            intent_status,
+            mut collected,
+            context,
+            now,
+            stale_after,
+        } = request;
+        let drifted = match Self::passive_terms_drifted(effective_order, context) {
+            Ok(drifted) => drifted,
+            Err(error) => {
+                tracing::warn!(
+                    execution_order_id = %effective_order.execution_order_id,
+                    error = %error,
+                    "resting-order terms evidence is unavailable; cancelling fail-closed"
+                );
+                true
+            }
+        };
+        if !drifted {
+            return Ok(Some(collected));
+        }
+        self.deps
+            .metrics
+            .record_maker_rebate_diagnostic("terms_drift", "cancel_requested");
+        let Some(venue_order_id) = effective_order.venue_order_id.as_ref() else {
+            collected.evidence.push(system_note(
+                ReconciliationEvidenceKind::ClobOrderStatus,
+                "terms drift detected but no exact venue order id is available".to_owned(),
+                now,
+            ));
+            self.apply_unresolvable(
+                original_order,
+                intent_status,
+                collected.evidence,
+                recommendation,
+            )
+            .await?;
+            return Ok(None);
+        };
+        let cancel = self.deps.order_client.cancel(venue_order_id).await;
+        self.deps.metrics.record_maker_rebate_diagnostic(
+            "terms_drift_cancel",
+            if cancel.cancelled {
+                "cancelled"
+            } else {
+                "race_or_rejected"
+            },
+        );
+        match self
+            .deps
+            .collector
+            .collect(effective_order, identity_refs, now, stale_after)
+            .await
+        {
+            Ok(mut recollected) => {
+                recollected.evidence.push(system_note(
+                    ReconciliationEvidenceKind::ClobOrderStatus,
+                    format!(
+                        "terms drift cancellation requested; cancelled={}",
+                        cancel.cancelled
+                    ),
+                    cancel.responded_at,
+                ));
+                Ok(Some(recollected))
+            }
+            Err(error) => {
+                collected.evidence.push(system_note(
+                    ReconciliationEvidenceKind::ClobOrderStatus,
+                    format!("terms drift cancellation recollection failed: {error}"),
+                    cancel.responded_at,
+                ));
+                self.apply_unresolvable(
+                    original_order,
+                    intent_status,
+                    collected.evidence,
+                    recommendation,
+                )
+                .await?;
+                Ok(None)
+            }
+        }
     }
 
     /// Reconcile a single order to a terminal verdict (or leave it pending).
@@ -280,6 +533,23 @@ impl ReconciliationService {
         if effective_order.venue_order_id.is_none() {
             effective_order.venue_order_id = discovered_order_id;
         }
+
+        let Some(collected) = self
+            .cancel_terms_drift(TermsDriftRequest {
+                original_order: order,
+                effective_order: &effective_order,
+                identity_refs: &identity_refs,
+                recommendation: &recommendation,
+                intent_status: intent.status,
+                collected,
+                context,
+                now,
+                stale_after,
+            })
+            .await?
+        else {
+            return Ok(());
+        };
 
         // Actively cancel a stale (or GTD-expired) resting order, then re-collect
         // the post-cancel truth so unfilled capital is released promptly.

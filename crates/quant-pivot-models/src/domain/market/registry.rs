@@ -7,7 +7,7 @@ use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::market::{fee::MarketMakerRebateSchedule, version::CATALOG_OBJECT_HASH_VERSION},
+    domain::market::{fee::MarketMakerRebateEvidence, version::CATALOG_OBJECT_HASH_VERSION},
     enums::{
         catalog::{CatalogFilterReason, CatalogFilterReasonSet},
         common::{CategorySet, MarketCategory, TickSize},
@@ -226,9 +226,8 @@ pub struct MarketRegistryInfo {
     pub liquidity_usd: Option<Usd>,
     /// Gamma-reported trailing 24h volume when published by the upstream source.
     pub volume_24h: Option<Usd>,
-    /// Gamma-sourced delayed maker-incentive fact. Missing means unavailable,
-    /// never a synthesized zero-rate schedule.
-    pub maker_rebate_schedule: Option<MarketMakerRebateSchedule>,
+    /// Required Gamma-sourced delayed maker-incentive truth.
+    pub maker_rebate_evidence: MarketMakerRebateEvidence,
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,

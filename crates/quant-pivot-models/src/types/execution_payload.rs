@@ -48,6 +48,44 @@ pub enum VenueOrderAmount {
     Shares(Shares),
 }
 
+/// Route-aware maker-rebate contract frozen at recommendation and intent time.
+///
+/// This sum type makes route applicability and a confirmed no-program state
+/// explicit; neither is represented by an ambiguous `None` or numeric zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "state", deny_unknown_fields)]
+pub enum EntryMakerRebateTerms {
+    AggressiveNotApplicable,
+    PassiveNoProgram {
+        terms_hash: ContentHash,
+        available_at: DateTime<Utc>,
+    },
+    PassiveProgram {
+        schedule: FrozenMakerRebateSchedule,
+    },
+}
+
+impl EntryMakerRebateTerms {
+    /// Active maker-rebate schedule, only for a passive program route.
+    #[must_use]
+    pub const fn schedule(&self) -> Option<FrozenMakerRebateSchedule> {
+        match self {
+            Self::PassiveProgram { schedule } => Some(*schedule),
+            Self::AggressiveNotApplicable | Self::PassiveNoProgram { .. } => None,
+        }
+    }
+
+    /// Stable Gamma terms identity for passive routes.
+    #[must_use]
+    pub const fn passive_terms_hash(&self) -> Option<ContentHash> {
+        match self {
+            Self::AggressiveNotApplicable => None,
+            Self::PassiveNoProgram { terms_hash, .. } => Some(*terms_hash),
+            Self::PassiveProgram { schedule } => Some(schedule.terms_hash),
+        }
+    }
+}
+
 /// Exact fee schedule frozen at admission. Reconciliation must use this
 /// decision-time evidence, never a process-current fee cache.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -81,8 +119,8 @@ pub struct PreparedVenueOrder {
     pub book_hash: ContentHash,
     pub clob_market_info_hash: ContentHash,
     pub fee_schedule: PreparedFeeSchedule,
-    /// Decision-time Gamma terms used only for actual maker-fill accrual.
-    pub maker_rebate_schedule: Option<FrozenMakerRebateSchedule>,
+    /// Decision-time route applicability and Gamma terms.
+    pub maker_rebate_terms: EntryMakerRebateTerms,
     pub prepared_at: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
 }
@@ -183,9 +221,8 @@ pub struct EntryOrderSpec {
     pub limit_price: Price,
     /// Venue amount with side/order-type semantics frozen at intent creation.
     pub amount: OrderAmount,
-    /// Frozen independently sourced maker-rebate terms. Only a passive,
-    /// post-only entry may carry this evidence.
-    pub maker_rebate_schedule: Option<FrozenMakerRebateSchedule>,
+    /// Required route applicability and independently sourced Gamma terms.
+    pub maker_rebate_terms: EntryMakerRebateTerms,
     /// Maximum tolerated slippage from the reference price.
     pub max_slippage_bps: Bps,
     /// Latest time the order may be submitted.

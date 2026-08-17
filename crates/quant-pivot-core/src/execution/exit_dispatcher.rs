@@ -31,9 +31,9 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     types::{
-        ExecutionOrderId, PendingScaleOut, PreparedFeeSchedule, PreparedVenueOrder,
-        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId, ResearchProfileRef,
-        Usd, VenueOrderAmount,
+        EntryMakerRebateTerms, ExecutionOrderId, PendingScaleOut, PreparedFeeSchedule,
+        PreparedVenueOrder, ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
+        ResearchProfileRef, Usd, VenueOrderAmount,
     },
 };
 use quant_pivot_repository::traits::{
@@ -286,7 +286,7 @@ impl CoreExitDispatcher {
                 builder_taker_fee_bps: schedule.builder_taker_fee_bps,
                 builder_attribution: schedule.builder_attribution,
             },
-            maker_rebate_schedule: None,
+            maker_rebate_terms: EntryMakerRebateTerms::AggressiveNotApplicable,
             prepared_at: now,
             valid_until,
         })

@@ -11,12 +11,15 @@ use quant_pivot_models::{
         },
     },
     types::{
-        Bps, PortfolioScenarioArtifactId, Price, Shares, Usd,
+        Bps, MakerRebateDelayBasis, MakerRebateProgramDayBaseline, MakerRebateValuationEvidence,
+        MakerRebateValuationHealth, PortfolioScenarioArtifactId, Price, Shares, Usd,
         trade_policy::{PassiveFillDistribution, PassiveFillState, PassiveFillStateKind},
     },
 };
 use quant_pivot_research::{
-    execution_semantics::{PitFeeSchedule, PitMakerRebateSchedule, PitMarketExecutionEconomics},
+    execution_semantics::{
+        PitFeeSchedule, PitMakerRebateEvidence, PitMakerRebateSchedule, PitMarketExecutionEconomics,
+    },
     portfolio::{
         EconomicTierFactory, ExecutablePassiveTierSeedFactory, ExecutablePassiveTierSeedInput,
         ExecutableTierSeed, SealedPortfolioScenarioArtifact,
@@ -141,17 +144,16 @@ fn rebate_uses_fill_expectation() -> QuantResult<()> {
             builder_taker_fee_bps: Bps::ZERO,
             builder_attribution: BuilderFeeAttribution::NoBuilderCode,
         },
-        maker_rebate_schedule: Some(PitMakerRebateSchedule {
-            schedule_hash: template.lineage_hash,
-            catalog_change_hash: template.lineage_hash,
-            effective_at: decision_at,
-            available_at: decision_at,
-            fees_enabled: true,
-            platform_rate: dec!(0.04),
-            exponent: dec!(1),
-            taker_only: true,
-            rebate_rate: dec!(0.20),
-        }),
+        maker_rebate_evidence: PitMakerRebateEvidence::Available {
+            schedule: PitMakerRebateSchedule {
+                terms_hash: template.lineage_hash,
+                available_at: decision_at,
+                platform_rate: dec!(0.04),
+                exponent: dec!(1),
+                taker_only: true,
+                rebate_rate: dec!(0.20),
+            },
+        },
         composite_hash: template.lineage_hash,
     };
     let seed = ExecutablePassiveTierSeedFactory::build(ExecutablePassiveTierSeedInput {
@@ -198,6 +200,20 @@ fn rebate_uses_fill_expectation() -> QuantResult<()> {
                 },
             ],
         },
+        maker_rebate_valuation: MakerRebateValuationEvidence {
+            as_of: decision_at,
+            health: MakerRebateValuationHealth::Healthy,
+            program_day_baselines: vec![MakerRebateProgramDayBaseline {
+                program_date: decision_at.date_naive(),
+                confirmed_accrual_usd: Usd::new(dec!(0.99)),
+            }],
+            payout_threshold_usd: Usd::ONE,
+            delay_basis: MakerRebateDelayBasis::ObservedP95 {
+                lag_from_program_close_secs: 86_400,
+                complete_program_days: 30,
+            },
+            evidence_hash: template.lineage_hash,
+        },
         source_lineage_hash: template.lineage_hash,
     })?;
 
@@ -207,13 +223,13 @@ fn rebate_uses_fill_expectation() -> QuantResult<()> {
     assert_eq!(entry.hard_reserved_cash_usd, Usd::new(dec!(50)));
     assert_eq!(entry.expected_filled_shares, Shares::new(dec!(37.5)));
     assert_eq!(
-        entry
-            .full_fill_maker_rebate
-            .ok_or_else(|| QuantError::config("missing full-fill rebate"))?
-            .expected_rebate_usd,
+        entry.full_fill_maker_rebate_accrual_usd,
         Usd::new(dec!(0.2))
     );
-    assert_eq!(entry.expected_maker_rebate_usd, Usd::new(dec!(0.075)));
+    assert_eq!(
+        entry.expected_maker_rebate_accrual_usd,
+        Usd::new(dec!(0.075))
+    );
     Ok(())
 }
 

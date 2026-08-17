@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use quant_pivot_core::ingest::{data_plane_index::DataPlane, market_registry::MarketRegistry};
 use quant_pivot_models::{
-    domain::market::{MarketRegistryInfo, TokenInfo},
+    domain::market::{MarketMakerRebateEvidence, MarketRegistryInfo, TokenInfo},
     enums::{
         catalog::CatalogFilterReasonSet,
         common::{CategorySet, MarketCategory, TickSize},
@@ -50,7 +50,7 @@ pub fn registered_data_plane(token: &str) -> (Arc<DataPlane>, TokenKey) {
         min_order_size: dec!(5),
         liquidity_usd: None,
         volume_24h: None,
-        maker_rebate_schedule: None,
+        maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         start_date: None,
         end_date: None,
         resolved_at: None,

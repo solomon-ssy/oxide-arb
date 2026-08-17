@@ -30,9 +30,10 @@ use quant_pivot_models::{
         data_plane::{DecisionBoundary, DecisionSource, HistorySealChunkRef},
         market::{
             CATALOG_OBJECT_HASH_VERSION, CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit,
-            CatalogEventCandidate, CatalogMarketCandidate, EventRegistryInfo, MarketRegistryInfo,
-            NewCatalogEventChange, NewCatalogEventObject, NewCatalogMarketObject,
-            NewCatalogSyncBatch, UpsertEvent, UpsertMarket, book::BookLevel, registry::TokenInfo,
+            CatalogEventCandidate, CatalogMarketCandidate, EventRegistryInfo,
+            MarketMakerRebateEvidence, MarketRegistryInfo, NewCatalogEventChange,
+            NewCatalogEventObject, NewCatalogMarketObject, NewCatalogSyncBatch, UpsertEvent,
+            UpsertMarket, book::BookLevel, registry::TokenInfo,
         },
         quant::{
             CryptoSubject, GroundingProof, JobProgressSink, LinkageOutcome,
@@ -1046,7 +1047,7 @@ fn market_registry_payload(
         min_order_size: Decimal::ONE,
         liquidity_usd: Some(Usd::new(dec!(1000))),
         volume_24h: Some(Usd::new(dec!(1000))),
-        maker_rebate_schedule: None,
+        maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         start_date: Some(context.source_effective_at),
         end_date: Some(context.end_date),
         resolved_at: None,

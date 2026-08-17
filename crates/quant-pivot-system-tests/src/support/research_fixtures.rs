@@ -17,7 +17,7 @@ use quant_pivot_models::{
         },
         market::{
             CATALOG_OBJECT_SCHEMA_VERSION, CatalogEventChangeInfo, CatalogMarketChangeInfo,
-            EventRegistryInfo, MarketRegistryInfo,
+            EventRegistryInfo, MarketMakerRebateEvidence, MarketRegistryInfo,
         },
         quant::{
             CompleteSourceSlice, CompleteTrainingDatasetBuild, FeedbackCohortWindow,
@@ -1151,7 +1151,7 @@ impl ReplayableSourceRecords {
             min_order_size: dec!(1),
             liquidity_usd: example.selected_market.liquidity_usd,
             volume_24h: example.selected_market.volume_24h_usd,
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
             start_date: None,
             end_date: None,
             resolved_at: None,

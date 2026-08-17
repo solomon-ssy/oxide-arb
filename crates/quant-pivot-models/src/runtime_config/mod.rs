@@ -49,9 +49,10 @@ use thiserror::Error;
 pub use wire::{
     DecimalValue, EmergencyExitKind, EmergencyExitPolicy, EntryOrderPolicy, ExecutionBreakerConfig,
     ExitMonitorPolicy, ExitSignalReinferencePolicy, FeatureFamily, FeatureStalenessPolicy,
-    KillSwitchPolicy, MASKED_SECRET, ModelVersionRef, NeutralizeDimension, NotificationPolicies,
-    OpportunisticSellPolicy, OutcomeReconciliationPolicy, RankLossKind, ReconciliationPolicy,
-    ReportDeliveryPolicy, ScheduleCadence, SmallCrossSectionPolicy, TrainingOptimizerKind,
+    KillSwitchPolicy, MASKED_SECRET, MakerRebatePolicy, ModelVersionRef, NeutralizeDimension,
+    NotificationPolicies, OpportunisticSellPolicy, OutcomeReconciliationPolicy, RankLossKind,
+    ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence, SmallCrossSectionPolicy,
+    TrainingOptimizerKind,
 };
 
 use crate::{
@@ -108,6 +109,7 @@ pub struct ExecutionRiskPolicy {
     pub entry_order_policy: EntryOrderPolicy,
     pub exit_monitor: ExitMonitorPolicy,
     pub reconciliation: ReconciliationPolicy,
+    pub maker_rebate: MakerRebatePolicy,
     pub breaker: ExecutionBreakerConfig,
 }
 
@@ -119,6 +121,7 @@ impl Default for ExecutionRiskPolicy {
             entry_order_policy: EntryOrderPolicy::default(),
             exit_monitor: ExitMonitorPolicy::default(),
             reconciliation: ReconciliationPolicy::default(),
+            maker_rebate: MakerRebatePolicy::default(),
             breaker: ExecutionBreakerConfig::default(),
         }
     }

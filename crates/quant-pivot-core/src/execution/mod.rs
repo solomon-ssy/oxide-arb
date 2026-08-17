@@ -31,6 +31,7 @@ pub mod settlement_preflight;
 pub mod settlement_recovery_admission;
 pub mod settlement_service;
 mod settlement_timing;
+pub mod terms_drift_wake;
 pub mod trade_policy_guard;
 
 pub use admission::{

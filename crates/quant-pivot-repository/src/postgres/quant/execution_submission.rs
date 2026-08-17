@@ -1504,7 +1504,7 @@ impl PgExecutionSubmissionRepository {
                 stage: VenueIncentiveStage::EstimatedAccrual,
                 program_date: incentive.program_date,
                 amount_usd: incentive.expected_rebate_usd,
-                source_schedule_hash: Some(incentive.source_schedule_hash),
+                source_terms_hash: Some(incentive.source_terms_hash),
                 source_partition: source_identity.clone(),
                 source_identity,
                 transaction_hash: transaction_hash.clone(),

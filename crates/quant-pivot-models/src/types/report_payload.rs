@@ -26,7 +26,6 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::market::fee::FrozenMakerRebateSchedule,
     enums::{
         common::MarketCategory,
         factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
@@ -39,10 +38,11 @@ use crate::{
     runtime_config::BuyModelRoute,
     types::{
         BookSnapshotRef, Bps, ContentHash, DecisionPolicySnapshotId, EconomicTierId,
-        EntryConditionPlan, EventId, FactorDefinitionId, FeatureVectorId, MarketSelectionId,
-        ModelRunId, ModelVersionId, Price, Probability, ReportDataQualitySnapshotId,
-        ResearchFeatureContract, ResearchProfileRef, Shares, SignalCandidateId,
-        TradePolicyArtifactId, TradePolicyCohortKey, Usd, UsdHours,
+        EntryConditionPlan, EntryMakerRebateTerms, EventId, FactorDefinitionId, FeatureVectorId,
+        MakerRebateDelayBasis, MakerRebateObjectiveStatus, MarketSelectionId, ModelRunId,
+        ModelVersionId, Price, Probability, ReportDataQualitySnapshotId, ResearchFeatureContract,
+        ResearchProfileRef, Shares, SignalCandidateId, TradePolicyArtifactId, TradePolicyCohortKey,
+        Usd, UsdHours,
     },
 };
 
@@ -111,10 +111,14 @@ pub struct SizingPlan {
     /// Immediate full-fill venue and builder fee.
     pub immediate_fee_usd: Usd,
     /// Delayed maker incentive expectation; never spendable cash.
-    pub expected_maker_rebate_usd: Usd,
-    /// Independent Gamma terms frozen for later maker-fill accrual. `None`
-    /// means the tier was valued with zero rebate.
-    pub maker_rebate_schedule: Option<FrozenMakerRebateSchedule>,
+    pub expected_maker_rebate_accrual_usd: Usd,
+    /// Threshold-aware discounted amount admitted to the expected objective.
+    pub objective_maker_rebate_usd: Usd,
+    pub maker_rebate_objective_status: MakerRebateObjectiveStatus,
+    pub rebate_delay_basis: Option<MakerRebateDelayBasis>,
+    pub rebate_valuation_hash: Option<ContentHash>,
+    /// Required route applicability and independent Gamma terms.
+    pub maker_rebate_terms: EntryMakerRebateTerms,
     /// Aggressive executable VWAP or passive post-only limit price.
     pub reference_entry_price: Price,
     /// Suggested allocation as a fraction of the capital base.

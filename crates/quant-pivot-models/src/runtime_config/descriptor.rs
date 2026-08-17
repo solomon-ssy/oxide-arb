@@ -286,6 +286,12 @@ const RUNTIME_GROUP_CONTRACTS: &[RuntimeGroupContract] = &[
     },
     RuntimeGroupContract {
         resource: ConfigResourceKind::ExecutionRiskPolicy,
+        pointer_prefix: "/maker_rebate",
+        group: "maker_rebate",
+        risk_level: RuntimeFieldRiskLevel::High,
+    },
+    RuntimeGroupContract {
+        resource: ConfigResourceKind::ExecutionRiskPolicy,
         pointer_prefix: "/exit_monitor",
         group: "exit_monitor",
         risk_level: RuntimeFieldRiskLevel::High,
@@ -573,6 +579,7 @@ impl DescriptorCollector {
                 | "/breaker/venue_window_secs"
                 | "/exit_monitor/monitor_secs"
                 | "/exit_monitor/signal_recheck_secs"
+                | "/maker_rebate/fallback_lag_from_program_close_secs"
                 | "/reconciliation/interval_secs"
                 | "/reconciliation/stale_open_secs",
             )
@@ -608,6 +615,7 @@ impl DescriptorCollector {
                 ExecutionRiskPolicy,
                 "/breaker/daily_realized_loss_cap_usd"
                 | "/entry_order_policy/min_entry_book_depth_usd"
+                | "/maker_rebate/payout_threshold_usd"
                 | "/portfolio/admission/min_nominal_expected_net_usd"
                 | "/portfolio/admission/min_robust_expected_net_usd"
                 | "/portfolio/budget/cash_reserve_usd"
@@ -638,6 +646,7 @@ impl DescriptorCollector {
                 "/breaker/venue_consecutive_failures_to_degrade"
                 | "/breaker/venue_consecutive_failures_to_halt"
                 | "/breaker/venue_min_window_samples"
+                | "/maker_rebate/observed_p95_min_samples"
                 | "/portfolio/exposure_limits/max_open_recommendations",
             )
             | (ModelRouting, "/model/calibration/min_samples_isotonic")

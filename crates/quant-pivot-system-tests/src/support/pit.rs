@@ -16,7 +16,7 @@ use quant_pivot_models::{
     domain::{
         data_plane::{DecisionBoundary, DecisionSource},
         market::{
-            BuilderFeeAttribution, MarketFeeSchedule,
+            BuilderFeeAttribution, MarketFeeSchedule, MarketMakerRebateEvidence,
             book::BookSnapshot,
             registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
         },
@@ -258,7 +258,7 @@ impl PointInTimeSnapshotSource for InMemoryDecisionSnapshotSource {
             end_date: market.end_date,
             created_at: market.created_at,
             fee_schedule: self.fee_schedules.get(market_id).cloned(),
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         };
         Ok(Some(ResolvedMarketSnapshot {
             boundary: boundary.clone(),

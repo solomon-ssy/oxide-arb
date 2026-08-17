@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::NaiveDate;
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
     config::PortfolioSolverDeployConfig,
@@ -30,6 +31,7 @@ use crate::precision::quantize_venue_amount;
 
 use super::{
     AccountSnapshot, CapitalTimeBucketContract, SealedPortfolioScenarioArtifact,
+    economic::{ScenarioRebateCreditDecision, materialize_rebate_credit},
     solver_boundary::{self, SolvedGlobal, SolvedMarginals},
 };
 
@@ -211,11 +213,20 @@ impl GlobalPortfolioPlanner {
                 solved,
                 ..
             } => {
+                let rebate = prepared.rebate_post_check(&solved.selected)?;
                 let selected = solved
                     .selected
                     .iter()
-                    .map(|index| input.tiers[prepared.tiers[*index].source_index].clone())
-                    .collect();
+                    .map(|index| {
+                        let mut tier = input.tiers[prepared.tiers[*index].source_index].clone();
+                        materialize_rebate_credit(
+                            &mut tier,
+                            &rebate.decisions,
+                            input.scenario_artifact.artifact(),
+                        )?;
+                        Ok(tier)
+                    })
+                    .collect::<QuantResult<Vec<_>>>()?;
                 Ok(VerifiedPortfolioSelection { selected, rejected })
             }
         }
@@ -297,6 +308,7 @@ fn rank_selected(
         .into());
     }
     let mut selected = Vec::with_capacity(selected_indices.len());
+    let rebate = prepared.rebate_post_check(selected_indices)?;
     for (&index, leave_out_selected) in selected_indices.iter().zip(&marginals.selections) {
         let leave_out_objectives = prepared.objectives(leave_out_selected)?;
         let marginal_numerator = full
@@ -315,6 +327,11 @@ fn rank_selected(
             .cvar_numerator
             .saturating_sub(without_objectives.cvar_numerator);
         let mut tier = input.tiers[prepared.tiers[index].source_index].clone();
+        materialize_rebate_credit(
+            &mut tier,
+            &rebate.decisions,
+            input.scenario_artifact.artifact(),
+        )?;
         let mut economics = tier.economics;
         economics.marginal_portfolio_value_usd = Usd::new(weighted_micro_to_decimal(
             marginal_numerator,
@@ -664,6 +681,19 @@ pub(super) struct PreparedGlobalModel {
     pub max_drawdown_micro: i64,
     pub top_n: u32,
     pub exclusivity_groups: Vec<Vec<usize>>,
+    pub rebate_buckets: Vec<PreparedRebateBucket>,
+}
+
+pub(super) struct PreparedRebateBucket {
+    pub scenario_index: usize,
+    pub program_date: NaiveDate,
+    pub baseline_micro: i64,
+    pub threshold_micro: i64,
+    pub accrual_terms: Vec<(usize, i64)>,
+    pub value_terms: Vec<(usize, i64)>,
+    pub maximum_accrual_micro: i64,
+    pub maximum_value_micro: i64,
+    pub credit_eligible: bool,
 }
 
 pub(super) struct PreparedTier {
@@ -676,9 +706,18 @@ pub(super) struct PreparedTier {
     pub stable_key: String,
     pub notional_micro: i64,
     pub scenario_net_micro: Vec<i64>,
+    pub scenario_base_net_micro: Vec<i64>,
+    pub scenario_rebate_micro: Vec<i64>,
+    pub scenario_rebate_accrual_micro: Vec<i64>,
+    pub scenario_rebate_program_dates: Vec<Option<NaiveDate>>,
+    pub scenario_rebate_baseline_micro: Vec<i64>,
     pub scenario_risk_net_micro: Vec<i64>,
     pub distribution_numerators: Vec<i64>,
+    pub base_distribution_numerators: Vec<i64>,
+    pub rebate_distribution_numerators: Vec<i64>,
     pub nominal_numerator: i64,
+    pub base_nominal_numerator: i64,
+    pub rebate_nominal_numerator: i64,
     pub bucket_capital_micro: Vec<i64>,
     pub capital_hours_micro: i64,
 }
@@ -697,6 +736,11 @@ pub(super) struct ExactObjectives {
     pub nominal_numerator: i64,
     pub cvar_numerator: i64,
     pub capital_hours_micro: i64,
+}
+
+pub(super) struct RebatePostCheck {
+    pub decisions: Vec<ScenarioRebateCreditDecision>,
+    credited_values_micro: Vec<i64>,
 }
 
 pub(super) struct VerificationSummary {
@@ -741,6 +785,17 @@ struct PreparedRiskData {
     max_cvar_numerator: i64,
     max_scenario_loss_micro: i64,
     max_drawdown_micro: i64,
+}
+
+struct PreparedRebateData {
+    credit_eligible: bool,
+    threshold_micro: i64,
+}
+
+struct RebateBucketBuilder {
+    baseline_micro: i64,
+    accrual_terms: Vec<(usize, i64)>,
+    value_terms: Vec<(usize, i64)>,
 }
 
 fn prepare_scenario(input: &GlobalPortfolioInput<'_>) -> QuantResult<PreparedScenarioData> {
@@ -826,6 +881,154 @@ fn prepare_buckets(input: &GlobalPortfolioInput<'_>) -> QuantResult<PreparedBuck
     })
 }
 
+fn prepare_rebate(input: &GlobalPortfolioInput<'_>) -> QuantResult<PreparedRebateData> {
+    let mut valuation = None;
+    for tier in input.tiers {
+        let EntryExecutionEconomics::Passive(entry) = &tier.entry_execution else {
+            continue;
+        };
+        if valuation.is_some_and(|current| current != &entry.maker_rebate_valuation) {
+            return Err(ReportError::ContractViolation {
+                detail: "passive tiers do not share one frozen maker rebate valuation".to_owned(),
+            }
+            .into());
+        }
+        valuation = Some(&entry.maker_rebate_valuation);
+    }
+    let Some(valuation) = valuation else {
+        return Ok(PreparedRebateData {
+            credit_eligible: false,
+            threshold_micro: 0,
+        });
+    };
+    Ok(PreparedRebateData {
+        credit_eligible: valuation.evidence_zero_reason().is_none(),
+        threshold_micro: usd_to_micro(
+            valuation.payout_threshold_usd,
+            "maker rebate payout threshold",
+        )?,
+    })
+}
+
+fn prepare_rebate_buckets(
+    input: &GlobalPortfolioInput<'_>,
+    tiers: &[PreparedTier],
+    rebate: &PreparedRebateData,
+) -> QuantResult<Vec<PreparedRebateBucket>> {
+    let mut builders = BTreeMap::<(usize, NaiveDate), RebateBucketBuilder>::new();
+    for (tier_index, tier) in tiers.iter().enumerate() {
+        for scenario_index in 0..tier.scenario_rebate_accrual_micro.len() {
+            let accrual = tier.scenario_rebate_accrual_micro[scenario_index];
+            if accrual == 0 {
+                continue;
+            }
+            let program_date = tier.scenario_rebate_program_dates[scenario_index].ok_or_else(|| {
+                ReportError::ContractViolation {
+                    detail: format!(
+                        "tier {} has maker accrual without a program date in scenario {scenario_index}",
+                        tier.stable_key
+                    ),
+                }
+            })?;
+            let baseline = tier.scenario_rebate_baseline_micro[scenario_index];
+            let builder = builders
+                .entry((scenario_index, program_date))
+                .or_insert_with(|| RebateBucketBuilder {
+                    baseline_micro: baseline,
+                    accrual_terms: Vec::new(),
+                    value_terms: Vec::new(),
+                });
+            if builder.baseline_micro != baseline {
+                return Err(ReportError::ContractViolation {
+                    detail: format!(
+                        "maker rebate baseline differs within scenario {scenario_index} program day {program_date}"
+                    ),
+                }
+                .into());
+            }
+            builder.accrual_terms.push((tier_index, accrual));
+            let value = tier.scenario_rebate_micro[scenario_index];
+            if value > 0 {
+                builder.value_terms.push((tier_index, value));
+            }
+        }
+    }
+    let max_scenarios = usize::try_from(input.solver.max_scenarios).map_err(|error| {
+        ReportError::NumericOverflow {
+            field: "portfolio_solver.max_scenarios",
+            detail: error.to_string(),
+        }
+    })?;
+    let max_top_n =
+        usize::try_from(input.solver.max_top_n).map_err(|error| ReportError::NumericOverflow {
+            field: "portfolio_solver.max_top_n",
+            detail: error.to_string(),
+        })?;
+    let capacity =
+        max_scenarios
+            .checked_mul(max_top_n)
+            .ok_or_else(|| ReportError::NumericOverflow {
+                field: "maker_rebate_bucket_capacity",
+                detail: "max_scenarios multiplied by max_top_n overflowed usize".to_owned(),
+            })?;
+    if builders.len() > capacity {
+        return Err(ReportError::ResourceCapacityExceeded {
+            resource: "maker_rebate_scenario_program_days",
+            actual: builders.len(),
+            ceiling: capacity,
+        }
+        .into());
+    }
+    let top_n = usize::try_from(input.top_n).map_err(|error| ReportError::NumericOverflow {
+        field: "portfolio_top_n",
+        detail: error.to_string(),
+    })?;
+    builders
+        .into_iter()
+        .map(|((scenario_index, program_date), builder)| {
+            let maximum_accrual_micro = builder
+                .baseline_micro
+                .checked_add(sum_largest_positive(&builder.accrual_terms, top_n)?)
+                .ok_or_else(|| ReportError::NumericOverflow {
+                    field: "maker_rebate_maximum_daily_accrual",
+                    detail: "program-day baseline plus TopN accrual overflowed i64".to_owned(),
+                })?;
+            let maximum_value_micro = sum_largest_positive(&builder.value_terms, top_n)?;
+            Ok(PreparedRebateBucket {
+                scenario_index,
+                program_date,
+                baseline_micro: builder.baseline_micro,
+                threshold_micro: rebate.threshold_micro,
+                accrual_terms: builder.accrual_terms,
+                value_terms: builder.value_terms,
+                maximum_accrual_micro,
+                maximum_value_micro,
+                credit_eligible: rebate.credit_eligible,
+            })
+        })
+        .collect()
+}
+
+fn sum_largest_positive(terms: &[(usize, i64)], limit: usize) -> QuantResult<i64> {
+    let mut values = terms
+        .iter()
+        .map(|(_, value)| *value)
+        .filter(|value| *value > 0)
+        .collect::<Vec<_>>();
+    values.sort_unstable_by(|left, right| right.cmp(left));
+    values
+        .into_iter()
+        .take(limit)
+        .try_fold(0_i64, |sum, value| {
+            sum.checked_add(value)
+                .ok_or_else(|| ReportError::NumericOverflow {
+                    field: "maker_rebate_top_n_bound",
+                    detail: "TopN maker rebate coefficient sum overflowed i64".to_owned(),
+                })
+        })
+        .map_err(Into::into)
+}
+
 fn prepare_tiers(
     input: &GlobalPortfolioInput<'_>,
     scenario: &PreparedScenarioData,
@@ -862,6 +1065,25 @@ fn prepare_tiers(
             "tier risk scenario cashflows",
             true,
         )?;
+        let scenario_rebate_micro =
+            canonical_rebate_cashflows(&tier.scenario_cashflows, artifact.scenarios.len())?;
+        let scenario_rebate_accrual_micro =
+            canonical_rebate_accruals(&tier.scenario_cashflows, artifact.scenarios.len())?;
+        let scenario_rebate_program_dates =
+            canonical_rebate_program_dates(&tier.scenario_cashflows, artifact.scenarios.len())?;
+        let scenario_rebate_baseline_micro =
+            canonical_rebate_baselines(&tier.scenario_cashflows, artifact.scenarios.len())?;
+        let scenario_base_net_micro = scenario_net_micro
+            .iter()
+            .zip(&scenario_rebate_micro)
+            .map(|(net, rebate)| {
+                net.checked_sub(*rebate)
+                    .ok_or_else(|| ReportError::NumericOverflow {
+                        field: "tier scenario base cashflows",
+                        detail: "discounted net minus maker rebate overflowed i64".to_owned(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let distribution_numerators = scenario
             .distribution_weights
             .iter()
@@ -869,10 +1091,42 @@ fn prepare_tiers(
                 weighted_numerator(&scenario_net_micro, weights, "tier robust distribution")
             })
             .collect::<QuantResult<Vec<_>>>()?;
+        let base_distribution_numerators = scenario
+            .distribution_weights
+            .iter()
+            .map(|weights| {
+                weighted_numerator(
+                    &scenario_base_net_micro,
+                    weights,
+                    "tier base robust distribution",
+                )
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        let rebate_distribution_numerators = scenario
+            .distribution_weights
+            .iter()
+            .map(|weights| {
+                weighted_numerator(
+                    &scenario_rebate_micro,
+                    weights,
+                    "tier maker rebate distribution",
+                )
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
         let nominal_numerator = weighted_numerator(
             &scenario_net_micro,
             &scenario.nominal_weights,
             "tier nominal distribution",
+        )?;
+        let base_nominal_numerator = weighted_numerator(
+            &scenario_base_net_micro,
+            &scenario.nominal_weights,
+            "tier base nominal distribution",
+        )?;
+        let rebate_nominal_numerator = weighted_numerator(
+            &scenario_rebate_micro,
+            &scenario.nominal_weights,
+            "tier maker rebate nominal distribution",
         )?;
         let bucket_capital_micro = canonical_reservation(
             &tier.hard_reservation_envelope,
@@ -905,20 +1159,42 @@ fn prepare_tiers(
                 "tier hard cash reservation",
             )?,
             scenario_net_micro,
+            scenario_base_net_micro,
+            scenario_rebate_micro,
+            scenario_rebate_accrual_micro,
+            scenario_rebate_program_dates,
+            scenario_rebate_baseline_micro,
             scenario_risk_net_micro,
             distribution_numerators,
+            base_distribution_numerators,
+            rebate_distribution_numerators,
             nominal_numerator,
+            base_nominal_numerator,
+            rebate_nominal_numerator,
             bucket_capital_micro,
             capital_hours_micro,
         });
     }
     tiers.sort_by(|left, right| left.stable_key.cmp(&right.stable_key));
+    let exclusivity_groups = prepared_exclusivity(input, &tiers, artifact);
+    Ok(PreparedTierData {
+        tiers,
+        rejected,
+        exclusivity_groups,
+    })
+}
+
+fn prepared_exclusivity(
+    input: &GlobalPortfolioInput<'_>,
+    tiers: &[PreparedTier],
+    artifact: &PortfolioScenarioArtifact,
+) -> Vec<Vec<usize>> {
     let source_to_prepared = tiers
         .iter()
         .enumerate()
         .map(|(prepared_index, tier)| (tier.source_index, prepared_index))
         .collect::<HashMap<_, _>>();
-    let exclusivity_groups = artifact
+    artifact
         .structural_exclusivity
         .iter()
         .filter_map(|group| {
@@ -936,12 +1212,7 @@ fn prepare_tiers(
                 .collect::<Vec<_>>();
             (indexes.len() > 1).then_some(indexes)
         })
-        .collect();
-    Ok(PreparedTierData {
-        tiers,
-        rejected,
-        exclusivity_groups,
-    })
+        .collect()
 }
 
 fn prepare_risk(input: &GlobalPortfolioInput<'_>) -> QuantResult<PreparedRiskData> {
@@ -1091,6 +1362,8 @@ impl PreparedGlobalModel {
         let buckets = prepare_buckets(input)?;
         let tier_data = prepare_tiers(input, &scenario, &buckets.ends)?;
         let risk = prepare_risk(input)?;
+        let rebate = prepare_rebate(input)?;
+        let rebate_buckets = prepare_rebate_buckets(input, &tier_data.tiers, &rebate)?;
         let prepared = Self {
             tiers: tier_data.tiers,
             scenario_count: artifact.scenarios.len(),
@@ -1121,6 +1394,7 @@ impl PreparedGlobalModel {
             max_drawdown_micro: risk.max_drawdown_micro,
             top_n: input.top_n,
             exclusivity_groups: tier_data.exclusivity_groups,
+            rebate_buckets,
         };
         prepared.ensure_solver_range()?;
         Ok((prepared, tier_data.rejected))
@@ -1157,6 +1431,14 @@ impl PreparedGlobalModel {
             self.max_scenario_loss_micro,
             self.max_drawdown_micro,
         ];
+        values.extend(self.rebate_buckets.iter().flat_map(|bucket| {
+            [
+                bucket.baseline_micro,
+                bucket.threshold_micro,
+                bucket.maximum_accrual_micro,
+                bucket.maximum_value_micro,
+            ]
+        }));
         values.extend(self.distribution_weights.iter().flatten().copied());
         values.extend(self.nominal_weights.iter().copied());
         values.extend(self.existing_scenario_net_micro.iter().copied());
@@ -1171,10 +1453,17 @@ impl PreparedGlobalModel {
             values.extend([
                 tier.notional_micro,
                 tier.nominal_numerator,
+                tier.base_nominal_numerator,
+                tier.rebate_nominal_numerator,
                 tier.capital_hours_micro,
             ]);
             values.extend(tier.distribution_numerators.iter().copied());
+            values.extend(tier.base_distribution_numerators.iter().copied());
+            values.extend(tier.rebate_distribution_numerators.iter().copied());
             values.extend(tier.scenario_net_micro.iter().copied());
+            values.extend(tier.scenario_base_net_micro.iter().copied());
+            values.extend(tier.scenario_rebate_micro.iter().copied());
+            values.extend(tier.scenario_rebate_accrual_micro.iter().copied());
             values.extend(tier.scenario_risk_net_micro.iter().copied());
             values.extend(tier.bucket_capital_micro.iter().copied());
         }
@@ -1355,37 +1644,75 @@ impl PreparedGlobalModel {
             }
             .into());
         }
-        let distribution_totals = self
-            .existing_distribution_numerators
-            .iter()
-            .enumerate()
-            .map(|(distribution_index, existing)| {
-                selected.iter().try_fold(*existing, |sum, tier_index| {
-                    sum.checked_add(
-                        self.tiers[*tier_index].distribution_numerators[distribution_index],
+        let rebate = self.rebate_post_check(selected)?;
+        let mut distribution_totals = self.existing_distribution_numerators.clone();
+        for tier_index in selected {
+            for (distribution_index, total) in distribution_totals.iter_mut().enumerate() {
+                *total = total
+                    .checked_add(
+                        self.tiers[*tier_index].base_distribution_numerators[distribution_index],
                     )
                     .ok_or_else(|| ReportError::NumericOverflow {
                         field: "robust_objective",
-                        detail: "scaled distribution sum overflow".to_owned(),
-                    })
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                        detail: "scaled base distribution sum overflowed i64".to_owned(),
+                    })?;
+            }
+        }
+        for (bucket, credited_value) in self
+            .rebate_buckets
+            .iter()
+            .zip(&rebate.credited_values_micro)
+        {
+            if *credited_value == 0 {
+                continue;
+            }
+            for (distribution_index, total) in distribution_totals.iter_mut().enumerate() {
+                let weighted = checked_product(
+                    *credited_value,
+                    self.distribution_weights[distribution_index][bucket.scenario_index],
+                    "maker rebate robust distribution",
+                )?;
+                *total =
+                    total
+                        .checked_add(weighted)
+                        .ok_or_else(|| ReportError::NumericOverflow {
+                            field: "robust_objective",
+                            detail: "credited rebate distribution sum overflowed i64".to_owned(),
+                        })?;
+            }
+        }
         let robust_numerator = distribution_totals.into_iter().min().ok_or_else(|| {
             ReportError::PortfolioPostCheck {
                 detail: "no robust distribution objective exists".to_owned(),
             }
         })?;
-        let nominal_numerator =
+        let mut nominal_numerator =
             selected
                 .iter()
                 .try_fold(self.existing_nominal_numerator, |sum, index| {
-                    sum.checked_add(self.tiers[*index].nominal_numerator)
+                    sum.checked_add(self.tiers[*index].base_nominal_numerator)
                         .ok_or_else(|| ReportError::NumericOverflow {
                             field: "nominal_objective",
-                            detail: "scaled nominal sum overflow".to_owned(),
+                            detail: "scaled base nominal sum overflowed i64".to_owned(),
                         })
                 })?;
+        for (bucket, credited_value) in self
+            .rebate_buckets
+            .iter()
+            .zip(&rebate.credited_values_micro)
+        {
+            let weighted = checked_product(
+                *credited_value,
+                self.nominal_weights[bucket.scenario_index],
+                "maker rebate nominal distribution",
+            )?;
+            nominal_numerator = nominal_numerator.checked_add(weighted).ok_or_else(|| {
+                ReportError::NumericOverflow {
+                    field: "nominal_objective",
+                    detail: "credited rebate nominal sum overflowed i64".to_owned(),
+                }
+            })?;
+        }
         let scenario_net = self.portfolio_scenario_risk_net(selected)?;
         let cvar_numerator =
             cvar_numerator(&scenario_net, &self.nominal_weights, self.tail_mass_bps)?;
@@ -1404,6 +1731,78 @@ impl PreparedGlobalModel {
             nominal_numerator,
             cvar_numerator,
             capital_hours_micro,
+        })
+    }
+
+    pub(super) fn rebate_post_check(&self, selected: &[usize]) -> QuantResult<RebatePostCheck> {
+        let selected = selected.iter().copied().collect::<BTreeSet<_>>();
+        let mut decisions = Vec::with_capacity(self.rebate_buckets.len());
+        let mut credited_values_micro = Vec::with_capacity(self.rebate_buckets.len());
+        for bucket in &self.rebate_buckets {
+            let program_day_total_micro = bucket.accrual_terms.iter().try_fold(
+                bucket.baseline_micro,
+                |total, (tier_index, accrual)| {
+                    if selected.contains(tier_index) {
+                        total
+                            .checked_add(*accrual)
+                            .ok_or_else(|| ReportError::NumericOverflow {
+                                field: "maker_rebate_program_day_total",
+                                detail: "selected program-day accrual overflowed i64".to_owned(),
+                            })
+                    } else {
+                        Ok(total)
+                    }
+                },
+            )?;
+            let credited = bucket.credit_eligible
+                && program_day_total_micro >= bucket.threshold_micro
+                && bucket.maximum_value_micro > 0;
+            let credited_value = if credited {
+                bucket
+                    .value_terms
+                    .iter()
+                    .try_fold(0_i64, |total, (tier_index, value)| {
+                        if selected.contains(tier_index) {
+                            total
+                                .checked_add(*value)
+                                .ok_or_else(|| ReportError::NumericOverflow {
+                                    field: "maker_rebate_credited_value",
+                                    detail: "selected credited value overflowed i64".to_owned(),
+                                })
+                        } else {
+                            Ok(total)
+                        }
+                    })?
+            } else {
+                0
+            };
+            if program_day_total_micro > bucket.maximum_accrual_micro
+                || credited_value > bucket.maximum_value_micro
+            {
+                return Err(ReportError::PortfolioPostCheck {
+                    detail: format!(
+                        "maker rebate bucket exceeded its tight TopN bound for scenario {} day {}",
+                        bucket.scenario_index, bucket.program_date
+                    ),
+                }
+                .into());
+            }
+            decisions.push(ScenarioRebateCreditDecision {
+                scenario_index: u32::try_from(bucket.scenario_index).map_err(|error| {
+                    ReportError::NumericOverflow {
+                        field: "maker_rebate_scenario_index",
+                        detail: error.to_string(),
+                    }
+                })?,
+                program_date: bucket.program_date,
+                program_day_total_usd: Usd::new(micro_to_decimal(program_day_total_micro)),
+                credited,
+            });
+            credited_values_micro.push(credited_value);
+        }
+        Ok(RebatePostCheck {
+            decisions,
+            credited_values_micro,
         })
     }
 
@@ -2023,6 +2422,196 @@ fn canonical_tier_cashflows(
             cashflow.ok_or_else(|| {
                 ReportError::ContractViolation {
                     detail: format!("{field} scenario index {index} is absent"),
+                }
+                .into()
+            })
+        })
+        .collect()
+}
+
+fn canonical_rebate_cashflows(
+    cashflows: &[ScenarioExecutionCashflow],
+    scenario_count: usize,
+) -> QuantResult<Vec<i64>> {
+    let mut canonical = vec![None; scenario_count];
+    for cashflow in cashflows {
+        let index = usize::try_from(cashflow.scenario_index).map_err(|error| {
+            ReportError::ContractViolation {
+                detail: format!("maker rebate scenario index conversion failed: {error}"),
+            }
+        })?;
+        let slot = canonical
+            .get_mut(index)
+            .ok_or_else(|| ReportError::ContractViolation {
+                detail: format!(
+                    "maker rebate scenario index {} is out of range",
+                    cashflow.scenario_index
+                ),
+            })?;
+        if slot
+            .replace(usd_to_micro(
+                cashflow.objective_maker_rebate_usd,
+                "tier maker rebate scenario cashflows",
+            )?)
+            .is_some()
+        {
+            return Err(ReportError::ContractViolation {
+                detail: format!(
+                    "maker rebate scenario index {} is duplicated",
+                    cashflow.scenario_index
+                ),
+            }
+            .into());
+        }
+    }
+    canonical
+        .into_iter()
+        .enumerate()
+        .map(|(index, cashflow)| {
+            cashflow.ok_or_else(|| {
+                ReportError::ContractViolation {
+                    detail: format!("maker rebate scenario index {index} is absent"),
+                }
+                .into()
+            })
+        })
+        .collect()
+}
+
+fn canonical_rebate_accruals(
+    cashflows: &[ScenarioExecutionCashflow],
+    scenario_count: usize,
+) -> QuantResult<Vec<i64>> {
+    let mut canonical = vec![None; scenario_count];
+    for cashflow in cashflows {
+        let index = usize::try_from(cashflow.scenario_index).map_err(|error| {
+            ReportError::ContractViolation {
+                detail: format!("maker rebate accrual scenario index conversion failed: {error}"),
+            }
+        })?;
+        let slot = canonical
+            .get_mut(index)
+            .ok_or_else(|| ReportError::ContractViolation {
+                detail: format!(
+                    "maker rebate accrual scenario index {} is out of range",
+                    cashflow.scenario_index
+                ),
+            })?;
+        if slot
+            .replace(usd_to_micro(
+                cashflow.maker_rebate_accrual_usd,
+                "tier maker rebate scenario accrual",
+            )?)
+            .is_some()
+        {
+            return Err(ReportError::ContractViolation {
+                detail: format!(
+                    "maker rebate accrual scenario index {} is duplicated",
+                    cashflow.scenario_index
+                ),
+            }
+            .into());
+        }
+    }
+    canonical
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.ok_or_else(|| {
+                ReportError::ContractViolation {
+                    detail: format!("maker rebate accrual scenario index {index} is absent"),
+                }
+                .into()
+            })
+        })
+        .collect()
+}
+
+fn canonical_rebate_program_dates(
+    cashflows: &[ScenarioExecutionCashflow],
+    scenario_count: usize,
+) -> QuantResult<Vec<Option<NaiveDate>>> {
+    let mut canonical = vec![None; scenario_count];
+    for cashflow in cashflows {
+        let index = usize::try_from(cashflow.scenario_index).map_err(|error| {
+            ReportError::ContractViolation {
+                detail: format!("maker rebate program date index conversion failed: {error}"),
+            }
+        })?;
+        let slot = canonical
+            .get_mut(index)
+            .ok_or_else(|| ReportError::ContractViolation {
+                detail: format!(
+                    "maker rebate program date scenario index {} is out of range",
+                    cashflow.scenario_index
+                ),
+            })?;
+        if slot.replace(cashflow.maker_rebate_program_date).is_some() {
+            return Err(ReportError::ContractViolation {
+                detail: format!(
+                    "maker rebate program date scenario index {} is duplicated",
+                    cashflow.scenario_index
+                ),
+            }
+            .into());
+        }
+    }
+    canonical
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.ok_or_else(|| {
+                ReportError::ContractViolation {
+                    detail: format!("maker rebate program date scenario index {index} is absent"),
+                }
+                .into()
+            })
+        })
+        .collect()
+}
+
+fn canonical_rebate_baselines(
+    cashflows: &[ScenarioExecutionCashflow],
+    scenario_count: usize,
+) -> QuantResult<Vec<i64>> {
+    let mut canonical = vec![None; scenario_count];
+    for cashflow in cashflows {
+        let index = usize::try_from(cashflow.scenario_index).map_err(|error| {
+            ReportError::ContractViolation {
+                detail: format!("maker rebate baseline index conversion failed: {error}"),
+            }
+        })?;
+        let slot = canonical
+            .get_mut(index)
+            .ok_or_else(|| ReportError::ContractViolation {
+                detail: format!(
+                    "maker rebate baseline scenario index {} is out of range",
+                    cashflow.scenario_index
+                ),
+            })?;
+        if slot
+            .replace(usd_to_micro(
+                cashflow.maker_rebate_program_day_baseline_usd,
+                "tier maker rebate program-day baseline",
+            )?)
+            .is_some()
+        {
+            return Err(ReportError::ContractViolation {
+                detail: format!(
+                    "maker rebate baseline scenario index {} is duplicated",
+                    cashflow.scenario_index
+                ),
+            }
+            .into());
+        }
+    }
+    canonical
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.ok_or_else(|| {
+                ReportError::ContractViolation {
+                    detail: format!("maker rebate baseline scenario index {index} is absent"),
                 }
                 .into()
             })

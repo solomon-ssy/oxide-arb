@@ -61,9 +61,28 @@ expression: recommendation_limit_entry()
           }
         ]
       },
-      "maker_rebate_schedule": null,
-      "full_fill_maker_rebate": null,
-      "expected_maker_rebate_usd": "0",
+      "maker_rebate_terms": {
+        "state": "passive_no_program",
+        "terms_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+        "available_at": "2023-11-14T22:13:20Z"
+      },
+      "full_fill_maker_rebate_accrual_usd": "0",
+      "expected_maker_rebate_accrual_usd": "0",
+      "objective_maker_rebate_usd": "0",
+      "maker_rebate_objective_status": {
+        "state": "no_program"
+      },
+      "maker_rebate_valuation": {
+        "as_of": "2023-11-14T22:13:20Z",
+        "health": "unavailable",
+        "program_day_baselines": [],
+        "payout_threshold_usd": "1",
+        "delay_basis": {
+          "kind": "conservative_fallback",
+          "lag_from_program_close_secs": 172800
+        },
+        "evidence_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+      },
       "visible_liquidity_usd": "5000"
     },
     "profit_probability_lower_bps": 5800,
@@ -79,8 +98,13 @@ expression: recommendation_limit_entry()
         "filled_shares": "581.39534883720930232558139535",
         "immediate_cash_outlay_usd": "250",
         "discounted_exit_cash_usd": "340",
-        "delayed_maker_rebate_usd": "0",
-        "discounted_maker_rebate_usd": "0",
+        "maker_rebate_accrual_usd": "0",
+        "objective_maker_rebate_usd": "0",
+        "maker_rebate_program_date": null,
+        "maker_rebate_program_day_baseline_usd": "0",
+        "maker_rebate_program_day_total_usd": "0",
+        "maker_rebate_credit_status": "no_accrual",
+        "maker_rebate_expected_by": null,
         "capital_cost_usd": "0",
         "capital_occupancy": [
           {
@@ -101,8 +125,13 @@ expression: recommendation_limit_entry()
         "filled_shares": "581.39534883720930232558139535",
         "immediate_cash_outlay_usd": "250",
         "discounted_exit_cash_usd": "130",
-        "delayed_maker_rebate_usd": "0",
-        "discounted_maker_rebate_usd": "0",
+        "maker_rebate_accrual_usd": "0",
+        "objective_maker_rebate_usd": "0",
+        "maker_rebate_program_date": null,
+        "maker_rebate_program_day_baseline_usd": "0",
+        "maker_rebate_program_day_total_usd": "0",
+        "maker_rebate_credit_status": "no_accrual",
+        "maker_rebate_expected_by": null,
         "capital_cost_usd": "0",
         "capital_occupancy": [
           {
@@ -205,8 +234,18 @@ expression: recommendation_limit_entry()
       "expected_filled_shares": "581.39534883720930232558139535",
       "hard_reserved_cash_usd": "250",
       "immediate_fee_usd": "0",
-      "expected_maker_rebate_usd": "0",
-      "maker_rebate_schedule": null,
+      "expected_maker_rebate_accrual_usd": "0",
+      "objective_maker_rebate_usd": "0",
+      "maker_rebate_objective_status": {
+        "state": "no_program"
+      },
+      "rebate_delay_basis": null,
+      "rebate_valuation_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+      "maker_rebate_terms": {
+        "state": "passive_no_program",
+        "terms_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+        "available_at": "2023-11-14T22:13:20Z"
+      },
       "reference_entry_price": "0.43",
       "portfolio_weight_pct": "0.05",
       "market_exposure_after_usd": "250",

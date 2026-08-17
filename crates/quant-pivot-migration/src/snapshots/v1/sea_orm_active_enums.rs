@@ -429,8 +429,8 @@ pub enum QpVenueIncentiveKind {
 pub enum QpVenueIncentiveStage {
     #[sea_orm(string_value = "estimated_accrual")]
     EstimatedAccrual,
-    #[sea_orm(string_value = "venue_awarded")]
-    VenueAwarded,
+    #[sea_orm(string_value = "venue_reported_accrual")]
+    VenueReportedAccrual,
     #[sea_orm(string_value = "wallet_credited")]
     WalletCredited,
 }

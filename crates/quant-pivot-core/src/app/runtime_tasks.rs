@@ -140,6 +140,8 @@ impl AppContext {
             Arc::clone(&self.execution.clob),
             Arc::clone(&self.infra.repos.market) as Arc<dyn MarketRepository>,
             Arc::clone(&self.infra.repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
+            Arc::clone(&self.infra.metrics),
+            self.data.terms_drift_wake.clone(),
             Duration::from_secs(self.config.polymarket.clob_market_info_refresh_secs),
         ));
         runner.spawn(TaskId::ClobMarketInfoSync, move |token| async move {

@@ -1,8 +1,8 @@
 //! Exact conversion from executable entry tiers to unified scenario USD cash flows.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
@@ -21,8 +21,10 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::BuyModelRoute,
     types::{
-        Bps, ContentHash, EconomicTierId, EventId, MarketId, Price, ReportRouteRunId, Shares,
-        SignalCandidateId, TokenId, Usd, UsdHours,
+        Bps, ContentHash, EconomicTierId, EntryMakerRebateTerms, EventId,
+        MakerRebateObjectiveStatus, MakerRebateObjectiveZeroReason,
+        MakerRebateScenarioCreditStatus, MakerRebateValuationEvidence, MarketId, Price,
+        ReportRouteRunId, Shares, SignalCandidateId, TokenId, Usd, UsdHours,
         trade_policy::{PassiveFillDistribution, PassiveFillState, PassiveFillStateKind},
     },
 };
@@ -31,7 +33,7 @@ use serde::Serialize;
 
 use crate::{
     execution_semantics::{
-        BookWalkOutcome, LiquidityRole, PitFeeSchedule, PitMakerRebateSchedule,
+        BookWalkOutcome, LiquidityRole, PitFeeSchedule, PitMakerRebateEvidence,
         PitMarketExecutionEconomics, walk_buy_cash_budget, walk_buy_exact_shares,
     },
     precision::quantize_venue_amount,
@@ -209,7 +211,7 @@ impl ExecutableTierLadderSeedFactory {
                     requested_shares: shares,
                     filled_shares: shares,
                     limit_price: input.limit_price,
-                    entry_vwap: vwap,
+                    execution_vwap: vwap,
                     immediate_cost: fill.immediate_cost,
                     slippage_usd: Usd::new(slippage),
                     visible_liquidity_usd: visible_liquidity,
@@ -320,7 +322,7 @@ impl ExecutableCashTierSeedFactory {
                 requested_shares: fill.filled_shares,
                 filled_shares: fill.filled_shares,
                 limit_price: input.limit_price,
-                entry_vwap: vwap,
+                execution_vwap: vwap,
                 immediate_cost: fill.immediate_cost,
                 slippage_usd: Usd::new(quantize_venue_amount(slippage)),
                 visible_liquidity_usd: visible_liquidity(input.asks, input.limit_price)?,
@@ -350,11 +352,19 @@ pub struct ExecutablePassiveTierSeedInput<'a> {
     pub cash_budget: Usd,
     pub good_til_secs: u64,
     pub fill_distribution: PassiveFillDistribution,
+    pub maker_rebate_valuation: MakerRebateValuationEvidence,
     pub source_lineage_hash: ContentHash,
 }
 
 /// Constructs a fully reserved passive entry seed without pretending it has filled.
 pub struct ExecutablePassiveTierSeedFactory;
+
+struct PassiveRebateProjection {
+    terms: EntryMakerRebateTerms,
+    full_fill_accrual_usd: Usd,
+    expected_accrual_usd: Usd,
+    objective_status: MakerRebateObjectiveStatus,
+}
 
 impl ExecutablePassiveTierSeedFactory {
     pub fn build(input: ExecutablePassiveTierSeedInput<'_>) -> QuantResult<ExecutableTierSeed> {
@@ -426,31 +436,7 @@ impl ExecutablePassiveTierSeedFactory {
         }
         let expected_filled_shares =
             expected_passive_shares(input.requested_shares, &input.fill_distribution)?;
-        let full_fill_maker_rebate = input
-            .execution_economics
-            .maker_rebate_schedule
-            .as_ref()
-            .map(|schedule| {
-                schedule.expected_incentive(
-                    &input.execution_economics.fee_schedule,
-                    LiquidityRole::Maker,
-                    input.limit_price,
-                    input.requested_shares,
-                    input.decision_at,
-                )
-            })
-            .transpose()
-            .map_err(|error| ReportError::InvariantViolation {
-                stage: "economic_passive_tier",
-                detail: format!("passive rebate calculation failed: {error:?}"),
-            })?
-            .flatten();
-        let expected_maker_rebate_usd = Usd::new(quantize_venue_amount(
-            full_fill_maker_rebate.map_or(Decimal::ZERO, |incentive| {
-                incentive.expected_rebate_usd.inner()
-            }) * expected_filled_shares.inner()
-                / input.requested_shares.inner(),
-        ));
+        let rebate = passive_rebate_projection(&input, expected_filled_shares)?;
         let source_lineage_hash = CanonicalDigest::content_hash_typed(
             "quant-pivot/passive-economic-tier-seed",
             1,
@@ -480,13 +466,12 @@ impl ExecutablePassiveTierSeedFactory {
                 expected_filled_shares,
                 full_fill_cost,
                 fill_distribution: input.fill_distribution,
-                maker_rebate_schedule: input
-                    .execution_economics
-                    .maker_rebate_schedule
-                    .as_ref()
-                    .map(PitMakerRebateSchedule::frozen),
-                full_fill_maker_rebate,
-                expected_maker_rebate_usd,
+                maker_rebate_terms: rebate.terms,
+                full_fill_maker_rebate_accrual_usd: rebate.full_fill_accrual_usd,
+                expected_maker_rebate_accrual_usd: rebate.expected_accrual_usd,
+                objective_maker_rebate_usd: Usd::ZERO,
+                maker_rebate_objective_status: rebate.objective_status,
+                maker_rebate_valuation: input.maker_rebate_valuation,
                 visible_liquidity_usd: Usd::new(quantize_venue_amount(
                     input.limit_price.inner() * visible_shares(input.bids)?.inner(),
                 )),
@@ -494,6 +479,81 @@ impl ExecutablePassiveTierSeedFactory {
             source_lineage_hash,
         })
     }
+}
+
+fn passive_rebate_projection(
+    input: &ExecutablePassiveTierSeedInput<'_>,
+    expected_filled_shares: Shares,
+) -> QuantResult<PassiveRebateProjection> {
+    let terms = match &input.execution_economics.maker_rebate_evidence {
+        PitMakerRebateEvidence::NoProgram {
+            terms_hash,
+            available_at,
+        } => EntryMakerRebateTerms::PassiveNoProgram {
+            terms_hash: *terms_hash,
+            available_at: *available_at,
+        },
+        PitMakerRebateEvidence::Available { schedule } => EntryMakerRebateTerms::PassiveProgram {
+            schedule: schedule.frozen(),
+        },
+        PitMakerRebateEvidence::Unavailable { reason, .. } => {
+            return Err(ReportError::InvariantViolation {
+                stage: "economic_passive_tier",
+                detail: format!(
+                    "passive entry requires decidable Gamma maker-rebate evidence: {reason:?}"
+                ),
+            }
+            .into());
+        }
+    };
+    let full_fill_accrual_usd = input
+        .execution_economics
+        .maker_rebate_evidence
+        .schedule()
+        .map(|schedule| {
+            schedule.expected_incentive(
+                &input.execution_economics.fee_schedule,
+                LiquidityRole::Maker,
+                input.limit_price,
+                input.requested_shares,
+                input.decision_at,
+            )
+        })
+        .transpose()
+        .map_err(|error| ReportError::InvariantViolation {
+            stage: "economic_passive_tier",
+            detail: format!("passive rebate calculation failed: {error:?}"),
+        })?
+        .flatten()
+        .map_or(Usd::ZERO, |incentive| incentive.expected_rebate_usd);
+    let expected_accrual_usd = Usd::new(quantize_venue_amount(
+        full_fill_accrual_usd.inner() * expected_filled_shares.inner()
+            / input.requested_shares.inner(),
+    ));
+    let objective_status = match terms {
+        EntryMakerRebateTerms::PassiveNoProgram { .. } => MakerRebateObjectiveStatus::NoProgram,
+        EntryMakerRebateTerms::PassiveProgram { .. } => {
+            input.maker_rebate_valuation.evidence_zero_reason().map_or(
+                MakerRebateObjectiveStatus::ScenarioWeighted {
+                    credited_probability_bps: 0,
+                },
+                |reason| MakerRebateObjectiveStatus::Zero { reason },
+            )
+        }
+        EntryMakerRebateTerms::AggressiveNotApplicable => {
+            return Err(ReportError::InvariantViolation {
+                stage: "economic_passive_tier",
+                detail: "passive tier cannot carry aggressive rebate applicability".to_owned(),
+            }
+            .into());
+        }
+    };
+    Ok(PassiveRebateProjection {
+        terms,
+        full_fill_accrual_usd,
+        expected_accrual_usd,
+        objective_status,
+    })
 }
 
 fn expected_passive_shares(
@@ -807,7 +867,7 @@ pub struct EconomicTierFactory;
 impl EconomicTierFactory {
     /// Build one immutable tier on the common discounted net-USD scale.
     pub fn build(
-        seed: ExecutableTierSeed,
+        mut seed: ExecutableTierSeed,
         sealed_artifact: &SealedPortfolioScenarioArtifact,
     ) -> QuantResult<ExecutableEconomicTier> {
         let artifact = sealed_artifact.artifact();
@@ -854,6 +914,11 @@ impl EconomicTierFactory {
             );
             scenario_cashflows.push(cashflow);
             outcome_hashes.push(outcome.outcome_lineage_hash);
+        }
+
+        if let EntryExecutionEconomics::Passive(entry) = &mut seed.entry_execution {
+            entry.objective_maker_rebate_usd =
+                nominal_rebate_objective(&scenario_cashflows, artifact)?;
         }
 
         let (nominal_expected, robust_expected, nominal_profit_bps, lower_profit_bps, width_bps) =
@@ -918,6 +983,161 @@ impl EconomicTierFactory {
     }
 }
 
+pub(super) fn materialize_rebate_credit(
+    tier: &mut ExecutableEconomicTier,
+    decisions: &[ScenarioRebateCreditDecision],
+    artifact: &PortfolioScenarioArtifact,
+) -> QuantResult<()> {
+    let EntryExecutionEconomics::Passive(entry) = &mut tier.entry_execution else {
+        return Ok(());
+    };
+    let decision_by_bucket = decisions
+        .iter()
+        .map(|decision| ((decision.scenario_index, decision.program_date), *decision))
+        .collect::<BTreeMap<_, _>>();
+    let mut credited_probability_bps = 0_u32;
+    let nominal = artifact
+        .nominal_distribution()
+        .ok_or_else(|| ReportError::ScenarioArtifact {
+            detail: "nominal distribution is absent or ambiguous".to_owned(),
+        })?;
+    for cashflow in &mut tier.scenario_cashflows {
+        let Some(program_date) = cashflow.maker_rebate_program_date else {
+            continue;
+        };
+        let decision = decision_by_bucket
+            .get(&(cashflow.scenario_index, program_date))
+            .ok_or_else(|| ReportError::PortfolioPostCheck {
+                detail: format!(
+                    "maker rebate decision is missing for scenario {} program day {program_date}",
+                    cashflow.scenario_index
+                ),
+            })?;
+        cashflow.maker_rebate_program_day_total_usd = decision.program_day_total_usd;
+        cashflow.maker_rebate_credit_status = if decision.credited {
+            MakerRebateScenarioCreditStatus::Credited
+        } else {
+            MakerRebateScenarioCreditStatus::BelowDailyThreshold
+        };
+        if decision.credited {
+            credited_probability_bps = credited_probability_bps
+                .checked_add(
+                    nominal
+                        .weights
+                        .iter()
+                        .find(|weight| weight.scenario_index == cashflow.scenario_index)
+                        .map(|weight| weight.probability_bps)
+                        .ok_or_else(|| ReportError::PortfolioPostCheck {
+                            detail: "maker rebate scenario index exceeds nominal weights"
+                                .to_owned(),
+                        })?,
+                )
+                .ok_or_else(|| ReportError::NumericOverflow {
+                    field: "maker_rebate_credited_probability_bps",
+                    detail: "credited scenario probability overflowed u32".to_owned(),
+                })?;
+        } else {
+            cashflow.discounted_net_usd = Usd::new(
+                cashflow.discounted_net_usd.inner() - cashflow.objective_maker_rebate_usd.inner(),
+            );
+            cashflow.objective_maker_rebate_usd = Usd::ZERO;
+            cashflow.maker_rebate_expected_by = None;
+        }
+    }
+    if matches!(
+        entry.maker_rebate_objective_status,
+        MakerRebateObjectiveStatus::ScenarioWeighted { .. }
+    ) {
+        entry.maker_rebate_objective_status = if credited_probability_bps == 0 {
+            MakerRebateObjectiveStatus::Zero {
+                reason: MakerRebateObjectiveZeroReason::BelowPayoutThreshold,
+            }
+        } else {
+            MakerRebateObjectiveStatus::ScenarioWeighted {
+                credited_probability_bps,
+            }
+        };
+    }
+    entry.objective_maker_rebate_usd =
+        nominal_rebate_objective(&tier.scenario_cashflows, artifact)?;
+    let valuation_hash = entry.maker_rebate_valuation.evidence_hash;
+    let (nominal_expected, robust_expected, nominal_profit_bps, lower_profit_bps, width_bps) =
+        distribution_economics(&tier.scenario_cashflows, artifact)?;
+    tier.profit_probability_lower_bps = lower_profit_bps;
+    tier.probability_interval_width_bps = width_bps;
+    tier.economics.nominal_expected_net_usd = nominal_expected;
+    tier.economics.robust_expected_net_usd = robust_expected;
+    tier.economics.profit_probability_bps = Bps::new(Decimal::from(nominal_profit_bps));
+    tier.lineage_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/threshold-materialized-economic-tier",
+        1,
+        &(
+            tier.lineage_hash,
+            decisions,
+            valuation_hash,
+            &tier.entry_execution,
+            &tier.scenario_cashflows,
+        ),
+    )?;
+    tier.economic_tier_id = EconomicTierId::from_content_hash(&tier.lineage_hash);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(super) struct ScenarioRebateCreditDecision {
+    pub scenario_index: u32,
+    pub program_date: NaiveDate,
+    pub program_day_total_usd: Usd,
+    pub credited: bool,
+}
+
+fn nominal_rebate_objective(
+    cashflows: &[ScenarioExecutionCashflow],
+    artifact: &PortfolioScenarioArtifact,
+) -> QuantResult<Usd> {
+    let distribution = artifact
+        .distributions
+        .iter()
+        .find(|distribution| distribution.nominal)
+        .ok_or_else(|| ReportError::ScenarioArtifact {
+            detail: "nominal distribution is absent".to_owned(),
+        })?;
+    let numerator = distribution.weights.iter().try_fold(
+        Decimal::ZERO,
+        |total, weight| -> QuantResult<Decimal> {
+            let cashflow = cashflows
+                .get(usize::try_from(weight.scenario_index).map_err(|error| {
+                    ReportError::NumericOverflow {
+                        field: "scenario_index",
+                        detail: error.to_string(),
+                    }
+                })?)
+                .filter(|cashflow| cashflow.scenario_index == weight.scenario_index)
+                .ok_or_else(|| ReportError::ScenarioArtifact {
+                    detail: format!(
+                        "nominal distribution references absent scenario {}",
+                        weight.scenario_index
+                    ),
+                })?;
+            total
+                .checked_add(
+                    cashflow.objective_maker_rebate_usd.inner()
+                        * Decimal::from(weight.probability_bps),
+                )
+                .ok_or_else(|| {
+                    ReportError::NumericOverflow {
+                        field: "scenario.objective_maker_rebate_usd",
+                        detail: "weighted maker rebate objective overflowed Decimal".to_owned(),
+                    }
+                    .into()
+                })
+        },
+    )?;
+    Ok(Usd::new(quantize_venue_amount(
+        numerator / Decimal::from(DISTRIBUTION_MASS_BPS),
+    )))
+}
+
 impl ExecutableTierSeed {
     fn validate(&self) -> QuantResult<()> {
         let entry_valid = match &self.entry_execution {
@@ -926,8 +1146,8 @@ impl ExecutableTierSeed {
                     && entry.filled_shares == entry.requested_shares
                     && entry.limit_price.is_positive()
                     && entry.limit_price <= Price::ONE
-                    && entry.entry_vwap.is_positive()
-                    && entry.entry_vwap <= entry.limit_price
+                    && entry.execution_vwap.is_positive()
+                    && entry.execution_vwap <= entry.limit_price
                     && entry.immediate_cost.cash_outlay_usd.is_positive()
                     && !entry.slippage_usd.is_negative()
                     && entry.visible_liquidity_usd.is_positive()
@@ -1030,8 +1250,13 @@ fn scenario_cashflow(
                 filled_shares: entry.filled_shares,
                 immediate_cash_outlay_usd: entry.immediate_cost.cash_outlay_usd,
                 discounted_exit_cash_usd: discounted_exit_cash,
-                delayed_maker_rebate_usd: Usd::ZERO,
-                discounted_maker_rebate_usd: Usd::ZERO,
+                maker_rebate_accrual_usd: Usd::ZERO,
+                objective_maker_rebate_usd: Usd::ZERO,
+                maker_rebate_program_date: None,
+                maker_rebate_program_day_baseline_usd: Usd::ZERO,
+                maker_rebate_program_day_total_usd: Usd::ZERO,
+                maker_rebate_credit_status: MakerRebateScenarioCreditStatus::NotApplicable,
+                maker_rebate_expected_by: None,
                 capital_cost_usd: Usd::ZERO,
                 capital_occupancy: vec![ScenarioCapitalOccupancySlice {
                     locked_cash_usd: entry.immediate_cost.cash_outlay_usd,
@@ -1083,6 +1308,68 @@ fn passive_state(
     .into())
 }
 
+struct ScenarioRebateProjection {
+    program_date: NaiveDate,
+    baseline: Usd,
+    total: Usd,
+    objective: Usd,
+    expected_by: Option<DateTime<Utc>>,
+    credit_status: MakerRebateScenarioCreditStatus,
+}
+
+impl ScenarioRebateProjection {
+    fn from_fill(
+        entry: &PassiveEntryEconomics,
+        accrual: Usd,
+        fill_at: DateTime<Utc>,
+        artifact: &PortfolioScenarioArtifact,
+    ) -> QuantResult<Self> {
+        let program_date = fill_at.date_naive();
+        let baseline = entry.maker_rebate_valuation.baseline_for(program_date);
+        let total = Usd::new(
+            baseline
+                .inner()
+                .checked_add(accrual.inner())
+                .ok_or_else(|| ReportError::NumericOverflow {
+                    field: "scenario.maker_rebate_program_day_total",
+                    detail: "program-day baseline plus scenario accrual overflowed Decimal"
+                        .to_owned(),
+                })?,
+        );
+        let (objective, expected_by) = if matches!(
+            entry.maker_rebate_objective_status,
+            MakerRebateObjectiveStatus::ScenarioWeighted { .. }
+        ) && accrual.is_positive()
+        {
+            let expected_by = rebate_expected_by(entry, program_date)?;
+            let delay = u64::try_from((expected_by - fill_at).num_seconds()).map_err(|error| {
+                ReportError::InvariantViolation {
+                    stage: "economic_passive_scenario",
+                    detail: format!("maker rebate expected-by precedes fill: {error}"),
+                }
+            })?;
+            (discount_cash(accrual, delay, artifact)?, Some(expected_by))
+        } else {
+            (Usd::ZERO, None)
+        };
+        let credit_status = if accrual.is_zero() {
+            MakerRebateScenarioCreditStatus::NoAccrual
+        } else if total >= entry.maker_rebate_valuation.payout_threshold_usd {
+            MakerRebateScenarioCreditStatus::Credited
+        } else {
+            MakerRebateScenarioCreditStatus::BelowDailyThreshold
+        };
+        Ok(Self {
+            program_date,
+            baseline,
+            total,
+            objective,
+            expected_by,
+            credit_status,
+        })
+    }
+}
+
 fn passive_cashflow(
     entry: &PassiveEntryEconomics,
     state: PassiveFillState,
@@ -1101,8 +1388,13 @@ fn passive_cashflow(
             filled_shares: Shares::ZERO,
             immediate_cash_outlay_usd: Usd::ZERO,
             discounted_exit_cash_usd: Usd::ZERO,
-            delayed_maker_rebate_usd: Usd::ZERO,
-            discounted_maker_rebate_usd: Usd::ZERO,
+            maker_rebate_accrual_usd: Usd::ZERO,
+            objective_maker_rebate_usd: Usd::ZERO,
+            maker_rebate_program_date: None,
+            maker_rebate_program_day_baseline_usd: Usd::ZERO,
+            maker_rebate_program_day_total_usd: Usd::ZERO,
+            maker_rebate_credit_status: MakerRebateScenarioCreditStatus::NoAccrual,
+            maker_rebate_expected_by: None,
             capital_cost_usd: capital_cost,
             capital_occupancy: vec![ScenarioCapitalOccupancySlice {
                 locked_cash_usd: entry.hard_reserved_cash_usd,
@@ -1128,16 +1420,22 @@ fn passive_cashflow(
     let immediate_cost = passive_fill_cost(entry, filled_shares)?;
     let fill_latency_secs = state.fill_latency_ms.div_ceil(1_000);
     let reservation_cost = capital_cost(entry.hard_reserved_cash_usd, fill_latency_secs, artifact)?;
-    let delayed_rebate = Usd::new(quantize_venue_amount(
-        entry
-            .full_fill_maker_rebate
-            .map_or(Decimal::ZERO, |incentive| {
-                incentive.expected_rebate_usd.inner()
-            })
-            * ratio,
+    let rebate_accrual = Usd::new(quantize_venue_amount(
+        entry.full_fill_maker_rebate_accrual_usd.inner() * ratio,
     ));
-    let rebate_delay_secs = incentive_delay_secs(entry)?;
-    let discounted_rebate = discount_cash(delayed_rebate, rebate_delay_secs, artifact)?;
+    let fill_latency_ms =
+        i64::try_from(state.fill_latency_ms).map_err(|error| ReportError::NumericOverflow {
+            field: "scenario.passive_fill_latency_ms",
+            detail: error.to_string(),
+        })?;
+    let fill_at = entry
+        .decision_at
+        .checked_add_signed(ChronoDuration::milliseconds(fill_latency_ms))
+        .ok_or_else(|| ReportError::NumericOverflow {
+            field: "scenario.passive_fill_at",
+            detail: "decision time plus fill latency overflows timestamp".to_owned(),
+        })?;
+    let rebate = ScenarioRebateProjection::from_fill(entry, rebate_accrual, fill_at, artifact)?;
     let discounted_exit_cash = scaled_exit_cash(
         filled_shares,
         outcome.discounted_exit_cash_per_share_usd,
@@ -1147,7 +1445,7 @@ fn passive_cashflow(
     let discounted_net = checked_net(
         discounted_exit_cash,
         immediate_cost.cash_outlay_usd,
-        discounted_rebate,
+        rebate.objective,
         reservation_cost,
     )?;
     let risk_net = checked_net(
@@ -1192,13 +1490,48 @@ fn passive_cashflow(
         filled_shares,
         immediate_cash_outlay_usd: immediate_cost.cash_outlay_usd,
         discounted_exit_cash_usd: discounted_exit_cash,
-        delayed_maker_rebate_usd: delayed_rebate,
-        discounted_maker_rebate_usd: discounted_rebate,
+        maker_rebate_accrual_usd: rebate_accrual,
+        objective_maker_rebate_usd: rebate.objective,
+        maker_rebate_program_date: rebate_accrual.is_positive().then_some(rebate.program_date),
+        maker_rebate_program_day_baseline_usd: rebate.baseline,
+        maker_rebate_program_day_total_usd: rebate.total,
+        maker_rebate_credit_status: rebate.credit_status,
+        maker_rebate_expected_by: rebate.expected_by,
         capital_cost_usd: reservation_cost,
         capital_occupancy: occupancy,
         discounted_net_usd: discounted_net,
         risk_net_usd: risk_net,
     })
+}
+
+fn rebate_expected_by(
+    entry: &PassiveEntryEconomics,
+    program_date: NaiveDate,
+) -> QuantResult<DateTime<Utc>> {
+    let program_close = program_date
+        .succ_opt()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|value| DateTime::from_naive_utc_and_offset(value, Utc))
+        .ok_or_else(|| ReportError::NumericOverflow {
+            field: "scenario.maker_rebate_program_close",
+            detail: "program date cannot advance to the next UTC day".to_owned(),
+        })?;
+    let lag =
+        i64::try_from(entry.maker_rebate_valuation.delay_basis.lag_secs()).map_err(|error| {
+            ReportError::NumericOverflow {
+                field: "scenario.maker_rebate_lag_secs",
+                detail: error.to_string(),
+            }
+        })?;
+    program_close
+        .checked_add_signed(ChronoDuration::seconds(lag))
+        .ok_or_else(|| {
+            ReportError::NumericOverflow {
+                field: "scenario.maker_rebate_expected_by",
+                detail: "program close plus payout lag overflows timestamp".to_owned(),
+            }
+            .into()
+        })
 }
 
 fn passive_fill_cost(
@@ -1280,26 +1613,6 @@ fn checked_net(
     Ok(Usd::new(quantize_venue_amount(value)))
 }
 
-fn incentive_delay_secs(entry: &PassiveEntryEconomics) -> QuantResult<u64> {
-    let Some(incentive) = entry.full_fill_maker_rebate else {
-        return Ok(0);
-    };
-    u64::try_from(
-        incentive
-            .expected_credit_at
-            .signed_duration_since(entry.decision_at)
-            .num_seconds()
-            .max(0),
-    )
-    .map_err(|error| {
-        ReportError::NumericOverflow {
-            field: "scenario.maker_rebate_delay_secs",
-            detail: error.to_string(),
-        }
-        .into()
-    })
-}
-
 fn capital_cost(
     locked: Usd,
     duration_secs: u64,
@@ -1352,7 +1665,7 @@ fn discount_cash(
         .inner()
         .checked_div(Decimal::ONE + carrying_rate)
         .ok_or_else(|| ReportError::NumericOverflow {
-            field: "scenario.discounted_maker_rebate_usd",
+            field: "scenario.objective_maker_rebate_usd",
             detail: "maker rebate discount division failed".to_owned(),
         })?;
     Ok(Usd::new(quantize_venue_amount(discounted)))

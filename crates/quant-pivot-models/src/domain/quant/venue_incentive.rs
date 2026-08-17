@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Days, NaiveDate, Utc};
+use chrono::{DateTime, Days, Duration, NaiveDate, NaiveTime, Utc};
 use schemars::JsonSchema;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ pub struct VenueIncentiveEventInfo {
     pub stage: VenueIncentiveStage,
     pub program_date: NaiveDate,
     pub amount_usd: Usd,
-    pub source_schedule_hash: Option<ContentHash>,
+    pub source_terms_hash: Option<ContentHash>,
     pub source_partition: String,
     pub source_identity: String,
     pub transaction_hash: Option<EvmTransactionHash>,
@@ -49,7 +49,7 @@ info_from_model!(
         stage,
         program_date,
         amount_usd,
-        source_schedule_hash,
+        source_terms_hash,
         source_partition,
         source_identity,
         transaction_hash,
@@ -71,7 +71,7 @@ pub struct NewVenueIncentiveEvent {
     pub stage: VenueIncentiveStage,
     pub program_date: NaiveDate,
     pub amount_usd: Usd,
-    pub source_schedule_hash: Option<ContentHash>,
+    pub source_terms_hash: Option<ContentHash>,
     pub source_partition: String,
     pub source_identity: String,
     pub transaction_hash: Option<EvmTransactionHash>,
@@ -136,7 +136,7 @@ pub struct NewVenueIncentiveReconciliationScan {
 
 /// Complete maker-award response plus its manifest, committed atomically.
 #[derive(Debug, Clone)]
-pub struct NewVenueIncentiveAwardSnapshot {
+pub struct NewVenueIncentiveReportedAccrualSnapshot {
     pub scan: NewVenueIncentiveReconciliationScan,
     pub awards: Vec<NewVenueIncentiveEvent>,
 }
@@ -170,7 +170,7 @@ impl VenueIncentiveScanHealth {
                     }),
                 );
                 if scan.kind == VenueIncentiveKind::MakerRebate
-                    && scan.stage == VenueIncentiveStage::VenueAwarded
+                    && scan.stage == VenueIncentiveStage::VenueReportedAccrual
                 {
                     latest_award_success_at = Some(
                         latest_award_success_at
@@ -198,7 +198,7 @@ impl VenueIncentiveScanHealth {
             let complete = [
                 (
                     VenueIncentiveKind::MakerRebate,
-                    VenueIncentiveStage::VenueAwarded,
+                    VenueIncentiveStage::VenueReportedAccrual,
                 ),
                 (
                     VenueIncentiveKind::MakerRebate,
@@ -241,20 +241,101 @@ impl VenueIncentiveScanHealth {
 pub struct VenueIncentiveReconciliation {
     pub as_of: DateTime<Utc>,
     pub estimated_maker_accrual_usd: Usd,
-    pub venue_awarded_maker_usd: Usd,
+    pub venue_reported_maker_accrual_usd: Usd,
     pub wallet_credited_maker_usd: Usd,
     pub wallet_credited_taker_usd: Usd,
 }
 
+/// Day-local maker payout projection. Credits are attributed FIFO only across
+/// program days that independently reached the configured threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct MakerRebateProgramDayStatus {
+    pub program_date: NaiveDate,
+    pub venue_reported_accrual_usd: Usd,
+    pub attributed_wallet_credit_usd: Usd,
+    pub outstanding_usd: Usd,
+    pub threshold_met: bool,
+    pub expected_by: DateTime<Utc>,
+}
+
+impl MakerRebateProgramDayStatus {
+    #[must_use]
+    pub fn project(
+        events: &[VenueIncentiveEventInfo],
+        payout_threshold_usd: Usd,
+        lag_from_program_close_secs: u64,
+    ) -> Vec<Self> {
+        let mut latest = BTreeMap::new();
+        for event in events.iter().filter(|event| {
+            event.kind == VenueIncentiveKind::MakerRebate
+                && matches!(
+                    event.stage,
+                    VenueIncentiveStage::VenueReportedAccrual | VenueIncentiveStage::WalletCredited
+                )
+        }) {
+            let key = (event.stage, event.source_partition.as_str());
+            if latest
+                .get(&key)
+                .is_none_or(|current: &&VenueIncentiveEventInfo| {
+                    (event.available_at, event.created_at)
+                        > (current.available_at, current.created_at)
+                })
+            {
+                latest.insert(key, event);
+            }
+        }
+        let mut reported_by_day = BTreeMap::<NaiveDate, Usd>::new();
+        let mut wallet_credit = Usd::ZERO;
+        for event in latest.into_values() {
+            match event.stage {
+                VenueIncentiveStage::VenueReportedAccrual => {
+                    let total = reported_by_day.entry(event.program_date).or_default();
+                    *total += event.amount_usd;
+                }
+                VenueIncentiveStage::WalletCredited => wallet_credit += event.amount_usd,
+                VenueIncentiveStage::EstimatedAccrual => {}
+            }
+        }
+        let lag = i64::try_from(lag_from_program_close_secs).unwrap_or(i64::MAX);
+        reported_by_day
+            .into_iter()
+            .map(|(program_date, venue_reported_accrual_usd)| {
+                let threshold_met = venue_reported_accrual_usd >= payout_threshold_usd;
+                let attributed_wallet_credit_usd = if threshold_met {
+                    venue_reported_accrual_usd.min(wallet_credit)
+                } else {
+                    Usd::ZERO
+                };
+                wallet_credit -= attributed_wallet_credit_usd;
+                let expected_by = DateTime::from_naive_utc_and_offset(
+                    program_date
+                        .succ_opt()
+                        .unwrap_or(program_date)
+                        .and_time(NaiveTime::MIN),
+                    Utc,
+                ) + Duration::seconds(lag);
+                Self {
+                    program_date,
+                    venue_reported_accrual_usd,
+                    attributed_wallet_credit_usd,
+                    outstanding_usd: venue_reported_accrual_usd - attributed_wallet_credit_usd,
+                    threshold_met,
+                    expected_by,
+                }
+            })
+            .collect()
+    }
+}
+
 impl VenueIncentiveReconciliation {
     #[must_use]
-    pub fn estimate_to_award_delta(self) -> Usd {
-        self.venue_awarded_maker_usd - self.estimated_maker_accrual_usd
+    pub fn estimate_to_reported_delta(self) -> Usd {
+        self.venue_reported_maker_accrual_usd - self.estimated_maker_accrual_usd
     }
 
     #[must_use]
-    pub fn award_to_credit_delta(self) -> Usd {
-        self.wallet_credited_maker_usd - self.venue_awarded_maker_usd
+    pub fn reported_to_credit_delta(self) -> Usd {
+        self.wallet_credited_maker_usd - self.venue_reported_maker_accrual_usd
     }
 
     #[must_use]
@@ -313,7 +394,7 @@ mod tests {
                 scan(
                     date,
                     VenueIncentiveKind::MakerRebate,
-                    VenueIncentiveStage::VenueAwarded,
+                    VenueIncentiveStage::VenueReportedAccrual,
                     VenueIncentiveReconciliationScanStatus::Succeeded,
                     completed_at,
                     completed_at,
@@ -342,7 +423,7 @@ mod tests {
         scans.push(scan(
             middle,
             VenueIncentiveKind::MakerRebate,
-            VenueIncentiveStage::VenueAwarded,
+            VenueIncentiveStage::VenueReportedAccrual,
             VenueIncentiveReconciliationScanStatus::Failed,
             at(16, 2),
             at(16, 2),
@@ -367,7 +448,7 @@ mod tests {
             scan(
                 date,
                 VenueIncentiveKind::MakerRebate,
-                VenueIncentiveStage::VenueAwarded,
+                VenueIncentiveStage::VenueReportedAccrual,
                 VenueIncentiveReconciliationScanStatus::Succeeded,
                 completed_at,
                 completed_at,
@@ -393,7 +474,7 @@ mod tests {
         scans.push(scan(
             date,
             VenueIncentiveKind::MakerRebate,
-            VenueIncentiveStage::VenueAwarded,
+            VenueIncentiveStage::VenueReportedAccrual,
             VenueIncentiveReconciliationScanStatus::Failed,
             completed_at,
             completed_at + Duration::microseconds(1),

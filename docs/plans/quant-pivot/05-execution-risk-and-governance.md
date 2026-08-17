@@ -288,7 +288,9 @@ shares 全部成交或 GTD 到期，保存所有 partial-fill slices；cohort �
 即时费用、延迟 maker incentive 与实际 venue credit 分账：
 
 - `MarketFeeSchedule` 只保存 CLOB 权威即时 fee；`MarketMakerRebateSchedule` 只保存 Gamma 权威 maker
-  incentive，两者使用独立 source/content hash；同 decision boundary 下 fee 开关或曲线不一致则拒绝 candidate；
+  incentive，两者使用独立 source/content hash；Gamma wire 的 `feesEnabled` 只用于归一化成
+  `NoProgram | Available | Unavailable`，不进入内部 schedule。曲线不一致或 evidence 不可判定只拒绝 Passive，
+  Aggressive 仍仅依赖合法 CLOB fee；
 - `PreparedExpected` 与 `AuthenticatedTradeDerived` 都是 provisional measurement；只有校验 chain 137、V2
   exchange、order/account/token/side、transaction/log identity 及 BUY/SELL asset conservation 的
   `OnChainSettled` 才是 exact fee；
@@ -298,6 +300,9 @@ shares 全部成交或 GTD 到期，保存所有 partial-fill slices；cohort �
 - daily `/rebates/current` 记录 market/day `VenueAwarded`；Data API `MAKER_REBATE` / `TAKER_REBATE`
   activity 记录 `WalletCredited`。只有 wallet credit 进入账户 incentive-credit cash component；Taker rebate
   从不进入 recommendation、MILP、CPCV 或资金可用量。
+- intent 创建与最终 admission 都冻结并重读 fee/rebate hashes；resting post-only order 在任一条款或 evidence
+  state 漂移时撤单并重新采集 venue truth。实际 fill 按 `matched_at` 重建 fee/Gamma PIT evidence，ledger 同时
+  保存 decision hash、match hash、drift 与不可估值原因，禁止复用 placement-time schedule 计算 accrual。
 
 所有 fill、fee measurement 与 incentive event 都是 append-only、identity-keyed、PIT 可查询事实。venue award
 的同一 account/market/day partition 允许以新 evidence identity 追加修订，读取时按 `available_at` 选择最新事实；

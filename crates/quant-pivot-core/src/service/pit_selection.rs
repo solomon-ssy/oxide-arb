@@ -271,6 +271,7 @@ mod tests {
             market::{
                 CatalogWindowInfo, EventRegistryInfo,
                 book::BookLevel,
+                fee::MarketMakerRebateEvidence,
                 registry::{MarketRegistryInfo, NegRiskLegSet, TokenInfo},
             },
             quant::{
@@ -343,7 +344,7 @@ mod tests {
             min_order_size: Decimal::ONE,
             liquidity_usd: None,
             volume_24h: None,
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
             start_date: Some(now),
             end_date: Some(now),
             resolved_at: None,
@@ -363,7 +364,7 @@ mod tests {
             end_date: market.end_date,
             created_at: market.created_at,
             fee_schedule: None,
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         }
     }
 

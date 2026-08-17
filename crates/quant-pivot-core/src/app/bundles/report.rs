@@ -96,6 +96,13 @@ impl ReportBundle {
             microstructure_commit: Arc::clone(&deps.data.data_pipeline)
                 as Arc<dyn MicrostructureCommitBarrier>,
             exchange_history_repo: Arc::clone(&deps.research.exchange_history_repo),
+            venue_incentive_repo: Arc::clone(&deps.infra.repos.venue_incentive)
+                as Arc<dyn VenueIncentiveRepository>,
+            execution_account_id: deps.account.execution_account.execution_account_id,
+            venue_incentive_stale_secs: deps
+                .workers
+                .venue_incentive_reconciliation_secs
+                .saturating_mul(2),
             metrics: Arc::clone(&deps.infra.metrics),
         }));
         let publisher = Arc::new(ReportPublisher::new(ReportPublisherDeps {

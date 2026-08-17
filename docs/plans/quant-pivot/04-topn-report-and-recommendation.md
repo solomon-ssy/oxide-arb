@@ -254,8 +254,8 @@ Trigger 类型：
 
 字段：
 
-- `suggested_usd`
-- `suggested_shares`
+- `hard_reserved_cash_usd`
+- `requested_shares`
 - `max_usd`
 - `min_usd`
 - `portfolio_weight_pct`
@@ -300,15 +300,19 @@ Sizing 不是展示值。执行模式启用时，`OrderIntent` 只能在 sizing 
 - aggressive：真实 L2 walk 的 requested/filled shares、limit、VWAP 与拆分后的
   `principal_usd` / `venue_fee_usd` / `builder_fee_usd` / `cash_outlay_usd`；
 - passive：post-only limit、GTD、requested shares、完整 limit notional 的 hard reservation、OOS
-  `PassiveFillDistribution`、expected filled shares，以及可选的 PIT maker-rebate schedule。
+  `PassiveFillDistribution`、expected filled shares，以及必填的 `PassiveNoProgram | PassiveProgram`
+  PIT maker-rebate terms；`Unavailable` 只抑制 Passive cohort，不能伪装成零计划。
 
 组合 scenario 联合枚举 payout/exit 与 `AggressiveFill`、`PassiveNoFill`、`PassivePartialFill`、
 `PassiveFullFill`。no-fill 的交易现金流和 rebate 严格为零，但保留 GTD 期间全额资金占用成本；partial/full
-只按场景实际 fills 计算 principal、fee、exit 与 delayed rebate。硬现金、最大损失、CVaR 和 tail-risk
+只按场景实际 fills 计算 principal、fee、exit 与 maker rebate accrual。报告冻结未兑 maker award、完整对账健康和
+最近 30 个完整 program-day 的 award→credit FIFO p95；只有所选报告组合与未兑 award 合计达到 1 USD payout
+门槛时，贴现返佣才进入 expected objective。硬现金、最大损失、CVaR 和 tail-risk
 cashflow 一律令未到账 rebate 为零。aggressive/passive tiers 共享 candidate identity，因此 MILP 最多选择其一。
 
 Report/API 对执行经济学必须显式输出：`requested_shares`、`expected_filled_shares`、
-`hard_reserved_cash_usd`、`immediate_fee_usd`、`expected_maker_rebate_usd`。Decimal 金额继续以 string wire
+`hard_reserved_cash_usd`、`immediate_fee_usd`、`expected_maker_rebate_accrual_usd`、
+`objective_maker_rebate_usd`、program state/terms hash/PIT availability 和 typed objective-zero reason。Decimal 金额继续以 string wire
 编码；不得用 expected fill 或 rebate 放松资金约束。
 
 ## 10. Exit Plan

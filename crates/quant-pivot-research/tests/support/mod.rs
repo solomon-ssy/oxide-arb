@@ -21,9 +21,9 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::{BuyModelRoute, PortfolioConfig, PortfolioScenarioModelArtifactBinding},
     types::{
-        Bps, ContentHash, EconomicTierId, EventId, MarketId, PortfolioPlanId,
-        PortfolioScenarioArtifactId, PortfolioScenarioModelArtifactId, Price, ReportRouteRunId,
-        SchemaVersion, Shares, SignalCandidateId, TokenId, Usd, UsdHours,
+        Bps, ContentHash, EconomicTierId, EventId, MakerRebateScenarioCreditStatus, MarketId,
+        PortfolioPlanId, PortfolioScenarioArtifactId, PortfolioScenarioModelArtifactId, Price,
+        ReportRouteRunId, SchemaVersion, Shares, SignalCandidateId, TokenId, Usd, UsdHours,
     },
 };
 use quant_pivot_research::portfolio::{
@@ -371,7 +371,7 @@ fn tier(fixture: TierFixture<'_>, bucket_ends: &[u64]) -> QuantResult<Executable
             requested_shares: filled_shares,
             filled_shares,
             limit_price: Price::new(dec!(0.5)),
-            entry_vwap: Price::new(dec!(0.5)),
+            execution_vwap: Price::new(dec!(0.5)),
             immediate_cost,
             slippage_usd: Usd::new(dec!(1)),
             visible_liquidity_usd: Usd::new(dec!(10_000)),
@@ -392,8 +392,13 @@ fn tier(fixture: TierFixture<'_>, bucket_ends: &[u64]) -> QuantResult<Executable
                     filled_shares,
                     immediate_cash_outlay_usd: immediate_cost.cash_outlay_usd,
                     discounted_exit_cash_usd: immediate_cost.cash_outlay_usd + discounted_net_usd,
-                    delayed_maker_rebate_usd: Usd::ZERO,
-                    discounted_maker_rebate_usd: Usd::ZERO,
+                    maker_rebate_accrual_usd: Usd::ZERO,
+                    objective_maker_rebate_usd: Usd::ZERO,
+                    maker_rebate_program_date: None,
+                    maker_rebate_program_day_baseline_usd: Usd::ZERO,
+                    maker_rebate_program_day_total_usd: Usd::ZERO,
+                    maker_rebate_credit_status: MakerRebateScenarioCreditStatus::NotApplicable,
+                    maker_rebate_expected_by: None,
                     capital_cost_usd: Usd::ZERO,
                     capital_occupancy: vec![ScenarioCapitalOccupancySlice {
                         locked_cash_usd: immediate_cost.cash_outlay_usd,

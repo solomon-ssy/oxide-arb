@@ -20,8 +20,8 @@ use crate::{
         equity::EquitySnapshotService,
         feature_integrity::AutomaticFullParityOutcome,
         venue_incentive::{
-            VenueAwardSource, VenueCreditSource, VenueIncentiveReconciliationDependencies,
-            VenueIncentiveReconciliationService,
+            VenueCreditSource, VenueIncentiveReconciliationDependencies,
+            VenueIncentiveReconciliationService, VenueReportedAccrualSource,
         },
     },
 };
@@ -39,7 +39,8 @@ impl AppContext {
         );
         let service = Arc::new(VenueIncentiveReconciliationService::new(
             VenueIncentiveReconciliationDependencies {
-                award_source: Arc::clone(&self.execution.clob) as Arc<dyn VenueAwardSource>,
+                reported_accrual_source: Arc::clone(&self.execution.clob)
+                    as Arc<dyn VenueReportedAccrualSource>,
                 credit_source: Arc::clone(&self.account.data_api) as Arc<dyn VenueCreditSource>,
                 repository: Arc::clone(&self.infra.repos.venue_incentive)
                     as Arc<dyn VenueIncentiveRepository>,
@@ -48,6 +49,12 @@ impl AppContext {
                 execution_account_id: self.account.execution_account.execution_account_id,
                 funder: self.account.execution_account.funder_address.clone(),
                 cadence_secs: poll.as_secs(),
+                maker_rebate_policy: self
+                    .runtime_config()
+                    .current()
+                    .execution_risk
+                    .maker_rebate
+                    .clone(),
             },
         ));
         let lookback_days = self.config.quant.workers.venue_incentive_lookback_days;

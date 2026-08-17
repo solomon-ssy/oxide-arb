@@ -639,7 +639,7 @@ pub struct TradePolicyCohort {
     pub passive_reconciled_trade_coverage: Option<Decimal>,
     pub passive_fill_distribution: Option<PassiveFillDistribution>,
     pub fee_catalog_coverage: Decimal,
-    pub rebate_evidence_coverage: Decimal,
+    pub passive_rebate_evidence_coverage: Option<Decimal>,
     pub cpcv_path_count: u32,
     pub trial_count: u32,
     pub deflated_sharpe_ratio: Decimal,
@@ -664,7 +664,7 @@ pub struct TradePolicyValidationEvidence {
     pub depth_failure_rate: Option<Decimal>,
     pub common_candidate_support: Option<Decimal>,
     pub fee_catalog_coverage: Option<Decimal>,
-    pub rebate_evidence_coverage: Option<Decimal>,
+    pub passive_rebate_evidence_coverage: Option<Decimal>,
     pub eligible_market_coverage: Option<Decimal>,
 }
 
@@ -682,7 +682,7 @@ pub struct TradePolicyTrialMetrics {
     pub executable_coverage: Decimal,
     pub full_l2_coverage: Decimal,
     pub fee_catalog_coverage: Decimal,
-    pub rebate_evidence_coverage: Decimal,
+    pub passive_rebate_evidence_coverage: Option<Decimal>,
     pub ambiguous_touch_rate: Decimal,
     pub depth_failure_rate: Decimal,
     pub latency_stress_multiplier: Decimal,
@@ -701,7 +701,6 @@ impl TradePolicyTrialMetrics {
             self.executable_coverage,
             self.full_l2_coverage,
             self.fee_catalog_coverage,
-            self.rebate_evidence_coverage,
             self.ambiguous_touch_rate,
             self.depth_failure_rate,
         ]
@@ -710,6 +709,14 @@ impl TradePolicyTrialMetrics {
         {
             return Err(
                 "trade-policy trial coverage/rate metrics must be within [0, 1]".to_owned(),
+            );
+        }
+        if self
+            .passive_rebate_evidence_coverage
+            .is_some_and(|value| !unit_interval(value))
+        {
+            return Err(
+                "trade-policy passive rebate evidence coverage must be within [0, 1]".to_owned(),
             );
         }
         Ok(())
@@ -1451,7 +1458,7 @@ impl TradePolicyArtifactPayload {
             }
             Some(_) => {}
         }
-        match validation.rebate_evidence_coverage {
+        match validation.passive_rebate_evidence_coverage {
             None => blockers.push(TradePolicyPublicationBlocker::MissingRebateEvidenceCoverage),
             Some(value) if value != Decimal::ONE => {
                 blockers.push(TradePolicyPublicationBlocker::IncompleteRebateEvidenceCoverage);
@@ -1534,7 +1541,7 @@ impl TradePolicyArtifactPayload {
                     TradePolicyPublicationBlocker::InsufficientCohortFeeCoverage { cohort_index },
                 );
             }
-            if cohort.rebate_evidence_coverage != Decimal::ONE {
+            if passive && cohort.passive_rebate_evidence_coverage != Some(Decimal::ONE) {
                 blockers.push(
                     TradePolicyPublicationBlocker::IncompleteCohortRebateEvidence { cohort_index },
                 );
@@ -1735,7 +1742,7 @@ mod tests {
                 depth_failure_rate: None,
                 common_candidate_support: None,
                 fee_catalog_coverage: None,
-                rebate_evidence_coverage: None,
+                passive_rebate_evidence_coverage: None,
                 eligible_market_coverage: None,
             },
         };

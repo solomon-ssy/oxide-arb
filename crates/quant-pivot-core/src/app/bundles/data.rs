@@ -29,7 +29,9 @@ use tokio_util::sync::CancellationToken;
 use super::InfraBundle;
 use crate::{
     app::exchange_history_worker::ExchangeHistoryProgressHandle,
-    execution::settlement_discovery_wake::SettlementDiscoveryWake,
+    execution::{
+        settlement_discovery_wake::SettlementDiscoveryWake, terms_drift_wake::TermsDriftWake,
+    },
     governance::{LinkageResolverDeps, LinkageResolverService},
     ingest::{
         book_store::BookStore,
@@ -89,6 +91,8 @@ pub struct DataBundle {
     pub status_nudge: SystemStatusNudge,
     /// Coalesced hint shared with the durable settlement discovery worker.
     pub settlement_discovery_wake: SettlementDiscoveryWake,
+    /// Coalesced execution-terms guard wake shared by catalog and CLOB commits.
+    pub terms_drift_wake: TermsDriftWake,
 }
 
 impl DataBundle {
@@ -164,6 +168,7 @@ impl DataBundle {
             &deps.deploy.domain_sources.weather_vertical_bindings,
         )?);
         let status_nudge = SystemStatusNudge::default();
+        let terms_drift_wake = TermsDriftWake::default();
         let exchange_history_progress = ExchangeHistoryProgressHandle::fresh_boot();
         let (gamma_service, ws_subscription) = assemble_gamma_service(GammaServiceAssembly {
             deps,
@@ -178,6 +183,7 @@ impl DataBundle {
             catalog: &catalog,
             linkage_resolver: &linkage_resolver,
             status_nudge: status_nudge.clone(),
+            terms_drift_wake: terms_drift_wake.clone(),
         });
 
         let data_quality = Arc::new(BookDataQualityService::new(
@@ -219,6 +225,7 @@ impl DataBundle {
             pit_source,
             status_nudge,
             settlement_discovery_wake: deps.settlement_discovery_wake.clone(),
+            terms_drift_wake,
         })
     }
 }
@@ -243,6 +250,7 @@ struct GammaServiceAssembly<'a> {
     catalog: &'a Arc<CatalogReadiness>,
     linkage_resolver: &'a Arc<LinkageResolverService>,
     status_nudge: SystemStatusNudge,
+    terms_drift_wake: TermsDriftWake,
 }
 
 fn assemble_gamma_service(
@@ -261,6 +269,7 @@ fn assemble_gamma_service(
         catalog,
         linkage_resolver,
         status_nudge,
+        terms_drift_wake,
     } = inputs;
     let ws_subscription = Arc::new(WsSubscriptionCoordinator::new(
         Arc::clone(ws_manager),
@@ -296,6 +305,7 @@ fn assemble_gamma_service(
             .engine_subscription_window_hours,
         linkage_resolver: Some(Arc::clone(linkage_resolver)),
         settlement_discovery_wake: deps.settlement_discovery_wake.clone(),
+        terms_drift_wake,
     }));
     (gamma_service, ws_subscription)
 }

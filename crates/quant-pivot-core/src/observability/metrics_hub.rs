@@ -294,14 +294,16 @@ pub struct MetricsHub {
     pub reconciliation_unresolvable: IntCounter,
     /// Venue-incentive reconciliation day outcomes.
     pub venue_incentive_reconciliation_total: IntCounterVec,
+    /// Maker-rebate evidence, suppression, valuation, and drift diagnostics.
+    pub maker_rebate_diagnostics_total: IntCounterVec,
     /// Unix timestamp of the latest successful upstream scan.
     pub venue_incentive_last_success_timestamp_seconds: IntGauge,
     /// Closed program days missing at least one required successful scan.
     pub venue_incentive_incomplete_days: IntGauge,
     /// Estimated maker accrual minus the latest venue-awarded snapshots.
-    pub venue_incentive_estimate_to_award_delta_usd: Gauge,
+    pub venue_incentive_estimate_to_reported_delta_usd: Gauge,
     /// Latest venue-awarded maker amount minus wallet-credited maker amount.
-    pub venue_incentive_award_to_credit_delta_usd: Gauge,
+    pub venue_incentive_reported_to_credit_delta_usd: Gauge,
     /// Exit-monitor triggers by exit reason.
     pub exit_triggers: IntCounterVec,
     /// Exit signal re-inference outcomes.
@@ -439,10 +441,11 @@ struct ExecutionMetrics {
     execution_breaker_trips: IntCounterVec,
     reconciliation_unresolvable: IntCounter,
     venue_incentive_reconciliation_total: IntCounterVec,
+    maker_rebate_diagnostics_total: IntCounterVec,
     venue_incentive_last_success_timestamp_seconds: IntGauge,
     venue_incentive_incomplete_days: IntGauge,
-    venue_incentive_estimate_to_award_delta_usd: Gauge,
-    venue_incentive_award_to_credit_delta_usd: Gauge,
+    venue_incentive_estimate_to_reported_delta_usd: Gauge,
+    venue_incentive_reported_to_credit_delta_usd: Gauge,
     exit_triggers: IntCounterVec,
     exit_signal_reinference: IntCounterVec,
     opportunistic_sell_eval: IntCounterVec,
@@ -997,6 +1000,12 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "Venue-incentive reconciliation day outcomes",
             &["status"]
         ),
+        maker_rebate_diagnostics_total: register_counter_vec!(
+            registry,
+            "quant_maker_rebate_diagnostics_total",
+            "Maker-rebate evidence, passive suppression, objective-zero, and terms-drift outcomes",
+            &["event", "reason"]
+        ),
         venue_incentive_last_success_timestamp_seconds: register_gauge_int!(
             registry,
             "quant_venue_incentive_last_success_timestamp_seconds",
@@ -1007,14 +1016,14 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "quant_venue_incentive_incomplete_days",
             "Closed venue-incentive program days missing a required successful scan"
         ),
-        venue_incentive_estimate_to_award_delta_usd: register_gauge_float!(
+        venue_incentive_estimate_to_reported_delta_usd: register_gauge_float!(
             registry,
-            "quant_venue_incentive_estimate_to_award_delta_usd",
+            "quant_venue_incentive_estimate_to_reported_delta_usd",
             "Estimated maker accrual minus latest venue-awarded maker snapshots in USD"
         ),
-        venue_incentive_award_to_credit_delta_usd: register_gauge_float!(
+        venue_incentive_reported_to_credit_delta_usd: register_gauge_float!(
             registry,
-            "quant_venue_incentive_award_to_credit_delta_usd",
+            "quant_venue_incentive_reported_to_credit_delta_usd",
             "Latest venue-awarded maker amount minus wallet-credited maker amount in USD"
         ),
         exit_triggers: register_counter_vec!(
@@ -1209,13 +1218,14 @@ impl MetricsHub {
             execution_breaker_trips: execution.execution_breaker_trips,
             reconciliation_unresolvable: execution.reconciliation_unresolvable,
             venue_incentive_reconciliation_total: execution.venue_incentive_reconciliation_total,
+            maker_rebate_diagnostics_total: execution.maker_rebate_diagnostics_total,
             venue_incentive_last_success_timestamp_seconds: execution
                 .venue_incentive_last_success_timestamp_seconds,
             venue_incentive_incomplete_days: execution.venue_incentive_incomplete_days,
-            venue_incentive_estimate_to_award_delta_usd: execution
-                .venue_incentive_estimate_to_award_delta_usd,
-            venue_incentive_award_to_credit_delta_usd: execution
-                .venue_incentive_award_to_credit_delta_usd,
+            venue_incentive_estimate_to_reported_delta_usd: execution
+                .venue_incentive_estimate_to_reported_delta_usd,
+            venue_incentive_reported_to_credit_delta_usd: execution
+                .venue_incentive_reported_to_credit_delta_usd,
             exit_triggers: execution.exit_triggers,
             exit_signal_reinference: execution.exit_signal_reinference,
             opportunistic_sell_eval: execution.opportunistic_sell_eval,
@@ -1277,22 +1287,36 @@ impl MetricsHub {
             .inc();
     }
 
+    /// Count one typed maker-rebate diagnostic outcome.
+    pub fn record_maker_rebate_diagnostic(&self, event: &str, reason: &str) {
+        self.maker_rebate_diagnostics_total
+            .with_label_values(&[event, reason])
+            .inc();
+    }
+
+    /// Add a bounded batch of low-cardinality maker-rebate diagnostics.
+    pub fn record_maker_rebate_diagnostics(&self, event: &str, reason: &str, count: u64) {
+        self.maker_rebate_diagnostics_total
+            .with_label_values(&[event, reason])
+            .inc_by(count);
+    }
+
     /// Publish the durable venue-incentive reconciliation health projection.
     pub fn set_venue_incentive_health(
         &self,
         last_success_timestamp: Option<i64>,
         incomplete_days: u32,
-        estimate_to_award_delta_usd: Usd,
-        award_to_credit_delta_usd: Usd,
+        estimate_to_reported_delta_usd: Usd,
+        reported_to_credit_delta_usd: Usd,
     ) {
         self.venue_incentive_last_success_timestamp_seconds
             .set(last_success_timestamp.unwrap_or_default());
         self.venue_incentive_incomplete_days
             .set(i64::from(incomplete_days));
-        self.venue_incentive_estimate_to_award_delta_usd
-            .set(decimal_metric_value(estimate_to_award_delta_usd));
-        self.venue_incentive_award_to_credit_delta_usd
-            .set(decimal_metric_value(award_to_credit_delta_usd));
+        self.venue_incentive_estimate_to_reported_delta_usd
+            .set(decimal_metric_value(estimate_to_reported_delta_usd));
+        self.venue_incentive_reported_to_credit_delta_usd
+            .set(decimal_metric_value(reported_to_credit_delta_usd));
     }
 
     /// Count one exit-monitor trigger for an exit reason.

@@ -10,9 +10,9 @@ use quant_pivot_models::{
         market::{
             CATALOG_OBJECT_HASH_VERSION, CATALOG_OBJECT_SCHEMA_VERSION, CatalogBatchCommit,
             CatalogBatchFailure, CatalogEventCandidate, CatalogMarketCandidate,
-            CatalogSnapshotInfo, EventRegistryInfo, EventTags, MarketRegistryInfo,
-            NewCatalogEventChange, NewCatalogEventObject, NewCatalogMarketObject,
-            NewCatalogSyncBatch, TokenInfo, UpsertEvent, UpsertMarket,
+            CatalogSnapshotInfo, EventRegistryInfo, EventTags, MarketMakerRebateEvidence,
+            MarketRegistryInfo, NewCatalogEventChange, NewCatalogEventObject,
+            NewCatalogMarketObject, NewCatalogSyncBatch, TokenInfo, UpsertEvent, UpsertMarket,
         },
     },
     entities::{
@@ -719,7 +719,7 @@ fn market_object_fixture(
         min_order_size: Decimal::ONE,
         liquidity_usd: None,
         volume_24h: None,
-        maker_rebate_schedule: None,
+        maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         start_date: None,
         end_date: None,
         resolved_at: None,

@@ -5,8 +5,8 @@ use quant_pivot_models::{
         api::quant_incentive::VenueIncentiveEventListQuery,
         pagination::Paginated,
         quant::venue_incentive::{
-            NewVenueIncentiveAwardSnapshot, NewVenueIncentiveEvent,
-            NewVenueIncentiveReconciliationScan, VenueIncentiveEventInfo,
+            NewVenueIncentiveEvent, NewVenueIncentiveReconciliationScan,
+            NewVenueIncentiveReportedAccrualSnapshot, VenueIncentiveEventInfo,
             VenueIncentiveReconciliation, VenueIncentiveReconciliationScanInfo,
         },
     },
@@ -29,9 +29,9 @@ pub trait VenueIncentiveRepository: Send + Sync {
 
     /// Apply a complete maker-award snapshot and retract partitions absent
     /// from the new response in the same transaction as the scan manifest.
-    async fn apply_award_snapshot(
+    async fn apply_reported_accrual_snapshot(
         &self,
-        snapshot: NewVenueIncentiveAwardSnapshot,
+        snapshot: NewVenueIncentiveReportedAccrualSnapshot,
     ) -> Result<(), StorageError>;
 
     /// Cumulative wallet-confirmed credits visible by the PIT boundary.
@@ -51,7 +51,7 @@ pub trait VenueIncentiveRepository: Send + Sync {
 
     /// Observation time of the oldest venue-awarded maker amount that remains
     /// unmatched by wallet credits under deterministic FIFO attribution.
-    async fn maker_credit_outstanding_since(
+    async fn maker_credit_pending_since(
         &self,
         execution_account_id: &ExecutionAccountId,
         as_of: DateTime<Utc>,
@@ -64,6 +64,14 @@ pub trait VenueIncentiveRepository: Send + Sync {
         from: NaiveDate,
         to: NaiveDate,
     ) -> Result<Vec<VenueIncentiveReconciliationScanInfo>, StorageError>;
+
+    /// Complete maker estimate/reported-accrual/credit ledger visible at the
+    /// valuation boundary. Callers collapse revisioned source partitions.
+    async fn maker_valuation_events(
+        &self,
+        execution_account_id: &ExecutionAccountId,
+        as_of: DateTime<Utc>,
+    ) -> Result<Vec<VenueIncentiveEventInfo>, StorageError>;
 
     /// Paginated immutable incentive events for operator audit.
     async fn page_events(

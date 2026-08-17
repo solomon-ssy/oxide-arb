@@ -270,7 +270,10 @@ fn included_row(state: IncludedFunnelState<'_>) -> QuantResult<ReportMarketFunne
             )
         } else if state.tiers.is_empty() {
             match state.tier_build_rejection {
-                Some(EconomicTierBuildRejection::ExecutionEconomicsUnavailable { .. }) => (
+                Some(
+                    EconomicTierBuildRejection::ExecutionEconomicsUnavailable { .. }
+                    | EconomicTierBuildRejection::PassiveMakerRebateUnavailable { .. },
+                ) => (
                     ReportFunnelStage::PolicyReady,
                     ReportFunnelReason::ExecutionEconomicsUnavailable,
                     ReportFunnelDiagnostics::None {},

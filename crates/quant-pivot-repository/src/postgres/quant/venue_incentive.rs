@@ -12,8 +12,8 @@ use quant_pivot_models::{
         api::quant_incentive::VenueIncentiveEventListQuery,
         pagination::{PageWindow, Paginated},
         quant::venue_incentive::{
-            NewVenueIncentiveAwardSnapshot, NewVenueIncentiveEvent,
-            NewVenueIncentiveReconciliationScan, VenueIncentiveEventInfo,
+            NewVenueIncentiveEvent, NewVenueIncentiveReconciliationScan,
+            NewVenueIncentiveReportedAccrualSnapshot, VenueIncentiveEventInfo,
             VenueIncentiveReconciliation, VenueIncentiveReconciliationScanInfo,
         },
     },
@@ -78,7 +78,7 @@ impl PgVenueIncentiveRepository {
                 existing.observed_at == event.observed_at
                     && existing.available_at == event.available_at
             }
-            VenueIncentiveStage::VenueAwarded => true,
+            VenueIncentiveStage::VenueReportedAccrual => true,
             VenueIncentiveStage::WalletCredited => existing.observed_at == event.observed_at,
         };
         timing_matches
@@ -89,7 +89,7 @@ impl PgVenueIncentiveRepository {
             && existing.stage == event.stage
             && existing.program_date == event.program_date
             && existing.amount_usd == event.amount_usd
-            && existing.source_schedule_hash == event.source_schedule_hash
+            && existing.source_terms_hash == event.source_terms_hash
             && existing.source_partition == event.source_partition
             && existing.source_identity == event.source_identity
             && existing.transaction_hash == event.transaction_hash
@@ -332,9 +332,9 @@ impl PgVenueIncentiveRepository {
         Ok(())
     }
 
-    async fn lock_award_partition(
+    async fn lock_reported_accrual_partition(
         db: &impl ConnectionTrait,
-        snapshot: &NewVenueIncentiveAwardSnapshot,
+        snapshot: &NewVenueIncentiveReportedAccrualSnapshot,
     ) -> Result<(), StorageError> {
         let lock_key = format!(
             "venue-incentive-award:{}:{}",
@@ -350,9 +350,9 @@ impl PgVenueIncentiveRepository {
         Ok(())
     }
 
-    async fn latest_award_partitions(
+    async fn latest_reported_accrual_partitions(
         db: &impl ConnectionTrait,
-        snapshot: &NewVenueIncentiveAwardSnapshot,
+        snapshot: &NewVenueIncentiveReportedAccrualSnapshot,
     ) -> Result<BTreeMap<String, EventModel>, StorageError> {
         let rows = EventEntity::find()
             .filter(EventColumn::ExecutionAccountId.eq(snapshot.scan.execution_account_id))
@@ -414,11 +414,11 @@ impl VenueIncentiveRepository for PgVenueIncentiveRepository {
     async fn record(&self, events: Vec<NewVenueIncentiveEvent>) -> Result<(), StorageError> {
         if events
             .iter()
-            .any(|event| event.stage == VenueIncentiveStage::VenueAwarded)
+            .any(|event| event.stage == VenueIncentiveStage::VenueReportedAccrual)
         {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_VENUE_INCENTIVE_EVENT),
-                "venue-awarded maker facts require a complete apply_award_snapshot transaction",
+                "venue-awarded maker facts require a complete apply_reported_accrual_snapshot transaction",
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
@@ -443,13 +443,13 @@ impl VenueIncentiveRepository for PgVenueIncentiveRepository {
         txn.commit().await.map_err(StorageError::from)
     }
 
-    async fn apply_award_snapshot(
+    async fn apply_reported_accrual_snapshot(
         &self,
-        snapshot: NewVenueIncentiveAwardSnapshot,
+        snapshot: NewVenueIncentiveReportedAccrualSnapshot,
     ) -> Result<(), StorageError> {
         Self::validate_scan(&snapshot.scan, &snapshot.awards)?;
         if snapshot.scan.kind != VenueIncentiveKind::MakerRebate
-            || snapshot.scan.stage != VenueIncentiveStage::VenueAwarded
+            || snapshot.scan.stage != VenueIncentiveStage::VenueReportedAccrual
             || snapshot.scan.status != VenueIncentiveReconciliationScanStatus::Succeeded
         {
             return Err(StorageError::invariant_violation(
@@ -474,10 +474,10 @@ impl VenueIncentiveRepository for PgVenueIncentiveRepository {
             )
         })?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        Self::lock_award_partition(&txn, &snapshot).await?;
+        Self::lock_reported_accrual_partition(&txn, &snapshot).await?;
         Self::validate_response_retry(&txn, &snapshot.scan, &snapshot.awards).await?;
         Self::persist_scan_on(&txn, snapshot.scan.clone()).await?;
-        let previous = Self::latest_award_partitions(&txn, &snapshot).await?;
+        let previous = Self::latest_reported_accrual_partitions(&txn, &snapshot).await?;
         for award in snapshot.awards {
             Self::persist_on(&txn, award).await?;
         }
@@ -493,10 +493,10 @@ impl VenueIncentiveRepository for PgVenueIncentiveRepository {
                     execution_fill_id: None,
                     market_id: prior.market_id,
                     kind: VenueIncentiveKind::MakerRebate,
-                    stage: VenueIncentiveStage::VenueAwarded,
+                    stage: VenueIncentiveStage::VenueReportedAccrual,
                     program_date: snapshot.scan.program_date,
                     amount_usd: Usd::ZERO,
-                    source_schedule_hash: None,
+                    source_terms_hash: None,
                     source_identity: format!("{source_partition}:retracted:{response_digest}"),
                     source_partition,
                     transaction_hash: None,
@@ -551,7 +551,7 @@ impl VenueIncentiveRepository for PgVenueIncentiveRepository {
             .latest_total(
                 execution_account_id,
                 VenueIncentiveKind::MakerRebate,
-                VenueIncentiveStage::VenueAwarded,
+                VenueIncentiveStage::VenueReportedAccrual,
                 as_of,
             )
             .await?;
@@ -574,13 +574,13 @@ impl VenueIncentiveRepository for PgVenueIncentiveRepository {
         Ok(VenueIncentiveReconciliation {
             as_of,
             estimated_maker_accrual_usd: maker_accrual,
-            venue_awarded_maker_usd: maker_award,
+            venue_reported_maker_accrual_usd: maker_award,
             wallet_credited_maker_usd: maker_cash,
             wallet_credited_taker_usd: taker_cash,
         })
     }
 
-    async fn maker_credit_outstanding_since(
+    async fn maker_credit_pending_since(
         &self,
         execution_account_id: &ExecutionAccountId,
         as_of: DateTime<Utc>,
@@ -588,7 +588,7 @@ impl VenueIncentiveRepository for PgVenueIncentiveRepository {
         let rows = EventEntity::find()
             .filter(EventColumn::ExecutionAccountId.eq(*execution_account_id))
             .filter(EventColumn::Kind.eq(VenueIncentiveKind::MakerRebate))
-            .filter(EventColumn::Stage.eq(VenueIncentiveStage::VenueAwarded))
+            .filter(EventColumn::Stage.eq(VenueIncentiveStage::VenueReportedAccrual))
             .filter(EventColumn::AvailableAt.lte(as_of))
             .order_by_asc(EventColumn::SourcePartition)
             .order_by_desc(EventColumn::AvailableAt)
@@ -638,6 +638,31 @@ impl VenueIncentiveRepository for PgVenueIncentiveRepository {
             .order_by_asc(ScanColumn::Stage)
             .order_by_desc(ScanColumn::CompletedAt)
             .order_by_desc(ScanColumn::CreatedAt)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn maker_valuation_events(
+        &self,
+        execution_account_id: &ExecutionAccountId,
+        as_of: DateTime<Utc>,
+    ) -> Result<Vec<VenueIncentiveEventInfo>, StorageError> {
+        EventEntity::find()
+            .filter(EventColumn::ExecutionAccountId.eq(*execution_account_id))
+            .filter(EventColumn::Kind.eq(VenueIncentiveKind::MakerRebate))
+            .filter(
+                Condition::any()
+                    .add(EventColumn::Stage.eq(VenueIncentiveStage::EstimatedAccrual))
+                    .add(EventColumn::Stage.eq(VenueIncentiveStage::VenueReportedAccrual))
+                    .add(EventColumn::Stage.eq(VenueIncentiveStage::WalletCredited)),
+            )
+            .filter(EventColumn::AvailableAt.lte(as_of))
+            .order_by_asc(EventColumn::ProgramDate)
+            .order_by_asc(EventColumn::ObservedAt)
+            .order_by_asc(EventColumn::AvailableAt)
+            .order_by_asc(EventColumn::CreatedAt)
             .all(&self.db)
             .await
             .map_err(StorageError::from)

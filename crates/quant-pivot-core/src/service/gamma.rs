@@ -49,7 +49,9 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    execution::settlement_discovery_wake::SettlementDiscoveryWake,
+    execution::{
+        settlement_discovery_wake::SettlementDiscoveryWake, terms_drift_wake::TermsDriftWake,
+    },
     governance::LinkageResolverService,
     ingest::{
         market_cache::MarketCache, market_filter::MarketFilter, market_registry::MarketRegistry,
@@ -85,6 +87,8 @@ pub struct GammaServiceDeps {
     pub status_nudge: SystemStatusNudge,
     /// Best-effort settlement discovery wake. `PostgreSQL` remains the work source of truth.
     pub settlement_discovery_wake: SettlementDiscoveryWake,
+    /// Coalesced guard wake after committed Gamma rebate terms change.
+    pub terms_drift_wake: TermsDriftWake,
     /// WS subscription look-ahead window (hours) from deploy config.
     pub subscription_window_hours: u64,
     /// Offline linkage resolver — runs after successful sync.
@@ -106,6 +110,7 @@ pub struct GammaService {
     events: CoreEventPublisher,
     status_nudge: SystemStatusNudge,
     settlement_discovery_wake: SettlementDiscoveryWake,
+    terms_drift_wake: TermsDriftWake,
     subscription_window_hours: u64,
     linkage_resolver: Option<Arc<LinkageResolverService>>,
     linkage_wake: Arc<Notify>,
@@ -128,6 +133,7 @@ impl GammaService {
             events: deps.events,
             status_nudge: deps.status_nudge,
             settlement_discovery_wake: deps.settlement_discovery_wake,
+            terms_drift_wake: deps.terms_drift_wake,
             subscription_window_hours: deps.subscription_window_hours,
             linkage_resolver: deps.linkage_resolver,
             linkage_wake: Arc::new(Notify::new()),
@@ -313,6 +319,18 @@ impl GammaService {
         let newly_settled = self
             .detect_settlement_transitions(&batch.registry_markets)
             .await?;
+        let changed_terms_markets = batch
+            .registry_markets
+            .iter()
+            .filter(|market| {
+                self.market_registry
+                    .get_market(&market.market_id)
+                    .is_none_or(|current| {
+                        current.maker_rebate_evidence != market.maker_rebate_evidence
+                    })
+            })
+            .map(|market| market.market_id.clone())
+            .collect::<Vec<_>>();
         let commit = build_catalog_commit(&CatalogCommitInput {
             batch_id: attempt.batch_id,
             sync_kind: attempt.sync_kind,
@@ -326,6 +344,21 @@ impl GammaService {
             market_mutations: &market_mutations,
         })?;
         self.catalog_ledger_repo.commit(commit).await?;
+        let changed_count = u64::try_from(changed_terms_markets.len()).unwrap_or(u64::MAX);
+        let unchanged_count = u64::try_from(batch.registry_markets.len())
+            .unwrap_or(u64::MAX)
+            .saturating_sub(changed_count);
+        self.metrics.record_maker_rebate_diagnostics(
+            "catalog_terms_commit",
+            "changed",
+            changed_count,
+        );
+        self.metrics.record_maker_rebate_diagnostics(
+            "catalog_terms_commit",
+            "unchanged",
+            unchanged_count,
+        );
+        self.terms_drift_wake.publish(changed_terms_markets);
         self.invalidate_projection_cache(&batch.registry_events, &batch.registry_markets)
             .await;
 
@@ -1203,9 +1236,11 @@ fn primary_outcome_won(market: &MarketRegistryInfo) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use chrono::Duration;
     use quant_pivot_models::{
-        domain::market::TokenInfo,
+        domain::market::{MarketMakerRebateEvidence, TokenInfo},
         enums::{
             catalog::CatalogFilterReasonSet,
             common::{CategorySet, TickSize},
@@ -1313,7 +1348,7 @@ mod tests {
             min_order_size: Decimal::ONE,
             liquidity_usd: None,
             volume_24h: None,
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
             start_date: None,
             end_date: None,
             resolved_at,
@@ -1506,5 +1541,45 @@ mod tests {
         let scan = settlement_transitions(&batch, &prior, now);
         assert!(scan.publishable.is_empty());
         assert!(scan.ambiguous.is_empty());
+    }
+
+    #[test]
+    fn market_hash_ignores_sync() {
+        let market = registry_market("m-stable", MarketStatus::Active, None, None);
+        let event_object_ids = BTreeMap::from([(
+            market.event_id.clone(),
+            CatalogEventObjectId::from_content_hash(&ContentHash::from_bytes([7; 32])),
+        )]);
+        let first = build_market_candidates(
+            &CatalogSyncBatchId::from_v7(),
+            slice::from_ref(&market),
+            &HashMap::new(),
+            &HashMap::new(),
+            &event_object_ids,
+            Utc::now(),
+        )
+        .expect("first candidate build");
+        let second = build_market_candidates(
+            &CatalogSyncBatchId::from_v7(),
+            &[market],
+            &HashMap::new(),
+            &HashMap::new(),
+            &event_object_ids,
+            Utc::now() + Duration::minutes(1),
+        )
+        .expect("second candidate build");
+
+        assert_eq!(
+            first.candidates[0].object.market_object_id,
+            second.candidates[0].object.market_object_id
+        );
+        assert_eq!(
+            first.candidates[0].object.content_hash,
+            second.candidates[0].object.content_hash
+        );
+        assert_eq!(
+            first.candidates[0].object.payload,
+            second.candidates[0].object.payload
+        );
     }
 }

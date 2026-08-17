@@ -1322,7 +1322,7 @@ Shares override 按最终 `shares × price` 原子重算资本预留。审批即
 2. 只在 entry window 内操作；
 3. 用 recommendation 给出的 token/outcome；
 4. 使用 limit price，不要高于 report 的 cap；
-5. notional 不超过 `suggested_usd`；
+5. notional 不超过 `hard_reserved_cash_usd`；
 6. 下单后记录 operator note、venue order id、tx/trade id；
 7. 重新调用 `GET /api/quant/account/live` 确认 positions；
 8. 如果希望系统后续可审计，下一次应切 `semi_auto` 走 intent 链路。

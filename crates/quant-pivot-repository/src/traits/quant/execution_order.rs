@@ -5,7 +5,7 @@ use quant_pivot_models::{
         pagination::Paginated,
         quant::{ExecutionOrderInfo, ExecutionOrderPatch, NewExecutionOrder},
     },
-    types::{ExecutionOrderId, OrderIntentId},
+    types::{ExecutionOrderId, MarketId, OrderIntentId},
 };
 
 /// Execution order persistence port.
@@ -50,6 +50,15 @@ pub trait ExecutionOrderRepository: Send + Sync {
     /// excluded so reconciliation never double-applies a fill. Ordered oldest
     /// first, bounded by `limit`.
     async fn find_reconcilable(&self, limit: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError>;
+
+    /// Reconcilable orders for markets whose committed fee or rebate terms
+    /// changed. This is the event-driven guard input and must not be shadowed
+    /// by unrelated older orders in the periodic batch.
+    async fn find_reconcilable_for_markets(
+        &self,
+        market_ids: &[MarketId],
+        limit: u64,
+    ) -> Result<Vec<ExecutionOrderInfo>, StorageError>;
 
     async fn transition(
         &self,

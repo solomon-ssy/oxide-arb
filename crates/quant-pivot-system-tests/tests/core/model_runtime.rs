@@ -45,7 +45,7 @@ use quant_pivot_models::{
         data_plane::{DecisionBoundary, DecisionClock, HistorySealChunkRef},
         governance::DecisionPolicySnapshotInfo,
         market::{
-            EventRegistryInfo, MarketRegistryInfo, TokenInfo,
+            EventRegistryInfo, MarketMakerRebateEvidence, MarketRegistryInfo, TokenInfo,
             book::{BookLevel, BookSnapshot},
         },
         quant::{
@@ -367,7 +367,7 @@ fn registry_market() -> MarketRegistryInfo {
         min_order_size: Decimal::ONE,
         liquidity_usd: Some(Usd::new(Decimal::from(60_000))),
         volume_24h: Some(Usd::new(Decimal::from(9_000))),
-        maker_rebate_schedule: None,
+        maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         start_date: Some(Utc::now() - ChronoDuration::days(2)),
         end_date: Some(Utc::now() + ChronoDuration::days(2)),
         resolved_at: None,
@@ -544,7 +544,7 @@ fn peer_registry_market(index: usize) -> MarketRegistryInfo {
         min_order_size: Decimal::ONE,
         liquidity_usd: Some(Usd::new(Decimal::from(40_000 + 8_000 * step))),
         volume_24h: Some(Usd::new(Decimal::from(9_000))),
-        maker_rebate_schedule: None,
+        maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         start_date: Some(Utc::now() - ChronoDuration::days(2)),
         end_date: Some(Utc::now() + ChronoDuration::days(2)),
         resolved_at: None,

@@ -978,7 +978,7 @@ impl TradePolicyService {
                 executable_coverage: trial.executable_coverage,
                 full_l2_coverage: trial.full_l2_coverage,
                 fee_catalog_coverage: trial.fee_catalog_coverage,
-                rebate_evidence_coverage: trial.rebate_evidence_coverage,
+                passive_rebate_evidence_coverage: trial.passive_rebate_evidence_coverage,
                 ambiguous_touch_rate: trial.ambiguous_touch_rate,
                 depth_failure_rate: trial.depth_failure_rate,
                 latency_stress_multiplier: trial.latency_multiplier,
@@ -2466,7 +2466,7 @@ struct AggregatePolicyEvidence {
     depth_failure_rate: Decimal,
     common_candidate_support: Decimal,
     fee_catalog_coverage: Decimal,
-    rebate_evidence_coverage: Decimal,
+    passive_rebate_evidence_coverage: Decimal,
     eligible_market_coverage: Decimal,
 }
 
@@ -2637,7 +2637,7 @@ fn policy_validation_evidence(
         depth_failure_rate: Some(aggregate.depth_failure_rate),
         common_candidate_support: Some(aggregate.common_candidate_support),
         fee_catalog_coverage: Some(aggregate.fee_catalog_coverage),
-        rebate_evidence_coverage: Some(aggregate.rebate_evidence_coverage),
+        passive_rebate_evidence_coverage: Some(aggregate.passive_rebate_evidence_coverage),
         eligible_market_coverage: Some(aggregate.eligible_market_coverage),
     })
 }
@@ -2649,6 +2649,14 @@ impl WeatherPolicyEvidence {
             .first()
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: "passing Weather fit has no fitted cohort".to_owned(),
+            })?;
+        let passive_rebate_evidence_coverage = self
+            .cohorts
+            .iter()
+            .filter_map(|cohort| cohort.passive_rebate_evidence_coverage)
+            .min()
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "passing Weather fit has no applicable Passive rebate evidence".to_owned(),
             })?;
         Ok(AggregatePolicyEvidence {
             cpcv_path_count: self
@@ -2699,12 +2707,7 @@ impl WeatherPolicyEvidence {
                 .map(|cohort| cohort.fee_catalog_coverage)
                 .min()
                 .unwrap_or(first.fee_catalog_coverage),
-            rebate_evidence_coverage: self
-                .cohorts
-                .iter()
-                .map(|cohort| cohort.rebate_evidence_coverage)
-                .min()
-                .unwrap_or(first.rebate_evidence_coverage),
+            passive_rebate_evidence_coverage,
             eligible_market_coverage: self
                 .cohorts
                 .iter()
@@ -2734,7 +2737,7 @@ fn append_statistical_attempts(
             executable_coverage: selected_trial.executable_coverage,
             full_l2_coverage: selected_trial.full_l2_coverage,
             fee_catalog_coverage: selected_trial.fee_catalog_coverage,
-            rebate_evidence_coverage: selected_trial.rebate_evidence_coverage,
+            passive_rebate_evidence_coverage: selected_trial.passive_rebate_evidence_coverage,
             ambiguous_touch_rate: selected_trial.ambiguous_touch_rate,
             depth_failure_rate: selected_trial.depth_failure_rate,
             latency_stress_multiplier: run.latency_multiplier,

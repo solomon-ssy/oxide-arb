@@ -20,6 +20,38 @@ pub enum FeeMeasurementPriority {
     OnChainSettled,
 }
 
+/// Why match-time Gamma maker-rebate evidence was not economically usable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchRebateUnavailableReason {
+    FeesFlagMissing,
+    EnabledScheduleMissing,
+    ScheduleIncomplete,
+    InvalidSchedule,
+    DisabledSchedulePresent,
+    NotPointInTime,
+    SourceMismatch,
+    MissingCatalog,
+    InvalidCatalog,
+    MissingClobMarketInfo,
+}
+
+/// Program truth rebuilt at the authenticated trade's match boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", deny_unknown_fields)]
+pub enum MatchMakerRebateEvidence {
+    NotApplicable,
+    NoProgram {
+        terms_hash: ContentHash,
+    },
+    Available {
+        terms_hash: ContentHash,
+    },
+    Unavailable {
+        reason: MatchRebateUnavailableReason,
+    },
+}
+
 /// Fee measurement with explicit provenance. Expected and authenticated
 /// derived values never masquerade as chain-settled facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +69,11 @@ pub enum FeeMeasurement {
         fee_rate_bps: Bps,
         expected_fee: Usd,
         derived_fee: Usd,
+        decision_fee_hash: ContentHash,
+        match_fee_hash: Option<ContentHash>,
+        decision_rebate_terms_hash: Option<ContentHash>,
+        match_rebate_evidence: MatchMakerRebateEvidence,
+        terms_drifted: bool,
         /// Present only for an authenticated maker fill covered by the frozen
         /// decision-time Gamma schedule.
         expected_maker_rebate: Option<DeferredVenueIncentive>,

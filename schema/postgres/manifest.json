@@ -24277,7 +24277,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "source_schedule_hash",
+      "name": "source_terms_hash",
       "nullable": true,
       "ordinal": 9,
       "storage": "x",
@@ -31817,7 +31817,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((amount_usd >= (0)::numeric) AND ((char_length(source_partition) >= 1) AND (char_length(source_partition) <= 512)) AND ((char_length(source_identity) >= 1) AND (char_length(source_identity) <= 600)) AND ((source_schedule_hash IS NULL) OR (source_schedule_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= observed_at) AND (((stage = 'estimated_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NOT NULL) AND (market_id IS NOT NULL) AND (source_schedule_hash IS NOT NULL)) OR ((stage = 'venue_awarded'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NULL) AND (market_id IS NOT NULL) AND (source_schedule_hash IS NULL)) OR ((stage = 'wallet_credited'::qp_venue_incentive_stage) AND (execution_fill_id IS NULL) AND (source_schedule_hash IS NULL)))))",
+      "definition": "CHECK (((amount_usd >= (0)::numeric) AND ((char_length(source_partition) >= 1) AND (char_length(source_partition) <= 512)) AND ((char_length(source_identity) >= 1) AND (char_length(source_identity) <= 600)) AND ((source_terms_hash IS NULL) OR (source_terms_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= observed_at) AND (((stage = 'estimated_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NOT NULL) AND (market_id IS NOT NULL) AND (source_terms_hash IS NOT NULL)) OR ((stage = 'venue_reported_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NULL) AND (market_id IS NOT NULL) AND (source_terms_hash IS NULL)) OR ((stage = 'wallet_credited'::qp_venue_incentive_stage) AND (execution_fill_id IS NULL) AND (source_terms_hash IS NULL)))))",
       "initially_deferred": false,
       "name": "ck_quant_venue_incentive_event_evidence",
       "table": "quant_venue_incentive_event",
@@ -33579,7 +33579,7 @@
     {
       "labels": [
         "estimated_accrual",
-        "venue_awarded",
+        "venue_reported_accrual",
         "wallet_credited"
       ],
       "name": "qp_venue_incentive_stage"

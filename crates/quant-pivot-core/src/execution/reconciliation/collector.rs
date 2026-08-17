@@ -20,9 +20,12 @@ use quant_pivot_api::{
 use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     clickhouse::ExchangeEventRow,
-    domain::quant::{
-        ExecutionIdentityEnrichment, ExecutionOrderIdentityRefs, ExecutionOrderInfo,
-        ExecutionTradeObservation,
+    domain::{
+        data_plane::DecisionClock,
+        quant::{
+            ExecutionIdentityEnrichment, ExecutionOrderIdentityRefs, ExecutionOrderInfo,
+            ExecutionTradeObservation,
+        },
     },
     enums::{
         clickhouse::{ChExchangeEventKind, ChExchangeSide, ChExchangeVersion},
@@ -31,13 +34,16 @@ use quant_pivot_models::{
         fee::FeeLiquidityRole,
     },
     types::{
-        EvmAddress, EvmTransactionHash, FeeMeasurement, OrderId, Price, ReconciliationEvidence,
-        Shares, TokenId, Usd, VenueTradeId,
+        EvmAddress, EvmTransactionHash, FeeMeasurement, MatchMakerRebateEvidence,
+        MatchRebateUnavailableReason, OrderId, Price, ReconciliationEvidence, Shares, TokenId, Usd,
+        VenueTradeId,
     },
 };
-use quant_pivot_repository::traits::QuantFactReadRepository;
+use quant_pivot_repository::traits::{
+    CatalogLedgerRepository, ClobMarketInfoRepository, QuantFactReadRepository,
+};
 use quant_pivot_research::execution_semantics::{
-    LiquidityRole, PitFeeSchedule, PitMakerRebateSchedule,
+    LiquidityRole, PitFeeSchedule, PitMakerRebateEvidence, PitMarketExecutionEconomics,
 };
 use rust_decimal::Decimal;
 
@@ -73,6 +79,8 @@ pub struct VenueEvidenceCollector {
     fact_read: Arc<dyn QuantFactReadRepository>,
     wallet: WalletTopology,
     book_store: Arc<BookStore>,
+    catalog_ledger: Arc<dyn CatalogLedgerRepository>,
+    clob_market_info: Arc<dyn ClobMarketInfoRepository>,
 }
 
 struct ResolvedVenueIdentities {
@@ -84,6 +92,12 @@ struct ResolvedVenueIdentities {
     used_account_discovery: bool,
 }
 
+struct MatchTermsContext {
+    fee_schedule: Option<PitFeeSchedule>,
+    rebate_evidence: MatchMakerRebateEvidence,
+    resolved: Option<PitMarketExecutionEconomics>,
+}
+
 impl VenueEvidenceCollector {
     #[must_use]
     pub const fn new(
@@ -91,12 +105,16 @@ impl VenueEvidenceCollector {
         fact_read: Arc<dyn QuantFactReadRepository>,
         wallet: WalletTopology,
         book_store: Arc<BookStore>,
+        catalog_ledger: Arc<dyn CatalogLedgerRepository>,
+        clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     ) -> Self {
         Self {
             reader,
             fact_read,
             wallet,
             book_store,
+            catalog_ledger,
+            clob_market_info,
         }
     }
 
@@ -246,9 +264,102 @@ impl VenueEvidenceCollector {
     }
 }
 
-fn authenticated_fee_evidence(
+async fn match_terms_context(
+    catalog_ledger: &dyn CatalogLedgerRepository,
+    clob_market_info: &dyn ClobMarketInfoRepository,
     order: &ExecutionOrderInfo,
     trade: &ClobTrade,
+    observed_at: DateTime<Utc>,
+) -> QuantResult<MatchTermsContext> {
+    let clob_at_match = clob_market_info
+        .at(&order.market_id, trade.matched_at, observed_at)
+        .await?;
+    let fee_schedule = clob_at_match
+        .as_ref()
+        .map(|version| PitFeeSchedule::from_market_fee_schedule(&version.fee_schedule()))
+        .transpose()
+        .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+            reason: format!(
+                "authenticated trade {} match-time fee schedule is invalid: {error:?}",
+                trade.trade_id
+            ),
+        })?;
+    let catalog_boundary = DecisionClock::new(0).boundary(trade.matched_at)?;
+    let catalog = catalog_ledger
+        .market_at(&order.market_id, &catalog_boundary)
+        .await?;
+    let resolved = match (&fee_schedule, catalog.as_ref()) {
+        (Some(_), Some(catalog)) => match catalog.verified_payload() {
+            Ok(market) => Some(
+                PitMarketExecutionEconomics::resolve(
+                    &clob_at_match
+                        .as_ref()
+                        .ok_or_else(|| ExecutionError::ReconciliationUnresolvable {
+                            reason: "match-time CLOB market info disappeared".to_owned(),
+                        })?
+                        .fee_schedule(),
+                    &market.maker_rebate_evidence,
+                    catalog.available_at,
+                    trade.matched_at,
+                )
+                .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+                    reason: format!("match-time execution economics are invalid: {error:?}"),
+                })?,
+            ),
+            Err(_) => None,
+        },
+        (None, _) | (_, None) => None,
+    };
+    let rebate_evidence = if !order.prepared_order_json.post_only {
+        MatchMakerRebateEvidence::NotApplicable
+    } else if fee_schedule.is_none() {
+        MatchMakerRebateEvidence::Unavailable {
+            reason: MatchRebateUnavailableReason::MissingClobMarketInfo,
+        }
+    } else if catalog.is_none() {
+        MatchMakerRebateEvidence::Unavailable {
+            reason: MatchRebateUnavailableReason::MissingCatalog,
+        }
+    } else if resolved.is_none() {
+        MatchMakerRebateEvidence::Unavailable {
+            reason: MatchRebateUnavailableReason::InvalidCatalog,
+        }
+    } else {
+        match &resolved
+            .as_ref()
+            .ok_or_else(|| ExecutionError::ReconciliationUnresolvable {
+                reason: "match-time economics disappeared".to_owned(),
+            })?
+            .maker_rebate_evidence
+        {
+            PitMakerRebateEvidence::NoProgram { terms_hash, .. } => {
+                MatchMakerRebateEvidence::NoProgram {
+                    terms_hash: *terms_hash,
+                }
+            }
+            PitMakerRebateEvidence::Available { schedule } => MatchMakerRebateEvidence::Available {
+                terms_hash: schedule.terms_hash,
+            },
+            PitMakerRebateEvidence::Unavailable { reason, .. } => {
+                MatchMakerRebateEvidence::Unavailable {
+                    reason: reason.match_reason(),
+                }
+            }
+        }
+    };
+    Ok(MatchTermsContext {
+        fee_schedule,
+        rebate_evidence,
+        resolved,
+    })
+}
+
+async fn authenticated_fee_evidence(
+    catalog_ledger: &dyn CatalogLedgerRepository,
+    clob_market_info: &dyn ClobMarketInfoRepository,
+    order: &ExecutionOrderInfo,
+    trade: &ClobTrade,
+    observed_at: DateTime<Utc>,
 ) -> QuantResult<FeeMeasurement> {
     let prepared = &order.prepared_order_json.fee_schedule;
     let role = match trade.trader_side {
@@ -286,37 +397,55 @@ fn authenticated_fee_evidence(
                 trade.trade_id
             ),
         })?;
-    let expected_maker_rebate = order
+    let match_terms =
+        match_terms_context(catalog_ledger, clob_market_info, order, trade, observed_at).await?;
+    let match_rebate_evidence = match_terms.rebate_evidence;
+    let decision_rebate_terms_hash = order
         .prepared_order_json
-        .maker_rebate_schedule
-        .map(|schedule| PitMakerRebateSchedule {
-            schedule_hash: schedule.schedule_hash,
-            catalog_change_hash: schedule.catalog_change_hash,
-            effective_at: schedule.effective_at,
-            available_at: schedule.available_at,
-            fees_enabled: schedule.fees_enabled,
-            platform_rate: schedule.platform_rate,
-            exponent: schedule.exponent,
-            taker_only: schedule.taker_only,
-            rebate_rate: schedule.rebate_rate,
-        })
-        .map(|schedule| {
-            schedule.expected_incentive(
-                &expected_schedule,
-                role,
-                trade.price,
-                trade.size,
-                trade.matched_at,
-            )
-        })
-        .transpose()
-        .map_err(|error| ExecutionError::ReconciliationUnresolvable {
-            reason: format!(
-                "authenticated trade {} maker-rebate accrual failed: {error:?}",
-                trade.trade_id
-            ),
-        })?
-        .flatten();
+        .maker_rebate_terms
+        .passive_terms_hash();
+    let terms_drifted = match_terms
+        .fee_schedule
+        .as_ref()
+        .is_none_or(|schedule| schedule.schedule_hash != prepared.schedule_hash)
+        || match (
+            decision_rebate_terms_hash,
+            match_rebate_evidence,
+            order.prepared_order_json.post_only,
+        ) {
+            (None, MatchMakerRebateEvidence::NotApplicable, false) => false,
+            (
+                Some(decision),
+                MatchMakerRebateEvidence::NoProgram { terms_hash }
+                | MatchMakerRebateEvidence::Available { terms_hash },
+                true,
+            ) => decision != terms_hash,
+            _ => true,
+        };
+    let expected_maker_rebate = if let Some(economics) = &match_terms.resolved {
+        economics
+            .maker_rebate_evidence
+            .schedule()
+            .map(|schedule| {
+                schedule.expected_incentive(
+                    &economics.fee_schedule,
+                    role,
+                    trade.price,
+                    trade.size,
+                    trade.matched_at,
+                )
+            })
+            .transpose()
+            .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+                reason: format!(
+                    "authenticated trade {} maker-rebate accrual failed: {error:?}",
+                    trade.trade_id
+                ),
+            })?
+            .flatten()
+    } else {
+        None
+    };
     Ok(FeeMeasurement::AuthenticatedTradeDerived {
         trade_id: trade.trade_id.clone(),
         bucket_index: trade.bucket_index,
@@ -325,6 +454,13 @@ fn authenticated_fee_evidence(
         fee_rate_bps: trade.fee_rate_bps,
         expected_fee,
         derived_fee,
+        decision_fee_hash: prepared.schedule_hash,
+        match_fee_hash: match_terms
+            .fee_schedule
+            .map(|schedule| schedule.schedule_hash),
+        decision_rebate_terms_hash,
+        match_rebate_evidence,
+        terms_drifted,
         expected_maker_rebate,
         transaction_hash: trade.transaction_hash.clone(),
         matched_at: trade.matched_at,
@@ -628,7 +764,16 @@ impl EvidenceCollector for VenueEvidenceCollector {
                 shares: confirmed.then_some(trade.size),
                 price: confirmed.then_some(trade.price),
                 fee_evidence: if confirmed {
-                    Some(authenticated_fee_evidence(order, trade)?)
+                    Some(
+                        authenticated_fee_evidence(
+                            self.catalog_ledger.as_ref(),
+                            self.clob_market_info.as_ref(),
+                            order,
+                            trade,
+                            now,
+                        )
+                        .await?,
+                    )
                 } else {
                     None
                 },

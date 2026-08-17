@@ -174,7 +174,7 @@ struct RawClobFeeDetails {
 }
 
 #[derive(Debug, Deserialize)]
-struct RawMakerRebateAward {
+struct RawMakerRebateReportedAccrual {
     date: NaiveDate,
     condition_id: String,
     asset_address: String,
@@ -185,7 +185,7 @@ struct RawMakerRebateAward {
 
 /// Venue-awarded maker rebate at the canonical market/day dimension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MakerRebateAward {
+pub struct MakerRebateReportedAccrual {
     pub program_date: NaiveDate,
     pub market_id: MarketId,
     pub asset_address: EvmAddress,
@@ -464,10 +464,10 @@ impl ClobClient {
     /// Fetch the venue's market/day maker-rebate awards. The endpoint is
     /// keyless, but the response identity is still validated against the exact
     /// requested wallet and date.
-    pub async fn maker_rebate_awards(
+    pub async fn maker_rebate_reported_accruals(
         &self,
         date: NaiveDate,
-    ) -> Result<Vec<MakerRebateAward>, ApiError> {
+    ) -> Result<Vec<MakerRebateReportedAccrual>, ApiError> {
         self.rate_limiter.acquire("GET /rebates/current").await;
         let url = format!(
             "{}/rebates/current?date={date}&maker_address={}",
@@ -475,12 +475,12 @@ impl ClobClient {
             self.maker_address,
         );
         let raw_body = get_text_with_retry(&self.http, &RetryPolicy::clob_default(), &url).await?;
-        let raw = serde_json::from_str::<Vec<RawMakerRebateAward>>(&raw_body).map_err(|error| {
-            ApiError::Deserialize {
+        let raw = serde_json::from_str::<Vec<RawMakerRebateReportedAccrual>>(&raw_body).map_err(
+            |error| ApiError::Deserialize {
                 context: "CLOB maker rebate awards".to_owned(),
                 detail: error.to_string(),
-            }
-        })?;
+            },
+        )?;
         raw.into_iter()
             .map(|award| normalize_maker_rebate_award(award, date, &self.maker_address))
             .collect()
@@ -1222,10 +1222,10 @@ impl ClobClient {
 }
 
 fn normalize_maker_rebate_award(
-    raw: RawMakerRebateAward,
+    raw: RawMakerRebateReportedAccrual,
     expected_date: NaiveDate,
     expected_maker: &EvmAddress,
-) -> Result<MakerRebateAward, ApiError> {
+) -> Result<MakerRebateReportedAccrual, ApiError> {
     let asset_address =
         EvmAddress::parse(raw.asset_address.to_ascii_lowercase()).map_err(|error| {
             ApiError::Deserialize {
@@ -1252,7 +1252,7 @@ fn normalize_maker_rebate_award(
             detail: "negative venue award".to_owned(),
         });
     }
-    Ok(MakerRebateAward {
+    Ok(MakerRebateReportedAccrual {
         program_date: raw.date,
         market_id: MarketId::new(raw.condition_id),
         asset_address,

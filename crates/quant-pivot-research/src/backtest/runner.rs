@@ -1242,7 +1242,7 @@ impl<'a> CandidateReplayContext<'a> {
         })?;
         if fill.outcome != BookWalkOutcome::Filled
             || fill.filled_shares != entry.filled_shares
-            || fill.vwap != Some(entry.entry_vwap)
+            || fill.vwap != Some(entry.execution_vwap)
         {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(

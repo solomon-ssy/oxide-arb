@@ -575,7 +575,7 @@ contract、候选漏斗和成功/zero-candidate/failure evidence。报告不得�
 - `robust_expected_net_usd Decimal128`
 - `marginal_portfolio_value_usd Decimal128`
 - `trade_plan_available Bool`
-- `suggested_usd Decimal128`
+- `hard_reserved_cash_usd Decimal128`
 - `valid_until DateTime64`
 
 排序：

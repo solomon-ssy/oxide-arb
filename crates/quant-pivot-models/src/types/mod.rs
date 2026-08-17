@@ -17,6 +17,7 @@ pub mod execution_payload;
 pub mod factor;
 pub mod feature;
 pub mod ids;
+pub mod maker_rebate;
 pub mod market_context;
 pub mod micro;
 pub mod model_input;
@@ -94,9 +95,9 @@ pub use entry_condition::{
     WeatherDailyTemperatureInput, WeatherObservationDayClosedOutsideBand,
 };
 pub use execution_payload::{
-    EntryOrderSpec, ExitPolicySpec, ExitReinferenceObservation, ExitReinferenceVerdictKind,
-    NextScaleOutProjection, OrderAmount, PendingScaleOut, PreparedFeeSchedule, PreparedVenueOrder,
-    ScaleOutState, VenueOrderAmount,
+    EntryMakerRebateTerms, EntryOrderSpec, ExitPolicySpec, ExitReinferenceObservation,
+    ExitReinferenceVerdictKind, NextScaleOutProjection, OrderAmount, PendingScaleOut,
+    PreparedFeeSchedule, PreparedVenueOrder, ScaleOutState, VenueOrderAmount,
 };
 pub use feature::{
     CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, DomainFeatureSlice,
@@ -138,6 +139,11 @@ pub use ids::{
     SignalCandidateId, SourceSliceId, TokenId, TradePolicyArtifactId, TradePolicyGovernanceAuditId,
     TradePolicyTrialAttemptId, TradePolicyValidationRunId, TrainingDatasetId, TrainingExampleId,
     UserId, VenueIncentiveEventId, VenueTradeId, WorkerId,
+};
+pub use maker_rebate::{
+    MakerRebateDelayBasis, MakerRebateObjectiveStatus, MakerRebateObjectiveZeroReason,
+    MakerRebateProgramDayBaseline, MakerRebateScenarioCreditStatus, MakerRebateValuationEvidence,
+    MakerRebateValuationHealth,
 };
 pub use market_context::MarketContext;
 pub use micro::{
@@ -239,4 +245,7 @@ pub use training::{
     ModelScoreCohortRow, NewModelLearningCohortRow, NewModelScoreCohortRow, TrainingSampleSource,
     TrainingSampleSources, TrainingSampleSourcesError,
 };
-pub use venue_fill::{FeeMeasurement, FeeMeasurementPriority, VenueFillObservation};
+pub use venue_fill::{
+    FeeMeasurement, FeeMeasurementPriority, MatchMakerRebateEvidence, MatchRebateUnavailableReason,
+    VenueFillObservation,
+};

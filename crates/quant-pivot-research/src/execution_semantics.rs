@@ -1,13 +1,13 @@
 //! Pure venue execution semantics shared by research and serving.
 
-use chrono::{DateTime, Days, Utc};
+use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     domain::market::{
         book::BookLevel,
         fee::{
             BuilderFeeAttribution, DeferredVenueIncentive, FrozenMakerRebateSchedule,
-            ImmediateExecutionCost, MakerRebateEligibility, MarketFeeSchedule,
-            MarketMakerRebateSchedule,
+            ImmediateExecutionCost, MakerRebateEligibility, MakerRebateUnavailableReason,
+            MarketFeeSchedule, MarketMakerRebateEvidence, MarketMakerRebateSchedule,
         },
     },
     enums::{
@@ -15,7 +15,13 @@ use quant_pivot_models::{
         quant::FillRequirement,
     },
     hashing::CanonicalDigest,
-    types::{Bps, ContentHash, PassivePlacement, PayoutRatio, Price, Shares, Usd},
+    types::{
+        Bps, ContentHash, MatchRebateUnavailableReason, PassivePlacement, PayoutRatio, Price,
+        Shares, Usd,
+        trade_policy_evidence::{
+            TradePolicyMakerRebateEvidence, TradePolicyMakerRebateUnavailableReason,
+        },
+    },
 };
 use rust_decimal::{Decimal, MathematicalOps, RoundingStrategy};
 use serde::{Deserialize, Serialize};
@@ -56,22 +62,127 @@ pub struct PitFeeSchedule {
 /// Point-in-time Gamma maker-rebate schedule, independent of immediate fees.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PitMakerRebateSchedule {
-    pub schedule_hash: ContentHash,
-    pub catalog_change_hash: ContentHash,
-    pub effective_at: DateTime<Utc>,
+    pub terms_hash: ContentHash,
     pub available_at: DateTime<Utc>,
-    pub fees_enabled: bool,
     pub platform_rate: Decimal,
     pub exponent: Decimal,
     pub taker_only: bool,
     pub rebate_rate: Decimal,
 }
 
+/// Point-in-time Gamma program truth after CLOB source-consistency validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum PitMakerRebateEvidence {
+    NoProgram {
+        terms_hash: ContentHash,
+        available_at: DateTime<Utc>,
+    },
+    Available {
+        schedule: PitMakerRebateSchedule,
+    },
+    Unavailable {
+        reason: PitMakerRebateUnavailableReason,
+        terms_hash: ContentHash,
+        available_at: DateTime<Utc>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PitMakerRebateUnavailableReason {
+    Source(MakerRebateUnavailableReason),
+    NotPointInTime,
+    SourceMismatch,
+}
+
+impl PitMakerRebateUnavailableReason {
+    #[must_use]
+    pub const fn metric_label(self) -> &'static str {
+        match self {
+            Self::NotPointInTime => "not_point_in_time",
+            Self::SourceMismatch => "source_mismatch",
+            Self::Source(reason) => match reason {
+                MakerRebateUnavailableReason::FeesFlagMissing => "fees_flag_missing",
+                MakerRebateUnavailableReason::EnabledScheduleMissing => "schedule_missing",
+                MakerRebateUnavailableReason::ScheduleIncomplete => "schedule_incomplete",
+                MakerRebateUnavailableReason::InvalidSchedule => "schedule_invalid",
+                MakerRebateUnavailableReason::DisabledSchedulePresent => "source_contradiction",
+            },
+        }
+    }
+
+    #[must_use]
+    pub const fn match_reason(self) -> MatchRebateUnavailableReason {
+        match self {
+            Self::NotPointInTime => MatchRebateUnavailableReason::NotPointInTime,
+            Self::SourceMismatch => MatchRebateUnavailableReason::SourceMismatch,
+            Self::Source(reason) => match reason {
+                MakerRebateUnavailableReason::FeesFlagMissing => {
+                    MatchRebateUnavailableReason::FeesFlagMissing
+                }
+                MakerRebateUnavailableReason::EnabledScheduleMissing => {
+                    MatchRebateUnavailableReason::EnabledScheduleMissing
+                }
+                MakerRebateUnavailableReason::ScheduleIncomplete => {
+                    MatchRebateUnavailableReason::ScheduleIncomplete
+                }
+                MakerRebateUnavailableReason::InvalidSchedule => {
+                    MatchRebateUnavailableReason::InvalidSchedule
+                }
+                MakerRebateUnavailableReason::DisabledSchedulePresent => {
+                    MatchRebateUnavailableReason::DisabledSchedulePresent
+                }
+            },
+        }
+    }
+}
+
+impl From<&PitMakerRebateEvidence> for TradePolicyMakerRebateEvidence {
+    fn from(evidence: &PitMakerRebateEvidence) -> Self {
+        match evidence {
+            PitMakerRebateEvidence::NoProgram { terms_hash, .. } => Self::NoProgram {
+                terms_hash: *terms_hash,
+            },
+            PitMakerRebateEvidence::Available { schedule } => Self::Available {
+                terms_hash: schedule.terms_hash,
+            },
+            PitMakerRebateEvidence::Unavailable { reason, .. } => Self::Unavailable {
+                reason: match reason {
+                    PitMakerRebateUnavailableReason::NotPointInTime => {
+                        TradePolicyMakerRebateUnavailableReason::NotYetVisible
+                    }
+                    PitMakerRebateUnavailableReason::SourceMismatch => {
+                        TradePolicyMakerRebateUnavailableReason::SourceMismatch
+                    }
+                    PitMakerRebateUnavailableReason::Source(reason) => match reason {
+                        MakerRebateUnavailableReason::FeesFlagMissing => {
+                            TradePolicyMakerRebateUnavailableReason::FeesFlagMissing
+                        }
+                        MakerRebateUnavailableReason::EnabledScheduleMissing => {
+                            TradePolicyMakerRebateUnavailableReason::EnabledScheduleMissing
+                        }
+                        MakerRebateUnavailableReason::ScheduleIncomplete => {
+                            TradePolicyMakerRebateUnavailableReason::ScheduleIncomplete
+                        }
+                        MakerRebateUnavailableReason::InvalidSchedule => {
+                            TradePolicyMakerRebateUnavailableReason::InvalidSchedule
+                        }
+                        MakerRebateUnavailableReason::DisabledSchedulePresent => {
+                            TradePolicyMakerRebateUnavailableReason::DisabledSchedulePresent
+                        }
+                    },
+                },
+            },
+        }
+    }
+}
+
 /// Composite PIT identity used by candidate admission and economic scenarios.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PitMarketExecutionEconomics {
     pub fee_schedule: PitFeeSchedule,
-    pub maker_rebate_schedule: Option<PitMakerRebateSchedule>,
+    pub maker_rebate_evidence: PitMakerRebateEvidence,
     pub composite_hash: ContentHash,
 }
 
@@ -168,22 +279,20 @@ impl PitFeeSchedule {
 impl PitMakerRebateSchedule {
     pub const fn from_market_schedule(
         schedule: &MarketMakerRebateSchedule,
-    ) -> Result<Self, FeeError> {
-        Ok(Self {
-            schedule_hash: schedule.schedule_hash,
-            catalog_change_hash: schedule.catalog_change_hash,
-            effective_at: schedule.effective_at,
-            available_at: schedule.available_at,
-            fees_enabled: schedule.fees_enabled,
+        available_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            terms_hash: schedule.terms_hash,
+            available_at,
             platform_rate: schedule.platform_rate,
             exponent: schedule.exponent,
             taker_only: schedule.taker_only,
             rebate_rate: schedule.rebate_rate,
-        })
+        }
     }
 
     pub fn validate_at(&self, decision_at: DateTime<Utc>) -> Result<(), FeeError> {
-        if self.effective_at > decision_at || self.available_at > decision_at {
+        if self.available_at > decision_at {
             return Err(FeeError::NotPointInTime);
         }
         if self.platform_rate < Decimal::ZERO
@@ -202,11 +311,8 @@ impl PitMakerRebateSchedule {
     #[must_use]
     pub const fn frozen(&self) -> FrozenMakerRebateSchedule {
         FrozenMakerRebateSchedule {
-            schedule_hash: self.schedule_hash,
-            catalog_change_hash: self.catalog_change_hash,
-            effective_at: self.effective_at,
+            terms_hash: self.terms_hash,
             available_at: self.available_at,
-            fees_enabled: self.fees_enabled,
             platform_rate: self.platform_rate,
             exponent: self.exponent,
             taker_only: self.taker_only,
@@ -215,7 +321,7 @@ impl PitMakerRebateSchedule {
     }
 
     /// Estimate the delayed maker incentive for a confirmed or simulated
-    /// maker fill. No fill, taker liquidity, disabled fees, or a zero program
+    /// maker fill. No fill, taker liquidity, or a zero program
     /// rate produces no accrual.
     pub fn expected_incentive(
         &self,
@@ -226,31 +332,73 @@ impl PitMakerRebateSchedule {
         fill_at: DateTime<Utc>,
     ) -> Result<Option<DeferredVenueIncentive>, FeeError> {
         self.validate_at(fill_at)?;
-        if role != LiquidityRole::Maker
-            || !shares.is_positive()
-            || !self.fees_enabled
-            || self.rebate_rate.is_zero()
-        {
+        if role != LiquidityRole::Maker || !shares.is_positive() || self.rebate_rate.is_zero() {
             return Ok(None);
         }
         let expected_rebate_usd = Usd::new(quantize_venue_amount(
             fee_schedule.fee_equivalent(price, shares, fill_at)?.inner() * self.rebate_rate,
         ));
-        let program_date = fill_at.date_naive();
-        let expected_credit_at = DateTime::<Utc>::from_naive_utc_and_offset(
-            program_date
-                .checked_add_days(Days::new(1))
-                .and_then(|date| date.and_hms_opt(0, 0, 0))
-                .ok_or(FeeError::InvalidFill)?,
-            Utc,
-        );
         Ok(Some(DeferredVenueIncentive {
             expected_rebate_usd,
-            program_date,
-            expected_credit_at,
-            source_schedule_hash: self.schedule_hash,
+            program_date: fill_at.date_naive(),
+            source_terms_hash: self.terms_hash,
             eligibility: MakerRebateEligibility::EligibleMakerFill,
         }))
+    }
+}
+
+impl PitMakerRebateEvidence {
+    pub fn from_market_evidence(
+        evidence: &MarketMakerRebateEvidence,
+        available_at: DateTime<Utc>,
+        decision_at: DateTime<Utc>,
+    ) -> Self {
+        if available_at > decision_at {
+            return Self::Unavailable {
+                reason: PitMakerRebateUnavailableReason::NotPointInTime,
+                terms_hash: evidence.terms_hash(),
+                available_at,
+            };
+        }
+        match evidence {
+            MarketMakerRebateEvidence::NoProgram { terms_hash } => Self::NoProgram {
+                terms_hash: *terms_hash,
+                available_at,
+            },
+            MarketMakerRebateEvidence::Available { schedule } => Self::Available {
+                schedule: PitMakerRebateSchedule::from_market_schedule(schedule, available_at),
+            },
+            MarketMakerRebateEvidence::Unavailable {
+                reason, terms_hash, ..
+            } => Self::Unavailable {
+                reason: PitMakerRebateUnavailableReason::Source(*reason),
+                terms_hash: *terms_hash,
+                available_at,
+            },
+        }
+    }
+
+    #[must_use]
+    pub const fn schedule(&self) -> Option<&PitMakerRebateSchedule> {
+        match self {
+            Self::Available { schedule } => Some(schedule),
+            Self::NoProgram { .. } | Self::Unavailable { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_decidable(&self) -> bool {
+        matches!(self, Self::NoProgram { .. } | Self::Available { .. })
+    }
+
+    #[must_use]
+    pub const fn terms_hash(&self) -> ContentHash {
+        match self {
+            Self::NoProgram { terms_hash, .. } | Self::Unavailable { terms_hash, .. } => {
+                *terms_hash
+            }
+            Self::Available { schedule } => schedule.terms_hash,
+        }
     }
 }
 
@@ -259,51 +407,52 @@ impl PitMarketExecutionEconomics {
     /// fee-curve disagreement at the decision boundary.
     pub fn resolve(
         fee_schedule: &MarketFeeSchedule,
-        maker_rebate_schedule: Option<&MarketMakerRebateSchedule>,
+        maker_rebate_evidence: &MarketMakerRebateEvidence,
+        maker_rebate_available_at: DateTime<Utc>,
         decision_at: DateTime<Utc>,
     ) -> Result<Self, FeeError> {
-        if maker_rebate_schedule
-            .is_some_and(|schedule| schedule.market_id != fee_schedule.market_id)
-        {
-            return Err(FeeError::SourceMismatch);
-        }
+        let source_market_mismatch = matches!(
+            maker_rebate_evidence,
+            MarketMakerRebateEvidence::Available { schedule }
+                if schedule.market_id != fee_schedule.market_id
+        );
         let fee_schedule = PitFeeSchedule::from_market_fee_schedule(fee_schedule)?;
         fee_schedule.validate_at(decision_at)?;
-        let maker_rebate_schedule = match maker_rebate_schedule
-            .map(PitMakerRebateSchedule::from_market_schedule)
-            .transpose()?
-        {
-            Some(schedule) => match schedule.validate_at(decision_at) {
-                Ok(()) => Some(schedule),
-                Err(FeeError::NotPointInTime) => None,
-                Err(error) => return Err(error),
-            },
-            None => None,
-        };
-        if let Some(rebate) = &maker_rebate_schedule {
-            let clob_fees_enabled = !fee_schedule.platform_rate.is_zero();
-            if rebate.fees_enabled != clob_fees_enabled
-                || rebate.platform_rate != fee_schedule.platform_rate
-                || rebate.exponent != fee_schedule.exponent
-                || rebate.taker_only != fee_schedule.taker_only
-            {
-                return Err(FeeError::SourceMismatch);
-            }
+        let mut maker_rebate_evidence = PitMakerRebateEvidence::from_market_evidence(
+            maker_rebate_evidence,
+            maker_rebate_available_at,
+            decision_at,
+        );
+        let source_mismatch = source_market_mismatch
+            || match &maker_rebate_evidence {
+                PitMakerRebateEvidence::NoProgram { .. } => !fee_schedule.platform_rate.is_zero(),
+                PitMakerRebateEvidence::Available { schedule } => {
+                    schedule.validate_at(decision_at)?;
+                    schedule.platform_rate != fee_schedule.platform_rate
+                        || schedule.exponent != fee_schedule.exponent
+                        || schedule.taker_only != fee_schedule.taker_only
+                }
+                PitMakerRebateEvidence::Unavailable { .. } => false,
+            };
+        if source_mismatch {
+            maker_rebate_evidence = PitMakerRebateEvidence::Unavailable {
+                reason: PitMakerRebateUnavailableReason::SourceMismatch,
+                terms_hash: maker_rebate_evidence.terms_hash(),
+                available_at: maker_rebate_available_at,
+            };
         }
         let composite_hash = CanonicalDigest::content_hash_typed(
             "quant-pivot/pit-market-execution-economics",
             2,
             &(
                 fee_schedule.schedule_hash,
-                maker_rebate_schedule
-                    .as_ref()
-                    .map(|schedule| schedule.schedule_hash),
+                maker_rebate_evidence.terms_hash(),
             ),
         )
         .map_err(|_| FeeError::InvalidSchedule)?;
         Ok(Self {
             fee_schedule,
-            maker_rebate_schedule,
+            maker_rebate_evidence,
             composite_hash,
         })
     }
@@ -784,7 +933,10 @@ mod tests {
     use quant_pivot_models::{
         domain::market::{
             book::BookLevel,
-            fee::{BuilderFeeAttribution, MarketFeeSchedule, MarketMakerRebateSchedule},
+            fee::{
+                BuilderFeeAttribution, MarketFeeSchedule, MarketMakerRebateEvidence,
+                MarketMakerRebateSchedule,
+            },
         },
         enums::{common::Side, quant::FillRequirement},
         types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, Price, Shares, Usd},
@@ -795,8 +947,8 @@ mod tests {
 
     use super::{
         BookWalkOutcome, FeeError, LiquidityRole, PassiveQueueState, PassiveTrade, PitFeeSchedule,
-        PitMakerRebateSchedule, PitMarketExecutionEconomics, walk_buy_cash_budget,
-        walk_sell_exact_shares,
+        PitMakerRebateEvidence, PitMakerRebateSchedule, PitMakerRebateUnavailableReason,
+        PitMarketExecutionEconomics, walk_buy_cash_budget, walk_sell_exact_shares,
     };
 
     fn level(price: Decimal, size: Decimal) -> BookLevel {
@@ -1015,12 +1167,8 @@ mod tests {
     fn rebate_requires_maker_fill() {
         let fees = PitFeeSchedule::semantics_fixture();
         let rebate = PitMakerRebateSchedule {
-            schedule_hash: ContentHash::parse(&format!("blake3:{}", "2".repeat(64))).expect("hash"),
-            catalog_change_hash: ContentHash::parse(&format!("blake3:{}", "3".repeat(64)))
-                .expect("hash"),
-            effective_at: fees.effective_at,
+            terms_hash: ContentHash::parse(&format!("blake3:{}", "2".repeat(64))).expect("hash"),
             available_at: fees.available_at,
-            fees_enabled: true,
             platform_rate: fees.platform_rate,
             exponent: fees.exponent,
             taker_only: fees.taker_only,
@@ -1064,6 +1212,39 @@ mod tests {
     }
 
     #[test]
+    fn rebate_uses_fill_day() {
+        let mut fees = PitFeeSchedule::semantics_fixture();
+        let decision_at = Utc
+            .with_ymd_and_hms(2026, 8, 17, 23, 59, 0)
+            .single()
+            .expect("decision time");
+        fees.effective_at = decision_at;
+        fees.available_at = decision_at;
+        let rebate = PitMakerRebateSchedule {
+            terms_hash: ContentHash::parse(&format!("blake3:{}", "2".repeat(64))).expect("hash"),
+            available_at: decision_at,
+            platform_rate: fees.platform_rate,
+            exponent: fees.exponent,
+            taker_only: fees.taker_only,
+            rebate_rate: dec!(0.20),
+        };
+        let fill_at = decision_at + Duration::minutes(2);
+        let incentive = rebate
+            .expected_incentive(
+                &fees,
+                LiquidityRole::Maker,
+                Price::new(dec!(0.5)),
+                Shares::new(dec!(100)),
+                fill_at,
+            )
+            .expect("rebate")
+            .expect("maker incentive");
+
+        assert_eq!(incentive.program_date, fill_at.date_naive());
+        assert_ne!(incentive.program_date, decision_at.date_naive());
+    }
+
+    #[test]
     fn pit_mismatch_fails_closed() {
         let fees = PitFeeSchedule::semantics_fixture();
         let market_id = MarketId::new("0xmarket");
@@ -1082,33 +1263,57 @@ mod tests {
         };
         let gamma = MarketMakerRebateSchedule {
             market_id,
-            fees_enabled: true,
             platform_rate: dec!(0.05),
             exponent: fees.exponent,
             taker_only: fees.taker_only,
             rebate_rate: dec!(0.20),
-            effective_at: fees.effective_at,
-            available_at: fees.available_at,
-            catalog_change_hash: ContentHash::parse(&format!("blake3:{}", "4".repeat(64)))
-                .expect("hash"),
-            schedule_hash: ContentHash::parse(&format!("blake3:{}", "5".repeat(64))).expect("hash"),
+            terms_hash: ContentHash::parse(&format!("blake3:{}", "5".repeat(64))).expect("hash"),
         };
-        assert_eq!(
-            PitMarketExecutionEconomics::resolve(&clob, Some(&gamma), fees.effective_at),
-            Err(FeeError::SourceMismatch)
-        );
+        let evidence = MarketMakerRebateEvidence::Available { schedule: gamma };
+        let resolved = PitMarketExecutionEconomics::resolve(
+            &clob,
+            &evidence,
+            fees.available_at,
+            fees.effective_at,
+        )
+        .expect("aggressive economics remains available");
+        assert!(matches!(
+            resolved.maker_rebate_evidence,
+            PitMakerRebateEvidence::Unavailable {
+                reason: PitMakerRebateUnavailableReason::SourceMismatch,
+                ..
+            }
+        ));
 
-        let mut wrong_market = gamma;
+        let MarketMakerRebateEvidence::Available {
+            schedule: mut wrong_market,
+        } = evidence
+        else {
+            panic!("available fixture");
+        };
         wrong_market.platform_rate = fees.platform_rate;
         wrong_market.market_id = MarketId::new("0xother-market");
-        assert_eq!(
-            PitMarketExecutionEconomics::resolve(&clob, Some(&wrong_market), fees.effective_at,),
-            Err(FeeError::SourceMismatch)
-        );
+        let wrong_evidence = MarketMakerRebateEvidence::Available {
+            schedule: wrong_market,
+        };
+        let resolved = PitMarketExecutionEconomics::resolve(
+            &clob,
+            &wrong_evidence,
+            fees.available_at,
+            fees.effective_at,
+        )
+        .expect("aggressive economics remains available");
+        assert!(matches!(
+            resolved.maker_rebate_evidence,
+            PitMakerRebateEvidence::Unavailable {
+                reason: PitMakerRebateUnavailableReason::SourceMismatch,
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn future_rebate_is_zero() {
+    fn future_rebate_unavailable() {
         let fees = PitFeeSchedule::semantics_fixture();
         let market_id = MarketId::new("0xmarket");
         let clob = MarketFeeSchedule {
@@ -1126,21 +1331,61 @@ mod tests {
         };
         let gamma = MarketMakerRebateSchedule {
             market_id,
-            fees_enabled: true,
             platform_rate: fees.platform_rate,
             exponent: fees.exponent,
             taker_only: fees.taker_only,
             rebate_rate: dec!(0.20),
-            effective_at: fees.effective_at,
-            available_at: fees.available_at + Duration::seconds(1),
-            catalog_change_hash: ContentHash::parse(&format!("blake3:{}", "4".repeat(64)))
-                .expect("hash"),
-            schedule_hash: ContentHash::parse(&format!("blake3:{}", "5".repeat(64))).expect("hash"),
+            terms_hash: ContentHash::parse(&format!("blake3:{}", "5".repeat(64))).expect("hash"),
         };
+        let evidence = MarketMakerRebateEvidence::Available { schedule: gamma };
+        let resolved = PitMarketExecutionEconomics::resolve(
+            &clob,
+            &evidence,
+            fees.available_at + Duration::seconds(1),
+            fees.effective_at,
+        )
+        .expect("aggressive economics remains available");
+        assert!(matches!(
+            resolved.maker_rebate_evidence,
+            PitMakerRebateEvidence::Unavailable {
+                reason: PitMakerRebateUnavailableReason::NotPointInTime,
+                ..
+            }
+        ));
+    }
 
-        let resolved = PitMarketExecutionEconomics::resolve(&clob, Some(&gamma), fees.effective_at)
-            .expect("future rebate source is unavailable, not a fee failure");
-        assert!(resolved.maker_rebate_schedule.is_none());
+    #[test]
+    fn no_program_matches_zero() {
+        let fees = PitFeeSchedule::semantics_fixture();
+        let market_id = MarketId::new("0xmarket");
+        let clob = MarketFeeSchedule {
+            market_id,
+            market_info_version_id: ClobMarketInfoVersionId::from_v7(),
+            market_info_payload_hash: fees.schedule_hash,
+            platform_rate: Decimal::ZERO,
+            exponent: fees.exponent,
+            taker_only: fees.taker_only,
+            builder_maker_fee_bps: Bps::ZERO,
+            builder_taker_fee_bps: Bps::ZERO,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+            effective_at: fees.effective_at,
+            available_at: fees.available_at,
+        };
+        let evidence = MarketMakerRebateEvidence::NoProgram {
+            terms_hash: ContentHash::parse(&format!("blake3:{}", "5".repeat(64))).expect("hash"),
+        };
+        let resolved = PitMarketExecutionEconomics::resolve(
+            &clob,
+            &evidence,
+            fees.available_at,
+            fees.effective_at,
+        )
+        .expect("no-program economics");
+
+        assert!(matches!(
+            resolved.maker_rebate_evidence,
+            PitMakerRebateEvidence::NoProgram { .. }
+        ));
     }
 
     #[test]
@@ -1162,20 +1407,20 @@ mod tests {
         };
         let gamma = MarketMakerRebateSchedule {
             market_id,
-            fees_enabled: true,
             platform_rate: fees.platform_rate,
             exponent: fees.exponent,
             taker_only: fees.taker_only,
             rebate_rate: dec!(1.01),
-            effective_at: fees.effective_at,
-            available_at: fees.available_at,
-            catalog_change_hash: ContentHash::parse(&format!("blake3:{}", "4".repeat(64)))
-                .expect("hash"),
-            schedule_hash: ContentHash::parse(&format!("blake3:{}", "5".repeat(64))).expect("hash"),
+            terms_hash: ContentHash::parse(&format!("blake3:{}", "5".repeat(64))).expect("hash"),
         };
-
+        let evidence = MarketMakerRebateEvidence::Available { schedule: gamma };
         assert_eq!(
-            PitMarketExecutionEconomics::resolve(&clob, Some(&gamma), fees.effective_at),
+            PitMarketExecutionEconomics::resolve(
+                &clob,
+                &evidence,
+                fees.available_at,
+                fees.effective_at,
+            ),
             Err(FeeError::InvalidSchedule)
         );
     }

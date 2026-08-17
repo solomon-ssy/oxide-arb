@@ -4,6 +4,7 @@ pub mod account;
 mod capital_bucket_contract;
 mod economic;
 mod global;
+mod rebate;
 mod scenario;
 mod scenario_model;
 mod solver_boundary;
@@ -20,6 +21,7 @@ pub use global::{
     GlobalPortfolioInput, GlobalPortfolioPlanner, GlobalPortfolioResult, PlannedEconomicTier,
     TierAdmissionRejection, TierAdmissionRejectionCode,
 };
+pub use rebate::{MakerRebateValuationFactory, MakerRebateValuationInput};
 pub use scenario::{
     PortfolioScenarioGenerationInput, PortfolioScenarioGenerator, PortfolioScenarioLegInput,
     SealedPortfolioScenarioArtifact, VerifiedPortfolioScenarioModel,

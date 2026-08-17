@@ -18,7 +18,10 @@ use quant_pivot_models::{
         ResearchProfileRef, SemanticTextError, TradePolicyCohort, TradePolicyCohortProvenance, Usd,
     },
 };
-use quant_pivot_research::{model::SignalCandidate, portfolio::TierAdmissionRejectionCode};
+use quant_pivot_research::{
+    execution_semantics::PitMakerRebateUnavailableReason, model::SignalCandidate,
+    portfolio::TierAdmissionRejectionCode,
+};
 
 /// Source that triggered one report build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +151,10 @@ pub enum EconomicTierBuildRejection {
     ExecutionEconomicsUnavailable {
         market_id: MarketId,
     },
+    PassiveMakerRebateUnavailable {
+        market_id: MarketId,
+        reason: PitMakerRebateUnavailableReason,
+    },
     InsufficientLiveDepth {
         market_id: MarketId,
         visible_usd: Usd,
@@ -161,6 +168,7 @@ impl EconomicTierBuildRejection {
     pub const fn market_id(&self) -> &MarketId {
         match self {
             Self::ExecutionEconomicsUnavailable { market_id }
+            | Self::PassiveMakerRebateUnavailable { market_id, .. }
             | Self::InsufficientLiveDepth { market_id, .. } => market_id,
         }
     }

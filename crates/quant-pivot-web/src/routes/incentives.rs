@@ -12,7 +12,7 @@ use quant_pivot_models::{
             VenueIncentiveEventListQuery, VenueIncentiveEventView,
         },
         pagination::Paginated,
-        quant::venue_incentive::VenueIncentiveScanHealth,
+        quant::venue_incentive::{MakerRebateProgramDayStatus, VenueIncentiveScanHealth},
     },
     enums::rbac::{Operation, ResourceType},
     types::Usd,
@@ -83,22 +83,48 @@ async fn get_reconciliation(
     } else {
         IncentiveReconciliationHealth::Healthy
     };
-    let award_outstanding =
-        reconciliation.venue_awarded_maker_usd - reconciliation.wallet_credited_maker_usd;
+    let maker_rebate_policy = &state
+        .runtime_config_apply
+        .current()
+        .execution_risk
+        .maker_rebate;
+    let payout_threshold_usd = Usd::new(maker_rebate_policy.payout_threshold_usd.value);
+    let events = state
+        .venue_incentives
+        .maker_valuation_events(&state.execution_account_id, now)
+        .await?;
+    let program_days = MakerRebateProgramDayStatus::project(
+        &events,
+        payout_threshold_usd,
+        maker_rebate_policy.fallback_lag_from_program_close_secs,
+    );
+    let below_payout_threshold_program_dates = program_days
+        .iter()
+        .filter(|day| day.venue_reported_accrual_usd.is_positive() && !day.threshold_met)
+        .map(|day| day.program_date)
+        .collect();
+    let overdue_program_dates = program_days
+        .iter()
+        .filter(|day| {
+            day.threshold_met && day.outstanding_usd.is_positive() && day.expected_by <= now
+        })
+        .map(|day| day.program_date)
+        .collect();
     Ok(WebResponse::ok(IncentiveReconciliationView {
         as_of: reconciliation.as_of,
         estimated_maker_accrual_usd: reconciliation.estimated_maker_accrual_usd,
-        venue_awarded_maker_usd: reconciliation.venue_awarded_maker_usd,
+        venue_reported_maker_accrual_usd: reconciliation.venue_reported_maker_accrual_usd,
         wallet_credited_maker_usd: reconciliation.wallet_credited_maker_usd,
         wallet_credited_taker_usd: reconciliation.wallet_credited_taker_usd,
-        estimate_to_award_delta_usd: reconciliation.estimate_to_award_delta(),
-        award_to_credit_delta_usd: reconciliation.award_to_credit_delta(),
+        estimate_to_reported_delta_usd: reconciliation.estimate_to_reported_delta(),
+        reported_to_credit_delta_usd: reconciliation.reported_to_credit_delta(),
         last_success_at: scan_health.last_success_at,
         oldest_incomplete_date: scan_health.oldest_incomplete_date,
         incomplete_day_count: scan_health.incomplete_day_count,
         health,
-        payout_threshold_usd: Usd::ONE,
-        below_payout_threshold: award_outstanding.is_positive() && award_outstanding < Usd::ONE,
+        payout_threshold_usd,
+        below_payout_threshold_program_dates,
+        overdue_program_dates,
     }))
 }
 

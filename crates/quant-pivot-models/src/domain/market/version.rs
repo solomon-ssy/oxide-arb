@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use quant_pivot_error::market::MarketError;
 use sea_orm::{DeriveIntoActiveModel, FromQueryResult};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
-    domain::market::{UpsertEvent, UpsertMarket},
+    domain::market::{EventRegistryInfo, MarketRegistryInfo, UpsertEvent, UpsertMarket},
     entities::{
         catalog_event_change, catalog_event_object, catalog_market_change, catalog_market_object,
         catalog_sync_rejection,
@@ -16,6 +17,7 @@ use crate::{
         CatalogChangeType, CatalogEntityKind, CatalogRejectionReason, CatalogSyncFailureStage,
         CatalogSyncKind, CatalogSyncStatus, CatalogTimestampQuality,
     },
+    hashing::CanonicalDigest,
     types::{
         CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId, CatalogMarketObjectId,
         CatalogSyncBatchId, CatalogSyncRejectionId, ContentHash, EventId, ExternalJsonDocument,
@@ -23,8 +25,8 @@ use crate::{
     },
 };
 
-pub const CATALOG_OBJECT_SCHEMA_VERSION: i32 = 2;
-pub const CATALOG_OBJECT_HASH_VERSION: u32 = 2;
+pub const CATALOG_OBJECT_SCHEMA_VERSION: i32 = 3;
+pub const CATALOG_OBJECT_HASH_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromQueryResult)]
 pub struct CatalogSyncBatchInfo {
@@ -207,6 +209,97 @@ pub struct CatalogMarketChangeInfo {
     pub schema_version: i32,
     pub payload: ExternalJsonDocument,
     pub created_at: DateTime<Utc>,
+}
+
+impl CatalogEventChangeInfo {
+    /// Decode and verify a v3 event object. Older schemas are rejected rather
+    /// than interpreted through a compatibility reader.
+    pub fn verified_payload(&self) -> Result<EventRegistryInfo, MarketError> {
+        let event: EventRegistryInfo = self.decode_payload("event", self.event_id.as_str())?;
+        let content_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-event-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            &event,
+        )
+        .map_err(|error| MarketError::CatalogSerialization {
+            entity: "event",
+            id: self.event_id.to_string(),
+            reason: error.to_string(),
+        })?;
+        if content_hash != self.content_hash {
+            return Err(MarketError::CatalogSerialization {
+                entity: "event",
+                id: self.event_id.to_string(),
+                reason: "payload hash does not match immutable catalog object".to_owned(),
+            });
+        }
+        Ok(event)
+    }
+
+    fn decode_payload<T>(&self, entity: &'static str, id: &str) -> Result<T, MarketError>
+    where
+        T: DeserializeOwned,
+    {
+        decode_object_payload(entity, id, self.schema_version, &self.payload)
+    }
+}
+
+impl CatalogMarketChangeInfo {
+    /// Decode and verify a v3 market object. Older schemas are rejected rather
+    /// than interpreted through a compatibility reader.
+    pub fn verified_payload(&self) -> Result<MarketRegistryInfo, MarketError> {
+        let market: MarketRegistryInfo = decode_object_payload(
+            "market",
+            self.market_id.as_str(),
+            self.schema_version,
+            &self.payload,
+        )?;
+        let content_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-market-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            &market,
+        )
+        .map_err(|error| MarketError::CatalogSerialization {
+            entity: "market",
+            id: self.market_id.to_string(),
+            reason: error.to_string(),
+        })?;
+        if content_hash != self.content_hash {
+            return Err(MarketError::CatalogSerialization {
+                entity: "market",
+                id: self.market_id.to_string(),
+                reason: "payload hash does not match immutable catalog object".to_owned(),
+            });
+        }
+        Ok(market)
+    }
+}
+
+fn decode_object_payload<T>(
+    entity: &'static str,
+    id: &str,
+    schema_version: i32,
+    payload: &ExternalJsonDocument,
+) -> Result<T, MarketError>
+where
+    T: DeserializeOwned,
+{
+    if schema_version != CATALOG_OBJECT_SCHEMA_VERSION {
+        return Err(MarketError::CatalogSerialization {
+            entity,
+            id: id.to_owned(),
+            reason: format!(
+                "schema {schema_version} is unsupported; required schema is {CATALOG_OBJECT_SCHEMA_VERSION}"
+            ),
+        });
+    }
+    serde_json::from_value(payload.clone().into_inner()).map_err(|error| {
+        MarketError::CatalogSerialization {
+            entity,
+            id: id.to_owned(),
+            reason: error.to_string(),
+        }
+    })
 }
 
 /// One transactionally consistent point-in-time catalog snapshot.

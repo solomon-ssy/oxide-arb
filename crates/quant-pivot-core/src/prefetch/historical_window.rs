@@ -847,7 +847,7 @@ fn decode_catalog_markets(catalog: &CatalogWindowInfo) -> QuantResult<Vec<Market
         .market_changes
         .iter()
         .map(|version| {
-            serde_json::from_value(version.payload.clone().into_inner()).map_err(|error| {
+            version.verified_payload().map_err(|error| {
                 ResearchError::PitResolution {
                     detail: format!(
                         "market catalog change {} payload is invalid: {error}",
@@ -1188,7 +1188,7 @@ mod tests {
         clickhouse::{BookMicrostructureRow, ChSchemaVersion},
         domain::{
             data_plane::DecisionClock,
-            market::{MarketRegistryInfo, TokenInfo},
+            market::{MarketMakerRebateEvidence, MarketRegistryInfo, TokenInfo},
         },
         enums::{
             catalog::CatalogFilterReasonSet,
@@ -1270,7 +1270,7 @@ mod tests {
             min_order_size: dec!(5),
             liquidity_usd: None,
             volume_24h: None,
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
             start_date: None,
             end_date: None,
             resolved_at: None,

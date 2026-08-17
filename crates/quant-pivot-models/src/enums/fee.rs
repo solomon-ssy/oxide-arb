@@ -35,7 +35,7 @@ pg_enum! {
     @derive(PartialOrd, Ord, schemars::JsonSchema)
     pub enum VenueIncentiveStage {
         EstimatedAccrual => "estimated_accrual",
-        VenueAwarded => "venue_awarded",
+        VenueReportedAccrual => "venue_reported_accrual",
         WalletCredited => "wallet_credited",
     }
 }

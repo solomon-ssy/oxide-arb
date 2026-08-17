@@ -1223,6 +1223,25 @@ fn validate_portfolio(config: &DecisionPolicySnapshot, report: &mut ConfigValida
 }
 
 fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
+    let maker_rebate = &config.execution_risk.maker_rebate;
+    if maker_rebate.payout_threshold_usd.value <= Decimal::ZERO {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution_risk.maker_rebate.payout_threshold_usd",
+            detail: "must be positive".to_owned(),
+        });
+    }
+    if maker_rebate.fallback_lag_from_program_close_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution_risk.maker_rebate.fallback_lag_from_program_close_secs",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
+    if maker_rebate.observed_p95_min_samples == 0 || maker_rebate.observed_p95_min_samples > 3_660 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution_risk.maker_rebate.observed_p95_min_samples",
+            detail: "must be in 1..=3660".to_owned(),
+        });
+    }
     let condition = &config.operations_policy.entry_condition;
     if condition.backstop_interval_ms == 0
         || condition.next_evaluation_delay_ms == 0

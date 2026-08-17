@@ -45,17 +45,90 @@ pub struct MarketFeeSchedule {
 #[serde(deny_unknown_fields)]
 pub struct MarketMakerRebateSchedule {
     pub market_id: MarketId,
-    pub fees_enabled: bool,
     pub platform_rate: Decimal,
     pub exponent: Decimal,
     pub taker_only: bool,
     pub rebate_rate: Decimal,
-    pub effective_at: DateTime<Utc>,
-    pub available_at: DateTime<Utc>,
-    /// Hash of the normalized Gamma fee/rebate subdocument before local clocks.
-    pub catalog_change_hash: ContentHash,
-    /// Independent content identity of this complete maker-rebate fact.
-    pub schedule_hash: ContentHash,
+    /// Identity of the normalized upstream terms. Local observation clocks are
+    /// deliberately excluded so unchanged Gamma payloads remain content-stable.
+    pub terms_hash: ContentHash,
+}
+
+/// Why Gamma did not provide an economically decidable maker-rebate program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MakerRebateUnavailableReason {
+    FeesFlagMissing,
+    EnabledScheduleMissing,
+    ScheduleIncomplete,
+    InvalidSchedule,
+    DisabledSchedulePresent,
+}
+
+/// Gamma field whose absence or invalid value made rebate terms undecidable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MakerRebateField {
+    FeesEnabled,
+    FeeSchedule,
+    PlatformRate,
+    Exponent,
+    TakerOnly,
+    RebateRate,
+}
+
+/// Required maker-rebate truth carried by every catalog market object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum MarketMakerRebateEvidence {
+    NoProgram {
+        terms_hash: ContentHash,
+    },
+    Available {
+        schedule: MarketMakerRebateSchedule,
+    },
+    Unavailable {
+        reason: MakerRebateUnavailableReason,
+        missing_fields: Vec<MakerRebateField>,
+        invalid_fields: Vec<MakerRebateField>,
+        terms_hash: ContentHash,
+    },
+}
+
+impl MarketMakerRebateEvidence {
+    /// Explicit source-unavailable fixture for non-catalog construction paths.
+    pub fn source_unavailable() -> Self {
+        Self::Unavailable {
+            reason: MakerRebateUnavailableReason::FeesFlagMissing,
+            missing_fields: vec![MakerRebateField::FeesEnabled],
+            invalid_fields: Vec::new(),
+            terms_hash: ContentHash::from_bytes([0; 32]),
+        }
+    }
+
+    /// Complete schedule when Gamma published an active program.
+    #[must_use]
+    pub const fn schedule(&self) -> Option<&MarketMakerRebateSchedule> {
+        match self {
+            Self::Available { schedule } => Some(schedule),
+            Self::NoProgram { .. } | Self::Unavailable { .. } => None,
+        }
+    }
+
+    /// Whether the source state is sufficient for passive economic decisions.
+    #[must_use]
+    pub const fn is_decidable(&self) -> bool {
+        matches!(self, Self::NoProgram { .. } | Self::Available { .. })
+    }
+
+    /// Stable identity of the exact upstream fee/rebate fields.
+    #[must_use]
+    pub const fn terms_hash(&self) -> ContentHash {
+        match self {
+            Self::NoProgram { terms_hash } | Self::Unavailable { terms_hash, .. } => *terms_hash,
+            Self::Available { schedule } => schedule.terms_hash,
+        }
+    }
 }
 
 /// Decision-time maker-rebate terms carried into the executable order.
@@ -66,11 +139,8 @@ pub struct MarketMakerRebateSchedule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenMakerRebateSchedule {
-    pub schedule_hash: ContentHash,
-    pub catalog_change_hash: ContentHash,
-    pub effective_at: DateTime<Utc>,
+    pub terms_hash: ContentHash,
     pub available_at: DateTime<Utc>,
-    pub fees_enabled: bool,
     #[serde(with = "rust_decimal::serde::str")]
     #[schemars(with = "String")]
     pub platform_rate: Decimal,
@@ -86,7 +156,7 @@ pub struct FrozenMakerRebateSchedule {
 impl FrozenMakerRebateSchedule {
     /// Validate the frozen terms at the decision boundary.
     pub fn validate_at(self, decision_at: DateTime<Utc>) -> Result<(), &'static str> {
-        if self.effective_at > decision_at || self.available_at > decision_at {
+        if self.available_at > decision_at {
             return Err("maker rebate schedule is not point-in-time visible");
         }
         if self.platform_rate < Decimal::ZERO
@@ -103,11 +173,8 @@ impl FrozenMakerRebateSchedule {
 }
 
 impl MarketMakerRebateSchedule {
-    /// Validate source ranges and point-in-time visibility.
-    pub fn validate_at(&self, decision_at: DateTime<Utc>) -> Result<(), &'static str> {
-        if self.effective_at > decision_at || self.available_at > decision_at {
-            return Err("maker rebate schedule is not point-in-time visible");
-        }
+    /// Validate the source terms independently from catalog observation time.
+    pub fn validate(&self) -> Result<(), &'static str> {
         if self.platform_rate < Decimal::ZERO
             || self.platform_rate > Decimal::ONE
             || self.exponent <= Decimal::ZERO
@@ -181,8 +248,6 @@ pub struct DeferredVenueIncentive {
     pub expected_rebate_usd: Usd,
     /// UTC program day containing the maker fill.
     pub program_date: NaiveDate,
-    /// Modeling assumption for discounting, never evidence of wallet credit.
-    pub expected_credit_at: DateTime<Utc>,
-    pub source_schedule_hash: ContentHash,
+    pub source_terms_hash: ContentHash,
     pub eligibility: MakerRebateEligibility,
 }

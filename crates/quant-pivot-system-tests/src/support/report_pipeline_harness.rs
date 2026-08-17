@@ -57,7 +57,7 @@ use quant_pivot_models::{
         data_plane::{DecisionBoundary, HistorySealChunkRef},
         governance::{NewOperationLog, lifecycle::OperationalPhase},
         market::{
-            EventRegistryInfo, MarketRegistryInfo, TokenInfo,
+            EventRegistryInfo, MarketMakerRebateEvidence, MarketRegistryInfo, TokenInfo,
             book::{BookLevel, BookSnapshot},
         },
         pagination::Paginated,
@@ -1881,6 +1881,10 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
         readiness_gate: Arc::new(AlwaysOperationalGate),
         microstructure_commit: Arc::new(ImmediateCommitBarrier),
         exchange_history_repo: live_history_repo(),
+        venue_incentive_repo: Arc::new(PgVenueIncentiveRepository::new(db.clone()))
+            as Arc<dyn VenueIncentiveRepository>,
+        execution_account_id: harness_execution_account().execution_account_id,
+        venue_incentive_stale_secs: 120,
         metrics: Arc::new(MetricsHub::new()),
     }))
 }
@@ -2001,7 +2005,7 @@ impl From<RegistryMarketFixture<'_>> for MarketRegistryInfo {
             min_order_size: Decimal::ONE,
             liquidity_usd: Some(fixture.liquidity_usd),
             volume_24h: Some(fixture.volume_24h_usd),
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
             start_date: Some(fixture.decision_at - ChronoDuration::hours(1)),
             end_date: Some(fixture.decision_at + ChronoDuration::days(2)),
             resolved_at: None,

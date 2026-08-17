@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Days, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     config::PortfolioSolverDeployConfig,
@@ -26,22 +26,26 @@ use quant_pivot_models::{
     },
     enums::quant::{EmptyReportReason, FillRequirement, OutcomeSide, TradePolicyStatus},
     hashing::CanonicalDigest,
-    runtime_config::{BuyModelRoute, DecisionPolicySnapshot},
+    runtime_config::{BuyModelRoute, DecisionPolicySnapshot, MakerRebatePolicy},
     types::{
         Bps, ContentHash, DecisionPolicySnapshotId, EconomicTierId, EntryOrderTemplate,
-        FeatureVectorId, MarketId, ModelRunId, ModelVersionId, PortfolioPlanId, Price,
-        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportRouteRunId, ReportRunId,
-        ServingAuthority, Shares, SignalCandidateId, TokenId, TradePolicyCohort,
-        TradePolicyCohortProvenance, Usd, calibration::CalibratedPayoutDistribution,
+        ExecutionAccountId, FeatureVectorId, MakerRebateDelayBasis, MakerRebateObjectiveStatus,
+        MakerRebateValuationEvidence, MakerRebateValuationHealth, MarketId, ModelRunId,
+        ModelVersionId, PortfolioPlanId, Price, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, ReportRouteRunId, ReportRunId, ServingAuthority, Shares,
+        SignalCandidateId, TokenId, TradePolicyCohort, TradePolicyCohortProvenance, Usd,
+        calibration::CalibratedPayoutDistribution,
     },
 };
 use quant_pivot_repository::traits::{
     ExchangeHistoryRepository, MarketSelectionRepository, PolicyRepository, TradePolicyRepository,
+    VenueIncentiveRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
     execution_semantics::{
-        PitFeeSchedule, PitMarketExecutionEconomics, aggressive_buy_limit, passive_buy_limit,
+        PitFeeSchedule, PitMakerRebateEvidence, PitMakerRebateUnavailableReason,
+        PitMarketExecutionEconomics, aggressive_buy_limit, passive_buy_limit,
     },
     features::{FeatureVector, MarketDecisionCapture, ResolvedBook},
     hashing::ResearchHasher,
@@ -50,7 +54,8 @@ use quant_pivot_research::{
         AccountSnapshot, EconomicTierFactory, ExecutableCashTierSeedFactory,
         ExecutableCashTierSeedInput, ExecutablePassiveTierSeedFactory,
         ExecutablePassiveTierSeedInput, ExecutableTierSeed, ExistingPortfolioFactory,
-        GlobalPortfolioInput, GlobalPortfolioPlanner, GlobalPortfolioResult, PlannedEconomicTier,
+        GlobalPortfolioInput, GlobalPortfolioPlanner, GlobalPortfolioResult,
+        MakerRebateValuationFactory, MakerRebateValuationInput, PlannedEconomicTier,
         PortfolioScenarioGenerationInput, PortfolioScenarioGenerator, PortfolioScenarioLegInput,
         SealedPortfolioScenarioArtifact, TierAdmissionRejection, VerifiedPortfolioScenarioModel,
     },
@@ -116,6 +121,9 @@ pub struct ReportBuilderDeps {
     pub readiness_gate: Arc<dyn ReportReadinessGate>,
     pub microstructure_commit: Arc<dyn MicrostructureCommitBarrier>,
     pub exchange_history_repo: Arc<dyn ExchangeHistoryRepository>,
+    pub venue_incentive_repo: Arc<dyn VenueIncentiveRepository>,
+    pub execution_account_id: ExecutionAccountId,
+    pub venue_incentive_stale_secs: u64,
     pub metrics: Arc<MetricsHub>,
 }
 
@@ -148,6 +156,11 @@ struct EconomicTierSeedBuild {
 struct CandidateTierBuild {
     admitted: Vec<(ExecutableTierSeed, TierSource)>,
     rejection: Option<EconomicTierBuildRejection>,
+}
+
+struct FullL2TierBuild {
+    admitted: Vec<(ExecutableTierSeed, TierSource)>,
+    passive_rejection: Option<PitMakerRebateUnavailableReason>,
 }
 
 impl ReportUniversePlan {
@@ -190,6 +203,23 @@ struct TierSource {
     candidate: SignalCandidate,
     contract: PlannedRecommendationContract,
     entry_limit_price: Price,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TierSourceKey {
+    report_route_run_id: ReportRouteRunId,
+    candidate_id: SignalCandidateId,
+    tier_ordinal: u32,
+}
+
+impl TierSourceKey {
+    const fn from_tier(tier: &ExecutableEconomicTier) -> Self {
+        Self {
+            report_route_run_id: tier.report_route_run_id,
+            candidate_id: tier.candidate_id,
+            tier_ordinal: tier.tier_ordinal,
+        }
+    }
 }
 
 struct SeededTier {
@@ -281,6 +311,7 @@ impl DefaultReportBuilder {
             .snapshot_for_report(&account)
             .await?;
         self.refresh_drawdown(&account, &mut equity).await?;
+        let maker_rebate_valuation = self.maker_rebate_valuation(&context).await?;
 
         let requirements = merged_requirements(&universe.active);
         let selection = self
@@ -318,6 +349,7 @@ impl DefaultReportBuilder {
             &routes,
             &routed_candidates,
             portfolio_context.as_ref(),
+            &maker_rebate_valuation,
         )?;
         let scenario_artifact = materialize_portfolio_scenario(
             &context,
@@ -338,6 +370,7 @@ impl DefaultReportBuilder {
             scenario_artifact: scenario_artifact.as_ref(),
             tiers: &tiers,
         })?;
+        self.record_rebate_diagnostics(&maker_rebate_valuation, &tier_build.rejections, &portfolio);
         let tier_rejections = report_tier_rejections(&tiers, &portfolio.rejections)?;
         update_route_funnels(&mut routes, &tiers, &portfolio)?;
         let planned = planned_recommendations(&portfolio.selected, &tier_sources)?;
@@ -469,6 +502,120 @@ impl DefaultReportBuilder {
         equity.equity_snapshot.high_water_mark_usd = resolved.high_water_mark_usd;
         equity.equity_snapshot.drawdown_pct = resolved.drawdown.current_ratio;
         Ok(())
+    }
+
+    async fn maker_rebate_valuation(
+        &self,
+        context: &BuildContext,
+    ) -> QuantResult<MakerRebateValuationEvidence> {
+        let as_of = context.boundary.decision_at();
+        let policy = &context.config.execution_risk.maker_rebate;
+        let Some(health_to) = as_of.date_naive().checked_sub_days(Days::new(1)) else {
+            return Self::unavailable_rebate_valuation(
+                as_of,
+                policy,
+                "health window end underflow",
+            );
+        };
+        let Some(health_from) = health_to.checked_sub_days(Days::new(29)) else {
+            return Self::unavailable_rebate_valuation(
+                as_of,
+                policy,
+                "health window start underflow",
+            );
+        };
+        let scans = self
+            .deps
+            .venue_incentive_repo
+            .scans(&self.deps.execution_account_id, health_from, health_to)
+            .await;
+        let events = self
+            .deps
+            .venue_incentive_repo
+            .maker_valuation_events(&self.deps.execution_account_id, as_of)
+            .await;
+        match (scans, events) {
+            (Ok(scans), Ok(events)) => {
+                MakerRebateValuationFactory::build(&MakerRebateValuationInput {
+                    as_of,
+                    stale_after_secs: self.deps.venue_incentive_stale_secs,
+                    health_from,
+                    health_to,
+                    scans: &scans,
+                    events: &events,
+                    policy,
+                })
+                .or_else(|error| {
+                    Self::unavailable_rebate_valuation(
+                        as_of,
+                        policy,
+                        &format!("invalid ledger: {error}"),
+                    )
+                })
+            }
+            (scans, events) => Self::unavailable_rebate_valuation(
+                as_of,
+                policy,
+                &format!(
+                    "repository unavailable: scans={:?}, events={:?}",
+                    scans.err(),
+                    events.err()
+                ),
+            ),
+        }
+    }
+
+    fn unavailable_rebate_valuation(
+        as_of: DateTime<Utc>,
+        policy: &MakerRebatePolicy,
+        detail: &str,
+    ) -> QuantResult<MakerRebateValuationEvidence> {
+        tracing::warn!(detail, "maker rebate objective valuation is unavailable");
+        let evidence_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/maker-rebate-valuation-unavailable",
+            1,
+            &(as_of, detail),
+        )?;
+        Ok(MakerRebateValuationEvidence {
+            as_of,
+            health: MakerRebateValuationHealth::Unavailable,
+            program_day_baselines: Vec::new(),
+            payout_threshold_usd: Usd::new(policy.payout_threshold_usd.value),
+            delay_basis: MakerRebateDelayBasis::ConservativeFallback {
+                lag_from_program_close_secs: policy.fallback_lag_from_program_close_secs,
+            },
+            evidence_hash,
+        })
+    }
+
+    fn record_rebate_diagnostics(
+        &self,
+        valuation: &MakerRebateValuationEvidence,
+        rejections: &[EconomicTierBuildRejection],
+        portfolio: &PortfolioBuild,
+    ) {
+        self.deps
+            .metrics
+            .record_maker_rebate_diagnostic("valuation_health", valuation.health.metric_label());
+        for rejection in rejections {
+            if let EconomicTierBuildRejection::PassiveMakerRebateUnavailable { reason, .. } =
+                rejection
+            {
+                self.deps
+                    .metrics
+                    .record_maker_rebate_diagnostic("passive_suppression", reason.metric_label());
+            }
+        }
+        for selected in &portfolio.selected {
+            if let EntryExecutionEconomics::Passive(entry) = &selected.tier.entry_execution
+                && let MakerRebateObjectiveStatus::Zero { reason } =
+                    entry.maker_rebate_objective_status
+            {
+                self.deps
+                    .metrics
+                    .record_maker_rebate_diagnostic("objective_zero", reason.metric_label());
+            }
+        }
     }
 
     async fn select_snapshot(
@@ -964,6 +1111,7 @@ fn build_economic_tier_seeds(
     routes: &[ReadyRoute],
     candidates: &[RoutedCandidate],
     portfolio: Option<&PromotedPortfolioContext>,
+    maker_rebate_valuation: &MakerRebateValuationEvidence,
 ) -> QuantResult<EconomicTierSeedBuild> {
     if candidates.is_empty() {
         return Ok(EconomicTierSeedBuild {
@@ -1011,7 +1159,15 @@ fn build_economic_tier_seeds(
                 detail: format!("candidate Route {:?} has no readiness state", routed.route),
             }
         })?;
-        let built = candidate_tiers(context, market, capture, routed, route, portfolio)?;
+        let built = candidate_tiers(
+            context,
+            market,
+            capture,
+            routed,
+            route,
+            portfolio,
+            maker_rebate_valuation,
+        )?;
         tiers.extend(
             built
                 .admitted
@@ -1047,6 +1203,7 @@ fn candidate_tiers(
     routed: &RoutedCandidate,
     route: &ReadyRoute,
     portfolio: &PromotedPortfolioContext,
+    maker_rebate_valuation: &MakerRebateValuationEvidence,
 ) -> QuantResult<CandidateTierBuild> {
     let horizon = validate_candidate_route(market, routed, route)?;
     let book = capture
@@ -1069,7 +1226,8 @@ fn candidate_tiers(
             })?;
     let Ok(execution_economics) = PitMarketExecutionEconomics::resolve(
         fee,
-        capture.market.maker_rebate_schedule.as_ref(),
+        &capture.market.maker_rebate_evidence,
+        capture.market.available_at,
         context.boundary.decision_at(),
     ) else {
         return Ok(CandidateTierBuild {
@@ -1111,13 +1269,14 @@ fn candidate_tiers(
             route: routed.route.as_str().to_owned(),
             detail: "execution-eligible Route lost its Trade Policy".to_owned(),
         })?;
-    let admitted = full_l2_candidate_tiers(FullL2TierInput {
+    let built = full_l2_candidate_tiers(FullL2TierInput {
         context,
         market,
         capture,
         routed,
         route,
         portfolio,
+        maker_rebate_valuation,
         policy,
         book,
         execution_economics: &execution_economics,
@@ -1125,8 +1284,13 @@ fn candidate_tiers(
         horizon,
     })?;
     Ok(CandidateTierBuild {
-        admitted,
-        rejection: None,
+        admitted: built.admitted,
+        rejection: built.passive_rejection.map(|reason| {
+            EconomicTierBuildRejection::PassiveMakerRebateUnavailable {
+                market_id: market.market_id.clone(),
+                reason,
+            }
+        }),
     })
 }
 
@@ -1138,6 +1302,7 @@ struct FullL2TierInput<'a> {
     routed: &'a RoutedCandidate,
     route: &'a ReadyRoute,
     portfolio: &'a PromotedPortfolioContext,
+    maker_rebate_valuation: &'a MakerRebateValuationEvidence,
     policy: &'a TradePolicyArtifactInfo,
     book: &'a ResolvedBook,
     execution_economics: &'a PitMarketExecutionEconomics,
@@ -1158,6 +1323,7 @@ fn policy_tier_seed(
         routed,
         book,
         execution_economics,
+        maker_rebate_valuation,
         best_ask,
         ..
     } = input;
@@ -1200,8 +1366,8 @@ fn policy_tier_seed(
             else {
                 return Ok(None);
             };
-            let entry_vwap = match &seed.entry_execution {
-                EntryExecutionEconomics::Aggressive(entry) => entry.entry_vwap,
+            let execution_vwap = match &seed.entry_execution {
+                EntryExecutionEconomics::Aggressive(entry) => entry.execution_vwap,
                 EntryExecutionEconomics::Passive(_) => {
                     return Err(ReportError::InvariantViolation {
                         stage: "economic_tier",
@@ -1210,7 +1376,7 @@ fn policy_tier_seed(
                     .into());
                 }
             };
-            Ok(Some((seed, entry_vwap, limit_price)))
+            Ok(Some((seed, execution_vwap, limit_price)))
         }
         EntryOrderTemplate::PassivePostOnly {
             placement,
@@ -1270,6 +1436,7 @@ fn policy_tier_seed(
                 cash_budget: cohort.key.cash_budget_tier,
                 good_til_secs: *good_til_secs,
                 fill_distribution: distribution,
+                maker_rebate_valuation: (*maker_rebate_valuation).clone(),
                 source_lineage_hash: lineage_hash,
             })?;
             Ok(Some((seed, limit_price, limit_price)))
@@ -1277,9 +1444,7 @@ fn policy_tier_seed(
     }
 }
 
-fn full_l2_candidate_tiers(
-    input: FullL2TierInput<'_>,
-) -> QuantResult<Vec<(ExecutableTierSeed, TierSource)>> {
+fn full_l2_candidate_tiers(input: FullL2TierInput<'_>) -> QuantResult<FullL2TierBuild> {
     let FullL2TierInput {
         context,
         market,
@@ -1292,8 +1457,10 @@ fn full_l2_candidate_tiers(
         execution_economics,
         best_ask: _,
         horizon,
+        maker_rebate_valuation: _,
     } = input;
     let mut by_budget = BTreeMap::<Usd, Vec<(ExecutableTierSeed, TierSource)>>::new();
+    let mut passive_rejection = None;
     for (index, cohort) in policy.payload_json.cohorts.iter().enumerate() {
         if cohort.key.category != market.category
             || cohort.key.horizon_secs != horizon
@@ -1303,6 +1470,15 @@ fn full_l2_candidate_tiers(
                 quant_pivot_models::types::EntryConditionTemplate::Immediate
             )
         {
+            continue;
+        }
+        if matches!(
+            cohort.entry_order,
+            EntryOrderTemplate::PassivePostOnly { .. }
+        ) && let PitMakerRebateEvidence::Unavailable { reason, .. } =
+            &execution_economics.maker_rebate_evidence
+        {
+            passive_rejection.get_or_insert(*reason);
             continue;
         }
         let cohort_index = u32::try_from(index).map_err(|error| ReportError::NumericOverflow {
@@ -1368,7 +1544,10 @@ fn full_l2_candidate_tiers(
                 },
             ));
     }
-    route_unique_budget_tiers(by_budget, routed)
+    Ok(FullL2TierBuild {
+        admitted: route_unique_budget_tiers(by_budget, routed)?,
+        passive_rejection,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1908,7 +2087,7 @@ fn finalize_economic_tiers(
     scenario_artifact: Option<&SealedPortfolioScenarioArtifact>,
 ) -> QuantResult<(
     Vec<ExecutableEconomicTier>,
-    HashMap<EconomicTierId, TierSource>,
+    HashMap<TierSourceKey, TierSource>,
 )> {
     if seeded_tiers.is_empty() {
         return Ok((Vec::new(), HashMap::new()));
@@ -1920,10 +2099,8 @@ fn finalize_economic_tiers(
     let mut sources = HashMap::with_capacity(seeded_tiers.len());
     for seeded in seeded_tiers {
         let tier = EconomicTierFactory::build(seeded.seed, artifact)?;
-        if sources
-            .insert(tier.economic_tier_id, seeded.source)
-            .is_some()
-        {
+        let source_key = TierSourceKey::from_tier(&tier);
+        if sources.insert(source_key, seeded.source).is_some() {
             return Err(ReportError::InvariantViolation {
                 stage: "economic_tier",
                 detail: format!("duplicate economic tier {}", tier.economic_tier_id),
@@ -2120,21 +2297,21 @@ fn update_route_funnels(
 
 fn planned_recommendations(
     selected: &[PlannedEconomicTier],
-    sources: &HashMap<EconomicTierId, TierSource>,
+    sources: &HashMap<TierSourceKey, TierSource>,
 ) -> QuantResult<Vec<PlannedReportRecommendation>> {
     selected
         .iter()
         .enumerate()
         .map(|(index, planned)| {
-            let source = sources.get(&planned.tier.economic_tier_id).ok_or_else(|| {
-                ReportError::InvariantViolation {
+            let source = sources
+                .get(&TierSourceKey::from_tier(&planned.tier))
+                .ok_or_else(|| ReportError::InvariantViolation {
                     stage: "portfolio_ranking",
                     detail: format!(
                         "selected tier {} has no candidate lineage",
                         planned.tier.economic_tier_id
                     ),
-                }
-            })?;
+                })?;
             Ok(PlannedReportRecommendation {
                 rank: u32::try_from(index)
                     .ok()

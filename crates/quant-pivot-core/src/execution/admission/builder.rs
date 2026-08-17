@@ -16,7 +16,9 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
+        data_plane::DecisionClock,
         governance::DecisionPolicySnapshotInfo,
+        market::CatalogMarketChangeInfo,
         ports::DataQualityPort,
         quant::{
             CapitalAllocationInfo, ModelVersionInfo, OrderIntentInfo, RecommendationInfo,
@@ -27,14 +29,14 @@ use quant_pivot_models::{
     types::{ClobMarketInfoVersion, Usd},
 };
 use quant_pivot_repository::traits::{
-    CapitalAllocationRepository, ClobMarketInfoRepository, EntryConditionRepository,
-    ExecutionOrderRepository, MarketRepository, ModelRegistryRepository, OrderIntentRepository,
-    PolicyRepository, RecommendationReportRepository, RecommendationRepository,
-    ReconciliationRepository, TradePolicyRepository,
+    CapitalAllocationRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
+    EntryConditionRepository, ExecutionOrderRepository, MarketRepository, ModelRegistryRepository,
+    OrderIntentRepository, PolicyRepository, RecommendationReportRepository,
+    RecommendationRepository, ReconciliationRepository, TradePolicyRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    execution_semantics::PitFeeSchedule,
+    execution_semantics::{PitFeeSchedule, PitMarketExecutionEconomics},
     model::{CalibrationArtifactLoader, ModelArtifact},
     portfolio::AccountSnapshot,
 };
@@ -77,6 +79,7 @@ pub struct AdmissionInputBuilderDeps {
     pub conditions: Arc<dyn EntryConditionRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub markets: Arc<dyn MarketRepository>,
+    pub catalog_ledger: Arc<dyn CatalogLedgerRepository>,
     pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     pub config_versions: Arc<dyn PolicyRepository>,
     pub account_factory: Arc<AccountProviderFactory>,
@@ -163,6 +166,7 @@ impl AdmissionInputBuilder {
         let fetched = self
             .fetch_parallel_sources(&recommendation, intent, budget_total_usd, now)
             .await?;
+        let execution_economics = Self::resolve_execution_economics(&fetched, now)?;
         let model_version =
             fetched
                 .model_version
@@ -221,18 +225,21 @@ impl AdmissionInputBuilder {
                 detail: error.to_string(),
             }
         })?;
+        let fee_schedule = execution_economics.fee_schedule;
+        let maker_rebate_evidence = execution_economics.maker_rebate_evidence;
         let state_version = StateVersion {
             config_version_id: fetched.active_version.decision_policy_snapshot_id,
             account_as_of: fetched.account.as_of,
             book_version: book.as_ref().map(|snapshot| snapshot.version),
             book_as_of_ms: book.as_ref().map(|snapshot| snapshot.timestamp_ms),
+            fee_schedule_hash: fee_schedule.schedule_hash,
+            maker_rebate_terms_hash: maker_rebate_evidence.terms_hash(),
+            maker_rebate_decidable: maker_rebate_evidence.is_decidable(),
             kill_switch_state: kill_switch,
             settlement_write_policy: controls.settlement_write_policy,
             settlement_deployment_digest: settlement_recovery.deployment_digest(),
             settlement_verified_block_hash: settlement_recovery.verified_block_hash(),
         };
-        let fee_schedule = pit_fee_schedule(&fetched.clob_market_info, now)?;
-
         Ok(AdmissionInput {
             profile_ref,
             intent: intent.clone(),
@@ -245,6 +252,7 @@ impl AdmissionInputBuilder {
             allocation: fetched.allocation,
             book,
             fee_schedule,
+            maker_rebate_evidence,
             budget_total_usd,
             open_intent_count: fetched.open_intent_count,
             max_open_intents,
@@ -266,6 +274,29 @@ impl AdmissionInputBuilder {
         })
     }
 
+    fn resolve_execution_economics(
+        fetched: &ParallelAdmissionFetch,
+        now: DateTime<Utc>,
+    ) -> QuantResult<PitMarketExecutionEconomics> {
+        let catalog_market = fetched.catalog_market.verified_payload().map_err(|error| {
+            ExecutionError::IntentDenied {
+                reason: format!("current Gamma catalog evidence is invalid: {error}"),
+            }
+        })?;
+        PitMarketExecutionEconomics::resolve(
+            &fetched.clob_market_info.fee_schedule(),
+            &catalog_market.maker_rebate_evidence,
+            fetched.catalog_market.available_at,
+            now,
+        )
+        .map_err(|error| {
+            ExecutionError::IntentDenied {
+                reason: format!("current execution economics are invalid: {error:?}"),
+            }
+            .into()
+        })
+    }
+
     async fn fetch_parallel_sources(
         &self,
         recommendation: &RecommendationInfo,
@@ -281,6 +312,7 @@ impl AdmissionInputBuilder {
         let account_factory = Arc::clone(&deps.account_factory);
         let clob = Arc::clone(&deps.clob);
         let token_id = intent.entry_order_json.token_id.clone();
+        let catalog_boundary = DecisionClock::new(0).boundary(now)?;
 
         let (
             report_result,
@@ -294,6 +326,7 @@ impl AdmissionInputBuilder {
             clob_market_info_result,
             open_intent_result,
             venue_metadata_result,
+            catalog_market_result,
         ) = tokio::join!(
             deps.reports.find_by_id(&report_id),
             deps.model_registry.find_model_version(&model_version_id),
@@ -311,6 +344,7 @@ impl AdmissionInputBuilder {
             deps.clob_market_info.at(&market_id, now, now),
             deps.intents.count_open(),
             async move { clob.order_metadata(&token_id).await },
+            deps.catalog_ledger.market_at(&market_id, &catalog_boundary),
         );
 
         let report = report_result?
@@ -326,6 +360,10 @@ impl AdmissionInputBuilder {
         let clob_market_info_hash = clob_market_info.payload_hash;
         let active_version = active_version_result?
             .ok_or_else(|| not_found("decision_policy_snapshot", "current".to_owned()))?;
+        let catalog_market =
+            catalog_market_result?.ok_or_else(|| ExecutionError::IntentDenied {
+                reason: "no current Gamma catalog evidence is available".to_owned(),
+            })?;
 
         Ok(ParallelAdmissionFetch {
             report,
@@ -344,6 +382,7 @@ impl AdmissionInputBuilder {
                 venue_neg_risk: venue_metadata.neg_risk,
                 clob_market_info_hash,
             },
+            catalog_market,
         })
     }
 
@@ -399,6 +438,7 @@ struct ParallelAdmissionFetch {
     active_version: DecisionPolicySnapshotInfo,
     open_intent_count: u64,
     venue_metadata: AdmissionVenueMetadata,
+    catalog_market: CatalogMarketChangeInfo,
 }
 
 pub fn pit_fee_schedule(

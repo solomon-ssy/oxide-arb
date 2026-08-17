@@ -438,40 +438,6 @@
         "insufficient_count"
       ]
     },
-    "DeferredVenueIncentive": {
-      "description": "Delayed venue incentive estimated from one actual or simulated maker fill.\n\nThis is deliberately not a fee and never changes immediate cash outlay,\nhard reservation, maximum loss, or spendable balance.",
-      "type": "object",
-      "properties": {
-        "eligibility": {
-          "$ref": "#/$defs/MakerRebateEligibility"
-        },
-        "expected_credit_at": {
-          "description": "Modeling assumption for discounting, never evidence of wallet credit.",
-          "type": "string",
-          "format": "date-time"
-        },
-        "expected_rebate_usd": {
-          "$ref": "#/$defs/Usd"
-        },
-        "program_date": {
-          "description": "UTC program day containing the maker fill.",
-          "type": "string",
-          "format": "date"
-        },
-        "source_schedule_hash": {
-          "type": "string",
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "expected_rebate_usd",
-        "program_date",
-        "expected_credit_at",
-        "source_schedule_hash",
-        "eligibility"
-      ]
-    },
     "EligibilitySummary": {
       "description": "Execution-eligibility roll-up across published recommendations.",
       "type": "object",
@@ -712,7 +678,7 @@
           "description": "Deterministic aggressive entry after a real L2 walk and venue rounding.",
           "type": "object",
           "properties": {
-            "entry_vwap": {
+            "execution_vwap": {
               "$ref": "#/$defs/Price"
             },
             "filled_shares": {
@@ -744,7 +710,7 @@
             "requested_shares",
             "filled_shares",
             "limit_price",
-            "entry_vwap",
+            "execution_vwap",
             "immediate_cost",
             "slippage_usd",
             "visible_liquidity_usd"
@@ -761,7 +727,7 @@
             "expected_filled_shares": {
               "$ref": "#/$defs/Shares"
             },
-            "expected_maker_rebate_usd": {
+            "expected_maker_rebate_accrual_usd": {
               "$ref": "#/$defs/Usd"
             },
             "fill_distribution": {
@@ -770,15 +736,8 @@
             "full_fill_cost": {
               "$ref": "#/$defs/ImmediateExecutionCost"
             },
-            "full_fill_maker_rebate": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/DeferredVenueIncentive"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+            "full_fill_maker_rebate_accrual_usd": {
+              "$ref": "#/$defs/Usd"
             },
             "good_til_secs": {
               "type": "integer",
@@ -795,16 +754,18 @@
             "limit_price": {
               "$ref": "#/$defs/Price"
             },
-            "maker_rebate_schedule": {
-              "description": "Gamma terms frozen at the decision boundary. `None` means rebate was\nunavailable and the route was valued with a strict zero incentive.",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/FrozenMakerRebateSchedule"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+            "maker_rebate_objective_status": {
+              "$ref": "#/$defs/MakerRebateObjectiveStatus"
+            },
+            "maker_rebate_terms": {
+              "description": "Required, route-aware Gamma program truth frozen at decision time.",
+              "$ref": "#/$defs/EntryMakerRebateTerms"
+            },
+            "maker_rebate_valuation": {
+              "$ref": "#/$defs/MakerRebateValuationEvidence"
+            },
+            "objective_maker_rebate_usd": {
+              "$ref": "#/$defs/Usd"
             },
             "requested_shares": {
               "$ref": "#/$defs/Shares"
@@ -824,8 +785,71 @@
             "expected_filled_shares",
             "full_fill_cost",
             "fill_distribution",
-            "expected_maker_rebate_usd",
+            "maker_rebate_terms",
+            "full_fill_maker_rebate_accrual_usd",
+            "expected_maker_rebate_accrual_usd",
+            "objective_maker_rebate_usd",
+            "maker_rebate_objective_status",
+            "maker_rebate_valuation",
             "visible_liquidity_usd"
+          ]
+        }
+      ]
+    },
+    "EntryMakerRebateTerms": {
+      "description": "Route-aware maker-rebate contract frozen at recommendation and intent time.\n\nThis sum type makes route applicability and a confirmed no-program state\nexplicit; neither is represented by an ambiguous `None` or numeric zero.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "aggressive_not_applicable"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "available_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "state": {
+              "type": "string",
+              "const": "passive_no_program"
+            },
+            "terms_hash": {
+              "type": "string",
+              "pattern": "^blake3:[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "terms_hash",
+            "available_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schedule": {
+              "$ref": "#/$defs/FrozenMakerRebateSchedule"
+            },
+            "state": {
+              "type": "string",
+              "const": "passive_program"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "schedule"
           ]
         }
       ]
@@ -889,16 +913,9 @@
           "description": "Hard limit price for the order.",
           "$ref": "#/$defs/Price"
         },
-        "maker_rebate_schedule": {
-          "description": "Frozen independently sourced maker-rebate terms. Only a passive,\npost-only entry may carry this evidence.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FrozenMakerRebateSchedule"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "maker_rebate_terms": {
+          "description": "Required route applicability and independently sourced Gamma terms.",
+          "$ref": "#/$defs/EntryMakerRebateTerms"
         },
         "max_slippage_bps": {
           "description": "Maximum tolerated slippage from the reference price.",
@@ -934,6 +951,7 @@
         "post_only",
         "limit_price",
         "amount",
+        "maker_rebate_terms",
         "max_slippage_bps",
         "valid_until"
       ]
@@ -1960,19 +1978,8 @@
           "type": "string",
           "format": "date-time"
         },
-        "catalog_change_hash": {
-          "type": "string",
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "effective_at": {
-          "type": "string",
-          "format": "date-time"
-        },
         "exponent": {
           "type": "string"
-        },
-        "fees_enabled": {
-          "type": "boolean"
         },
         "platform_rate": {
           "type": "string"
@@ -1980,21 +1987,18 @@
         "rebate_rate": {
           "type": "string"
         },
-        "schedule_hash": {
-          "type": "string",
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        },
         "taker_only": {
           "type": "boolean"
+        },
+        "terms_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
         }
       },
       "additionalProperties": false,
       "required": [
-        "schedule_hash",
-        "catalog_change_hash",
-        "effective_at",
+        "terms_hash",
         "available_at",
-        "fees_enabled",
         "platform_rate",
         "exponent",
         "taker_only",
@@ -2105,13 +2109,14 @@
           "type": "string",
           "format": "date-time"
         },
-        "award_to_credit_delta_usd": {
-          "$ref": "#/$defs/Usd"
+        "below_payout_threshold_program_dates": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "date"
+          }
         },
-        "below_payout_threshold": {
-          "type": "boolean"
-        },
-        "estimate_to_award_delta_usd": {
+        "estimate_to_reported_delta_usd": {
           "$ref": "#/$defs/Usd"
         },
         "estimated_maker_accrual_usd": {
@@ -2139,10 +2144,20 @@
           ],
           "format": "date"
         },
+        "overdue_program_dates": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "date"
+          }
+        },
         "payout_threshold_usd": {
           "$ref": "#/$defs/Usd"
         },
-        "venue_awarded_maker_usd": {
+        "reported_to_credit_delta_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "venue_reported_maker_accrual_usd": {
           "$ref": "#/$defs/Usd"
         },
         "wallet_credited_maker_usd": {
@@ -2155,15 +2170,16 @@
       "required": [
         "as_of",
         "estimated_maker_accrual_usd",
-        "venue_awarded_maker_usd",
+        "venue_reported_maker_accrual_usd",
         "wallet_credited_maker_usd",
         "wallet_credited_taker_usd",
-        "estimate_to_award_delta_usd",
-        "award_to_credit_delta_usd",
+        "estimate_to_reported_delta_usd",
+        "reported_to_credit_delta_usd",
         "incomplete_day_count",
         "health",
         "payout_threshold_usd",
-        "below_payout_threshold"
+        "below_payout_threshold_program_dates",
+        "overdue_program_dates"
       ]
     },
     "IneligibilityReason": {
@@ -2234,14 +2250,206 @@
         "exposures"
       ]
     },
-    "MakerRebateEligibility": {
-      "description": "Eligibility state frozen into a maker-rebate accrual estimate.",
+    "MakerRebateDelayBasis": {
+      "description": "Frozen payout-lag evidence. Lag is measured from the close of the maker\nfill's UTC program day, never from a later API observation timestamp.",
       "oneOf": [
         {
-          "description": "A confirmed maker fill is covered by the visible Gamma schedule.",
-          "type": "string",
-          "const": "eligible_maker_fill"
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "conservative_fallback"
+            },
+            "lag_from_program_close_secs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "lag_from_program_close_secs"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "complete_program_days": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "observed_p95"
+            },
+            "lag_from_program_close_secs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "lag_from_program_close_secs",
+            "complete_program_days"
+          ]
         }
+      ]
+    },
+    "MakerRebateObjectiveStatus": {
+      "description": "Operator-facing status of a recommendation's maker-rebate objective.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "not_applicable"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "no_program"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/MakerRebateObjectiveZeroReason"
+            },
+            "state": {
+              "type": "string",
+              "const": "zero"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "credited_probability_bps": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "state": {
+              "type": "string",
+              "const": "scenario_weighted"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "credited_probability_bps"
+          ]
+        }
+      ]
+    },
+    "MakerRebateObjectiveZeroReason": {
+      "description": "Typed reason why nominal maker accrual receives zero objective credit.",
+      "type": "string",
+      "enum": [
+        "below_payout_threshold",
+        "reconciliation_stale",
+        "reconciliation_incomplete",
+        "reconciliation_unavailable"
+      ]
+    },
+    "MakerRebateProgramDayBaseline": {
+      "description": "Confirmed local maker-fill accrual already accumulated on one UTC program\nday before the current report's hypothetical fills are added.",
+      "type": "object",
+      "properties": {
+        "confirmed_accrual_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "program_date": {
+          "type": "string",
+          "format": "date"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "program_date",
+        "confirmed_accrual_usd"
+      ]
+    },
+    "MakerRebateScenarioCreditStatus": {
+      "description": "Day-local payout eligibility for one promoted joint scenario.",
+      "type": "string",
+      "enum": [
+        "not_applicable",
+        "no_accrual",
+        "below_daily_threshold",
+        "credited"
+      ]
+    },
+    "MakerRebateValuationEvidence": {
+      "description": "Frozen account-level evidence used by all passive tiers in one report.",
+      "type": "object",
+      "properties": {
+        "as_of": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "delay_basis": {
+          "$ref": "#/$defs/MakerRebateDelayBasis"
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "health": {
+          "$ref": "#/$defs/MakerRebateValuationHealth"
+        },
+        "payout_threshold_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "program_day_baselines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MakerRebateProgramDayBaseline"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "as_of",
+        "health",
+        "program_day_baselines",
+        "payout_threshold_usd",
+        "delay_basis",
+        "evidence_hash"
+      ]
+    },
+    "MakerRebateValuationHealth": {
+      "description": "Point-in-time health of the account evidence required to value an\nunreceived maker rebate in the expected objective.",
+      "type": "string",
+      "enum": [
+        "healthy",
+        "stale",
+        "incomplete",
+        "unavailable"
       ]
     },
     "MarketCategory": {
@@ -4648,13 +4856,7 @@
             "$ref": "#/$defs/ScenarioCapitalOccupancySlice"
           }
         },
-        "delayed_maker_rebate_usd": {
-          "$ref": "#/$defs/Usd"
-        },
         "discounted_exit_cash_usd": {
-          "$ref": "#/$defs/Usd"
-        },
-        "discounted_maker_rebate_usd": {
           "$ref": "#/$defs/Usd"
         },
         "discounted_net_usd": {
@@ -4667,6 +4869,35 @@
           "$ref": "#/$defs/Shares"
         },
         "immediate_cash_outlay_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "maker_rebate_accrual_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "maker_rebate_credit_status": {
+          "$ref": "#/$defs/MakerRebateScenarioCreditStatus"
+        },
+        "maker_rebate_expected_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "maker_rebate_program_date": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "maker_rebate_program_day_baseline_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "maker_rebate_program_day_total_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "objective_maker_rebate_usd": {
           "$ref": "#/$defs/Usd"
         },
         "risk_net_usd": {
@@ -4686,8 +4917,11 @@
         "filled_shares",
         "immediate_cash_outlay_usd",
         "discounted_exit_cash_usd",
-        "delayed_maker_rebate_usd",
-        "discounted_maker_rebate_usd",
+        "maker_rebate_accrual_usd",
+        "objective_maker_rebate_usd",
+        "maker_rebate_program_day_baseline_usd",
+        "maker_rebate_program_day_total_usd",
+        "maker_rebate_credit_status",
         "capital_cost_usd",
         "capital_occupancy",
         "discounted_net_usd",
@@ -4730,7 +4964,7 @@
           "description": "OOS expected fill quantity; equals requested shares for aggressive entry.",
           "$ref": "#/$defs/Shares"
         },
-        "expected_maker_rebate_usd": {
+        "expected_maker_rebate_accrual_usd": {
           "description": "Delayed maker incentive expectation; never spendable cash.",
           "$ref": "#/$defs/Usd"
         },
@@ -4742,24 +4976,41 @@
           "description": "Immediate full-fill venue and builder fee.",
           "$ref": "#/$defs/Usd"
         },
-        "maker_rebate_schedule": {
-          "description": "Independent Gamma terms frozen for later maker-fill accrual. `None`\nmeans the tier was valued with zero rebate.",
+        "maker_rebate_objective_status": {
+          "$ref": "#/$defs/MakerRebateObjectiveStatus"
+        },
+        "maker_rebate_terms": {
+          "description": "Required route applicability and independent Gamma terms.",
+          "$ref": "#/$defs/EntryMakerRebateTerms"
+        },
+        "market_exposure_after_usd": {
+          "description": "Projected market exposure after this allocation.",
+          "$ref": "#/$defs/Usd"
+        },
+        "objective_maker_rebate_usd": {
+          "description": "Threshold-aware discounted amount admitted to the expected objective.",
+          "$ref": "#/$defs/Usd"
+        },
+        "portfolio_weight_pct": {
+          "description": "Suggested allocation as a fraction of the capital base.",
+          "type": "string"
+        },
+        "rebate_delay_basis": {
           "anyOf": [
             {
-              "$ref": "#/$defs/FrozenMakerRebateSchedule"
+              "$ref": "#/$defs/MakerRebateDelayBasis"
             },
             {
               "type": "null"
             }
           ]
         },
-        "market_exposure_after_usd": {
-          "description": "Projected market exposure after this allocation.",
-          "$ref": "#/$defs/Usd"
-        },
-        "portfolio_weight_pct": {
-          "description": "Suggested allocation as a fraction of the capital base.",
-          "type": "string"
+        "rebate_valuation_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^blake3:[0-9a-f]{64}$"
         },
         "reference_entry_price": {
           "description": "Aggressive executable VWAP or passive post-only limit price.",
@@ -4784,7 +5035,10 @@
         "expected_filled_shares",
         "hard_reserved_cash_usd",
         "immediate_fee_usd",
-        "expected_maker_rebate_usd",
+        "expected_maker_rebate_accrual_usd",
+        "objective_maker_rebate_usd",
+        "maker_rebate_objective_status",
+        "maker_rebate_terms",
         "reference_entry_price",
         "portfolio_weight_pct",
         "market_exposure_after_usd",
@@ -5074,7 +5328,7 @@
         "source_partition": {
           "type": "string"
         },
-        "source_schedule_hash": {
+        "source_terms_hash": {
           "type": [
             "string",
             "null"
@@ -5121,7 +5375,7 @@
       "type": "string",
       "enum": [
         "estimated_accrual",
-        "venue_awarded",
+        "venue_reported_accrual",
         "wallet_credited"
       ]
     },

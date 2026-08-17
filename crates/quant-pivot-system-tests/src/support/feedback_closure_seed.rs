@@ -55,7 +55,8 @@ use quant_pivot_models::{
         },
         market::{
             BookLevel, CATALOG_OBJECT_HASH_VERSION, CATALOG_OBJECT_SCHEMA_VERSION,
-            EventRegistryInfo, EventTags, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
+            EventRegistryInfo, EventTags, MakerRebateField, MakerRebateUnavailableReason,
+            MarketMakerRebateEvidence, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
         },
         ports::{
             FeedbackRecipeCalibrationSpec, FeedbackRecipeCpcvSpec, FeedbackRecipeDiagnosticSpec,
@@ -954,6 +955,17 @@ impl ClosureCatalogMarketBuild<'_> {
             );
         }
         let (question, description) = closure_market_text(self.scope, ordinal)?;
+        let maker_terms_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/gamma-maker-rebate-terms",
+            3,
+            &(
+                Option::<bool>::None,
+                Option::<Decimal>::None,
+                Option::<Decimal>::None,
+                Option::<bool>::None,
+                Option::<Decimal>::None,
+            ),
+        )?;
         let info = MarketRegistryInfo {
             market_id: market_id.clone(),
             event_id: self.event_id.clone(),
@@ -988,7 +1000,12 @@ impl ClosureCatalogMarketBuild<'_> {
             min_order_size: dec!(1),
             liquidity_usd: Some(metrics.visible_liquidity_usd),
             volume_24h: Some(Usd::new(dec!(10000))),
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::Unavailable {
+                reason: MakerRebateUnavailableReason::FeesFlagMissing,
+                missing_fields: vec![MakerRebateField::FeesEnabled],
+                invalid_fields: Vec::new(),
+                terms_hash: maker_terms_hash,
+            },
             start_date: Some(self.market_created_at),
             end_date: Some(resolution_at),
             resolved_at: None,

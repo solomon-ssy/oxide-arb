@@ -19,7 +19,7 @@ pub struct Model {
     pub program_date: Date,
     pub amount_usd: Decimal,
     #[sea_orm(column_type = "Text", nullable)]
-    pub source_schedule_hash: Option<String>,
+    pub source_terms_hash: Option<String>,
     #[sea_orm(column_type = "Text")]
     pub source_partition: String,
     #[sea_orm(column_type = "Text", unique)]

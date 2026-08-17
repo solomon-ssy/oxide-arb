@@ -45,8 +45,8 @@ use quant_pivot_models::{
         settlement::SettlementRoute,
     },
     types::{
-        CapitalAllocationId, ContentHash, EntryConditionInstanceId, EntryOrderPolicy,
-        EntryOrderSpec, ExecutionAccountId, ExitPolicySpec, ModelVersionId,
+        CapitalAllocationId, ContentHash, EntryConditionInstanceId, EntryMakerRebateTerms,
+        EntryOrderPolicy, EntryOrderSpec, ExecutionAccountId, ExitPolicySpec, ModelVersionId,
         OperationDetailDocument, OperationLogId, OrderAmount, OrderIntentId, Price, Probability,
         RecommendationExitPlan, RecommendationId, RecommendationReportId, ResearchProfileRef,
         ServingAuthority, Usd,
@@ -807,19 +807,24 @@ fn project_entry_order_spec(
     const GTD_SECURITY_BUFFER_SECS: i64 = 60;
     let entry_plan = &rec.trade_plan.entry;
     let sizing = &rec.trade_plan.sizing;
-    if sizing.maker_rebate_schedule.is_some()
-        && !matches!(entry_plan.order_policy, EntryOrderPolicy::Passive { .. })
-    {
-        return Err(ExecutionError::IntentDenied {
-            reason: "aggressive entry cannot carry maker-rebate terms".to_owned(),
-        });
-    }
-    if let Some(schedule) = sizing.maker_rebate_schedule {
-        schedule
-            .validate_at(entry_plan.valid_from)
-            .map_err(|detail| ExecutionError::IntentDenied {
-                reason: detail.to_owned(),
-            })?;
+    match (&entry_plan.order_policy, sizing.maker_rebate_terms) {
+        (EntryOrderPolicy::Aggressive { .. }, EntryMakerRebateTerms::AggressiveNotApplicable) => {}
+        (
+            EntryOrderPolicy::Passive { .. },
+            EntryMakerRebateTerms::PassiveNoProgram { available_at, .. },
+        ) if available_at <= entry_plan.valid_from => {}
+        (EntryOrderPolicy::Passive { .. }, EntryMakerRebateTerms::PassiveProgram { schedule }) => {
+            schedule
+                .validate_at(entry_plan.valid_from)
+                .map_err(|detail| ExecutionError::IntentDenied {
+                    reason: detail.to_owned(),
+                })?;
+        }
+        _ => {
+            return Err(ExecutionError::IntentDenied {
+                reason: "entry route and maker-rebate terms are inconsistent".to_owned(),
+            });
+        }
     }
     let (limit_price, order_type, amount, post_only) = match entry_plan.order_policy {
         EntryOrderPolicy::Aggressive {
@@ -882,7 +887,7 @@ fn project_entry_order_spec(
         post_only,
         limit_price,
         amount,
-        maker_rebate_schedule: sizing.maker_rebate_schedule,
+        maker_rebate_terms: sizing.maker_rebate_terms,
         max_slippage_bps: entry_plan.max_slippage_bps,
         valid_until: entry_plan.valid_until,
     })
@@ -1047,10 +1052,11 @@ mod tests {
             settlement::SettlementRoute,
         },
         types::{
-            Bps, ContentHash, DecisionPolicySnapshotId, EntryOrderPolicy, EntryOrderSpec,
-            EntryPlan, EvmAddress, EvmBlockHash, ExitPlan, OrderAmount, OrderIntentId, Price,
-            RecommendationExitPlan, RecommendationId, RecommendationReportId, RiskEnvelope,
-            RoleCode, Shares, SizingPlan, TokenId, Usd, UserId,
+            Bps, ContentHash, DecisionPolicySnapshotId, EntryMakerRebateTerms, EntryOrderPolicy,
+            EntryOrderSpec, EntryPlan, EvmAddress, EvmBlockHash, ExitPlan,
+            MakerRebateObjectiveStatus, OrderAmount, OrderIntentId, Price, RecommendationExitPlan,
+            RecommendationId, RecommendationReportId, RiskEnvelope, RoleCode, Shares, SizingPlan,
+            TokenId, Usd, UserId,
         },
     };
     use rust_decimal_macros::dec;
@@ -1089,7 +1095,7 @@ mod tests {
             post_only: false,
             limit_price: Price::new(dec!(0.60)),
             amount: OrderAmount::Shares(Shares::new(dec!(100))),
-            maker_rebate_schedule: None,
+            maker_rebate_terms: EntryMakerRebateTerms::AggressiveNotApplicable,
             max_slippage_bps: Bps::new(dec!(50)),
             valid_until: Utc::now(),
         }
@@ -1200,6 +1206,11 @@ mod tests {
             worst_price: Price::new(dec!(0.60)),
             fill_requirement: FillRequirement::AllOrNothing,
         };
+        rec.trade_plan.sizing.maker_rebate_terms = EntryMakerRebateTerms::AggressiveNotApplicable;
+        rec.trade_plan.sizing.maker_rebate_objective_status =
+            MakerRebateObjectiveStatus::NotApplicable;
+        rec.trade_plan.sizing.rebate_delay_basis = None;
+        rec.trade_plan.sizing.rebate_valuation_hash = None;
         let spec = project_entry_order_spec(&rec, Utc::now()).expect("projection");
         assert_eq!(spec.order_type, OrderType::Fok);
         assert!(!spec.post_only);
@@ -1216,6 +1227,11 @@ mod tests {
             worst_price: Price::new(dec!(0.60)),
             fill_requirement: FillRequirement::AllowPartial,
         };
+        rec.trade_plan.sizing.maker_rebate_terms = EntryMakerRebateTerms::AggressiveNotApplicable;
+        rec.trade_plan.sizing.maker_rebate_objective_status =
+            MakerRebateObjectiveStatus::NotApplicable;
+        rec.trade_plan.sizing.rebate_delay_basis = None;
+        rec.trade_plan.sizing.rebate_valuation_hash = None;
         let spec = project_entry_order_spec(&rec, Utc::now()).expect("projection");
         assert_eq!(spec.order_type, OrderType::Fak);
         assert!(!spec.post_only);

@@ -292,9 +292,9 @@ mod tests {
         domain::{
             data_plane::DecisionClock,
             market::{
-                CATALOG_OBJECT_SCHEMA_VERSION, CatalogEventChangeInfo, CatalogMarketChangeInfo,
-                CatalogWindowInfo, EventRegistryInfo, book::BookLevel,
-                registry::MarketRegistryInfo,
+                CATALOG_OBJECT_HASH_VERSION, CATALOG_OBJECT_SCHEMA_VERSION, CatalogEventChangeInfo,
+                CatalogMarketChangeInfo, CatalogWindowInfo, EventRegistryInfo, book::BookLevel,
+                fee::MarketMakerRebateEvidence, registry::MarketRegistryInfo,
             },
         },
         enums::{
@@ -306,8 +306,8 @@ mod tests {
         types::{
             CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId,
             CatalogMarketObjectId, CatalogSyncBatchId, ClobFeeDetails, ClobMarketInfoVersion,
-            ClobMarketInfoVersionId, ClobTokenDescriptor, ContentHash, EventId, MarketId, Price,
-            Shares, TokenId,
+            ClobMarketInfoVersionId, ClobTokenDescriptor, EventId, MarketId, Price, Shares,
+            TokenId,
         },
     };
     use rust_decimal::Decimal;
@@ -337,10 +337,6 @@ mod tests {
             source_event: None,
             available_at: timestamp,
         }
-    }
-
-    fn hash(seed: char) -> ContentHash {
-        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
     }
 
     fn market_info(
@@ -405,7 +401,12 @@ mod tests {
             created_at: event_time,
             updated_at: event_time,
         };
-        let event_hash = hash('e');
+        let event_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/catalog-event-object",
+            CATALOG_OBJECT_HASH_VERSION,
+            &event,
+        )
+        .expect("event hash");
         let event_version = CatalogEventChangeInfo {
             event_change_id: event_version_id,
             catalog_sync_batch_id: batch_id,
@@ -444,18 +445,19 @@ mod tests {
                     min_order_size: Decimal::ONE,
                     liquidity_usd: None,
                     volume_24h: None,
-                    maker_rebate_schedule: None,
+                    maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
                     start_date: None,
                     end_date: None,
                     resolved_at: None,
                     created_at: Some(event_time),
                     updated_at: *at,
                 };
-                let market_hash = hash(if *status == MarketStatus::Active {
-                    'a'
-                } else {
-                    'b'
-                });
+                let market_hash = CanonicalDigest::content_hash_typed(
+                    "quant-pivot/catalog-market-object",
+                    CATALOG_OBJECT_HASH_VERSION,
+                    &market,
+                )
+                .expect("market hash");
                 CatalogMarketChangeInfo {
                     market_change_id: CatalogMarketChangeId::from_v7(),
                     catalog_sync_batch_id: batch_id,
@@ -583,6 +585,24 @@ mod tests {
                 .expect("market")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_v2_catalog() {
+        let market_id = MarketId::new("v2-market");
+        let at = Utc.timestamp_millis_opt(1_000).single().expect("ts");
+        let mut catalog = catalog_window(&market_id, &[(at, MarketStatus::Active)]);
+        catalog.market_changes[0].schema_version = 2;
+        let engine =
+            MaterializedPitEngine::new(HashMap::new(), catalog, Vec::new(), Duration::seconds(60))
+                .expect("engine");
+        let boundary = DecisionClock::new(0).boundary(at).expect("boundary");
+
+        let error = engine
+            .market_snapshot_at(&market_id, &boundary)
+            .await
+            .expect_err("v2 catalog objects must be rejected");
+        assert!(error.to_string().contains("schema 2 is unsupported"));
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ use quant_pivot_models::{
         data_plane::{CryptoPriceReport, DecisionClock, DecisionSource, DomainObservation},
         market::{
             book::BookLevel,
+            fee::MarketMakerRebateEvidence,
             registry::{MarketRegistryInfo, TokenInfo},
         },
         quant::{
@@ -244,7 +245,7 @@ fn domain_test_registry(
         min_order_size: dec!(1),
         liquidity_usd: Some(Usd::new(dec!(100))),
         volume_24h: None,
-        maker_rebate_schedule: None,
+        maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         start_date: context.start_date,
         end_date: context.end_date,
         resolved_at: None,
@@ -273,7 +274,7 @@ fn build_domain_test_vector(
         end_date: Some(as_of + Duration::days(1)),
         created_at: Some(as_of - Duration::days(1)),
         fee_schedule: None,
-        maker_rebate_schedule: None,
+        maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
     };
     let registry = domain_test_registry(&market, &market_ctx, cutoff);
     let lag_secs = u64::try_from((as_of - cutoff).num_seconds()).map_err(|error| {

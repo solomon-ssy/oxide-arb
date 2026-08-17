@@ -917,7 +917,7 @@ impl PolicyEvidenceFixture {
                     executable_coverage: Decimal::ONE,
                     full_l2_coverage: Decimal::ONE,
                     fee_catalog_coverage: Decimal::ONE,
-                    rebate_evidence_coverage: Decimal::ONE,
+                    passive_rebate_evidence_coverage: Some(Decimal::ONE),
                     ambiguous_touch_rate: Decimal::ZERO,
                     depth_failure_rate: Decimal::ZERO,
                     latency_stress_multiplier: Decimal::ONE,
@@ -1041,7 +1041,7 @@ impl PolicyEvidenceFixture {
                 depth_failure_rate: Some(Decimal::ZERO),
                 common_candidate_support: Some(Decimal::ONE),
                 fee_catalog_coverage: Some(Decimal::ONE),
-                rebate_evidence_coverage: Some(Decimal::ONE),
+                passive_rebate_evidence_coverage: Some(Decimal::ONE),
                 eligible_market_coverage: Some(Decimal::ONE),
             },
         })
@@ -1305,7 +1305,7 @@ fn fill_record(
             vwap: Some(Price::new(dec!(0.5))),
             gross_amount: Usd::new(dec!(5)),
             execution_fee_usd: Usd::ZERO,
-            expected_maker_rebate_usd: if passive {
+            expected_maker_rebate_accrual_usd: if passive {
                 Usd::new(dec!(0.01))
             } else {
                 Usd::ZERO
@@ -1313,7 +1313,7 @@ fn fill_record(
             risk_cash_delta: dec!(-5),
             fee_schedule_hash: Some(ResearchHasher::canonical(&"system-policy-fee-schedule-v1")?),
             maker_rebate_evidence: passive.then_some(TradePolicyMakerRebateEvidence::Available {
-                schedule_hash: rebate_schedule_hash,
+                terms_hash: rebate_schedule_hash,
             }),
             stream_session_id: Some(Uuid::nil()),
             token_sequence: Some(1),
@@ -1350,7 +1350,7 @@ fn candidate_trial_record(
             entry_filled_shares: Shares::new(dec!(10)),
             exited_shares: Shares::new(dec!(10)),
             execution_fee_usd: Usd::ZERO,
-            expected_maker_rebate_usd: if passive {
+            expected_maker_rebate_accrual_usd: if passive {
                 Usd::new(dec!(0.01))
             } else {
                 Usd::ZERO
@@ -1360,7 +1360,7 @@ fn candidate_trial_record(
             ambiguous_touch: false,
             full_l2_coverage: TradePolicyEvidenceCoverage::Covered,
             fee_coverage: TradePolicyEvidenceCoverage::Covered,
-            rebate_evidence_coverage: TradePolicyEvidenceCoverage::Covered,
+            passive_rebate_evidence_coverage: TradePolicyEvidenceCoverage::Covered,
             passive_reconciled_trade_coverage: passive
                 .then_some(TradePolicyEvidenceCoverage::Covered),
             gap: None,
@@ -1390,7 +1390,7 @@ fn cohort_trial_record(
             executable_coverage: Decimal::ONE,
             full_l2_coverage: Decimal::ONE,
             fee_catalog_coverage: Decimal::ONE,
-            rebate_evidence_coverage: Decimal::ONE,
+            passive_rebate_evidence_coverage: Some(Decimal::ONE),
             ambiguous_touch_rate: Decimal::ZERO,
             depth_failure_rate: Decimal::ZERO,
         },
@@ -1598,7 +1598,7 @@ fn policy_cohort(key: TradePolicyCohortKey) -> TradePolicyCohort {
         passive_reconciled_trade_coverage: None,
         passive_fill_distribution: None,
         fee_catalog_coverage: Decimal::ONE,
-        rebate_evidence_coverage: Decimal::ONE,
+        passive_rebate_evidence_coverage: Some(Decimal::ONE),
         cpcv_path_count: 21,
         trial_count: 1,
         deflated_sharpe_ratio: Decimal::ONE,

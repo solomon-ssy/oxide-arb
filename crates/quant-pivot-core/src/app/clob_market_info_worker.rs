@@ -9,12 +9,16 @@ use quant_pivot_repository::traits::{ClobMarketInfoRepository, MarketRepository}
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
+use crate::{execution::terms_drift_wake::TermsDriftWake, observability::metrics_hub::MetricsHub};
+
 const FETCH_CONCURRENCY: usize = 8;
 
 pub struct ClobMarketInfoWorker {
     clob: Arc<ClobClient>,
     markets: Arc<dyn MarketRepository>,
     observations: Arc<dyn ClobMarketInfoRepository>,
+    metrics: Arc<MetricsHub>,
+    terms_drift_wake: TermsDriftWake,
     refresh_interval: Duration,
 }
 
@@ -23,12 +27,16 @@ impl ClobMarketInfoWorker {
         clob: Arc<ClobClient>,
         markets: Arc<dyn MarketRepository>,
         observations: Arc<dyn ClobMarketInfoRepository>,
+        metrics: Arc<MetricsHub>,
+        terms_drift_wake: TermsDriftWake,
         refresh_interval: Duration,
     ) -> Self {
         Self {
             clob,
             markets,
             observations,
+            metrics,
+            terms_drift_wake,
             refresh_interval,
         }
     }
@@ -70,11 +78,16 @@ impl ClobMarketInfoWorker {
                 let observations = Arc::clone(&observations);
                 async move {
                     let observation = clob.clob_market_info_version(&market_id).await?;
+                    let changed = observations
+                        .latest(&market_id)
+                        .await
+                        .map_err(QuantError::from)?
+                        .is_none_or(|current| current.fee_schedule() != observation.fee_schedule());
                     observations
                         .insert_observation(observation)
                         .await
                         .map_err(QuantError::from)?;
-                    Ok::<_, QuantError>(market_id)
+                    Ok::<_, QuantError>((market_id, changed))
                 }
             })
             .buffer_unordered(FETCH_CONCURRENCY)
@@ -82,15 +95,30 @@ impl ClobMarketInfoWorker {
             .await;
         let mut succeeded = 0_u64;
         let mut failed = 0_u64;
+        let mut changed_market_ids = Vec::new();
         for result in results {
             match result {
-                Ok(_) => succeeded += 1,
+                Ok((market_id, changed)) => {
+                    succeeded += 1;
+                    if changed {
+                        changed_market_ids.push(market_id);
+                    }
+                }
                 Err(error) => {
                     failed += 1;
                     tracing::warn!(%error, "CLOB market-info observation failed");
                 }
             }
         }
+        let changed = u64::try_from(changed_market_ids.len()).unwrap_or(u64::MAX);
+        self.metrics
+            .record_maker_rebate_diagnostics("clob_terms_commit", "changed", changed);
+        self.metrics.record_maker_rebate_diagnostics(
+            "clob_terms_commit",
+            "unchanged",
+            succeeded.saturating_sub(changed),
+        );
+        self.terms_drift_wake.publish(changed_market_ids);
         tracing::info!(succeeded, failed, "CLOB market-info refresh complete");
     }
 }

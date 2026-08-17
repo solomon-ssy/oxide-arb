@@ -68,6 +68,9 @@ pub enum TradePolicyReplayGap {
     EntryDepthInsufficient,
     PassiveTradeCoverageUnavailable,
     PitFeeScheduleUnavailable,
+    PitMakerRebateUnavailable,
+    PassiveTermsDrift,
+    PassiveCancelFillRace,
     ExitBookUnavailable,
     ExitBookStale,
     ExitDepthInsufficient,
@@ -96,16 +99,24 @@ pub enum TradePolicyEvidenceFillOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradePolicyMakerRebateUnavailableReason {
-    NotListed,
     NotYetVisible,
+    FeesFlagMissing,
+    EnabledScheduleMissing,
+    ScheduleIncomplete,
+    InvalidSchedule,
+    DisabledSchedulePresent,
+    SourceMismatch,
 }
 
 /// Immutable maker-rebate lineage attached to a simulated maker fill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum TradePolicyMakerRebateEvidence {
+    NoProgram {
+        terms_hash: ContentHash,
+    },
     Available {
-        schedule_hash: ContentHash,
+        terms_hash: ContentHash,
     },
     Unavailable {
         reason: TradePolicyMakerRebateUnavailableReason,
@@ -167,7 +178,7 @@ pub struct TradePolicyFillEvidenceRow {
     pub vwap: Option<Price>,
     pub gross_amount: Usd,
     pub execution_fee_usd: Usd,
-    pub expected_maker_rebate_usd: Usd,
+    pub expected_maker_rebate_accrual_usd: Usd,
     pub risk_cash_delta: Decimal,
     pub fee_schedule_hash: Option<ContentHash>,
     pub maker_rebate_evidence: Option<TradePolicyMakerRebateEvidence>,
@@ -180,6 +191,7 @@ pub struct TradePolicyFillEvidenceRow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradePolicyEvidenceCoverage {
+    NotRequired,
     Covered,
     Missing,
 }
@@ -188,6 +200,11 @@ impl TradePolicyEvidenceCoverage {
     #[must_use]
     pub const fn is_covered(self) -> bool {
         matches!(self, Self::Covered)
+    }
+
+    #[must_use]
+    pub const fn is_applicable(self) -> bool {
+        !matches!(self, Self::NotRequired)
     }
 }
 
@@ -223,13 +240,13 @@ pub struct TradePolicyCandidateTrialRow {
     pub entry_filled_shares: Shares,
     pub exited_shares: Shares,
     pub execution_fee_usd: Usd,
-    pub expected_maker_rebate_usd: Usd,
+    pub expected_maker_rebate_accrual_usd: Usd,
     pub expected_net_return_bps: Option<Decimal>,
     pub risk_net_return_bps: Option<Decimal>,
     pub ambiguous_touch: bool,
     pub full_l2_coverage: TradePolicyEvidenceCoverage,
     pub fee_coverage: TradePolicyEvidenceCoverage,
-    pub rebate_evidence_coverage: TradePolicyEvidenceCoverage,
+    pub passive_rebate_evidence_coverage: TradePolicyEvidenceCoverage,
     pub passive_reconciled_trade_coverage: Option<TradePolicyEvidenceCoverage>,
     pub gap: Option<TradePolicyReplayGap>,
 }
@@ -250,7 +267,7 @@ pub struct TradePolicyCohortTrialRow {
     pub executable_coverage: Decimal,
     pub full_l2_coverage: Decimal,
     pub fee_catalog_coverage: Decimal,
-    pub rebate_evidence_coverage: Decimal,
+    pub passive_rebate_evidence_coverage: Option<Decimal>,
     pub ambiguous_touch_rate: Decimal,
     pub depth_failure_rate: Decimal,
 }

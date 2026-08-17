@@ -9,7 +9,7 @@ use quant_pivot_models::{
     },
     entities::quant_execution_order::{Column, Entity},
     enums::quant::ExecutionOrderState,
-    types::{ExecutionOrderId, OrderIntentId},
+    types::{ExecutionOrderId, MarketId, OrderIntentId},
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel,
@@ -88,6 +88,29 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
 
     async fn find_reconcilable(&self, limit: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
         Entity::find()
+            .filter(Column::State.is_in([
+                ExecutionOrderState::Submitted,
+                ExecutionOrderState::PartiallyFilled,
+                ExecutionOrderState::Ambiguous,
+            ]))
+            .order_by_asc(Column::SubmittedAt)
+            .limit(limit)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn find_reconcilable_for_markets(
+        &self,
+        market_ids: &[MarketId],
+        limit: u64,
+    ) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
+        if market_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Entity::find()
+            .filter(Column::MarketId.is_in(market_ids.iter().cloned()))
             .filter(Column::State.is_in([
                 ExecutionOrderState::Submitted,
                 ExecutionOrderState::PartiallyFilled,

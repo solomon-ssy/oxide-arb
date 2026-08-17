@@ -19,7 +19,7 @@ use quant_pivot_models::{
     domain::{
         data_plane::{DecisionClock, HistorySealChunkRef},
         market::{
-            EventRegistryInfo, MarketRegistryInfo, TokenInfo,
+            EventRegistryInfo, MarketMakerRebateEvidence, MarketRegistryInfo, TokenInfo,
             book::{BookLevel, BookSnapshot},
         },
     },
@@ -107,7 +107,7 @@ impl E2eCatalog {
             min_order_size: Decimal::ONE,
             liquidity_usd: Some(Usd::new(Decimal::from(20_000))),
             volume_24h: Some(Usd::new(Decimal::from(8_000))),
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
             start_date: Some(Utc::now()),
             end_date: Some(Utc::now() + Duration::days(7)),
             resolved_at: None,

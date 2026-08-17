@@ -1,19 +1,19 @@
 //! Venue-executable discrete economic tiers on a unified USD cash-flow scale.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::market::fee::{
-        DeferredVenueIncentive, FrozenMakerRebateSchedule, ImmediateExecutionCost,
-    },
+    domain::market::fee::ImmediateExecutionCost,
     enums::{common::MarketCategory, quant::OutcomeSide},
     runtime_config::BuyModelRoute,
     types::{
-        Bps, ContentHash, EconomicTierId, EventId, MarketId, Price, ReportRouteRunId, Shares,
-        SignalCandidateId, TokenId, Usd, UsdHours, trade_policy::PassiveFillDistribution,
+        Bps, ContentHash, EconomicTierId, EntryMakerRebateTerms, EventId,
+        MakerRebateObjectiveStatus, MakerRebateScenarioCreditStatus, MakerRebateValuationEvidence,
+        MarketId, Price, ReportRouteRunId, Shares, SignalCandidateId, TokenId, Usd, UsdHours,
+        trade_policy::PassiveFillDistribution,
     },
 };
 
@@ -24,7 +24,7 @@ pub struct AggressiveEntryEconomics {
     pub requested_shares: Shares,
     pub filled_shares: Shares,
     pub limit_price: Price,
-    pub entry_vwap: Price,
+    pub execution_vwap: Price,
     pub immediate_cost: ImmediateExecutionCost,
     pub slippage_usd: Usd,
     pub visible_liquidity_usd: Usd,
@@ -42,11 +42,13 @@ pub struct PassiveEntryEconomics {
     pub expected_filled_shares: Shares,
     pub full_fill_cost: ImmediateExecutionCost,
     pub fill_distribution: PassiveFillDistribution,
-    /// Gamma terms frozen at the decision boundary. `None` means rebate was
-    /// unavailable and the route was valued with a strict zero incentive.
-    pub maker_rebate_schedule: Option<FrozenMakerRebateSchedule>,
-    pub full_fill_maker_rebate: Option<DeferredVenueIncentive>,
-    pub expected_maker_rebate_usd: Usd,
+    /// Required, route-aware Gamma program truth frozen at decision time.
+    pub maker_rebate_terms: EntryMakerRebateTerms,
+    pub full_fill_maker_rebate_accrual_usd: Usd,
+    pub expected_maker_rebate_accrual_usd: Usd,
+    pub objective_maker_rebate_usd: Usd,
+    pub maker_rebate_objective_status: MakerRebateObjectiveStatus,
+    pub maker_rebate_valuation: MakerRebateValuationEvidence,
     pub visible_liquidity_usd: Usd,
 }
 
@@ -126,10 +128,18 @@ impl EntryExecutionEconomics {
     }
 
     #[must_use]
-    pub const fn expected_maker_rebate_usd(&self) -> Usd {
+    pub const fn maker_rebate_accrual_usd(&self) -> Usd {
         match self {
             Self::Aggressive(_) => Usd::ZERO,
-            Self::Passive(entry) => entry.expected_maker_rebate_usd,
+            Self::Passive(entry) => entry.expected_maker_rebate_accrual_usd,
+        }
+    }
+
+    #[must_use]
+    pub const fn objective_maker_rebate_usd(&self) -> Usd {
+        match self {
+            Self::Aggressive(_) => Usd::ZERO,
+            Self::Passive(entry) => entry.objective_maker_rebate_usd,
         }
     }
 
@@ -151,8 +161,13 @@ pub struct ScenarioExecutionCashflow {
     pub filled_shares: Shares,
     pub immediate_cash_outlay_usd: Usd,
     pub discounted_exit_cash_usd: Usd,
-    pub delayed_maker_rebate_usd: Usd,
-    pub discounted_maker_rebate_usd: Usd,
+    pub maker_rebate_accrual_usd: Usd,
+    pub objective_maker_rebate_usd: Usd,
+    pub maker_rebate_program_date: Option<NaiveDate>,
+    pub maker_rebate_program_day_baseline_usd: Usd,
+    pub maker_rebate_program_day_total_usd: Usd,
+    pub maker_rebate_credit_status: MakerRebateScenarioCreditStatus,
+    pub maker_rebate_expected_by: Option<DateTime<Utc>>,
     /// Pre-fill reservation opportunity cost. Post-fill capital cost is already
     /// represented by the scenario artifact's discounted exit cash.
     pub capital_cost_usd: Usd,

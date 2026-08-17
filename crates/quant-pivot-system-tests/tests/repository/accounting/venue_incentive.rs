@@ -4,7 +4,8 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::quant::venue_incentive::{
-        NewVenueIncentiveAwardSnapshot, NewVenueIncentiveEvent, NewVenueIncentiveReconciliationScan,
+        NewVenueIncentiveEvent, NewVenueIncentiveReconciliationScan,
+        NewVenueIncentiveReportedAccrualSnapshot,
     },
     enums::fee::{VenueIncentiveKind, VenueIncentiveReconciliationScanStatus, VenueIncentiveStage},
     types::{
@@ -71,7 +72,7 @@ pub async fn award_snapshots_revise_retract() {
     .await;
 
     repository
-        .apply_award_snapshot(award_snapshot(
+        .apply_reported_accrual_snapshot(award_snapshot(
             account_id,
             observed_at.date_naive(),
             revised_available_at,
@@ -98,12 +99,15 @@ pub async fn award_snapshots_revise_retract() {
         .reconciliation_cumulative(&account_id, revised_available_at)
         .await
         .expect("read revised reconciliation");
-    assert_eq!(after_revision.venue_awarded_maker_usd, Usd::new(dec!(2.25)));
+    assert_eq!(
+        after_revision.venue_reported_maker_accrual_usd,
+        Usd::new(dec!(2.25))
+    );
     assert_eq!(after_revision.wallet_credit_total(), Usd::ZERO);
 
     let deletion_at = revised_available_at + Duration::minutes(10);
     repository
-        .apply_award_snapshot(award_snapshot(
+        .apply_reported_accrual_snapshot(award_snapshot(
             account_id,
             observed_at.date_naive(),
             deletion_at,
@@ -129,13 +133,13 @@ pub async fn award_snapshots_revise_retract() {
             .reconciliation_cumulative(&account_id, deletion_at)
             .await
             .expect("read after deleted award partition")
-            .venue_awarded_maker_usd,
+            .venue_reported_maker_accrual_usd,
         Usd::new(dec!(1.50))
     );
 
     let empty_at = deletion_at + Duration::minutes(10);
     repository
-        .apply_award_snapshot(award_snapshot(
+        .apply_reported_accrual_snapshot(award_snapshot(
             account_id,
             observed_at.date_naive(),
             empty_at,
@@ -149,7 +153,7 @@ pub async fn award_snapshots_revise_retract() {
             .reconciliation_cumulative(&account_id, empty_at)
             .await
             .expect("read after empty award snapshot")
-            .venue_awarded_maker_usd,
+            .venue_reported_maker_accrual_usd,
         Usd::ZERO
     );
 }
@@ -158,22 +162,24 @@ async fn assert_snapshot_idempotency(
     repository: &PgVenueIncentiveRepository,
     account_id: ExecutionAccountId,
     program_date: NaiveDate,
-    initial: NewVenueIncentiveAwardSnapshot,
+    initial: NewVenueIncentiveReportedAccrualSnapshot,
     first_available_at: DateTime<Utc>,
     repeated_at: DateTime<Utc>,
 ) {
     repository
-        .apply_award_snapshot(initial.clone())
+        .apply_reported_accrual_snapshot(initial.clone())
         .await
         .expect("apply initial complete award snapshot");
     let mut conflicting_retry = initial.clone();
     conflicting_retry.awards[0].amount_usd = Usd::new(dec!(9.99));
     assert!(matches!(
-        repository.apply_award_snapshot(conflicting_retry).await,
+        repository
+            .apply_reported_accrual_snapshot(conflicting_retry)
+            .await,
         Err(StorageError::StateConflict { .. })
     ));
     repository
-        .apply_award_snapshot(initial.clone())
+        .apply_reported_accrual_snapshot(initial.clone())
         .await
         .expect("exact complete snapshot retry is idempotent");
 
@@ -187,9 +193,12 @@ async fn assert_snapshot_idempotency(
         award.available_at = repeated_at;
         award.venue_incentive_event_id = VenueIncentiveEventId::from_v7();
     }
-    repository.apply_award_snapshot(repeated).await.expect(
-        "same response at a later cadence refreshes scan health without duplicating economics",
-    );
+    repository
+        .apply_reported_accrual_snapshot(repeated)
+        .await
+        .expect(
+            "same response at a later cadence refreshes scan health without duplicating economics",
+        );
     let scans = repository
         .scans(&account_id, program_date, program_date)
         .await
@@ -209,7 +218,7 @@ async fn assert_snapshot_idempotency(
         .await
         .expect("read pre-revision reconciliation");
     assert_eq!(
-        before_revision.venue_awarded_maker_usd,
+        before_revision.venue_reported_maker_accrual_usd,
         Usd::new(dec!(2.00))
     );
 }
@@ -305,7 +314,7 @@ pub async fn wallet_credit_is_cash() {
         reconciliation.wallet_credited_taker_usd,
         Usd::new(dec!(0.40))
     );
-    assert_eq!(reconciliation.venue_awarded_maker_usd, Usd::ZERO);
+    assert_eq!(reconciliation.venue_reported_maker_accrual_usd, Usd::ZERO);
 }
 
 pub async fn conflicting_identity_rolls_back() {
@@ -364,10 +373,10 @@ impl MakerAwardFixture<'_> {
             execution_fill_id: None,
             market_id: Some(MarketId::new(self.market_id)),
             kind: VenueIncentiveKind::MakerRebate,
-            stage: VenueIncentiveStage::VenueAwarded,
+            stage: VenueIncentiveStage::VenueReportedAccrual,
             program_date: self.observed_at.date_naive(),
             amount_usd: Usd::new(self.amount),
-            source_schedule_hash: None,
+            source_terms_hash: None,
             source_partition: self.partition.to_owned(),
             source_identity: self.identity.to_owned(),
             transaction_hash: None,
@@ -396,7 +405,7 @@ fn wallet_credit(
         stage: VenueIncentiveStage::WalletCredited,
         program_date: observed_at.date_naive(),
         amount_usd: Usd::new(amount),
-        source_schedule_hash: None,
+        source_terms_hash: None,
         source_partition: source_identity.to_owned(),
         source_identity: source_identity.to_owned(),
         transaction_hash: Some(
@@ -415,13 +424,13 @@ fn award_snapshot(
     completed_at: DateTime<Utc>,
     awards: Vec<NewVenueIncentiveEvent>,
     hash_seed: char,
-) -> NewVenueIncentiveAwardSnapshot {
-    NewVenueIncentiveAwardSnapshot {
+) -> NewVenueIncentiveReportedAccrualSnapshot {
+    NewVenueIncentiveReportedAccrualSnapshot {
         scan: NewVenueIncentiveReconciliationScan {
             venue_incentive_reconciliation_scan_id: VenueIncentiveReconciliationScanId::from_v7(),
             execution_account_id,
             kind: VenueIncentiveKind::MakerRebate,
-            stage: VenueIncentiveStage::VenueAwarded,
+            stage: VenueIncentiveStage::VenueReportedAccrual,
             program_date,
             started_at: completed_at - Duration::seconds(1),
             completed_at,

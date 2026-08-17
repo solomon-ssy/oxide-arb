@@ -29,41 +29,11 @@ use uuid::Uuid;
 
 use crate::execution_semantics::{
     BookWalkFill, BookWalkOutcome, LiquidityRole, PassiveQueueState, PassiveTrade, PitFeeSchedule,
-    PitMakerRebateSchedule, walk_buy_cash_budget, walk_sell_exact_shares,
+    PitMakerRebateEvidence, walk_buy_cash_budget, walk_sell_exact_shares,
 };
 
 /// Versioned identity of the pure replay semantics sealed into evidence.
 pub const POLICY_REPLAY_KERNEL_VERSION: &str = "weather_candidate_replay_v2";
-
-/// Why a decision-time Gamma maker-rebate schedule was unavailable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MakerRebateUnavailableReason {
-    NotListed,
-    NotYetVisible,
-}
-
-/// Complete PIT maker-rebate evidence carried beside each replay observation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
-pub enum PitMakerRebateEvidence {
-    Available {
-        schedule_hash: ContentHash,
-        schedule: PitMakerRebateSchedule,
-    },
-    Unavailable {
-        reason: MakerRebateUnavailableReason,
-    },
-}
-
-impl PitMakerRebateEvidence {
-    const fn available_schedule(&self) -> Option<&PitMakerRebateSchedule> {
-        match self {
-            Self::Available { schedule, .. } => Some(schedule),
-            Self::Unavailable { .. } => None,
-        }
-    }
-}
 
 /// One full-depth, sequence-addressed book visible at an observation boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,7 +138,7 @@ pub struct PolicyReplayFill {
     pub vwap: Option<Price>,
     pub gross_amount: Usd,
     pub execution_fee_usd: Usd,
-    pub expected_maker_rebate_usd: Usd,
+    pub expected_maker_rebate_accrual_usd: Usd,
     pub risk_cash_delta: Decimal,
     pub fee_schedule_hash: Option<ContentHash>,
     pub maker_rebate_evidence: Option<PitMakerRebateEvidence>,
@@ -195,13 +165,13 @@ pub struct PolicyReplayOutcome {
     pub entry_filled_shares: Shares,
     pub exited_shares: Shares,
     pub execution_fee_usd: Usd,
-    pub expected_maker_rebate_usd: Usd,
+    pub expected_maker_rebate_accrual_usd: Usd,
     pub expected_net_return_bps: Option<Decimal>,
     pub risk_net_return_bps: Option<Decimal>,
     pub ambiguous_touch: bool,
     pub full_l2_coverage: TradePolicyEvidenceCoverage,
     pub fee_covered: bool,
-    pub rebate_evidence_covered: bool,
+    pub passive_rebate_evidence_coverage: TradePolicyEvidenceCoverage,
     pub passive_reconciled_trade_covered: Option<bool>,
     pub gap: Option<TradePolicyReplayGap>,
     pub fills: Vec<PolicyReplayFill>,
@@ -219,6 +189,30 @@ impl PolicyReplayOutcome {
             gap,
             TradePolicyReplayGap::EntryNotTriggered | TradePolicyReplayGap::EntryDepthInsufficient
         );
+        let passive_rebate_evidence_coverage = match candidate.entry_execution {
+            EntryOrderTemplate::PassivePostOnly { .. }
+                if matches!(
+                    gap,
+                    TradePolicyReplayGap::PitMakerRebateUnavailable
+                        | TradePolicyReplayGap::PassiveTermsDrift
+                        | TradePolicyReplayGap::PassiveCancelFillRace
+                ) =>
+            {
+                TradePolicyEvidenceCoverage::Missing
+            }
+            EntryOrderTemplate::PassivePostOnly { .. }
+                if matches!(
+                    gap,
+                    TradePolicyReplayGap::EntryDepthInsufficient
+                        | TradePolicyReplayGap::PassiveTradeCoverageUnavailable
+                ) =>
+            {
+                TradePolicyEvidenceCoverage::Covered
+            }
+            EntryOrderTemplate::Aggressive { .. } | EntryOrderTemplate::PassivePostOnly { .. } => {
+                TradePolicyEvidenceCoverage::NotRequired
+            }
+        };
         Self {
             candidate_id: candidate.candidate_id.clone(),
             outcome_side,
@@ -235,13 +229,13 @@ impl PolicyReplayOutcome {
             entry_filled_shares: Shares::ZERO,
             exited_shares: Shares::ZERO,
             execution_fee_usd: Usd::ZERO,
-            expected_maker_rebate_usd: Usd::ZERO,
+            expected_maker_rebate_accrual_usd: Usd::ZERO,
             expected_net_return_bps: valid_no_trade.then_some(Decimal::ZERO),
             risk_net_return_bps: valid_no_trade.then_some(Decimal::ZERO),
             ambiguous_touch: false,
             full_l2_coverage: TradePolicyEvidenceCoverage::from(valid_no_trade),
             fee_covered: valid_no_trade,
-            rebate_evidence_covered: valid_no_trade,
+            passive_rebate_evidence_coverage,
             passive_reconciled_trade_covered: None,
             gap: Some(gap),
             fills: Vec::new(),
@@ -272,13 +266,13 @@ impl PolicyReplayOutcome {
             entry_filled_shares: Shares::ZERO,
             exited_shares: Shares::ZERO,
             execution_fee_usd: Usd::ZERO,
-            expected_maker_rebate_usd: Usd::ZERO,
+            expected_maker_rebate_accrual_usd: Usd::ZERO,
             expected_net_return_bps: Some(Decimal::ZERO),
             risk_net_return_bps: Some(Decimal::ZERO),
             ambiguous_touch: false,
             full_l2_coverage: TradePolicyEvidenceCoverage::Covered,
             fee_covered: true,
-            rebate_evidence_covered: true,
+            passive_rebate_evidence_coverage: TradePolicyEvidenceCoverage::Covered,
             passive_reconciled_trade_covered: Some(true),
             gap: None,
             fills: Vec::new(),
@@ -300,6 +294,7 @@ struct EntryResult {
     fill_ratio: Decimal,
     fills: Vec<PolicyReplayFill>,
     passive_coverage: Option<bool>,
+    entry_gap: Option<TradePolicyReplayGap>,
 }
 
 struct ExitExecution {
@@ -319,11 +314,21 @@ struct PassiveEntryRequest<'a> {
     observations: &'a [PolicyReplayObservation],
 }
 
+struct PassiveFillRequest<'a> {
+    triggered_at: DateTime<Utc>,
+    requested: Shares,
+    price: Price,
+    schedule: &'a PitFeeSchedule,
+    maker_rebate_evidence: &'a PitMakerRebateEvidence,
+    trades: Vec<&'a PolicyReplayTrade>,
+}
+
 struct PassiveTradeWindow<'a> {
     observations: &'a [PolicyReplayObservation],
     placement_at: DateTime<Utc>,
     coverage_through: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    cancel_at: Option<DateTime<Utc>>,
     stream_session_id: Uuid,
 }
 
@@ -350,7 +355,13 @@ impl<'a> PassiveTradeWindow<'a> {
                 let occurs_after_placement = trade.event_at >= self.placement_at;
                 let causally_available = trade.event_at <= trade.available_at;
                 let available_before_expiry = trade.available_at <= self.expires_at;
-                occurs_after_placement && causally_available && available_before_expiry
+                let before_cancel = self.cancel_at.is_none_or(|cancel_at| {
+                    trade.event_at < cancel_at && trade.available_at < cancel_at
+                });
+                occurs_after_placement
+                    && causally_available
+                    && available_before_expiry
+                    && before_cancel
             })
             .collect::<Vec<_>>();
         trades.sort_by(|left, right| {
@@ -479,15 +490,15 @@ fn validate_observations(observations: &[PolicyReplayObservation]) -> QuantResul
             book.available_at > observation.at || book.observed_at > observation.at
         }) || observation.fee_schedule.as_ref().is_some_and(|schedule| {
             schedule.available_at > observation.at || schedule.effective_at > observation.at
-        }) || matches!(
-            &observation.maker_rebate_evidence,
-            PitMakerRebateEvidence::Available {
-                schedule_hash,
-                schedule,
-            } if *schedule_hash != schedule.schedule_hash
-                || schedule.available_at > observation.at
-                || schedule.effective_at > observation.at
-        ) || observation
+        }) || match &observation.maker_rebate_evidence {
+            PitMakerRebateEvidence::NoProgram { available_at, .. } => {
+                *available_at > observation.at
+            }
+            PitMakerRebateEvidence::Available { schedule } => {
+                schedule.available_at > observation.at
+            }
+            PitMakerRebateEvidence::Unavailable { .. } => false,
+        } || observation
             .passive_trades
             .iter()
             .any(|trade| trade.available_at > observation.at || trade.event_at > observation.at)
@@ -660,6 +671,7 @@ fn aggressive_entry(
         .min(Decimal::ONE),
         fills: vec![fill],
         passive_coverage: None,
+        entry_gap: None,
     }))
 }
 
@@ -692,6 +704,9 @@ fn passive_entry(
         return Ok(Err(TradePolicyReplayGap::PitFeeScheduleUnavailable));
     };
     let maker_rebate_evidence = placement_observation.maker_rebate_evidence.clone();
+    if !maker_rebate_evidence.is_decidable() {
+        return Ok(Err(TradePolicyReplayGap::PitMakerRebateUnavailable));
+    }
     let (price, queue_ahead) = passive_price(book, placement, tick_size)?;
     let synthetic_size = Shares::new(cash_budget.inner() / price.inner() * Decimal::TWO);
     let level = BookLevel::try_from_decimal(price, synthetic_size)
@@ -720,11 +735,36 @@ fn passive_entry(
     let Some(expiration_observation) = observation_at_or_after(observations, expires_at) else {
         return Ok(Err(TradePolicyReplayGap::PassiveTradeCoverageUnavailable));
     };
+    let cancel_at = observations
+        .iter()
+        .filter(|observation| {
+            observation.at > placement_observation.at && observation.at <= expiration_observation.at
+        })
+        .find(|observation| {
+            observation
+                .fee_schedule
+                .as_ref()
+                .is_none_or(|current| current.schedule_hash != schedule.schedule_hash)
+                || observation.maker_rebate_evidence != maker_rebate_evidence
+        })
+        .map(|observation| observation.at);
+    if let Some(cancel_at) = cancel_at
+        && observations.iter().any(|observation| {
+            observation.passive_trades.iter().any(|trade| {
+                trade.stream_session_id == book.stream_session_id
+                    && trade.event_at <= cancel_at
+                    && trade.available_at >= cancel_at
+            })
+        })
+    {
+        return Ok(Err(TradePolicyReplayGap::PassiveCancelFillRace));
+    }
     let trades = match (PassiveTradeWindow {
         observations,
         placement_at: placement_observation.at,
-        coverage_through: expiration_observation.at,
+        coverage_through: cancel_at.unwrap_or(expiration_observation.at),
         expires_at,
+        cancel_at,
         stream_session_id: book.stream_session_id,
     })
     .covered_trades()
@@ -732,75 +772,21 @@ fn passive_entry(
         Ok(trades) => trades,
         Err(gap) => return Ok(Err(gap)),
     };
-    let mut fill_slices = Vec::new();
-    for trade in trades {
-        let filled = queue.apply_trade(PassiveTrade {
-            stream_session_id: trade.stream_session_id,
-            side: trade.side,
-            price: trade.price,
-            shares: trade.shares,
-        });
-        if filled > Shares::ZERO {
-            let fee = schedule
-                .fee(LiquidityRole::Maker, price, filled, trade.event_at)
-                .map_err(|error| methodology(format!("passive fee failed: {error:?}")))?;
-            let expected_maker_rebate_usd = maker_rebate_evidence
-                .available_schedule()
-                .map(|rebate| {
-                    rebate
-                        .expected_incentive(
-                            schedule,
-                            LiquidityRole::Maker,
-                            price,
-                            filled,
-                            trade.event_at,
-                        )
-                        .map(|incentive| {
-                            incentive.map_or(Usd::ZERO, |value| value.expected_rebate_usd)
-                        })
-                })
-                .transpose()
-                .map_err(|error| methodology(format!("passive maker rebate failed: {error:?}")))?
-                .unwrap_or(Usd::ZERO);
-            let gross = filled * price;
-            let leg_ordinal = u32::try_from(fill_slices.len()).map_err(|error| {
-                methodology(format!("passive fill ordinal does not fit u32: {error}"))
-            })?;
-            let source_event_hash =
-                ContentHash::parse(&trade.source_event_id).map_err(|error| {
-                    methodology(format!("passive trade event hash is invalid: {error}"))
-                })?;
-            fill_slices.push(PolicyReplayFill {
-                leg_ordinal,
-                side: Side::Buy,
-                exit_reason: None,
-                triggered_at,
-                filled_at: trade.event_at,
-                liquidity_role: LiquidityRole::Maker,
-                outcome: if queue.remaining_shares == Shares::ZERO {
-                    BookWalkOutcome::Filled
-                } else {
-                    BookWalkOutcome::Partial
-                },
-                requested_shares: Some(requested),
-                filled_shares: filled,
-                vwap: Some(price),
-                gross_amount: gross,
-                execution_fee_usd: fee,
-                expected_maker_rebate_usd,
-                risk_cash_delta: -(gross.inner() + fee.inner()),
-                fee_schedule_hash: Some(schedule.schedule_hash),
-                maker_rebate_evidence: Some(maker_rebate_evidence.clone()),
-                stream_session_id: Some(trade.stream_session_id),
-                token_sequence: Some(trade.token_sequence),
-                source_event_hash: Some(source_event_hash),
-            });
-            if queue.remaining_shares == Shares::ZERO {
-                break;
-            }
-        }
-    }
+    let fill_slices = passive_fill_slices(
+        PassiveFillRequest {
+            triggered_at,
+            requested,
+            price,
+            schedule,
+            maker_rebate_evidence: &maker_rebate_evidence,
+            trades,
+        },
+        &mut queue,
+    )?;
     let Some(entered_at) = fill_slices.first().map(|fill| fill.filled_at) else {
+        if cancel_at.is_some() {
+            return Ok(Err(TradePolicyReplayGap::PassiveTermsDrift));
+        }
         return Ok(Ok(EntryAttempt::PassiveNoFill {
             triggered_at,
             expired_at: expires_at,
@@ -812,7 +798,84 @@ fn passive_entry(
         fill_ratio: queue.filled_shares.inner() / requested.inner(),
         fills: fill_slices,
         passive_coverage: Some(true),
+        entry_gap: (cancel_at.is_some() && queue.remaining_shares > Shares::ZERO)
+            .then_some(TradePolicyReplayGap::PassiveTermsDrift),
     })))
+}
+
+fn passive_fill_slices(
+    request: PassiveFillRequest<'_>,
+    queue: &mut PassiveQueueState,
+) -> QuantResult<Vec<PolicyReplayFill>> {
+    let mut fills = Vec::new();
+    for trade in request.trades {
+        let filled = queue.apply_trade(PassiveTrade {
+            stream_session_id: trade.stream_session_id,
+            side: trade.side,
+            price: trade.price,
+            shares: trade.shares,
+        });
+        if filled == Shares::ZERO {
+            continue;
+        }
+        let fee = request
+            .schedule
+            .fee(LiquidityRole::Maker, request.price, filled, trade.event_at)
+            .map_err(|error| methodology(format!("passive fee failed: {error:?}")))?;
+        let expected_maker_rebate_accrual_usd = request
+            .maker_rebate_evidence
+            .schedule()
+            .map(|rebate| {
+                rebate
+                    .expected_incentive(
+                        request.schedule,
+                        LiquidityRole::Maker,
+                        request.price,
+                        filled,
+                        trade.event_at,
+                    )
+                    .map(|incentive| incentive.map_or(Usd::ZERO, |value| value.expected_rebate_usd))
+            })
+            .transpose()
+            .map_err(|error| methodology(format!("passive maker rebate failed: {error:?}")))?
+            .unwrap_or(Usd::ZERO);
+        let gross = filled * request.price;
+        let leg_ordinal = u32::try_from(fills.len()).map_err(|error| {
+            methodology(format!("passive fill ordinal does not fit u32: {error}"))
+        })?;
+        let source_event_hash = ContentHash::parse(&trade.source_event_id).map_err(|error| {
+            methodology(format!("passive trade event hash is invalid: {error}"))
+        })?;
+        fills.push(PolicyReplayFill {
+            leg_ordinal,
+            side: Side::Buy,
+            exit_reason: None,
+            triggered_at: request.triggered_at,
+            filled_at: trade.event_at,
+            liquidity_role: LiquidityRole::Maker,
+            outcome: if queue.remaining_shares == Shares::ZERO {
+                BookWalkOutcome::Filled
+            } else {
+                BookWalkOutcome::Partial
+            },
+            requested_shares: Some(request.requested),
+            filled_shares: filled,
+            vwap: Some(request.price),
+            gross_amount: gross,
+            execution_fee_usd: fee,
+            expected_maker_rebate_accrual_usd,
+            risk_cash_delta: -(gross.inner() + fee.inner()),
+            fee_schedule_hash: Some(request.schedule.schedule_hash),
+            maker_rebate_evidence: Some(request.maker_rebate_evidence.clone()),
+            stream_session_id: Some(trade.stream_session_id),
+            token_sequence: Some(trade.token_sequence),
+            source_event_hash: Some(source_event_hash),
+        });
+        if queue.remaining_shares == Shares::ZERO {
+            break;
+        }
+    }
+    Ok(fills)
 }
 
 fn passive_price(
@@ -930,7 +993,7 @@ fn open_position_state(
         next_scale_out: 0,
         terminal_reason: None,
         terminal_at: None,
-        gap: None,
+        gap: entry.entry_gap,
     })
 }
 
@@ -1119,7 +1182,7 @@ fn settle_resolution(
         vwap: Some(Price::new(resolution.token_payout_ratio.inner())),
         gross_amount: Usd::new(payout),
         execution_fee_usd: Usd::ZERO,
-        expected_maker_rebate_usd: Usd::ZERO,
+        expected_maker_rebate_accrual_usd: Usd::ZERO,
         risk_cash_delta: payout,
         fee_schedule_hash: None,
         maker_rebate_evidence: None,
@@ -1158,18 +1221,21 @@ fn finalize_open_position(
         );
     }
     let execution_fee_usd = state.fills.iter().map(|fill| fill.execution_fee_usd).sum();
-    let expected_maker_rebate_usd = state
+    let expected_maker_rebate_accrual_usd = state
         .fills
         .iter()
-        .map(|fill| fill.expected_maker_rebate_usd)
+        .map(|fill| fill.expected_maker_rebate_accrual_usd)
         .sum::<Usd>();
     let terminal = state.remaining == Shares::ZERO && state.entry_cash > Decimal::ZERO;
     let risk_net_return_bps = terminal.then(|| {
         ((state.exit_cash - state.entry_cash) / state.entry_cash * Decimal::from(10_000))
             .round_dp(8)
     });
+    // Trade-policy selection measures the route's nominal maker economics.
+    // Account/day payout eligibility is applied later by the report MILP; risk
+    // remains a separate zero-rebate series.
     let expected_net_return_bps = terminal.then(|| {
-        ((state.exit_cash + expected_maker_rebate_usd.inner() - state.entry_cash)
+        ((state.exit_cash + expected_maker_rebate_accrual_usd.inner() - state.entry_cash)
             / state.entry_cash
             * Decimal::from(10_000))
         .round_dp(8)
@@ -1196,7 +1262,7 @@ fn finalize_open_position(
             fill.fee_schedule_hash.is_some()
                 || fill.exit_reason == Some(ExitReason::ResolutionRedeem)
         });
-    let rebate_evidence_covered = state
+    let maker_entry_fills = state
         .fills
         .iter()
         .filter(|fill| {
@@ -1204,7 +1270,21 @@ fn finalize_open_position(
                 && fill.exit_reason.is_none()
                 && fill.liquidity_role == LiquidityRole::Maker
         })
-        .all(|fill| fill.maker_rebate_evidence.is_some());
+        .collect::<Vec<_>>();
+    let passive_rebate_evidence_coverage = if maker_entry_fills.is_empty() {
+        TradePolicyEvidenceCoverage::NotRequired
+    } else if matches!(
+        state.gap,
+        Some(TradePolicyReplayGap::PassiveTermsDrift | TradePolicyReplayGap::PassiveCancelFillRace)
+    ) || maker_entry_fills.iter().any(|fill| {
+        fill.maker_rebate_evidence
+            .as_ref()
+            .is_none_or(|evidence| !evidence.is_decidable())
+    }) {
+        TradePolicyEvidenceCoverage::Missing
+    } else {
+        TradePolicyEvidenceCoverage::Covered
+    };
     let entry_fill_latency_ms = state
         .entered_at
         .signed_duration_since(state.entry_triggered_at)
@@ -1241,13 +1321,13 @@ fn finalize_open_position(
         entry_filled_shares: state.entry_shares,
         exited_shares: state.exited,
         execution_fee_usd,
-        expected_maker_rebate_usd,
+        expected_maker_rebate_accrual_usd,
         expected_net_return_bps,
         risk_net_return_bps,
         ambiguous_touch: false,
         full_l2_coverage: full_l2.into(),
         fee_covered,
-        rebate_evidence_covered,
+        passive_rebate_evidence_coverage,
         passive_reconciled_trade_covered: state.passive_coverage,
         gap: state.gap,
         fills: state.fills,
@@ -1404,7 +1484,7 @@ fn replay_fill_from_walk(context: ReplayFillContext<'_>, walk: &BookWalkFill) ->
         vwap: walk.vwap,
         gross_amount: walk.immediate_cost.principal_usd,
         execution_fee_usd: walk.immediate_cost.total_fee_usd(),
-        expected_maker_rebate_usd: Usd::ZERO,
+        expected_maker_rebate_accrual_usd: Usd::ZERO,
         risk_cash_delta: walk.account_cash_delta_usd,
         fee_schedule_hash: Some(context.schedule.schedule_hash),
         maker_rebate_evidence: None,
@@ -1469,7 +1549,7 @@ mod tests {
             ExitExecutionTemplate, OpportunisticExitPolicy, PassivePlacement, PayoutRatio, Price,
             Probability, ResidualSharePolicy, ScaleOutTemplate, Shares, TokenId,
             TradePolicyCandidateSpec, TradePolicyExitTemplate, TradePolicyReplayGap,
-            TrailingStopTemplate, Usd,
+            TrailingStopTemplate, Usd, trade_policy_evidence::TradePolicyEvidenceCoverage,
         },
     };
     use rust_decimal::Decimal;
@@ -1477,11 +1557,14 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        MakerRebateUnavailableReason, POLICY_REPLAY_KERNEL_VERSION, PitMakerRebateEvidence,
-        PolicyReplayBook, PolicyReplayLatency, PolicyReplayObservation, PolicyReplayResolution,
-        PolicyReplaySignal, PolicyReplayTrade, replay_policy_candidate,
+        POLICY_REPLAY_KERNEL_VERSION, PolicyReplayBook, PolicyReplayLatency,
+        PolicyReplayObservation, PolicyReplayResolution, PolicyReplaySignal, PolicyReplayTrade,
+        replay_policy_candidate,
     };
-    use crate::execution_semantics::{BookWalkOutcome, PitFeeSchedule, PitMakerRebateSchedule};
+    use crate::execution_semantics::{
+        BookWalkOutcome, PitFeeSchedule, PitMakerRebateEvidence, PitMakerRebateSchedule,
+        PitMakerRebateUnavailableReason,
+    };
 
     fn hash(seed: char) -> ContentHash {
         ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
@@ -1513,11 +1596,8 @@ mod tests {
 
     fn maker_rebate_schedule(time: DateTime<Utc>) -> PitMakerRebateSchedule {
         PitMakerRebateSchedule {
-            schedule_hash: hash('c'),
-            catalog_change_hash: hash('d'),
-            effective_at: time,
+            terms_hash: hash('c'),
             available_at: time,
-            fees_enabled: true,
             platform_rate: dec!(0.02),
             exponent: Decimal::ONE,
             taker_only: true,
@@ -1541,8 +1621,9 @@ mod tests {
                 source_event_hash: hash('b'),
             }),
             fee_schedule: Some(schedule(time)),
-            maker_rebate_evidence: PitMakerRebateEvidence::Unavailable {
-                reason: MakerRebateUnavailableReason::NotListed,
+            maker_rebate_evidence: PitMakerRebateEvidence::NoProgram {
+                terms_hash: hash('d'),
+                available_at: at(0),
             },
             signal: Some(PolicyReplaySignal {
                 token_id: TokenId::new("yes"),
@@ -1783,14 +1864,132 @@ mod tests {
         .expect("passive replay");
 
         assert_eq!(outcome.entered_at, Some(at(1)));
-        assert_eq!(outcome.expected_maker_rebate_usd, Usd::ZERO);
+        assert_eq!(outcome.expected_maker_rebate_accrual_usd, Usd::ZERO);
         assert_eq!(outcome.expected_net_return_bps, outcome.risk_net_return_bps);
         assert_eq!(outcome.passive_reconciled_trade_covered, Some(true));
         assert_eq!(outcome.terminal_reason, Some(ExitReason::TimeExit));
     }
 
     #[test]
-    fn passive_rebate_improves_expected() {
+    fn passive_unavailable_rejected() {
+        let mut passive = candidate(FillRequirement::AllowPartial);
+        passive.entry_execution = EntryOrderTemplate::PassivePostOnly {
+            placement: PassivePlacement::JoinBestBid,
+            good_til_secs: 60,
+            max_book_age_ms: 5_000,
+        };
+        let mut first = observation(0, dec!(0.49), dec!(0.50));
+        first.maker_rebate_evidence = PitMakerRebateEvidence::Unavailable {
+            reason: PitMakerRebateUnavailableReason::NotPointInTime,
+            terms_hash: hash('f'),
+            available_at: at(1),
+        };
+
+        let outcome = replay_policy_candidate(
+            &passive,
+            OutcomeSide::Yes,
+            Usd::new(dec!(25)),
+            TickSize::Hundredth,
+            PolicyReplayLatency {
+                base_delay_ms: 0,
+                stress_multiplier: Decimal::ONE,
+            },
+            &[first, observation(61, dec!(0.49), dec!(0.50))],
+        )
+        .expect("passive replay");
+
+        assert_eq!(
+            outcome.gap,
+            Some(TradePolicyReplayGap::PitMakerRebateUnavailable)
+        );
+        assert_eq!(
+            outcome.passive_rebate_evidence_coverage,
+            TradePolicyEvidenceCoverage::Missing
+        );
+    }
+
+    #[test]
+    fn passive_drift_cancels() {
+        let mut passive = candidate(FillRequirement::AllowPartial);
+        passive.entry_execution = EntryOrderTemplate::PassivePostOnly {
+            placement: PassivePlacement::JoinBestBid,
+            good_til_secs: 60,
+            max_book_age_ms: 5_000,
+        };
+        let first = observation(0, dec!(0.49), dec!(0.50));
+        let mut changed = observation(1, dec!(0.49), dec!(0.50));
+        changed.maker_rebate_evidence = PitMakerRebateEvidence::NoProgram {
+            terms_hash: hash('e'),
+            available_at: at(1),
+        };
+
+        let outcome = replay_policy_candidate(
+            &passive,
+            OutcomeSide::Yes,
+            Usd::new(dec!(25)),
+            TickSize::Hundredth,
+            PolicyReplayLatency {
+                base_delay_ms: 0,
+                stress_multiplier: Decimal::ONE,
+            },
+            &[first, changed, observation(61, dec!(0.49), dec!(0.50))],
+        )
+        .expect("passive replay");
+
+        assert_eq!(outcome.gap, Some(TradePolicyReplayGap::PassiveTermsDrift));
+        assert!(outcome.entered_at.is_none());
+    }
+
+    #[test]
+    fn passive_drift_race_fails() {
+        let mut passive = candidate(FillRequirement::AllowPartial);
+        passive.entry_execution = EntryOrderTemplate::PassivePostOnly {
+            placement: PassivePlacement::JoinBestBid,
+            good_til_secs: 60,
+            max_book_age_ms: 5_000,
+        };
+        let first = observation(0, dec!(0.49), dec!(0.50));
+        let mut changed = observation(1, dec!(0.49), dec!(0.50));
+        changed.maker_rebate_evidence = PitMakerRebateEvidence::NoProgram {
+            terms_hash: hash('e'),
+            available_at: at(1),
+        };
+        changed.passive_trades.push(PolicyReplayTrade {
+            event_at: at(1),
+            available_at: at(1),
+            stream_session_id: Uuid::nil(),
+            token_sequence: 2,
+            side: Side::Sell,
+            price: Price::new(dec!(0.49)),
+            shares: Shares::new(dec!(1_100)),
+            source_event_id: format!("blake3:{}", "4".repeat(64)),
+        });
+
+        let outcome = replay_policy_candidate(
+            &passive,
+            OutcomeSide::Yes,
+            Usd::new(dec!(25)),
+            TickSize::Hundredth,
+            PolicyReplayLatency {
+                base_delay_ms: 0,
+                stress_multiplier: Decimal::ONE,
+            },
+            &[first, changed, observation(61, dec!(0.49), dec!(0.50))],
+        )
+        .expect("passive replay");
+
+        assert_eq!(
+            outcome.gap,
+            Some(TradePolicyReplayGap::PassiveCancelFillRace)
+        );
+        assert_eq!(
+            outcome.passive_rebate_evidence_coverage,
+            TradePolicyEvidenceCoverage::Missing
+        );
+    }
+
+    #[test]
+    fn passive_rebate_stays_nominal() {
         let mut passive = candidate(FillRequirement::AllowPartial);
         passive.entry_execution = EntryOrderTemplate::PassivePostOnly {
             placement: PassivePlacement::JoinBestBid,
@@ -1799,11 +1998,10 @@ mod tests {
         };
         let mut first = observation(0, dec!(0.49), dec!(0.50));
         let schedule = maker_rebate_schedule(at(0));
-        first.maker_rebate_evidence = PitMakerRebateEvidence::Available {
-            schedule_hash: schedule.schedule_hash,
-            schedule,
-        };
+        let evidence = PitMakerRebateEvidence::Available { schedule };
+        first.maker_rebate_evidence = evidence.clone();
         let mut matched = observation(1, dec!(0.49), dec!(0.50));
+        matched.maker_rebate_evidence = evidence.clone();
         matched.passive_trades.push(PolicyReplayTrade {
             event_at: at(1),
             available_at: at(1),
@@ -1814,6 +2012,8 @@ mod tests {
             shares: Shares::new(dec!(1_100)),
             source_event_id: format!("blake3:{}", "3".repeat(64)),
         });
+        let mut expired = observation(121, dec!(0.49), dec!(0.50));
+        expired.maker_rebate_evidence = evidence;
         let outcome = replay_policy_candidate(
             &passive,
             OutcomeSide::Yes,
@@ -1823,20 +2023,18 @@ mod tests {
                 base_delay_ms: 0,
                 stress_multiplier: Decimal::ONE,
             },
-            &[first, matched, observation(121, dec!(0.49), dec!(0.50))],
+            &[first, matched, expired],
         )
         .expect("passive rebate replay");
 
-        assert!(outcome.expected_maker_rebate_usd.is_positive());
-        assert!(
-            outcome
-                .expected_net_return_bps
-                .zip(outcome.risk_net_return_bps)
-                .is_some_and(|(expected, risk)| expected > risk)
+        assert!(outcome.expected_maker_rebate_accrual_usd.is_positive());
+        assert!(outcome.expected_net_return_bps > outcome.risk_net_return_bps);
+        assert_eq!(
+            outcome.passive_rebate_evidence_coverage,
+            TradePolicyEvidenceCoverage::Covered
         );
-        assert!(outcome.rebate_evidence_covered);
         assert!(outcome.fills.iter().any(|fill| {
-            fill.expected_maker_rebate_usd.is_positive()
+            fill.expected_maker_rebate_accrual_usd.is_positive()
                 && matches!(
                     fill.maker_rebate_evidence,
                     Some(PitMakerRebateEvidence::Available { .. })

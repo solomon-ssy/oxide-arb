@@ -8,7 +8,6 @@
 
 use std::{
     collections::{HashMap, hash_map::Entry},
-    fmt::Display,
     sync::Arc,
 };
 mod materialized;
@@ -16,14 +15,14 @@ mod materialized;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 pub use materialized::MaterializedPitEngine;
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
         data_plane::{DecisionBoundary, DecisionSource},
         market::{
             CatalogMarketChangeInfo, CatalogMarketLeg, CatalogSnapshotInfo,
             book::BookLevel,
-            fee::{MarketFeeSchedule, MarketMakerRebateSchedule},
+            fee::{MarketFeeSchedule, MarketMakerRebateEvidence},
             registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
         },
     },
@@ -33,8 +32,7 @@ use quant_pivot_models::{
         TokenId,
     },
 };
-use serde::{Serialize, de::DeserializeOwned};
-use serde_json::Value;
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::hashing::ResearchHasher;
@@ -112,8 +110,8 @@ pub struct MarketContextAt {
     pub created_at: Option<DateTime<Utc>>,
     /// Fee schedule resolved from the independent append-only CLOB market-info ledger.
     pub fee_schedule: Option<MarketFeeSchedule>,
-    /// Gamma-sourced maker incentive schedule from the same catalog revision.
-    pub maker_rebate_schedule: Option<MarketMakerRebateSchedule>,
+    /// Gamma-sourced maker incentive truth from the same catalog revision.
+    pub maker_rebate_evidence: MarketMakerRebateEvidence,
 }
 
 /// One immutable catalog projection used by selection, feature computation,
@@ -204,11 +202,16 @@ fn resolve_event_catalog(
     boundary: &DecisionBoundary,
 ) -> QuantResult<ResolvedEventCatalog> {
     validate_event_visibility(snapshot, boundary)?;
-    let event: EventRegistryInfo = decode_catalog_payload(
-        "event",
-        &snapshot.event.event_change_id,
-        snapshot.event.payload.clone().into_inner(),
-    )?;
+    let event =
+        snapshot
+            .event
+            .verified_payload()
+            .map_err(|error| ResearchError::PitResolution {
+                detail: format!(
+                    "event catalog change {} payload is invalid: {error}",
+                    snapshot.event.event_change_id
+                ),
+            })?;
     let membership_hash = catalog_membership_hash(
         &snapshot.event.event_change_id,
         &event,
@@ -228,11 +231,16 @@ fn resolve_market_catalog(
     boundary: &DecisionBoundary,
     resolved_event: &ResolvedEventCatalog,
 ) -> QuantResult<ResolvedMarketSnapshot> {
-    let market: MarketRegistryInfo = decode_catalog_payload(
-        "market",
-        &snapshot.market.market_change_id,
-        snapshot.market.payload.clone().into_inner(),
-    )?;
+    let market =
+        snapshot
+            .market
+            .verified_payload()
+            .map_err(|error| ResearchError::PitResolution {
+                detail: format!(
+                    "market catalog change {} payload is invalid: {error}",
+                    snapshot.market.market_change_id
+                ),
+            })?;
     let event = resolved_event.event.as_ref();
     if snapshot.market.event_change_id != snapshot.event.event_change_id
         || market.event_id != event.event_id
@@ -259,7 +267,7 @@ fn resolve_market_catalog(
         }
         .into());
     }
-    let maker_rebate_schedule = market.maker_rebate_schedule.clone();
+    let maker_rebate_evidence = market.maker_rebate_evidence.clone();
     let context = MarketContextAt {
         market_id: market.market_id.clone(),
         effective_at: snapshot.market.source_effective_at,
@@ -270,7 +278,7 @@ fn resolve_market_catalog(
         end_date: market.end_date,
         created_at: snapshot.market.source_created_at,
         fee_schedule: None,
-        maker_rebate_schedule,
+        maker_rebate_evidence,
     };
     Ok(ResolvedMarketSnapshot {
         boundary: boundary.clone(),
@@ -404,30 +412,19 @@ fn decode_event_members(
     changes
         .iter()
         .map(|change| {
-            decode_catalog_payload::<MarketRegistryInfo>(
-                "market",
-                &change.market_change_id,
-                change.payload.clone().into_inner(),
-            )
-            .map(|market| (market.market_id.clone(), market))
+            change
+                .verified_payload()
+                .map_err(|error| {
+                    QuantError::from(ResearchError::PitResolution {
+                        detail: format!(
+                            "market catalog change {} payload is invalid: {error}",
+                            change.market_change_id
+                        ),
+                    })
+                })
+                .map(|market| (market.market_id.clone(), market))
         })
         .collect()
-}
-
-fn decode_catalog_payload<T>(
-    entity: &'static str,
-    change_id: &impl Display,
-    payload: Value,
-) -> QuantResult<T>
-where
-    T: DeserializeOwned,
-{
-    serde_json::from_value(payload).map_err(|error| {
-        ResearchError::PitResolution {
-            detail: format!("{entity} catalog change {change_id} payload is invalid: {error}"),
-        }
-        .into()
-    })
 }
 
 fn event_leg_set(

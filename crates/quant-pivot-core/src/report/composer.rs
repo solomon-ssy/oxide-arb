@@ -27,15 +27,17 @@ use quant_pivot_models::{
     hashing::{CanonicalDigest, canonical_state_hash},
     runtime_config::{BuyModelRoute, DecisionPolicySnapshot},
     types::{
-        BookSnapshotRef, BootstrapExitGuidance, Bps, ConditionTruth, DecisionPolicySnapshotId,
-        EligibilitySummary, EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
-        EntryOrderPolicy, EntryOrderTemplate, EntryPlan, EventId, EvidenceRefs, EvidenceRefsInput,
+        BookSnapshotRef, BootstrapExitGuidance, Bps, ConditionTruth, ContentHash,
+        DecisionPolicySnapshotId, EligibilitySummary, EntryConditionFoldState,
+        EntryConditionInstanceId, EntryConditionPlan, EntryMakerRebateTerms, EntryOrderPolicy,
+        EntryOrderTemplate, EntryPlan, EventId, EvidenceRefs, EvidenceRefsInput,
         ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FactorDefinitionId, FeatureVectorId,
-        MarketId, OperationDetailDocument, OperationLogId, PortfolioRejectionReason, Price,
-        RecommendationExitPlan, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
-        RejectionReasonCount, ReportDataQualitySnapshotId, ReportRunId, ReportSummary,
-        RiskEnvelope, RiskEnvelopeHashInput, ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy,
+        MakerRebateDelayBasis, MakerRebateObjectiveStatus, MarketId, OperationDetailDocument,
+        OperationLogId, PortfolioRejectionReason, Price, RecommendationExitPlan,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, RecommendationTradePlan, RejectionReasonCount,
+        ReportDataQualitySnapshotId, ReportRunId, ReportSummary, RiskEnvelope,
+        RiskEnvelopeHashInput, ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy,
         TrailingStopPolicy, Usd, UsdHours,
     },
 };
@@ -326,6 +328,33 @@ struct SizingExposure {
     route: Usd,
 }
 
+struct RebateSizingPresentation {
+    status: MakerRebateObjectiveStatus,
+    delay_basis: Option<MakerRebateDelayBasis>,
+    valuation_hash: Option<ContentHash>,
+}
+
+impl From<&PlannedReportRecommendation> for RebateSizingPresentation {
+    fn from(planned: &PlannedReportRecommendation) -> Self {
+        match &planned.tier.entry_execution {
+            EntryExecutionEconomics::Aggressive(_) => Self {
+                status: MakerRebateObjectiveStatus::NotApplicable,
+                delay_basis: None,
+                valuation_hash: None,
+            },
+            EntryExecutionEconomics::Passive(entry) => Self {
+                status: entry.maker_rebate_objective_status,
+                delay_basis: matches!(
+                    entry.maker_rebate_terms,
+                    EntryMakerRebateTerms::PassiveProgram { .. }
+                )
+                .then_some(entry.maker_rebate_valuation.delay_basis),
+                valuation_hash: Some(entry.maker_rebate_valuation.evidence_hash),
+            },
+        }
+    }
+}
+
 struct RecommendationEvidence<'a> {
     capture: &'a MarketDecisionCapture,
     identity: RecommendationIdentity,
@@ -417,16 +446,23 @@ fn compose_recommendation(
         }
         .into());
     };
+    let rebate = RebateSizingPresentation::from(planned);
     let sizing = SizingPlan {
         economic_tier_id: planned.tier.economic_tier_id,
         requested_shares: planned.tier.entry_execution.requested_shares(),
         expected_filled_shares: planned.tier.entry_execution.expected_filled_shares(),
         hard_reserved_cash_usd: planned.tier.entry_execution.hard_reserved_cash_usd(),
         immediate_fee_usd: planned.tier.entry_execution.immediate_fee_usd(),
-        expected_maker_rebate_usd: planned.tier.entry_execution.expected_maker_rebate_usd(),
-        maker_rebate_schedule: match &planned.tier.entry_execution {
-            EntryExecutionEconomics::Aggressive(_) => None,
-            EntryExecutionEconomics::Passive(entry) => entry.maker_rebate_schedule,
+        expected_maker_rebate_accrual_usd: planned.tier.entry_execution.maker_rebate_accrual_usd(),
+        objective_maker_rebate_usd: planned.tier.entry_execution.objective_maker_rebate_usd(),
+        maker_rebate_objective_status: rebate.status,
+        rebate_delay_basis: rebate.delay_basis,
+        rebate_valuation_hash: rebate.valuation_hash,
+        maker_rebate_terms: match &planned.tier.entry_execution {
+            EntryExecutionEconomics::Aggressive(_) => {
+                EntryMakerRebateTerms::AggressiveNotApplicable
+            }
+            EntryExecutionEconomics::Passive(entry) => entry.maker_rebate_terms,
         },
         reference_entry_price: tier_reference_price(&planned.tier.entry_execution),
         portfolio_weight_pct,
@@ -728,7 +764,7 @@ fn immediate_entry_plan(
 
 fn tier_reference_price(entry: &EntryExecutionEconomics) -> Price {
     match entry {
-        EntryExecutionEconomics::Aggressive(entry) => entry.entry_vwap,
+        EntryExecutionEconomics::Aggressive(entry) => entry.execution_vwap,
         EntryExecutionEconomics::Passive(entry) => entry.limit_price,
     }
 }

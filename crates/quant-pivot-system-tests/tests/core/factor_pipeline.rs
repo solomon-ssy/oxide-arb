@@ -35,7 +35,7 @@ use quant_pivot_models::{
     domain::{
         data_plane::{DecisionClock, HistorySealChunkRef},
         market::{
-            EventRegistryInfo, MarketRegistryInfo, TokenInfo,
+            EventRegistryInfo, MarketMakerRebateEvidence, MarketRegistryInfo, TokenInfo,
             book::{BookLevel, BookSnapshot},
         },
         quant::{FactorValueInfo, NewFactorValue, NewModelRun},
@@ -152,7 +152,7 @@ impl Catalog {
             min_order_size: Decimal::ONE,
             liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
             volume_24h: Some(Usd::new(Decimal::from(9_000))),
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
             start_date: Some(Utc::now() - ChronoDuration::days(2)),
             end_date: Some(Utc::now() + ChronoDuration::days(5)),
             resolved_at: None,

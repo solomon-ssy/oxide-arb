@@ -94,6 +94,8 @@ impl LinearForm {
 
 struct SolverColumns {
     tiers: Vec<Col>,
+    rebate_gates: Vec<Col>,
+    rebate_values: Vec<Col>,
     eta: Col,
     excess: Vec<Col>,
     robust_floor: Col,
@@ -122,8 +124,24 @@ impl ModelForms {
                         .iter()
                         .zip(&prepared.tiers)
                         .map(|(column, tier)| {
-                            (*column, tier.distribution_numerators[distribution_index])
+                            (
+                                *column,
+                                tier.base_distribution_numerators[distribution_index],
+                            )
                         })
+                        .chain(
+                            columns
+                                .rebate_values
+                                .iter()
+                                .zip(&prepared.rebate_buckets)
+                                .map(|(column, bucket)| {
+                                    (
+                                        *column,
+                                        prepared.distribution_weights[distribution_index]
+                                            [bucket.scenario_index],
+                                    )
+                                }),
+                        )
                         .collect(),
                 )
             })
@@ -134,7 +152,16 @@ impl ModelForms {
                 .tiers
                 .iter()
                 .zip(&prepared.tiers)
-                .map(|(column, tier)| (*column, tier.nominal_numerator))
+                .map(|(column, tier)| (*column, tier.base_nominal_numerator))
+                .chain(
+                    columns
+                        .rebate_values
+                        .iter()
+                        .zip(&prepared.rebate_buckets)
+                        .map(|(column, bucket)| {
+                            (*column, prepared.nominal_weights[bucket.scenario_index])
+                        }),
+                )
                 .collect(),
         );
         let scenarios = (0..prepared.scenario_count)
@@ -194,6 +221,7 @@ impl ConstraintBuilder<'_> {
         self.add_capital()?;
         self.add_exposure()?;
         self.add_exclusivity()?;
+        self.add_rebate()?;
         self.add_buckets()?;
         self.add_tail()?;
         self.add_robust_floor()
@@ -330,6 +358,82 @@ impl ConstraintBuilder<'_> {
         Ok(())
     }
 
+    fn add_rebate(&mut self) -> QuantResult<()> {
+        for ((bucket, gate), credited_value) in self
+            .prepared
+            .rebate_buckets
+            .iter()
+            .zip(&self.columns.rebate_gates)
+            .zip(&self.columns.rebate_values)
+        {
+            if !bucket.credit_eligible
+                || bucket.maximum_accrual_micro < bucket.threshold_micro
+                || bucket.maximum_value_micro == 0
+            {
+                continue;
+            }
+            let mut threshold_terms = bucket
+                .accrual_terms
+                .iter()
+                .map(|(tier_index, accrual)| (self.columns.tiers[*tier_index], *accrual))
+                .collect::<Vec<_>>();
+            threshold_terms.push((*gate, -bucket.threshold_micro));
+            self.add_lower(
+                &LinearForm::new(bucket.baseline_micro, threshold_terms),
+                0,
+                "maker_rebate_daily_threshold_lower",
+            )?;
+            let gate_big_m = bucket
+                .maximum_accrual_micro
+                .checked_sub(bucket.threshold_micro)
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| ReportError::NumericOverflow {
+                    field: "maker_rebate_daily_gate_big_m",
+                    detail: "tight daily accrual Big-M overflowed i64".to_owned(),
+                })?;
+            let mut upper_terms = bucket
+                .accrual_terms
+                .iter()
+                .map(|(tier_index, accrual)| (self.columns.tiers[*tier_index], *accrual))
+                .collect::<Vec<_>>();
+            upper_terms.push((*gate, -gate_big_m));
+            self.add_upper(
+                &LinearForm::new(bucket.baseline_micro, upper_terms),
+                bucket.threshold_micro - 1,
+                "maker_rebate_daily_threshold_upper",
+            )?;
+            let value_terms = bucket
+                .value_terms
+                .iter()
+                .map(|(tier_index, value)| (self.columns.tiers[*tier_index], -*value))
+                .collect::<Vec<_>>();
+            let mut credit_at_most_value = value_terms.clone();
+            credit_at_most_value.push((*credited_value, 1));
+            self.add_upper(
+                &LinearForm::new(0, credit_at_most_value),
+                0,
+                "maker_rebate_credit_at_most_value",
+            )?;
+            self.add_upper(
+                &LinearForm::new(
+                    0,
+                    vec![(*credited_value, 1), (*gate, -bucket.maximum_value_micro)],
+                ),
+                0,
+                "maker_rebate_credit_at_most_gate",
+            )?;
+            let mut credit_at_least_value = value_terms;
+            credit_at_least_value.push((*credited_value, 1));
+            credit_at_least_value.push((*gate, -bucket.maximum_value_micro));
+            self.add_lower(
+                &LinearForm::new(0, credit_at_least_value),
+                -bucket.maximum_value_micro,
+                "maker_rebate_credit_at_least_value",
+            )?;
+        }
+        Ok(())
+    }
+
     fn add_buckets(&mut self) -> QuantResult<()> {
         for (bucket_index, cap) in self.prepared.bucket_caps.iter().enumerate() {
             let form = LinearForm::new(
@@ -425,6 +529,32 @@ impl<'a> PersistentModel<'a> {
             .iter()
             .map(|_| problem.add_integer_column(0.0, 0_i32..=1_i32))
             .collect::<Vec<_>>();
+        let rebate_gates = prepared
+            .rebate_buckets
+            .iter()
+            .map(|bucket| {
+                let upper = i32::from(
+                    bucket.credit_eligible
+                        && bucket.maximum_accrual_micro >= bucket.threshold_micro
+                        && bucket.maximum_value_micro > 0,
+                );
+                problem.add_integer_column(0.0, 0_i32..=upper)
+            })
+            .collect::<Vec<_>>();
+        let rebate_values = prepared
+            .rebate_buckets
+            .iter()
+            .map(|bucket| {
+                Ok(problem.add_column(
+                    0.0,
+                    0.0..=exact_f64(if bucket.credit_eligible {
+                        bucket.maximum_value_micro
+                    } else {
+                        0
+                    })?,
+                ))
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
         let max_loss_bound = exact_f64(prepared.max_scenario_loss_micro)?;
         let eta = problem.add_column(0.0, 0.0..=max_loss_bound);
         let excess = (0..prepared.scenario_count)
@@ -432,11 +562,15 @@ impl<'a> PersistentModel<'a> {
             .collect::<Vec<_>>();
         let robust_floor = problem.add_column(0.0, f64::NEG_INFINITY..);
         let mut all = tiers.clone();
+        all.extend(rebate_gates.iter().copied());
+        all.extend(rebate_values.iter().copied());
         all.push(eta);
         all.extend(excess.iter().copied());
         all.push(robust_floor);
         let columns = SolverColumns {
             tiers,
+            rebate_gates,
+            rebate_values,
             eta,
             excess,
             robust_floor,
@@ -684,7 +818,18 @@ impl<'a> PersistentModel<'a> {
             SolveStage::Robust => model.change_column_cost(self.columns.robust_floor, 1.0),
             SolveStage::Nominal => {
                 for (column, tier) in self.columns.tiers.iter().zip(&self.prepared.tiers) {
-                    model.change_column_cost(*column, exact_f64(tier.nominal_numerator)?);
+                    model.change_column_cost(*column, exact_f64(tier.base_nominal_numerator)?);
+                }
+                for (column, bucket) in self
+                    .columns
+                    .rebate_values
+                    .iter()
+                    .zip(&self.prepared.rebate_buckets)
+                {
+                    model.change_column_cost(
+                        *column,
+                        exact_f64(self.prepared.nominal_weights[bucket.scenario_index])?,
+                    );
                 }
             }
             SolveStage::Cvar => {
@@ -727,12 +872,20 @@ impl<'a> PersistentModel<'a> {
         let bound_scale = 2_f64.powi(self.bound_scale_exponent);
         let maximum = match stage {
             SolveStage::Robust => 1.0,
-            SolveStage::Nominal => self.prepared.tiers.iter().try_fold(
-                0.0_f64,
-                |maximum, tier| -> QuantResult<f64> {
-                    Ok(maximum.max(exact_f64(tier.nominal_numerator)?.abs() * bound_scale))
-                },
-            )?,
+            SolveStage::Nominal => self
+                .prepared
+                .tiers
+                .iter()
+                .map(|tier| tier.base_nominal_numerator)
+                .chain(
+                    self.prepared
+                        .rebate_buckets
+                        .iter()
+                        .map(|bucket| self.prepared.nominal_weights[bucket.scenario_index]),
+                )
+                .try_fold(0.0_f64, |maximum, coefficient| -> QuantResult<f64> {
+                    Ok(maximum.max(exact_f64(coefficient)?.abs() * bound_scale))
+                })?,
             SolveStage::Cvar => self
                 .prepared
                 .nominal_weights
@@ -1329,13 +1482,16 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use chrono::NaiveDate;
     use quant_pivot_models::config::PortfolioSolverDeployConfig;
 
     use super::{
         HIGHS_LARGE_BOUND_TARGET, HIGHS_SMALL_MATRIX_VALUE, MAX_SAFE_BOUND_SCALE_SHIFT,
         bound_scale_exponent, objective_scale_exponent, solve_lexicographic, tie_weight,
     };
-    use crate::portfolio::global::{PreparedExposureLimits, PreparedGlobalModel, PreparedTier};
+    use crate::portfolio::global::{
+        PreparedExposureLimits, PreparedGlobalModel, PreparedRebateBucket, PreparedTier,
+    };
 
     #[test]
     fn bound_scale_is_safe() {
@@ -1379,12 +1535,27 @@ mod tests {
         let mut prepared = symmetric_model(3);
         prepared.distribution_weights = vec![prepared.nominal_weights.clone(); 2];
         prepared.existing_distribution_numerators = vec![0; 2];
-        prepared.tiers[0].distribution_numerators = vec![3_255_460_869_290, 3_255_460_869_290];
-        prepared.tiers[0].nominal_numerator = 4_000_000_000_000;
-        prepared.tiers[1].distribution_numerators = vec![3_260_434_713_864, 3_260_434_713_864];
-        prepared.tiers[1].nominal_numerator = 3_000_000_000_000;
-        prepared.tiers[2].distribution_numerators = vec![3_260_434_713_864, 3_250_000_000_000];
-        prepared.tiers[2].nominal_numerator = 4_500_000_000_000;
+        for (tier, (distribution, nominal)) in prepared.tiers.iter_mut().zip([
+            (
+                vec![3_255_460_869_290, 3_255_460_869_290],
+                4_000_000_000_000,
+            ),
+            (
+                vec![3_260_434_713_864, 3_260_434_713_864],
+                3_000_000_000_000,
+            ),
+            (
+                vec![3_260_434_713_864, 3_250_000_000_000],
+                4_500_000_000_000,
+            ),
+        ]) {
+            tier.distribution_numerators.clone_from(&distribution);
+            tier.base_distribution_numerators = distribution;
+            tier.rebate_distribution_numerators = vec![0; 2];
+            tier.nominal_numerator = nominal;
+            tier.base_nominal_numerator = nominal;
+            tier.rebate_nominal_numerator = 0;
+        }
         let deploy = PortfolioSolverDeployConfig {
             deadline_secs: 10,
             threads: 1,
@@ -1435,10 +1606,19 @@ mod tests {
                 route_key: "route".to_owned(),
                 stable_key: "stable".to_owned(),
                 notional_micro: 1_000_000,
+                scenario_base_net_micro: scenario_net_micro.clone(),
+                scenario_rebate_micro: vec![0; 400],
+                scenario_rebate_accrual_micro: vec![0; 400],
+                scenario_rebate_program_dates: vec![None; 400],
+                scenario_rebate_baseline_micro: vec![0; 400],
                 scenario_risk_net_micro: scenario_net_micro.clone(),
                 scenario_net_micro,
                 distribution_numerators: vec![nominal_numerator],
+                base_distribution_numerators: vec![nominal_numerator],
+                rebate_distribution_numerators: vec![0],
                 nominal_numerator,
+                base_nominal_numerator: nominal_numerator,
+                rebate_nominal_numerator: 0,
                 bucket_capital_micro: vec![1_000_000],
                 capital_hours_micro: 1_000_000,
             }],
@@ -1474,6 +1654,7 @@ mod tests {
             max_drawdown_micro: 200_000_000,
             top_n: 1,
             exclusivity_groups: Vec::new(),
+            rebate_buckets: Vec::new(),
         };
         let deploy = PortfolioSolverDeployConfig {
             deadline_secs: 10,
@@ -1587,9 +1768,18 @@ mod tests {
                     stable_key: format!("placeholder-{index}"),
                     notional_micro: 1_000_000,
                     scenario_net_micro: scenario_net_micro.clone(),
+                    scenario_base_net_micro: scenario_net_micro.clone(),
+                    scenario_rebate_micro: vec![0; 3],
+                    scenario_rebate_accrual_micro: vec![0; 3],
+                    scenario_rebate_program_dates: vec![None; 3],
+                    scenario_rebate_baseline_micro: vec![0; 3],
                     scenario_risk_net_micro: scenario_net_micro.clone(),
                     distribution_numerators: vec![nominal_numerator],
+                    base_distribution_numerators: vec![nominal_numerator],
+                    rebate_distribution_numerators: vec![0],
                     nominal_numerator,
+                    base_nominal_numerator: nominal_numerator,
+                    rebate_nominal_numerator: 0,
                     bucket_capital_micro: vec![1_000_000],
                     capital_hours_micro: 1_000_000,
                 })
@@ -1626,6 +1816,210 @@ mod tests {
             max_drawdown_micro: 200_000_000,
             top_n: 1,
             exclusivity_groups: Vec::new(),
+            rebate_buckets: Vec::new(),
         }
+    }
+
+    #[test]
+    fn rebate_threshold_is_exact() {
+        let mut prepared = symmetric_model(1);
+        let base_nominal_numerator = prepared.tiers[0].base_nominal_numerator;
+        let program_date = NaiveDate::from_ymd_opt(2026, 8, 17).expect("valid fixture date");
+        prepared.rebate_buckets = vec![PreparedRebateBucket {
+            scenario_index: 0,
+            program_date,
+            baseline_micro: 990_000,
+            threshold_micro: 1_000_000,
+            accrual_terms: vec![(0, 9_000)],
+            value_terms: vec![(0, 100_000)],
+            maximum_accrual_micro: 999_000,
+            maximum_value_micro: 100_000,
+            credit_eligible: true,
+        }];
+
+        let below = prepared.objectives(&[0]).expect("below threshold");
+        assert_eq!(below.nominal_numerator, base_nominal_numerator);
+
+        prepared.rebate_buckets[0].accrual_terms[0].1 = 10_000;
+        prepared.rebate_buckets[0].maximum_accrual_micro = 1_000_000;
+        let reached = prepared.objectives(&[0]).expect("threshold reached");
+        assert!(reached.nominal_numerator > base_nominal_numerator);
+    }
+
+    #[test]
+    fn rebate_combo_crosses_threshold() {
+        let mut prepared = symmetric_model(2);
+        prepared.top_n = 2;
+        prepared.exposure_limits.open_recommendations = 2;
+        prepared.rebate_buckets = vec![PreparedRebateBucket {
+            scenario_index: 0,
+            program_date: NaiveDate::from_ymd_opt(2026, 8, 17).expect("valid fixture date"),
+            baseline_micro: 0,
+            threshold_micro: 1_000_000,
+            accrual_terms: vec![(0, 600_000), (1, 600_000)],
+            value_terms: vec![(0, 100_000), (1, 100_000)],
+            maximum_accrual_micro: 1_200_000,
+            maximum_value_micro: 200_000,
+            credit_eligible: true,
+        }];
+        let deploy = PortfolioSolverDeployConfig {
+            deadline_secs: 10,
+            threads: 1,
+            max_tiers: 100,
+            max_scenarios: 10,
+            max_top_n: 2,
+        };
+
+        let solved =
+            solve_lexicographic(&prepared, Instant::now() + Duration::from_secs(10), &deploy)
+                .expect("threshold-aware solve");
+        assert_eq!(solved.selected, vec![0, 1]);
+        assert!(
+            prepared
+                .rebate_post_check(&solved.selected)
+                .expect("threshold evidence")
+                .decisions[0]
+                .credited
+        );
+    }
+
+    #[test]
+    fn program_days_never_roll() {
+        let mut prepared = symmetric_model(2);
+        prepared.top_n = 2;
+        prepared.exposure_limits.open_recommendations = 2;
+        let first = NaiveDate::from_ymd_opt(2026, 8, 16).expect("valid fixture date");
+        let second = NaiveDate::from_ymd_opt(2026, 8, 17).expect("valid fixture date");
+        prepared.rebate_buckets = vec![
+            PreparedRebateBucket {
+                scenario_index: 0,
+                program_date: first,
+                baseline_micro: 0,
+                threshold_micro: 1_000_000,
+                accrual_terms: vec![(0, 600_000)],
+                value_terms: vec![(0, 100_000)],
+                maximum_accrual_micro: 600_000,
+                maximum_value_micro: 100_000,
+                credit_eligible: true,
+            },
+            PreparedRebateBucket {
+                scenario_index: 0,
+                program_date: second,
+                baseline_micro: 0,
+                threshold_micro: 1_000_000,
+                accrual_terms: vec![(1, 600_000)],
+                value_terms: vec![(1, 100_000)],
+                maximum_accrual_micro: 600_000,
+                maximum_value_micro: 100_000,
+                credit_eligible: true,
+            },
+        ];
+
+        let post_check = prepared
+            .rebate_post_check(&[0, 1])
+            .expect("daily post-check");
+        assert!(
+            post_check
+                .decisions
+                .iter()
+                .all(|decision| !decision.credited)
+        );
+    }
+
+    #[test]
+    fn only_qualifying_scenario_credits() {
+        let mut prepared = symmetric_model(1);
+        let program_date = NaiveDate::from_ymd_opt(2026, 8, 17).expect("valid fixture date");
+        prepared.rebate_buckets = vec![
+            PreparedRebateBucket {
+                scenario_index: 0,
+                program_date,
+                baseline_micro: 990_000,
+                threshold_micro: 1_000_000,
+                accrual_terms: vec![(0, 10_000)],
+                value_terms: vec![(0, 100_000)],
+                maximum_accrual_micro: 1_000_000,
+                maximum_value_micro: 100_000,
+                credit_eligible: true,
+            },
+            PreparedRebateBucket {
+                scenario_index: 1,
+                program_date,
+                baseline_micro: 0,
+                threshold_micro: 1_000_000,
+                accrual_terms: vec![(0, 10_000)],
+                value_terms: vec![(0, 100_000)],
+                maximum_accrual_micro: 10_000,
+                maximum_value_micro: 100_000,
+                credit_eligible: true,
+            },
+        ];
+
+        let post_check = prepared
+            .rebate_post_check(&[0])
+            .expect("scenario post-check");
+        assert!(post_check.decisions[0].credited);
+        assert!(!post_check.decisions[1].credited);
+    }
+
+    #[test]
+    fn daily_solver_matches_bruteforce() {
+        let mut prepared = symmetric_model(3);
+        prepared.top_n = 2;
+        prepared.exposure_limits.open_recommendations = 2;
+        for (tier, scenario_value) in prepared.tiers.iter_mut().zip([100_000_i64, 90_000, 80_000]) {
+            let numerator = scenario_value * 10_000;
+            tier.scenario_net_micro = vec![scenario_value; 3];
+            tier.scenario_base_net_micro = vec![scenario_value; 3];
+            tier.scenario_risk_net_micro = vec![scenario_value; 3];
+            tier.distribution_numerators = vec![numerator];
+            tier.base_distribution_numerators = vec![numerator];
+            tier.nominal_numerator = numerator;
+            tier.base_nominal_numerator = numerator;
+        }
+        prepared.rebate_buckets = vec![PreparedRebateBucket {
+            scenario_index: 0,
+            program_date: NaiveDate::from_ymd_opt(2026, 8, 17).expect("valid fixture date"),
+            baseline_micro: 0,
+            threshold_micro: 1_000_000,
+            accrual_terms: vec![(0, 600_000), (1, 600_000), (2, 600_000)],
+            value_terms: vec![(0, 300_000), (1, 200_000), (2, 100_000)],
+            maximum_accrual_micro: 1_200_000,
+            maximum_value_micro: 500_000,
+            credit_eligible: true,
+        }];
+        let deploy = PortfolioSolverDeployConfig {
+            deadline_secs: 10,
+            threads: 1,
+            max_tiers: 10,
+            max_scenarios: 10,
+            max_top_n: 2,
+        };
+        let solved =
+            solve_lexicographic(&prepared, Instant::now() + Duration::from_secs(10), &deploy)
+                .expect("daily threshold solve");
+        let solved_robust = prepared
+            .objectives(&solved.selected)
+            .expect("solver objective")
+            .robust_numerator;
+        let brute_force_robust = [
+            vec![],
+            vec![0],
+            vec![1],
+            vec![2],
+            vec![0, 1],
+            vec![0, 2],
+            vec![1, 2],
+        ]
+        .into_iter()
+        .map(|selection| {
+            prepared
+                .objectives(&selection)
+                .expect("brute-force objective")
+                .robust_numerator
+        })
+        .max()
+        .expect("non-empty brute-force catalog");
+        assert_eq!(solved_robust, brute_force_robust);
     }
 }

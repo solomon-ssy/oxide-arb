@@ -8,7 +8,6 @@ mod wire;
 
 use catalog::{CatalogEvent, CatalogMarket};
 pub use catalog::{CatalogMarketReject, FilteredPrelistingMarket, RejectedMarket};
-use chrono::Utc;
 use futures_util::stream::{self, StreamExt};
 use mapper::{CatalogMarketMapCtx, CatalogMarketWithCtx};
 pub use mapper::{CatalogSourceTimestamps, GammaCatalogBatch};
@@ -176,7 +175,6 @@ impl GammaClient {
             ctx: CatalogMarketMapCtx {
                 event_id,
                 categories,
-                available_at: Utc::now(),
             },
         }
         .try_into()

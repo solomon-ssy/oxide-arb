@@ -432,6 +432,28 @@ impl Default for ReconciliationPolicy {
     }
 }
 
+/// Frozen account-level policy for valuing delayed maker rebates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MakerRebatePolicy {
+    /// Day-local minimum venue-calculated accrual required for payout.
+    pub payout_threshold_usd: DecimalValue,
+    /// Conservative lag from UTC program-day close while observed history is insufficient.
+    pub fallback_lag_from_program_close_secs: u64,
+    /// Complete venue-reported-accrual to wallet-credit program days required for p95.
+    pub observed_p95_min_samples: u32,
+}
+
+impl Default for MakerRebatePolicy {
+    fn default() -> Self {
+        Self {
+            payout_threshold_usd: DecimalValue::new(rust_decimal_macros::dec!(1)),
+            fallback_lag_from_program_close_secs: 172_800,
+            observed_p95_min_samples: 30,
+        }
+    }
+}
+
 /// Venue-dimension execution-breaker thresholds.
 ///
 /// Drives the stateful execution breaker that watches venue submit/cancel

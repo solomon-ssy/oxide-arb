@@ -382,7 +382,7 @@ async fn assert_maker_identity(signature_type: Option<SignatureType>, funder: Ad
         .await
         .expect("place identity order");
     let awards = client
-        .maker_rebate_awards(date)
+        .maker_rebate_reported_accruals(date)
         .await
         .expect("read maker awards");
     let requests = server.received_requests().await.expect("request ledger");

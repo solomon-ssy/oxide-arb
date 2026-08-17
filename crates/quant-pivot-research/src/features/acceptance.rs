@@ -16,6 +16,7 @@ use quant_pivot_models::{
         market::{
             MarketInfo, MarketRegistryInfo, TokenInfo,
             book::BookLevel,
+            fee::MarketMakerRebateEvidence,
             registry::{CatalogMarketLeg, EventRegistryInfo, NegRiskLeg, NegRiskLegSet},
         },
         quant::{DomainAvailability, FeatureVectorInfo, MarketCandidate, MarketDataHealth},
@@ -92,7 +93,7 @@ fn test_context(
         end_date: Some(boundary.decision_at() + ChronoDuration::days(7)),
         created_at: Some(boundary.decision_at() - ChronoDuration::days(30)),
         fee_schedule: None,
-        maker_rebate_schedule: None,
+        maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
     }
 }
 
@@ -152,7 +153,7 @@ fn test_catalog_snapshot(
         min_order_size: Decimal::ONE,
         liquidity_usd: Some(Usd::new(Decimal::from(5_000))),
         volume_24h: None,
-        maker_rebate_schedule: None,
+        maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         start_date: context.start_date,
         end_date: context.end_date,
         resolved_at: None,
@@ -1363,7 +1364,7 @@ async fn online_offline_feature_parity() {
             end_date: Some(as_of + ChronoDuration::days(3)),
             created_at: Some(as_of - ChronoDuration::days(10)),
             fee_schedule: None,
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         },
     };
 
@@ -1912,7 +1913,7 @@ async fn online_offline_parity_window() {
             end_date: Some(as_of + ChronoDuration::days(3)),
             created_at: Some(as_of - ChronoDuration::days(10)),
             fee_schedule: None,
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         },
     };
     let buckets: Vec<MicrostructureBucket> = (1_i64..=5)
@@ -2147,7 +2148,7 @@ fn sibling_leg_parity_fixture() -> (SiblingLegParityFixture, [NegRiskLeg; 3], Se
             end_date: Some(as_of + ChronoDuration::days(7)),
             created_at: Some(as_of - ChronoDuration::days(30)),
             fee_schedule: None,
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
         },
     };
     let sibling_legs = [

@@ -19,9 +19,7 @@ use quant_pivot_models::{
             CryptoPriceReport, DecisionBoundary, DecisionClock, DomainObservation,
             WeatherForecastPoint, WeatherObservationFact,
         },
-        market::{
-            CatalogEventChangeInfo, CatalogMarketChangeInfo, CatalogWindowInfo, MarketRegistryInfo,
-        },
+        market::{CatalogEventChangeInfo, CatalogMarketChangeInfo, CatalogWindowInfo},
         quant::{
             CompleteSourceSlice, MarketLinkage, NewSourceSlice, SourceSliceIdentity,
             SourceSliceInfo,
@@ -580,7 +578,8 @@ impl SourceSliceMaterializer {
         let mut selected_changes = Vec::with_capacity(market_changes.len());
         for version in market_changes {
             let market =
-                serde_json::from_value::<MarketRegistryInfo>(version.payload.clone().into_inner())
+                version
+                    .verified_payload()
                     .map_err(|error| ResearchError::CohortMismatch {
                         profile: profile.profile_ref.id.to_string(),
                         detail: format!(
@@ -1224,11 +1223,11 @@ fn source_boundary(identity: &SourceSliceIdentity) -> QuantResult<DecisionBounda
 fn replay_samples(versions: &[CatalogMarketChangeInfo]) -> QuantResult<Vec<ReplaySample>> {
     let mut samples = Vec::with_capacity(versions.len().saturating_mul(2));
     for version in versions {
-        let market =
-            serde_json::from_value::<MarketRegistryInfo>(version.payload.clone().into_inner())
-                .map_err(|error| ResearchError::DatasetBuild {
-                    detail: format!("catalog market {} is invalid: {error}", version.market_id),
-                })?;
+        let market = version
+            .verified_payload()
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("catalog market {} is invalid: {error}", version.market_id),
+            })?;
         let market_id = market.market_id;
         for token_id in [market.token_yes, market.token_no] {
             samples.push(ReplaySample {

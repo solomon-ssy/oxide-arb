@@ -203,6 +203,8 @@ impl ExecutionBundle {
             Arc::clone(&infra.quant_fact_read),
             deps.wallet,
             Arc::clone(&deps.data.book_store),
+            Arc::clone(&deps.data.catalog_ledger_repo),
+            Arc::clone(&repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
         ));
         let reconciliation = Arc::new(ReconciliationService::new(ReconciliationServiceDeps {
             collector,
@@ -214,6 +216,9 @@ impl ExecutionBundle {
             positions: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
             reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
             submission: Arc::clone(&submission),
+            catalog_ledger: Arc::clone(&deps.data.catalog_ledger_repo),
+            clob_market_info: Arc::clone(&repos.clob_market_info)
+                as Arc<dyn ClobMarketInfoRepository>,
             breaker: Arc::clone(&breaker),
             metrics: Arc::clone(&infra.metrics),
             config: Arc::clone(&deps.governance.runtime_config),
@@ -460,6 +465,7 @@ fn build_admission_builder(
         conditions: Arc::clone(&repos.entry_condition) as Arc<dyn EntryConditionRepository>,
         capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
         markets: Arc::clone(&deps.data.market_repo),
+        catalog_ledger: Arc::clone(&deps.data.catalog_ledger_repo),
         clob_market_info: Arc::clone(&repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
         config_versions: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
         account_factory: Arc::clone(&deps.account.provider_factory),

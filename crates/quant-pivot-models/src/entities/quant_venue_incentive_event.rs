@@ -25,7 +25,7 @@ pub struct Model {
     pub stage: VenueIncentiveStage,
     pub program_date: NaiveDate,
     pub amount_usd: Usd,
-    pub source_schedule_hash: Option<ContentHash>,
+    pub source_terms_hash: Option<ContentHash>,
     #[sea_orm(column_type = "Text")]
     pub source_partition: String,
     #[sea_orm(column_type = "Text", unique)]

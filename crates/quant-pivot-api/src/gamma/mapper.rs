@@ -10,15 +10,18 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::market::MarketError;
 use quant_pivot_models::{
     domain::market::{
-        EventRegistryInfo, MarketRegistryInfo, TokenInfo, fee::MarketMakerRebateSchedule,
+        EventRegistryInfo, MarketRegistryInfo, TokenInfo,
+        fee::{MarketMakerRebateEvidence, MarketMakerRebateSchedule},
         resolve_binary_pair_exact,
     },
     enums::common::CategorySet,
-    hashing::CanonicalDigest,
     types::{EventId, MarketId, TokenId},
 };
 
-use super::catalog::{CatalogEvent, CatalogMarket, FilteredPrelistingMarket, RejectedMarket};
+use super::catalog::{
+    CatalogEvent, CatalogMakerRebateEvidence, CatalogMarket, FilteredPrelistingMarket,
+    RejectedMarket,
+};
 use crate::gamma::CatalogMarketReject;
 
 /// Source timestamps retained separately from the live registry's resolved
@@ -44,7 +47,6 @@ pub struct GammaCatalogBatch {
 
 impl From<Vec<CatalogEvent>> for GammaCatalogBatch {
     fn from(events: Vec<CatalogEvent>) -> Self {
-        let available_at = Utc::now();
         let event_source_timestamps = events
             .iter()
             .map(|event| {
@@ -88,7 +90,6 @@ impl From<Vec<CatalogEvent>> for GammaCatalogBatch {
                 let ctx = CatalogMarketMapCtx {
                     event_id: event_id.clone(),
                     categories: event_categories,
-                    available_at,
                 };
                 match MarketRegistryInfo::try_from(CatalogMarketWithCtx { market, ctx }) {
                     Ok(registry) => registry_markets.push(registry),
@@ -144,7 +145,6 @@ impl From<&CatalogEvent> for EventRegistryInfo {
 pub struct CatalogMarketMapCtx {
     pub event_id: EventId,
     pub categories: CategorySet,
-    pub available_at: DateTime<Utc>,
 }
 
 /// Catalog market plus mapping context for domain conversion.
@@ -175,44 +175,34 @@ impl TryFrom<CatalogMarketWithCtx> for MarketRegistryInfo {
         // without it remains unknown; substituting `updatedAt` (or wall clock)
         // would fabricate label maturity and a live settlement transition.
         let resolved_at = market.resolved_at;
-        let maker_rebate_schedule = market
-            .maker_rebate_schedule
-            .as_ref()
-            .map(|source| {
-                let schedule_hash = CanonicalDigest::content_hash_typed(
-                    "quant-pivot/market-maker-rebate-schedule",
-                    1,
-                    &(
-                        &market_id,
-                        source.fees_enabled,
-                        source.platform_rate,
-                        source.exponent,
-                        source.taker_only,
-                        source.rebate_rate,
-                        source.effective_at,
-                        ctx.available_at,
-                        source.catalog_change_hash,
-                    ),
-                )
-                .map_err(|error| MarketError::CatalogSerialization {
-                    entity: "market_maker_rebate_schedule",
-                    id: market_id.to_string(),
-                    reason: error.to_string(),
-                })?;
-                Ok::<_, MarketError>(MarketMakerRebateSchedule {
-                    market_id: market_id.clone(),
-                    fees_enabled: source.fees_enabled,
-                    platform_rate: source.platform_rate,
-                    exponent: source.exponent,
-                    taker_only: source.taker_only,
-                    rebate_rate: source.rebate_rate,
-                    effective_at: source.effective_at,
-                    available_at: ctx.available_at,
-                    catalog_change_hash: source.catalog_change_hash,
-                    schedule_hash,
-                })
-            })
-            .transpose()?;
+        let maker_rebate_evidence = match market.maker_rebate_evidence {
+            CatalogMakerRebateEvidence::NoProgram { terms_hash } => {
+                MarketMakerRebateEvidence::NoProgram { terms_hash }
+            }
+            CatalogMakerRebateEvidence::Available { schedule } => {
+                MarketMakerRebateEvidence::Available {
+                    schedule: MarketMakerRebateSchedule {
+                        market_id: market_id.clone(),
+                        platform_rate: schedule.platform_rate,
+                        exponent: schedule.exponent,
+                        taker_only: schedule.taker_only,
+                        rebate_rate: schedule.rebate_rate,
+                        terms_hash: schedule.terms_hash,
+                    },
+                }
+            }
+            CatalogMakerRebateEvidence::Unavailable {
+                reason,
+                missing_fields,
+                invalid_fields,
+                terms_hash,
+            } => MarketMakerRebateEvidence::Unavailable {
+                reason,
+                missing_fields,
+                invalid_fields,
+                terms_hash,
+            },
+        };
 
         let registry = Self {
             market_id,
@@ -235,7 +225,7 @@ impl TryFrom<CatalogMarketWithCtx> for MarketRegistryInfo {
             min_order_size: market.min_order_size,
             liquidity_usd: market.liquidity_usd,
             volume_24h: market.volume_24h_usd,
-            maker_rebate_schedule,
+            maker_rebate_evidence,
             start_date: market.start_date,
             end_date: market.end_date,
             resolved_at,

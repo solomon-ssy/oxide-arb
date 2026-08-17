@@ -213,7 +213,7 @@ impl MarketRegistry {
 mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::market::TokenInfo,
+        domain::market::{MarketMakerRebateEvidence, TokenInfo},
         enums::{
             catalog::CatalogFilterReasonSet,
             common::{CategorySet, MarketCategory, TickSize},
@@ -265,7 +265,7 @@ mod tests {
             min_order_size: dec!(5),
             liquidity_usd: None,
             volume_24h: None,
-            maker_rebate_schedule: None,
+            maker_rebate_evidence: MarketMakerRebateEvidence::source_unavailable(),
             start_date: None,
             end_date: None,
             resolved_at: None,

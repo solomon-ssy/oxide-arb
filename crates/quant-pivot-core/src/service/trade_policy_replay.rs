@@ -53,24 +53,20 @@ use quant_pivot_models::{
         WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
         WeatherDailyTemperatureInput, WeatherObservationDayClosedOutsideBand,
         WeatherTemperatureStatistic,
-        trade_policy_evidence::{
-            TradePolicyEvidenceCoverage, TradePolicyMakerRebateEvidence,
-            TradePolicyMakerRebateUnavailableReason,
-        },
+        trade_policy_evidence::{TradePolicyEvidenceCoverage, TradePolicyMakerRebateEvidence},
     },
 };
 use quant_pivot_research::{
     execution_semantics::{
-        BookWalkOutcome, FeeError, LiquidityRole, PitFeeSchedule, PitMakerRebateSchedule,
-        PitMarketExecutionEconomics,
+        BookWalkOutcome, FeeError, LiquidityRole, PitFeeSchedule, PitMakerRebateEvidence,
+        PitMakerRebateUnavailableReason, PitMarketExecutionEconomics,
     },
     model::{QuantModelRuntime, SignalCandidate},
     pit::BookSnapshotAt,
     policy_evidence::PolicyEvidenceRecord,
     policy_replay::{
-        MakerRebateUnavailableReason, PitMakerRebateEvidence, PolicyReplayBook,
-        PolicyReplayLatency, PolicyReplayObservation, PolicyReplayOutcome, PolicyReplayResolution,
-        PolicyReplaySignal, PolicyReplayTrade, replay_policy_candidate,
+        PolicyReplayBook, PolicyReplayLatency, PolicyReplayObservation, PolicyReplayOutcome,
+        PolicyReplayResolution, PolicyReplaySignal, PolicyReplayTrade, replay_policy_candidate,
     },
     policy_validation::{
         PolicyPerformanceObservation, PolicyPerformanceRequest, PolicyPerformanceSummary,
@@ -432,13 +428,13 @@ impl WeatherPolicyEvidence {
             entry_filled_shares: outcome.entry_filled_shares,
             exited_shares: outcome.exited_shares,
             execution_fee_usd: outcome.execution_fee_usd,
-            expected_maker_rebate_usd: outcome.expected_maker_rebate_usd,
+            expected_maker_rebate_accrual_usd: outcome.expected_maker_rebate_accrual_usd,
             expected_net_return_bps: outcome.expected_net_return_bps,
             risk_net_return_bps: outcome.risk_net_return_bps,
             ambiguous_touch: outcome.ambiguous_touch,
             full_l2_coverage: outcome.full_l2_coverage,
             fee_coverage: outcome.fee_covered.into(),
-            rebate_evidence_coverage: outcome.rebate_evidence_covered.into(),
+            passive_rebate_evidence_coverage: outcome.passive_rebate_evidence_coverage,
             passive_reconciled_trade_coverage: outcome
                 .passive_reconciled_trade_covered
                 .map(TradePolicyEvidenceCoverage::from),
@@ -487,13 +483,13 @@ impl WeatherPolicyEvidence {
                 vwap: fill.vwap,
                 gross_amount: fill.gross_amount,
                 execution_fee_usd: fill.execution_fee_usd,
-                expected_maker_rebate_usd: fill.expected_maker_rebate_usd,
+                expected_maker_rebate_accrual_usd: fill.expected_maker_rebate_accrual_usd,
                 risk_cash_delta: fill.risk_cash_delta,
                 fee_schedule_hash: fill.fee_schedule_hash,
                 maker_rebate_evidence: fill
                     .maker_rebate_evidence
                     .as_ref()
-                    .map(policy_rebate_evidence),
+                    .map(TradePolicyMakerRebateEvidence::from),
                 stream_session_id: fill.stream_session_id,
                 token_sequence: fill.token_sequence,
                 source_event_hash: fill.source_event_hash,
@@ -633,7 +629,7 @@ struct CandidateTrialMetrics {
     executable_coverage: Decimal,
     full_l2_coverage: Decimal,
     fee_catalog_coverage: Decimal,
-    rebate_evidence_coverage: Decimal,
+    passive_rebate_evidence_coverage: Option<Decimal>,
     ambiguous_touch_rate: Decimal,
     depth_failure_rate: Decimal,
     passive_reconciled_trade_coverage: Option<Decimal>,
@@ -722,7 +718,7 @@ fn append_weather_latency_evidence(
             executable_coverage: metrics.executable_coverage,
             full_l2_coverage: metrics.full_l2_coverage,
             fee_catalog_coverage: metrics.fee_catalog_coverage,
-            rebate_evidence_coverage: metrics.rebate_evidence_coverage,
+            passive_rebate_evidence_coverage: metrics.passive_rebate_evidence_coverage,
             ambiguous_touch_rate: metrics.ambiguous_touch_rate,
             depth_failure_rate: metrics.depth_failure_rate,
         });
@@ -802,6 +798,17 @@ fn append_row_evidence(
                 })
             })
         };
+        let applicable_rebate_coverages = replay
+            .outcomes
+            .iter()
+            .filter(|outcome| candidate_ids.contains(&outcome.candidate_id))
+            .map(|outcome| outcome.passive_rebate_evidence_coverage)
+            .filter(|coverage| coverage.is_applicable())
+            .collect::<Vec<_>>();
+        let rebate_evidence_available = !applicable_rebate_coverages.is_empty()
+            && applicable_rebate_coverages
+                .iter()
+                .all(|coverage| coverage.is_covered());
         let available_capabilities = [
             (
                 replay
@@ -815,10 +822,7 @@ fn append_row_evidence(
                 TradePolicyObservationCapability::PitFeeSchedule,
             ),
             (
-                replay
-                    .outcomes
-                    .iter()
-                    .all(|outcome| outcome.rebate_evidence_covered),
+                rebate_evidence_available,
                 TradePolicyObservationCapability::PitMakerRebateEvidence,
             ),
             (
@@ -924,30 +928,6 @@ fn performance_observations(
         .collect()
 }
 
-const fn policy_rebate_evidence(
-    evidence: &PitMakerRebateEvidence,
-) -> TradePolicyMakerRebateEvidence {
-    match evidence {
-        PitMakerRebateEvidence::Available { schedule_hash, .. } => {
-            TradePolicyMakerRebateEvidence::Available {
-                schedule_hash: *schedule_hash,
-            }
-        }
-        PitMakerRebateEvidence::Unavailable { reason } => {
-            TradePolicyMakerRebateEvidence::Unavailable {
-                reason: match reason {
-                    MakerRebateUnavailableReason::NotListed => {
-                        TradePolicyMakerRebateUnavailableReason::NotListed
-                    }
-                    MakerRebateUnavailableReason::NotYetVisible => {
-                        TradePolicyMakerRebateUnavailableReason::NotYetVisible
-                    }
-                },
-            }
-        }
-    }
-}
-
 fn trial_metrics_for_candidate(
     replayed: &[WeatherExampleReplay],
     candidate_id: &str,
@@ -984,6 +964,19 @@ fn trial_metrics_for_candidate(
         Decimal::from(passive.iter().filter(|covered| **covered).count())
             / Decimal::from(passive.len())
     });
+    let passive_rebate = rows
+        .iter()
+        .map(|outcome| outcome.passive_rebate_evidence_coverage)
+        .filter(|coverage| coverage.is_applicable())
+        .collect::<Vec<_>>();
+    let passive_rebate_evidence_coverage = (!passive_rebate.is_empty()).then(|| {
+        Decimal::from(
+            passive_rebate
+                .iter()
+                .filter(|coverage| coverage.is_covered())
+                .count(),
+        ) / Decimal::from(passive_rebate.len())
+    });
     Ok(CandidateTrialMetrics {
         sample_count,
         executable_coverage: ratio(
@@ -1000,11 +993,7 @@ fn trial_metrics_for_candidate(
                 .count(),
         )?,
         fee_catalog_coverage: ratio(rows.iter().filter(|outcome| outcome.fee_covered).count())?,
-        rebate_evidence_coverage: ratio(
-            rows.iter()
-                .filter(|outcome| outcome.rebate_evidence_covered)
-                .count(),
-        )?,
+        passive_rebate_evidence_coverage,
         ambiguous_touch_rate: ratio(
             rows.iter()
                 .filter(|outcome| outcome.ambiguous_touch)
@@ -1050,7 +1039,8 @@ fn statistical_gate_passes(
         && metrics.executable_coverage >= gate.min_eligible_market_coverage
         && metrics.full_l2_coverage >= gate.min_full_l2_coverage
         && metrics.fee_catalog_coverage >= gate.min_fee_catalog_coverage
-        && metrics.rebate_evidence_coverage == Decimal::ONE
+        && (!requires_passive_reconciliation
+            || metrics.passive_rebate_evidence_coverage == Some(Decimal::ONE))
         && passive_gate_passes
         && metrics.ambiguous_touch_rate <= gate.max_ambiguous_touch_rate
         && metrics.depth_failure_rate <= gate.max_depth_failure_rate
@@ -1332,10 +1322,18 @@ fn fitted_cohort(request: FittedCohortRequest<'_>) -> QuantResult<TradePolicyCoh
             one_x_metrics.fee_catalog_coverage,
             two_x_metrics.fee_catalog_coverage,
         ),
-        rebate_evidence_coverage: min_metric(
-            one_x_metrics.rebate_evidence_coverage,
-            two_x_metrics.rebate_evidence_coverage,
-        ),
+        passive_rebate_evidence_coverage: match (
+            one_x_metrics.passive_rebate_evidence_coverage,
+            two_x_metrics.passive_rebate_evidence_coverage,
+        ) {
+            (Some(one_x), Some(two_x)) => Some(min_metric(one_x, two_x)),
+            (None, None) => None,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(methodology(
+                    "latency scenarios disagree on passive rebate applicability".to_owned(),
+                ));
+            }
+        },
         cpcv_path_count: u32::try_from(one_x.cpcv_paths.len().min(two_x.cpcv_paths.len()))
             .map_err(|error| methodology(format!("cohort CPCV path count overflow: {error}")))?,
         trial_count,
@@ -1709,43 +1707,34 @@ fn maker_rebate_evidence_at(
     fee_schedule: Option<&MarketFeeSchedule>,
     at: DateTime<Utc>,
 ) -> QuantResult<PitMakerRebateEvidence> {
-    let Some(market) = catalog_market_at_boundary(page, market_id, boundary)? else {
+    let Some(version) = catalog_market_version_at(page, market_id, boundary) else {
+        let terms_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot/missing-maker-rebate-evidence",
+            1,
+            &(market_id, at),
+        )?;
         return Ok(PitMakerRebateEvidence::Unavailable {
-            reason: MakerRebateUnavailableReason::NotYetVisible,
+            reason: PitMakerRebateUnavailableReason::NotPointInTime,
+            terms_hash,
+            available_at: at,
         });
     };
-    let Some(source_schedule) = market.maker_rebate_schedule.as_ref() else {
-        return Ok(PitMakerRebateEvidence::Unavailable {
-            reason: MakerRebateUnavailableReason::NotListed,
-        });
-    };
-    let schedule = PitMakerRebateSchedule::from_market_schedule(source_schedule)
-        .map_err(|error| rebate_evidence_error(market_id, at, error))?;
-    match schedule.validate_at(at) {
-        Ok(()) => {}
-        Err(FeeError::NotPointInTime) => {
-            return Ok(PitMakerRebateEvidence::Unavailable {
-                reason: MakerRebateUnavailableReason::NotYetVisible,
-            });
-        }
-        Err(error) => return Err(rebate_evidence_error(market_id, at, error)),
-    }
+    let market = decode_catalog_market(version)?;
     if let Some(fee_schedule) = fee_schedule {
-        let economics =
-            PitMarketExecutionEconomics::resolve(fee_schedule, Some(source_schedule), at)
-                .map_err(|error| rebate_evidence_error(market_id, at, error))?;
-        let schedule = economics
-            .maker_rebate_schedule
-            .ok_or_else(|| rebate_evidence_error(market_id, at, FeeError::NotPointInTime))?;
-        return Ok(PitMakerRebateEvidence::Available {
-            schedule_hash: schedule.schedule_hash,
-            schedule,
-        });
+        let economics = PitMarketExecutionEconomics::resolve(
+            fee_schedule,
+            &market.maker_rebate_evidence,
+            version.available_at,
+            at,
+        )
+        .map_err(|error| rebate_evidence_error(market_id, at, error))?;
+        return Ok(economics.maker_rebate_evidence);
     }
-    Ok(PitMakerRebateEvidence::Available {
-        schedule_hash: schedule.schedule_hash,
-        schedule,
-    })
+    Ok(PitMakerRebateEvidence::from_market_evidence(
+        &market.maker_rebate_evidence,
+        version.available_at,
+        at,
+    ))
 }
 
 fn rebate_evidence_error(market_id: &MarketId, at: DateTime<Utc>, error: FeeError) -> QuantError {
@@ -2480,28 +2469,36 @@ fn catalog_market_at_boundary(
     market_id: &MarketId,
     boundary: &DecisionBoundary,
 ) -> QuantResult<Option<MarketRegistryInfo>> {
-    let version = page
-        .catalog_markets
+    catalog_market_version_at(page, market_id, boundary)
+        .map(decode_catalog_market)
+        .transpose()
+}
+
+fn catalog_market_version_at<'a>(
+    page: &'a ReplayPage,
+    market_id: &MarketId,
+    boundary: &DecisionBoundary,
+) -> Option<&'a CatalogMarketChangeInfo> {
+    page.catalog_markets
         .iter()
         .filter(|version| {
             &version.market_id == market_id
                 && version.source_effective_at <= boundary.cutoff_for(DecisionSource::Catalog)
                 && version.available_at <= boundary.decision_at()
         })
-        .max_by(|left, right| catalog_change_order(left, right));
+        .max_by(|left, right| catalog_change_order(left, right))
+}
+
+fn decode_catalog_market(version: &CatalogMarketChangeInfo) -> QuantResult<MarketRegistryInfo> {
     version
-        .map(|version| {
-            serde_json::from_value(version.payload.clone().into_inner()).map_err(|error| {
-                ResearchError::PitResolution {
-                    detail: format!(
-                        "market {} catalog payload is invalid: {error}",
-                        version.market_id
-                    ),
-                }
-                .into()
-            })
+        .verified_payload()
+        .map_err(|error| ResearchError::PitResolution {
+            detail: format!(
+                "market {} catalog payload is invalid: {error}",
+                version.market_id,
+            ),
         })
-        .transpose()
+        .map_err(Into::into)
 }
 
 fn catalog_change_order(

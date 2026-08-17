@@ -6,9 +6,9 @@ use quant_pivot_models::{
     enums::common::{OrderType, Side},
     hashing::CanonicalDigest,
     types::{
-        ArtifactUri, Bps, ContentHash, PreparedFeeSchedule, PreparedVenueOrder, Price,
-        ResearchEvaluationTrack, ResearchProfileRef, Shares, SourceSliceManifestRef, TokenId, Usd,
-        VenueOrderAmount, builtin_research_profiles,
+        ArtifactUri, Bps, ContentHash, EntryMakerRebateTerms, PreparedFeeSchedule,
+        PreparedVenueOrder, Price, ResearchEvaluationTrack, ResearchProfileRef, Shares,
+        SourceSliceManifestRef, TokenId, Usd, VenueOrderAmount, builtin_research_profiles,
     },
 };
 use rust_decimal::Decimal;
@@ -68,7 +68,7 @@ pub fn prepared_order(
             builder_taker_fee_bps: Bps::ZERO,
             builder_attribution: BuilderFeeAttribution::NoBuilderCode,
         },
-        maker_rebate_schedule: None,
+        maker_rebate_terms: EntryMakerRebateTerms::AggressiveNotApplicable,
         prepared_at: now,
         valid_until: now + Duration::hours(1),
     }

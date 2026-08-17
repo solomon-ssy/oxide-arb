@@ -4850,8 +4850,8 @@
           "wire_value": "estimated_accrual"
         },
         {
-          "rust_variant": "VenueAwarded",
-          "wire_value": "venue_awarded"
+          "rust_variant": "VenueReportedAccrual",
+          "wire_value": "venue_reported_accrual"
         },
         {
           "rust_variant": "WalletCredited",

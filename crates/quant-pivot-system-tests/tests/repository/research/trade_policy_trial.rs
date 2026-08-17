@@ -88,7 +88,7 @@ fn successful_attempt(
             executable_coverage: Decimal::ONE,
             full_l2_coverage: Decimal::ONE,
             fee_catalog_coverage: Decimal::ONE,
-            rebate_evidence_coverage: Decimal::ONE,
+            passive_rebate_evidence_coverage: Some(Decimal::ONE),
             ambiguous_touch_rate: Decimal::ZERO,
             depth_failure_rate: Decimal::ZERO,
             latency_stress_multiplier: Decimal::ONE,

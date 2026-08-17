@@ -5,14 +5,14 @@ use chrono::NaiveDate;
 use quant_pivot_models::types::EvmAddress;
 use rust_decimal_macros::dec;
 
-use super::{RawMakerRebateAward, normalize_maker_rebate_award};
+use super::{RawMakerRebateReportedAccrual, normalize_maker_rebate_award};
 
 #[test]
 fn maker_award_validates_identity() {
     let expected_date = NaiveDate::from_ymd_opt(2026, 8, 15).expect("date");
     let expected_maker = EvmAddress::parse(format!("0x{}", "1".repeat(40))).expect("maker address");
     let award = normalize_maker_rebate_award(
-        RawMakerRebateAward {
+        RawMakerRebateReportedAccrual {
             date: expected_date,
             condition_id: format!("0x{}", "2".repeat(64)),
             asset_address: format!("0x{}", "3".repeat(40)),
@@ -34,7 +34,7 @@ fn maker_award_rejects_negative() {
     let expected_date = NaiveDate::from_ymd_opt(2026, 8, 15).expect("date");
     let expected_maker = EvmAddress::parse(format!("0x{}", "1".repeat(40))).expect("maker address");
     let error = normalize_maker_rebate_award(
-        RawMakerRebateAward {
+        RawMakerRebateReportedAccrual {
             date: expected_date,
             condition_id: format!("0x{}", "2".repeat(64)),
             asset_address: format!("0x{}", "3".repeat(40)),

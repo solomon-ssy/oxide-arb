@@ -12,7 +12,10 @@ pub use book::{
     bid_depth_down_to, top_n_share_depth, total_depth_usd,
 };
 pub use catalog::{EventInfo, EventTags, UpsertEvent};
-pub use fee::{BuilderFeeAttribution, MarketFeeSchedule};
+pub use fee::{
+    BuilderFeeAttribution, MakerRebateField, MakerRebateUnavailableReason, MarketFeeSchedule,
+    MarketMakerRebateEvidence, MarketMakerRebateSchedule,
+};
 pub use registry::{
     CatalogMarketLeg, EventRegistryInfo, MarketInfo, MarketRegistryInfo, NegRiskLeg, NegRiskLegSet,
     TokenInfo, UpsertMarket, resolve_binary_pair_exact,
