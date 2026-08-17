@@ -225,6 +225,12 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
+        name: "trg_quant_venue_incentive_scan_append_only",
+        table: "quant_venue_incentive_reconciliation_scan",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
         name: "trg_quant_factor_definition_append_only",
         table: "quant_factor_definition",
         events: TriggerEvents::DeleteOrUpdate,

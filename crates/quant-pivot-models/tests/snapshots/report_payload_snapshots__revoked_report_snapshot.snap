@@ -76,7 +76,7 @@ expression: revoked_report()
     "candidate_count": 8,
     "rejected_tier_count": 3,
     "published_recommendation_count": 2,
-    "total_suggested_usd": "500",
+    "total_hard_reserved_cash_usd": "500",
     "max_single_recommendation_usd": "300",
     "robust_expected_net_usd": "75",
     "nominal_expected_net_usd": "95",

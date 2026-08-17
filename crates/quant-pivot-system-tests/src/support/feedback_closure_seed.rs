@@ -614,7 +614,7 @@ impl ReportBuildOptions {
     fn align_closure_summary(&mut self, market_selection_count: usize) -> Result<()> {
         let published_count = u32::try_from(self.recommendations.len())?;
         let market_selection_count = u32::try_from(market_selection_count)?;
-        let total_suggested_usd = self
+        let total_hard_reserved_cash_usd = self
             .recommendations
             .iter()
             .map(|recommendation| recommendation.trade_plan.sizing.hard_reserved_cash_usd)
@@ -663,7 +663,7 @@ impl ReportBuildOptions {
         self.summary.candidate_count = published_count;
         self.summary.rejected_tier_count = market_selection_count.saturating_sub(published_count);
         self.summary.published_recommendation_count = published_count;
-        self.summary.total_suggested_usd = total_suggested_usd;
+        self.summary.total_hard_reserved_cash_usd = total_hard_reserved_cash_usd;
         self.summary.max_single_recommendation_usd = max_single_recommendation_usd;
         self.summary.category_allocation = category_allocation;
         self.summary.event_allocation = event_allocation;
@@ -743,7 +743,9 @@ fn closure_report_recommendations(
                     economics.capital_occupancy_usd_hours.inner(),
                 )),
                 marginal_portfolio_value_usd: ChUsd::from(economics.marginal_portfolio_value_usd),
-                suggested_usd: ChUsd::from(recommendation.trade_plan.sizing.hard_reserved_cash_usd),
+                hard_reserved_cash_usd: ChUsd::from(
+                    recommendation.trade_plan.sizing.hard_reserved_cash_usd,
+                ),
                 valid_until: recommendation.valid_until.timestamp_millis(),
             })
         })

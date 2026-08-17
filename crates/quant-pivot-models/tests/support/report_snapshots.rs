@@ -182,12 +182,12 @@ fn base_recommendation(
     rank: i32,
     market: &str,
     side: OutcomeSide,
-    suggested_usd: Usd,
+    hard_reserved_cash_usd: Usd,
 ) -> RecommendationInfo {
     let report_id = report_id(report_seed);
     let id = recommendation_id(rec_seed);
     let mut info =
-        report_fixtures::recommendation(report_id, id, rank, market, side, suggested_usd);
+        report_fixtures::recommendation(report_id, id, rank, market, side, hard_reserved_cash_usd);
     let report_route_run_id = ref_id(&format!("snapshot-route-run:{report_seed}:pooled"));
     let candidate_id = ref_id(&format!("snapshot-candidate:{rec_seed}"));
     let economic_tier_id = ref_id(&format!("snapshot-tier:{rec_seed}:1"));
@@ -345,7 +345,7 @@ impl TopNReportSnapshot {
 pub fn empty_report() -> QuantReportDetailView {
     let mut summary = report_fixtures::report_summary();
     summary.published_recommendation_count = 0;
-    summary.total_suggested_usd = Usd::ZERO;
+    summary.total_hard_reserved_cash_usd = Usd::ZERO;
     summary.max_single_recommendation_usd = Usd::ZERO;
     summary.category_allocation = BTreeMap::new();
     summary.event_allocation = BTreeMap::new();

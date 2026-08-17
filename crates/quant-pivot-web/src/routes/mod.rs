@@ -39,6 +39,7 @@ pub mod factor_catalog;
 pub mod feature_integrity;
 pub mod feedback;
 pub mod health;
+pub mod incentives;
 pub mod market_linkages;
 pub mod markets;
 pub mod menus;
@@ -114,6 +115,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(quant_reports::route_specs());
     specs.extend(quant_recommendations::route_specs());
     specs.extend(account::route_specs());
+    specs.extend(incentives::route_specs());
     specs.extend(positions::route_specs());
     specs.extend(execution_orders::route_specs());
     specs.extend(reconciliations::route_specs());

@@ -1,0 +1,5179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QuantOperatorApiContractSchema",
+  "description": "Schema-only envelope used to generate frontend wire types and boundary validators.\n\nHTTP handlers never serialize this envelope. Every field points at the real\nrequest or response DTO used by the handler so the SPA cannot maintain a\nparallel operator contract.",
+  "type": "object",
+  "properties": {
+    "account_snapshot_response": {
+      "$ref": "#/$defs/AccountSnapshotView"
+    },
+    "create_intent_request": {
+      "$ref": "#/$defs/CreateIntentRequest"
+    },
+    "equity_snapshot_response": {
+      "$ref": "#/$defs/EquitySnapshotView"
+    },
+    "execution_confirmation_response": {
+      "$ref": "#/$defs/OrderIntentView"
+    },
+    "incentive_event_response": {
+      "$ref": "#/$defs/VenueIncentiveEventView"
+    },
+    "incentive_reconciliation_response": {
+      "$ref": "#/$defs/IncentiveReconciliationView"
+    },
+    "live_account_response": {
+      "$ref": "#/$defs/LiveAccountView"
+    },
+    "recommendation_response": {
+      "$ref": "#/$defs/QuantRecommendationView"
+    },
+    "report_detail_response": {
+      "$ref": "#/$defs/QuantReportDetailView"
+    },
+    "report_diff_response": {
+      "$ref": "#/$defs/ReportDiffView"
+    },
+    "report_list_row_response": {
+      "$ref": "#/$defs/QuantReportView"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "recommendation_response",
+    "report_list_row_response",
+    "report_detail_response",
+    "report_diff_response",
+    "create_intent_request",
+    "execution_confirmation_response",
+    "account_snapshot_response",
+    "live_account_response",
+    "equity_snapshot_response",
+    "incentive_reconciliation_response",
+    "incentive_event_response"
+  ],
+  "$defs": {
+    "AccountSnapshotView": {
+      "description": "Persisted decision-time venue account snapshot (immutable audit evidence).",
+      "type": "object",
+      "properties": {
+        "account_snapshot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "as_of": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "available_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "capital_base_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "exposures": {
+          "$ref": "#/$defs/ExposureBreakdown"
+        },
+        "positions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VenuePositionSnapshotView"
+          }
+        },
+        "reserved_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "source": {
+          "$ref": "#/$defs/AccountSource"
+        },
+        "venue_net_liquidation_usd": {
+          "$ref": "#/$defs/Usd"
+        }
+      },
+      "required": [
+        "account_snapshot_id",
+        "as_of",
+        "source",
+        "venue_net_liquidation_usd",
+        "capital_base_usd",
+        "available_usd",
+        "reserved_usd",
+        "positions",
+        "exposures",
+        "created_at"
+      ]
+    },
+    "AccountSource": {
+      "description": "Capital-base provenance for a report's sizing.\n\nSingle real source (the Polymarket venue account). The enum is retained\nfor evidence labelling and forward extension; there is **no** simulated or\nconfigured-budget source — credentials are required and the report fails\nclosed without them.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "polymarket"
+          ]
+        },
+        {
+          "description": "Governed immutable PIT replay; forbidden for a publishable live report.",
+          "type": "string",
+          "const": "historical_replay"
+        }
+      ]
+    },
+    "ApprovalStatus": {
+      "description": "Human or policy approval state attached to an order intent.",
+      "type": "string",
+      "enum": [
+        "not_required",
+        "pending",
+        "approved",
+        "rejected",
+        "expired"
+      ]
+    },
+    "BootstrapExitGuidance": {
+      "description": "Honest report-only exit guidance for an L2-free bootstrap model.\n\nThis intentionally contains no synthetic take-profit, stop-loss, trailing,\nor opportunistic-exit thresholds. It is not accepted by execution paths.",
+      "type": "object",
+      "properties": {
+        "guidance": {
+          "type": "string"
+        },
+        "manual_review_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reference_horizon_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "settlement_value_is_terminal": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "reference_horizon_secs",
+        "manual_review_at",
+        "settlement_value_is_terminal",
+        "guidance"
+      ]
+    },
+    "Bps": {
+      "description": "Basis points (1 bps = 0.01%).",
+      "type": "string"
+    },
+    "BuyModelRoute": {
+      "description": "Exact Buy-side route represented by one report and one durable model run.\n\n`Pooled` may contain only non-vertical market categories. `Crypto` and\n`Weather` are isolated category routes because their `ResearchProfile`,\ndomain-source, factor-plane, and serving-contract preimages are distinct.",
+      "type": "string",
+      "enum": [
+        "pooled",
+        "crypto",
+        "weather"
+      ]
+    },
+    "ConditionTruth": {
+      "description": "Three-state leaf/composite truth. Missing input never becomes false.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "satisfied"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unsatisfied"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "$ref": "#/$defs/ConditionUnavailableReason"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "ConditionUnavailableReason": {
+      "description": "Typed fail-closed reason attached to an unavailable evaluation.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "source_not_configured"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "source_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "source_unhealthy"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "source_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "generation": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "source_gap"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "source_id",
+            "generation"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "input_missing"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "input_stale"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "binding_drift"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "artifact_hash_mismatch"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "factor_definition_mismatch"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "catalog_snapshot_mismatch"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "market_linkage_mismatch"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "clock_skew"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "CreateIntentRequest": {
+      "description": "Inbound body for `POST /quant/intents` (create from a recommendation).",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "recommendation_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "recommendation_id",
+        "reason"
+      ]
+    },
+    "DataQualitySummary": {
+      "description": "Counts of candidates by data-quality classification.",
+      "type": "object",
+      "properties": {
+        "acceptable_count": {
+          "description": "Acceptable inputs.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "degraded_count": {
+          "description": "Degraded inputs.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "fresh_count": {
+          "description": "Fresh inputs.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "insufficient_count": {
+          "description": "Insufficient inputs.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "stale_count": {
+          "description": "Stale inputs.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "fresh_count",
+        "acceptable_count",
+        "degraded_count",
+        "stale_count",
+        "insufficient_count"
+      ]
+    },
+    "DeferredVenueIncentive": {
+      "description": "Delayed venue incentive estimated from one actual or simulated maker fill.\n\nThis is deliberately not a fee and never changes immediate cash outlay,\nhard reservation, maximum loss, or spendable balance.",
+      "type": "object",
+      "properties": {
+        "eligibility": {
+          "$ref": "#/$defs/MakerRebateEligibility"
+        },
+        "expected_credit_at": {
+          "description": "Modeling assumption for discounting, never evidence of wallet credit.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "expected_rebate_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "program_date": {
+          "description": "UTC program day containing the maker fill.",
+          "type": "string",
+          "format": "date"
+        },
+        "source_schedule_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expected_rebate_usd",
+        "program_date",
+        "expected_credit_at",
+        "source_schedule_hash",
+        "eligibility"
+      ]
+    },
+    "EligibilitySummary": {
+      "description": "Execution-eligibility roll-up across published recommendations.",
+      "type": "object",
+      "properties": {
+        "eligible_auto_execution": {
+          "description": "Eligible under auto-execution.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "eligible_report_only": {
+          "description": "Eligible under report-only.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "eligible_semi_auto": {
+          "description": "Eligible under semi-auto.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "eligible_report_only",
+        "eligible_semi_auto",
+        "eligible_auto_execution"
+      ]
+    },
+    "EmptyReportReason": {
+      "description": "Why a report could not publish any recommendation (empty report).\n\nEvery variant has an independent producer in the report builder — there\nare no wire-only placeholders (zero dead semantics).",
+      "oneOf": [
+        {
+          "description": "The market selection was empty.",
+          "type": "string",
+          "const": "empty_selection"
+        },
+        {
+          "description": "Data quality was insufficient for inference.",
+          "type": "string",
+          "const": "insufficient_data_quality"
+        },
+        {
+          "description": "The portfolio budget was already exhausted.",
+          "type": "string",
+          "const": "portfolio_budget_exhausted"
+        },
+        {
+          "description": "Available cash (collateral − reserved) was exhausted before any\ncandidate could be funded — distinct from \"no signal\".",
+          "type": "string",
+          "const": "available_cash_exhausted"
+        },
+        {
+          "description": "No candidate carried a positive signal.",
+          "type": "string",
+          "const": "no_positive_signal"
+        }
+      ]
+    },
+    "EntryConditionInstanceSummaryView": {
+      "description": "Shared summary embedded by recommendation and intent detail views.",
+      "type": "object",
+      "properties": {
+        "artifact_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "artifact_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "claim_admission_state_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "claimed_by_intent_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "condition_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "confirmation_started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "consumed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "continuity_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "evaluation_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "input_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "last_evaluated_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "lease_epoch": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "next_evaluation_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "state": {
+          "$ref": "#/$defs/EntryConditionState"
+        },
+        "truth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConditionTruth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "condition_instance_id",
+        "state",
+        "revision",
+        "expires_at",
+        "lease_epoch"
+      ]
+    },
+    "EntryConditionPlan": {
+      "description": "Recommendation trade-plan reference to an immutable condition artifact.",
+      "oneOf": [
+        {
+          "description": "No conditional wait; admission may proceed immediately.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "immediate"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "Evaluate the exact content-addressed artifact.",
+          "type": "object",
+          "properties": {
+            "artifact_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "content_hash": {
+              "type": "string",
+              "pattern": "^blake3:[0-9a-f]{64}$"
+            },
+            "kind": {
+              "type": "string",
+              "const": "conditional"
+            }
+          },
+          "required": [
+            "kind",
+            "artifact_id",
+            "content_hash"
+          ]
+        }
+      ]
+    },
+    "EntryConditionState": {
+      "description": "Durable state of a recommendation-level entry condition instance.",
+      "type": "string",
+      "enum": [
+        "not_required",
+        "waiting",
+        "unavailable",
+        "confirming",
+        "qualified",
+        "consumed",
+        "expired",
+        "invalidated"
+      ]
+    },
+    "EntryExecutionEconomics": {
+      "description": "Route-specific entry contract offered to the optimizer.",
+      "oneOf": [
+        {
+          "description": "Deterministic aggressive entry after a real L2 walk and venue rounding.",
+          "type": "object",
+          "properties": {
+            "entry_vwap": {
+              "$ref": "#/$defs/Price"
+            },
+            "filled_shares": {
+              "$ref": "#/$defs/Shares"
+            },
+            "immediate_cost": {
+              "$ref": "#/$defs/ImmediateExecutionCost"
+            },
+            "kind": {
+              "type": "string",
+              "const": "aggressive"
+            },
+            "limit_price": {
+              "$ref": "#/$defs/Price"
+            },
+            "requested_shares": {
+              "$ref": "#/$defs/Shares"
+            },
+            "slippage_usd": {
+              "$ref": "#/$defs/Usd"
+            },
+            "visible_liquidity_usd": {
+              "$ref": "#/$defs/Usd"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "requested_shares",
+            "filled_shares",
+            "limit_price",
+            "entry_vwap",
+            "immediate_cost",
+            "slippage_usd",
+            "visible_liquidity_usd"
+          ]
+        },
+        {
+          "description": "OOS-distributed passive post-only entry with a full hard reservation.",
+          "type": "object",
+          "properties": {
+            "decision_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "expected_filled_shares": {
+              "$ref": "#/$defs/Shares"
+            },
+            "expected_maker_rebate_usd": {
+              "$ref": "#/$defs/Usd"
+            },
+            "fill_distribution": {
+              "$ref": "#/$defs/PassiveFillDistribution"
+            },
+            "full_fill_cost": {
+              "$ref": "#/$defs/ImmediateExecutionCost"
+            },
+            "full_fill_maker_rebate": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeferredVenueIncentive"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "good_til_secs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "hard_reserved_cash_usd": {
+              "$ref": "#/$defs/Usd"
+            },
+            "kind": {
+              "type": "string",
+              "const": "passive"
+            },
+            "limit_price": {
+              "$ref": "#/$defs/Price"
+            },
+            "maker_rebate_schedule": {
+              "description": "Gamma terms frozen at the decision boundary. `None` means rebate was\nunavailable and the route was valued with a strict zero incentive.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FrozenMakerRebateSchedule"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "requested_shares": {
+              "$ref": "#/$defs/Shares"
+            },
+            "visible_liquidity_usd": {
+              "$ref": "#/$defs/Usd"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "requested_shares",
+            "limit_price",
+            "decision_at",
+            "good_til_secs",
+            "hard_reserved_cash_usd",
+            "expected_filled_shares",
+            "full_fill_cost",
+            "fill_distribution",
+            "expected_maker_rebate_usd",
+            "visible_liquidity_usd"
+          ]
+        }
+      ]
+    },
+    "EntryOrderPolicy": {
+      "description": "How an armed entry is submitted to the venue.",
+      "oneOf": [
+        {
+          "description": "Rest a bounded, post-only limit order until the recommendation expires.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "passive"
+            },
+            "limit_price": {
+              "$ref": "#/$defs/Price"
+            },
+            "post_only": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "limit_price",
+            "post_only"
+          ]
+        },
+        {
+          "description": "Cross the spread with a worst-price cap and explicit fill semantics.",
+          "type": "object",
+          "properties": {
+            "fill_requirement": {
+              "$ref": "#/$defs/FillRequirement"
+            },
+            "kind": {
+              "type": "string",
+              "const": "aggressive"
+            },
+            "worst_price": {
+              "$ref": "#/$defs/Price"
+            }
+          },
+          "required": [
+            "kind",
+            "worst_price",
+            "fill_requirement"
+          ]
+        }
+      ]
+    },
+    "EntryOrderSpec": {
+      "description": "The concrete entry order an approved intent will submit to the venue.\n\n`side` is always [`Side::Buy`] for an opening recommendation (the outcome is\nchosen by `token_id`); the type stays general so a future closing intent can\nreuse it.",
+      "type": "object",
+      "properties": {
+        "amount": {
+          "description": "Venue amount with side/order-type semantics frozen at intent creation.",
+          "$ref": "#/$defs/OrderAmount"
+        },
+        "limit_price": {
+          "description": "Hard limit price for the order.",
+          "$ref": "#/$defs/Price"
+        },
+        "maker_rebate_schedule": {
+          "description": "Frozen independently sourced maker-rebate terms. Only a passive,\npost-only entry may carry this evidence.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FrozenMakerRebateSchedule"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_slippage_bps": {
+          "description": "Maximum tolerated slippage from the reference price.",
+          "$ref": "#/$defs/Bps"
+        },
+        "order_type": {
+          "description": "Time-in-force / order type.",
+          "$ref": "#/$defs/OrderType"
+        },
+        "post_only": {
+          "description": "Whether venue admission must reject immediately marketable placement.",
+          "type": "boolean"
+        },
+        "side": {
+          "description": "Order direction (opening = `Buy`).",
+          "$ref": "#/$defs/Side"
+        },
+        "token_id": {
+          "description": "Outcome token to trade.",
+          "type": "string"
+        },
+        "valid_until": {
+          "description": "Latest time the order may be submitted.",
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "token_id",
+        "side",
+        "order_type",
+        "post_only",
+        "limit_price",
+        "amount",
+        "max_slippage_bps",
+        "valid_until"
+      ]
+    },
+    "EntryPlan": {
+      "description": "When and how a recommendation becomes executable.",
+      "type": "object",
+      "properties": {
+        "cancel_if_not_triggered": {
+          "description": "Whether to cancel the entry if it never triggers within the window.",
+          "type": "boolean"
+        },
+        "condition": {
+          "description": "Immutable condition artifact reference evaluated at recommendation scope.",
+          "$ref": "#/$defs/EntryConditionPlan"
+        },
+        "entry_reason": {
+          "description": "Human explanation of the entry decision.",
+          "type": "string"
+        },
+        "max_book_age_ms": {
+          "description": "Maximum tolerated book age at entry.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_slippage_bps": {
+          "description": "Maximum acceptable slippage from the reference price.",
+          "$ref": "#/$defs/Bps"
+        },
+        "min_depth_usd": {
+          "description": "Minimum visible depth (USD) required at entry.",
+          "$ref": "#/$defs/Usd"
+        },
+        "order_policy": {
+          "description": "Venue execution policy, orthogonal to the entry condition.",
+          "$ref": "#/$defs/EntryOrderPolicy"
+        },
+        "valid_from": {
+          "description": "Earliest time the entry is valid.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "valid_until": {
+          "description": "Latest time the entry is valid.",
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "condition",
+        "order_policy",
+        "max_slippage_bps",
+        "valid_from",
+        "valid_until",
+        "min_depth_usd",
+        "max_book_age_ms",
+        "cancel_if_not_triggered",
+        "entry_reason"
+      ]
+    },
+    "EquitySnapshotView": {
+      "description": "Persisted strategy-capital equity curve snapshot.",
+      "type": "object",
+      "properties": {
+        "account_snapshot_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "as_of": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "available_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "capital_base_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "drawdown_pct": {
+          "type": "string"
+        },
+        "equity_snapshot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "high_water_mark_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "incentive_credit_cumulative_usd": {
+          "description": "Wallet-confirmed incentive credits, shown for attribution only.\nThis amount is already reflected in venue NLV and must not be added to\ncapital base, available cash, or realized `PnL` a second time.",
+          "$ref": "#/$defs/Usd"
+        },
+        "realized_pnl_cumulative_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "reserved_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "source": {
+          "$ref": "#/$defs/AccountSource"
+        },
+        "unrealized_pnl_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "venue_net_liquidation_usd": {
+          "$ref": "#/$defs/Usd"
+        }
+      },
+      "required": [
+        "equity_snapshot_id",
+        "as_of",
+        "source",
+        "venue_net_liquidation_usd",
+        "capital_base_usd",
+        "available_usd",
+        "reserved_usd",
+        "realized_pnl_cumulative_usd",
+        "incentive_credit_cumulative_usd",
+        "unrealized_pnl_usd",
+        "high_water_mark_usd",
+        "drawdown_pct",
+        "created_at"
+      ]
+    },
+    "ExactVerificationEvidence": {
+      "description": "Exact post-solve verification evidence.",
+      "type": "object",
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "recomputed_economics_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "selected_tier_digest": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "selected_tier_digest",
+        "recomputed_economics_hash"
+      ]
+    },
+    "ExecutableEconomicTier": {
+      "description": "One complete tier offered to the MILP. The optimizer may select the identity or reject it;\nit never changes shares or money values.",
+      "type": "object",
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "category": {
+          "$ref": "#/$defs/MarketCategory"
+        },
+        "economic_tier_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "economics": {
+          "$ref": "#/$defs/RecommendationEconomics"
+        },
+        "entry_execution": {
+          "$ref": "#/$defs/EntryExecutionEconomics"
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "hard_reservation_envelope": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HardReservationBucket"
+          }
+        },
+        "lineage_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "market_id": {
+          "type": "string"
+        },
+        "outcome_side": {
+          "$ref": "#/$defs/OutcomeSide"
+        },
+        "probability_interval_width_bps": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "profit_probability_lower_bps": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "report_route_run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "route": {
+          "$ref": "#/$defs/BuyModelRoute"
+        },
+        "scenario_cashflows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScenarioExecutionCashflow"
+          }
+        },
+        "tier_ordinal": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "token_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "economic_tier_id",
+        "report_route_run_id",
+        "candidate_id",
+        "tier_ordinal",
+        "route",
+        "market_id",
+        "event_id",
+        "category",
+        "token_id",
+        "outcome_side",
+        "entry_execution",
+        "profit_probability_lower_bps",
+        "probability_interval_width_bps",
+        "scenario_cashflows",
+        "hard_reservation_envelope",
+        "economics",
+        "lineage_hash"
+      ]
+    },
+    "ExecutionEligibility": {
+      "description": "Per-recommendation execution eligibility across runtime modes.\n\nComputed and persisted with the recommendation. The create-intent and\nadmission flow consumes it. `eligible_modes` always contains\n[`QuantRuntimeMode::ReportOnly`] (a report is the report-only artifact).",
+      "type": "object",
+      "properties": {
+        "approval_required": {
+          "description": "Whether human approval is required.",
+          "type": "boolean"
+        },
+        "auto_policy_id": {
+          "description": "Auto-execution policy id, when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eligible_modes": {
+          "description": "Runtime modes in which this recommendation is eligible for execution.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuantRuntimeMode"
+          }
+        },
+        "ineligibility_reasons": {
+          "description": "Reasons the recommendation is ineligible (empty when fully eligible).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IneligibilityReason"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "eligible_modes",
+        "ineligibility_reasons",
+        "approval_required"
+      ]
+    },
+    "ExitMonitorObservationView": {
+      "description": "Authoritative read-time projection of one lot's governed exit monitor.",
+      "type": "object",
+      "properties": {
+        "book_age_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "book_fresh": {
+          "type": "boolean"
+        },
+        "book_observed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "cumulative_exit_pct": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cumulative_exited_shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "current_executable_bid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective_stop": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_check_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "latest_reinference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitReinferenceObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_check_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "next_scale_out": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NextScaleOutProjection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "peak_mark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/ExitState"
+        }
+      },
+      "required": [
+        "state",
+        "book_fresh",
+        "cumulative_exited_shares"
+      ]
+    },
+    "ExitPlan": {
+      "description": "When and how a recommendation should be exited.",
+      "type": "object",
+      "properties": {
+        "exit_reason": {
+          "description": "Human explanation of the exit decision.",
+          "type": "string"
+        },
+        "manual_review_at": {
+          "description": "Optional manual-review checkpoint time.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "max_hold_secs": {
+          "description": "Maximum holding period in seconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "opportunistic_exit": {
+          "description": "Policy-fitted advisory exit thresholds.",
+          "$ref": "#/$defs/OpportunisticExitPolicy"
+        },
+        "redeem_policy": {
+          "description": "Whether a resolved hold-to-resolution lot is redeemed automatically.",
+          "$ref": "#/$defs/RedeemPolicy"
+        },
+        "scale_out_targets": {
+          "description": "Monotone cumulative scale-out targets.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScaleOutTarget"
+          }
+        },
+        "settlement_mode": {
+          "description": "Whether the lot exits before resolution or holds through resolution.",
+          "$ref": "#/$defs/ExitSettlementMode"
+        },
+        "stop_loss_pct": {
+          "description": "Stop-loss as a percentage move.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stop_loss_price": {
+          "description": "Stop-loss price target.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "take_profit_pct": {
+          "description": "Take-profit as a percentage move.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "take_profit_price": {
+          "description": "Take-profit price target.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thesis_invalidation": {
+          "description": "Frozen, machine-evaluable thesis invalidation policy.",
+          "$ref": "#/$defs/ThesisInvalidationPolicy"
+        },
+        "time_exit_at": {
+          "description": "Absolute time-based exit.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "trailing_stop": {
+          "description": "Optional trailing-stop policy.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrailingStopPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "scale_out_targets",
+        "thesis_invalidation",
+        "opportunistic_exit",
+        "settlement_mode",
+        "redeem_policy",
+        "exit_reason"
+      ]
+    },
+    "ExitPolicySpec": {
+      "description": "The exit policy an approved intent freezes after the entry fills.\n\nA **faithful, complete** projection of the recommendation's `ExitPlan` — the\nexit monitor evaluates every trigger deterministically from this frozen\ncontract and never re-reads the (possibly expired/revoked) recommendation\nfor the price/time/trailing/partial ladder. `entry_reference_price` and\n`entry_composite_score` are the frozen entry-thesis baselines used for\npercentage-based stops/targets and signal-degradation re-inference.",
+      "type": "object",
+      "properties": {
+        "entry_composite_score": {
+          "description": "Frozen entry composite score — the baseline the signal-degradation\nre-inference compares the fresh score against.",
+          "$ref": "#/$defs/Probability"
+        },
+        "entry_reference_price": {
+          "description": "Frozen entry reference price (recommendation `entry_price_ref` / limit),\nthe basis for percentage-based take-profit / stop-loss / trailing math.",
+          "$ref": "#/$defs/Price"
+        },
+        "manual_review_at": {
+          "description": "Optional manual-review checkpoint time.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "max_hold_secs": {
+          "description": "Maximum holding period in seconds (relative to the lot's open time).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "opportunistic_exit": {
+          "description": "Policy-fitted advisory exit thresholds.",
+          "$ref": "#/$defs/OpportunisticExitPolicy"
+        },
+        "redeem_policy": {
+          "description": "Whether a resolved hold-to-resolution lot is redeemed automatically.",
+          "$ref": "#/$defs/RedeemPolicy"
+        },
+        "scale_out_targets": {
+          "description": "Monotone cumulative scale-out targets.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScaleOutTarget"
+          }
+        },
+        "settlement_mode": {
+          "description": "Whether the lot exits before resolution or holds through resolution.",
+          "$ref": "#/$defs/ExitSettlementMode"
+        },
+        "stop_loss_pct": {
+          "description": "Stop-loss as a percentage move from the entry reference price.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stop_loss_price": {
+          "description": "Stop-loss price target.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "take_profit_pct": {
+          "description": "Take-profit as a percentage move from the entry reference price.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "take_profit_price": {
+          "description": "Take-profit price target.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thesis_invalidation": {
+          "description": "Machine-evaluable thesis invalidation thresholds.",
+          "$ref": "#/$defs/ThesisInvalidationPolicy"
+        },
+        "time_exit_at": {
+          "description": "Absolute time-based exit.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "trailing_stop": {
+          "description": "Optional trailing-stop policy (folded into the effective stop-loss).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrailingStopPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "thesis_invalidation",
+        "opportunistic_exit",
+        "scale_out_targets",
+        "settlement_mode",
+        "redeem_policy",
+        "entry_reference_price",
+        "entry_composite_score"
+      ]
+    },
+    "ExitReason": {
+      "description": "Why a position lot exited (persisted on `quant_order_intent.exit_reason`).",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "take_profit",
+            "stop_loss",
+            "time_exit",
+            "partial_exit",
+            "signal_invalidated",
+            "manual",
+            "settlement_hold",
+            "resolution_redeem",
+            "kill_switch_emergency",
+            "risk_envelope_breached",
+            "market_abnormal",
+            "data_stale"
+          ]
+        },
+        {
+          "description": "Opportunistic model-driven Sell emitted by the Sell scorer.",
+          "type": "string",
+          "const": "opportunistic"
+        }
+      ]
+    },
+    "ExitReinferenceObservation": {
+      "description": "Latest re-inference evidence persisted on the intent at the governed cadence.",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "expected_return_bps": {
+          "$ref": "#/$defs/Bps"
+        },
+        "factor_snapshot_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "mark": {
+          "$ref": "#/$defs/Price"
+        },
+        "model_artifact_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "model_version_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "route_gate_eligible": {
+          "type": "boolean"
+        },
+        "score": {
+          "$ref": "#/$defs/Probability"
+        },
+        "score_retention": {
+          "type": "string"
+        },
+        "shadow": {
+          "type": "boolean"
+        },
+        "verdict": {
+          "$ref": "#/$defs/ExitReinferenceVerdictKind"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "observed_at",
+        "model_version_id",
+        "model_artifact_hash",
+        "factor_snapshot_hash",
+        "mark",
+        "score",
+        "score_retention",
+        "expected_return_bps",
+        "route_gate_eligible",
+        "verdict",
+        "detail",
+        "shadow"
+      ]
+    },
+    "ExitReinferenceVerdictKind": {
+      "description": "Persisted classification of the latest governed thesis re-inference.",
+      "type": "string",
+      "enum": [
+        "holds",
+        "thesis_invalidated",
+        "indeterminate"
+      ]
+    },
+    "ExitSettlementMode": {
+      "description": "Whether an open lot should leave the market before resolution or be held\nuntil the CTF payout vector is available.",
+      "oneOf": [
+        {
+          "description": "Hold the position until the market resolves.",
+          "type": "string",
+          "const": "hold_to_resolution"
+        },
+        {
+          "description": "Exit on the book before resolution per the exit plan.",
+          "type": "string",
+          "const": "exit_before_resolution"
+        }
+      ]
+    },
+    "ExitState": {
+      "type": "string",
+      "enum": [
+        "not_started",
+        "monitoring",
+        "triggered",
+        "order_submitted",
+        "partially_exited",
+        "exited",
+        "failed",
+        "manual_required"
+      ]
+    },
+    "ExposureBreakdown": {
+      "description": "Net USD exposure aggregated by market, event, and category.\n\nThe planner uses this as the starting point for `exposure_after` projections\nand cap-room checks. Built from [`PositionSnapshot`]s via\n[`ExposureBreakdown::from_positions`].",
+      "type": "object",
+      "properties": {
+        "per_category": {
+          "description": "Net USD exposure per category.",
+          "type": "object",
+          "properties": {
+            "crypto": {
+              "$ref": "#/$defs/Usd"
+            },
+            "culture": {
+              "$ref": "#/$defs/Usd"
+            },
+            "economics": {
+              "$ref": "#/$defs/Usd"
+            },
+            "finance": {
+              "$ref": "#/$defs/Usd"
+            },
+            "geopolitics": {
+              "$ref": "#/$defs/Usd"
+            },
+            "other": {
+              "$ref": "#/$defs/Usd"
+            },
+            "politics": {
+              "$ref": "#/$defs/Usd"
+            },
+            "sports": {
+              "$ref": "#/$defs/Usd"
+            },
+            "tech": {
+              "$ref": "#/$defs/Usd"
+            },
+            "weather": {
+              "$ref": "#/$defs/Usd"
+            }
+          },
+          "additionalProperties": false
+        },
+        "per_event": {
+          "description": "Net USD exposure per event.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Usd"
+          }
+        },
+        "per_market": {
+          "description": "Net USD exposure per market.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Usd"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "per_market",
+        "per_event",
+        "per_category"
+      ]
+    },
+    "FactorBreakdownEntry": {
+      "description": "One factor's signed contribution to a recommendation's composite score.",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "description": "Confidence attached to the factor.",
+          "$ref": "#/$defs/Probability"
+        },
+        "contribution": {
+          "description": "Signed contribution to the composite score.",
+          "type": "string"
+        },
+        "direction": {
+          "description": "Direction the factor pushed the score.",
+          "$ref": "#/$defs/FactorDirection"
+        },
+        "explanation": {
+          "description": "Human explanation.",
+          "type": "string"
+        },
+        "factor_name": {
+          "description": "Factor name.",
+          "type": "string"
+        },
+        "family": {
+          "description": "Factor family.",
+          "$ref": "#/$defs/FactorFamily"
+        },
+        "indeterminate_reason": {
+          "description": "Why the factor was indeterminate; `None` when scored / missing.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FactorIndeterminateReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "normalization_source": {
+          "description": "How the score was derived; `None` when missing / indeterminate.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NormalizationSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "normalized_score": {
+          "description": "Normalized factor score in `[0, 1]`; `None` when the factor was missing\nor indeterminate (never a fabricated neutral).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Probability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "raw_value": {
+          "description": "Raw factor value before normalization.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_refs": {
+          "description": "References to the evidence behind this factor.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "value_state": {
+          "description": "Authoritative value state (scored / missing-input / not-applicable /\nindeterminate) — drives the report's distinct \"—\" rendering.",
+          "$ref": "#/$defs/FactorValueState"
+        },
+        "weight": {
+          "description": "Weight applied by the model.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "factor_name",
+        "family",
+        "value_state",
+        "weight",
+        "contribution",
+        "confidence",
+        "direction",
+        "explanation",
+        "source_refs"
+      ]
+    },
+    "FactorDirection": {
+      "description": "Factor contribution direction.",
+      "type": "string",
+      "enum": [
+        "positive",
+        "negative",
+        "neutral"
+      ]
+    },
+    "FactorFamily": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "liquidity",
+            "microstructure",
+            "momentum",
+            "mean_reversion",
+            "volatility",
+            "activity",
+            "resolution",
+            "data_quality"
+          ]
+        },
+        {
+          "description": "Prediction-market structural signals (neg-risk leg drift, shock-gated\nreversal, resolution-proximity regime, favorite-longshot). Platform-\ncomputable from existing facts — no external data source.",
+          "type": "string",
+          "const": "structural"
+        },
+        {
+          "description": "Crypto external vertical (Binance underlying price + Chainlink\noracle). Routed by market category via `DomainFactorRegistry` —\nnever selectable through `enabled_factor_families`.",
+          "type": "string",
+          "const": "domain_crypto"
+        },
+        {
+          "description": "Airport daily maximum/minimum Weather external vertical.",
+          "type": "string",
+          "const": "domain_weather"
+        }
+      ]
+    },
+    "FactorIndeterminateReason": {
+      "description": "Why a factor produced **no** normalized score (never a silent neutral).",
+      "oneOf": [
+        {
+          "description": "The present cross-section was smaller than `cross_section.min_size`.",
+          "type": "string",
+          "const": "cross_section_too_small"
+        },
+        {
+          "description": "Every present value was equal — the cross-section carries no signal.",
+          "type": "string",
+          "const": "zero_variance"
+        },
+        {
+          "description": "Small cross-section + frozen-reference policy but the model artifact\nhas no usable reference CDF for this factor.",
+          "type": "string",
+          "const": "no_frozen_reference"
+        },
+        {
+          "description": "A neg-risk sibling leg's order book was absent at `as_of`, so the\nfull-leg structural factor could not be computed (never a silent zero).",
+          "type": "string",
+          "const": "leg_book_missing"
+        }
+      ]
+    },
+    "FactorValueState": {
+      "description": "The authoritative outcome state of a persisted factor value — orthogonal\nto `indeterminate_reason` (which is populated only for `Indeterminate`).\n\nThis makes a structurally **not-applicable** factor (a neg-risk factor on\na binary market) durably distinguishable from a **missing-input** factor:\nboth carry no score, but they are different truths and must render / audit\ndifferently (never conflated into one null bucket).",
+      "oneOf": [
+        {
+          "description": "The factor produced a usable normalized score.",
+          "type": "string",
+          "const": "scored"
+        },
+        {
+          "description": "A single declared input was absent (existing missing-input semantics).",
+          "type": "string",
+          "const": "missing_input"
+        },
+        {
+          "description": "The factor does not apply to this market's structure (not a data gap).",
+          "type": "string",
+          "const": "not_applicable"
+        },
+        {
+          "description": "The factor should have computed but an input was structurally absent,\nor the cross-section could not normalize (see `indeterminate_reason`).",
+          "type": "string",
+          "const": "indeterminate"
+        }
+      ]
+    },
+    "FillRequirement": {
+      "description": "Venue fill semantics required by an aggressive entry.",
+      "type": "string",
+      "enum": [
+        "all_or_nothing",
+        "allow_partial"
+      ]
+    },
+    "FrozenMakerRebateSchedule": {
+      "description": "Decision-time maker-rebate terms carried into the executable order.\n\nThis projection deliberately retains the independent Gamma identities and\ncurve terms needed to account for a later authenticated maker fill. It is\nnever reconstructed from a process-current catalog after the decision.",
+      "type": "object",
+      "properties": {
+        "available_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "catalog_change_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "effective_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "exponent": {
+          "type": "string"
+        },
+        "fees_enabled": {
+          "type": "boolean"
+        },
+        "platform_rate": {
+          "type": "string"
+        },
+        "rebate_rate": {
+          "type": "string"
+        },
+        "schedule_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "taker_only": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schedule_hash",
+        "catalog_change_hash",
+        "effective_at",
+        "available_at",
+        "fees_enabled",
+        "platform_rate",
+        "exponent",
+        "taker_only",
+        "rebate_rate"
+      ]
+    },
+    "GlobalPortfolioPlan": {
+      "description": "Unique global portfolio plan persisted and referenced by every recommendation.",
+      "type": "object",
+      "properties": {
+        "constraints": {
+          "$ref": "#/$defs/PortfolioConstraintEvidence"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "exact_verification": {
+          "$ref": "#/$defs/ExactVerificationEvidence"
+        },
+        "objectives": {
+          "$ref": "#/$defs/PortfolioObjectiveEvidence"
+        },
+        "portfolio_plan_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "selected_tier_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "solver": {
+          "$ref": "#/$defs/SolverEvidence"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "portfolio_plan_id",
+        "selected_tier_ids",
+        "objectives",
+        "constraints",
+        "solver",
+        "exact_verification",
+        "content_hash"
+      ]
+    },
+    "HardReservationBucket": {
+      "description": "Hard cash reservation held independently of expected passive fills.",
+      "type": "object",
+      "properties": {
+        "end_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reserved_cash_usd": {
+          "$ref": "#/$defs/Usd"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "end_secs",
+        "reserved_cash_usd"
+      ]
+    },
+    "ImmediateExecutionCost": {
+      "description": "Immediate account cost of one filled venue execution.\n\n`cash_outlay_usd` is always the principal plus both immediate fee\ncomponents. A caller projecting a SELL cash flow subtracts the fees from\nprincipal; delayed incentives never enter this structure.",
+      "type": "object",
+      "properties": {
+        "builder_fee_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "cash_outlay_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "principal_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "venue_fee_usd": {
+          "$ref": "#/$defs/Usd"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "principal_usd",
+        "venue_fee_usd",
+        "builder_fee_usd",
+        "cash_outlay_usd"
+      ]
+    },
+    "IncentiveReconciliationHealth": {
+      "type": "string",
+      "enum": [
+        "healthy",
+        "stale",
+        "incomplete",
+        "unavailable"
+      ]
+    },
+    "IncentiveReconciliationView": {
+      "description": "Account-level incentive attribution and upstream scan health.",
+      "type": "object",
+      "properties": {
+        "as_of": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "award_to_credit_delta_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "below_payout_threshold": {
+          "type": "boolean"
+        },
+        "estimate_to_award_delta_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "estimated_maker_accrual_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "health": {
+          "$ref": "#/$defs/IncentiveReconciliationHealth"
+        },
+        "incomplete_day_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "last_success_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "oldest_incomplete_date": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "payout_threshold_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "venue_awarded_maker_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "wallet_credited_maker_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "wallet_credited_taker_usd": {
+          "$ref": "#/$defs/Usd"
+        }
+      },
+      "required": [
+        "as_of",
+        "estimated_maker_accrual_usd",
+        "venue_awarded_maker_usd",
+        "wallet_credited_maker_usd",
+        "wallet_credited_taker_usd",
+        "estimate_to_award_delta_usd",
+        "award_to_credit_delta_usd",
+        "incomplete_day_count",
+        "health",
+        "payout_threshold_usd",
+        "below_payout_threshold"
+      ]
+    },
+    "IneligibilityReason": {
+      "description": "Why a recommendation is ineligible for execution in a given mode.",
+      "oneOf": [
+        {
+          "description": "The runtime mode is report-only.",
+          "type": "string",
+          "const": "report_only_mode"
+        },
+        {
+          "description": "The report-level order-count or USD automation cap was exhausted.",
+          "type": "string",
+          "const": "automation_cap_exceeded"
+        }
+      ]
+    },
+    "LiveAccountView": {
+      "description": "Live venue account read (re-fetched on every request; not persisted).",
+      "type": "object",
+      "properties": {
+        "as_of": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "available_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "budget_cap_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "capital_base_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "exposures": {
+          "$ref": "#/$defs/ExposureBreakdown"
+        },
+        "fetched_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "positions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VenuePositionSnapshotView"
+          }
+        },
+        "reserved_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "source": {
+          "$ref": "#/$defs/AccountSource"
+        },
+        "venue_net_liquidation_usd": {
+          "$ref": "#/$defs/Usd"
+        }
+      },
+      "required": [
+        "fetched_at",
+        "budget_cap_usd",
+        "as_of",
+        "source",
+        "venue_net_liquidation_usd",
+        "capital_base_usd",
+        "available_usd",
+        "reserved_usd",
+        "positions",
+        "exposures"
+      ]
+    },
+    "MakerRebateEligibility": {
+      "description": "Eligibility state frozen into a maker-rebate accrual estimate.",
+      "oneOf": [
+        {
+          "description": "A confirmed maker fill is covered by the visible Gamma schedule.",
+          "type": "string",
+          "const": "eligible_maker_fill"
+        }
+      ]
+    },
+    "MarketCategory": {
+      "description": "Polymarket event category for business selection and model cohorts.",
+      "type": "string",
+      "enum": [
+        "geopolitics",
+        "sports",
+        "politics",
+        "finance",
+        "tech",
+        "culture",
+        "weather",
+        "economics",
+        "crypto",
+        "other"
+      ]
+    },
+    "MarketContext": {
+      "description": "Frozen top-of-book and metadata at recommendation decision time.",
+      "type": "object",
+      "properties": {
+        "best_ask": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "best_bid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "book_age_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "depth_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "fee_rate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "market_status": {
+          "$ref": "#/$defs/MarketStatus"
+        },
+        "mid_price": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "neg_risk": {
+          "type": "boolean"
+        },
+        "spread_bps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bps"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tick_size": {
+          "$ref": "#/$defs/TickSize"
+        },
+        "time_to_resolution_secs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "volume_24h_usd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Usd"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "depth_usd",
+        "book_age_ms",
+        "market_status",
+        "neg_risk",
+        "tick_size"
+      ]
+    },
+    "MarketStatus": {
+      "type": "string",
+      "enum": [
+        "discovered",
+        "active",
+        "filtered",
+        "paused",
+        "manually_blocked",
+        "settled",
+        "delisted"
+      ]
+    },
+    "NextScaleOutProjection": {
+      "description": "Exact next cumulative scale-out projection shared by monitor and read APIs.",
+      "type": "object",
+      "properties": {
+        "delta_shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "target_cumulative_exit_pct": {
+          "type": "string"
+        },
+        "target_id": {
+          "type": "string"
+        },
+        "trigger_price": {
+          "$ref": "#/$defs/Price"
+        }
+      },
+      "required": [
+        "target_id",
+        "trigger_price",
+        "target_cumulative_exit_pct",
+        "delta_shares"
+      ]
+    },
+    "NormalizationSource": {
+      "description": "How a factor's normalized score was derived (audit + analytics).",
+      "oneOf": [
+        {
+          "description": "Normalized against the same-`as_of` market cross-section.",
+          "type": "string",
+          "const": "cross_section"
+        },
+        {
+          "description": "Per-market scaling against a fixed semantic domain (`MinMax`).",
+          "type": "string",
+          "const": "per_market"
+        },
+        {
+          "description": "Small cross-section → normalized against the empirical training CDF\nfrozen into the model artifact.",
+          "type": "string",
+          "const": "frozen_reference_quantile"
+        }
+      ]
+    },
+    "OpportunisticExitPolicy": {
+      "description": "Policy-fitted opportunistic exit rule frozen into recommendation and intent.\n\nRuntime configuration may disable or shadow it, but never supplies or\ntightens these decision thresholds.",
+      "type": "object",
+      "properties": {
+        "max_cumulative_exit_pct": {
+          "type": "string"
+        },
+        "min_confidence": {
+          "$ref": "#/$defs/Probability"
+        },
+        "min_expected_alpha_bps": {
+          "$ref": "#/$defs/Bps"
+        },
+        "min_incremental_exit_pct": {
+          "type": "string"
+        },
+        "min_p_exit_better": {
+          "$ref": "#/$defs/Probability"
+        }
+      },
+      "required": [
+        "min_confidence",
+        "min_expected_alpha_bps",
+        "min_p_exit_better",
+        "max_cumulative_exit_pct",
+        "min_incremental_exit_pct"
+      ]
+    },
+    "OrderAmount": {
+      "description": "Governed intent amount. Aggressive BUY orders carry a total cash budget;\nresting orders and SELL orders carry an exact share quantity.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "unit": {
+              "type": "string",
+              "const": "cash_budget"
+            },
+            "value": {
+              "$ref": "#/$defs/Usd"
+            }
+          },
+          "required": [
+            "unit",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "unit": {
+              "type": "string",
+              "const": "shares"
+            },
+            "value": {
+              "$ref": "#/$defs/Shares"
+            }
+          },
+          "required": [
+            "unit",
+            "value"
+          ]
+        }
+      ]
+    },
+    "OrderIntentKind": {
+      "type": "string",
+      "enum": [
+        "buy"
+      ]
+    },
+    "OrderIntentStatus": {
+      "description": "Governed execution-intent lifecycle state.",
+      "type": "string",
+      "enum": [
+        "draft",
+        "pending_approval",
+        "approved",
+        "approved_by_policy",
+        "admission_pending",
+        "admission_rejected",
+        "submitted",
+        "partially_filled",
+        "filled",
+        "rejected",
+        "cancelled",
+        "failed",
+        "expired",
+        "invalidated"
+      ]
+    },
+    "OrderIntentView": {
+      "description": "Outbound projection of a governed order intent (full operator transparency).",
+      "type": "object",
+      "properties": {
+        "admission_trace_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "approval_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "approval_status": {
+          "$ref": "#/$defs/ApprovalStatus"
+        },
+        "approved_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "approved_by": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "condition_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "decision_policy_snapshot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "entry_condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntryConditionInstanceSummaryView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "entry_order": {
+          "$ref": "#/$defs/EntryOrderSpec"
+        },
+        "exit_monitor_observation": {
+          "description": "Read-time projection for a filled lot; absent before the entry fills.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitMonitorObservationView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exit_policy": {
+          "$ref": "#/$defs/ExitPolicySpec"
+        },
+        "exit_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exit_state": {
+          "$ref": "#/$defs/ExitState"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "intent_kind": {
+          "$ref": "#/$defs/OrderIntentKind"
+        },
+        "last_signal_recheck_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "latest_reinference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitReinferenceObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model_version_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "next_check_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "order_intent_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "peak_mark_price": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "policy_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recommendation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "risk_envelope_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "runtime_mode": {
+          "$ref": "#/$defs/QuantRuntimeMode"
+        },
+        "scale_out_state": {
+          "$ref": "#/$defs/ScaleOutState"
+        },
+        "status": {
+          "$ref": "#/$defs/OrderIntentStatus"
+        },
+        "status_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "order_intent_id",
+        "recommendation_id",
+        "runtime_mode",
+        "decision_policy_snapshot_id",
+        "model_version_id",
+        "intent_kind",
+        "status",
+        "approval_status",
+        "condition_instance_id",
+        "entry_order",
+        "exit_policy",
+        "risk_envelope_hash",
+        "expires_at",
+        "exit_state",
+        "scale_out_state",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "OrderType": {
+      "description": "Polymarket CLOB order time-in-force types.",
+      "oneOf": [
+        {
+          "description": "Fill-or-Kill: must fill entirely and immediately, or cancel. Never retried.",
+          "type": "string",
+          "const": "fok"
+        },
+        {
+          "description": "Fill-and-Kill: fill immediately as much as possible and cancel the remainder.\nNever retried because a partial venue fill is a valid terminal outcome.",
+          "type": "string",
+          "const": "fak"
+        },
+        {
+          "description": "Good-Till-Cancelled: rests on the book until filled or manually cancelled.",
+          "type": "string",
+          "const": "gtc"
+        },
+        {
+          "description": "Good-Till-Date: rests on the book until `expiration` (unix timestamp).",
+          "type": "object",
+          "properties": {
+            "gtd": {
+              "type": "object",
+              "properties": {
+                "expiration": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "expiration"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "gtd"
+          ]
+        }
+      ]
+    },
+    "OutcomeSide": {
+      "description": "Which binary-market outcome token a recommendation opens a position in.\n\nA recommendation is always an *opening* position (buy-to-open) in one\noutcome token, so the only directional choice it expresses is the outcome\n(`Yes`/`No`) — the token itself is identified by `token_id`. Buy/sell\ndirection is an execution-layer concern (see [`crate::enums::common::Side`]),\nand the sell/exit plan is expressed entirely by `ExitPlan`; this enum never\nencodes a sell.",
+      "type": "string",
+      "enum": [
+        "yes",
+        "no"
+      ]
+    },
+    "PassiveFillDistribution": {
+      "description": "Published cross-fitted passive execution distribution for one cohort.",
+      "type": "object",
+      "properties": {
+        "sample_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source_evidence_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PassiveFillState"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sample_count",
+        "source_evidence_hash",
+        "states"
+      ]
+    },
+    "PassiveFillState": {
+      "description": "One joint fill/latency/adverse-selection state in a passive distribution.",
+      "type": "object",
+      "properties": {
+        "fill_latency_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fill_ratio_bps": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "kind": {
+          "$ref": "#/$defs/PassiveFillStateKind"
+        },
+        "post_fill_markout_bps": {
+          "$ref": "#/$defs/Bps"
+        },
+        "probability_bps": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "probability_bps",
+        "fill_ratio_bps",
+        "fill_latency_ms",
+        "post_fill_markout_bps"
+      ]
+    },
+    "PassiveFillStateKind": {
+      "description": "Mutually exclusive passive-entry state estimated from cross-fitted OOS replay.",
+      "type": "string",
+      "enum": [
+        "no_fill",
+        "partial_fill",
+        "full_fill"
+      ]
+    },
+    "PendingScaleOut": {
+      "description": "One in-flight cumulative scale-out target.",
+      "type": "object",
+      "properties": {
+        "target_cumulative_exit_pct": {
+          "description": "Desired cumulative exit fraction of the frozen entry-filled denominator.",
+          "type": "string"
+        },
+        "target_id": {
+          "description": "Deterministic target id; opportunistic cumulative targets have no id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "target_cumulative_exit_pct"
+      ]
+    },
+    "PortfolioConstraintEvidence": {
+      "description": "Aggregate hard-constraint values recomputed outside the solver.",
+      "type": "object",
+      "properties": {
+        "available_cash_used_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "checked_constraint_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "maximum_scenario_loss_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "open_capital_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "selected_recommendation_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "available_cash_used_usd",
+        "open_capital_usd",
+        "selected_recommendation_count",
+        "maximum_scenario_loss_usd",
+        "checked_constraint_count",
+        "evidence_hash"
+      ]
+    },
+    "PortfolioDecisionResult": {
+      "description": "Durable terminal portfolio decision. Zero candidates is explicit evidence;\nsolver failure never produces this value.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "evidence_hash": {
+              "type": "string",
+              "pattern": "^blake3:[0-9a-f]{64}$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "zero_candidates"
+            },
+            "rejected_tier_count": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "rejected_tier_count",
+            "evidence_hash"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "type": "string",
+              "const": "optimized"
+            },
+            "plan": {
+              "$ref": "#/$defs/GlobalPortfolioPlan"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "plan"
+          ]
+        }
+      ]
+    },
+    "PortfolioObjectiveEvidence": {
+      "description": "Exact Decimal values fixed between lexicographic solve stages.",
+      "type": "object",
+      "properties": {
+        "capital_occupancy_usd_hours": {
+          "$ref": "#/$defs/UsdHours"
+        },
+        "cvar_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "nominal_expected_net_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "robust_expected_net_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "stable_tie_break_stages": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "robust_expected_net_usd",
+        "nominal_expected_net_usd",
+        "cvar_usd",
+        "capital_occupancy_usd_hours",
+        "stable_tie_break_stages"
+      ]
+    },
+    "PortfolioRejectionReason": {
+      "description": "Stable economic admission or global-optimum exclusion reason.",
+      "type": "string",
+      "enum": [
+        "scenario_exit_capacity",
+        "nominal_expected_net_floor",
+        "robust_expected_net_floor",
+        "profit_probability_floor",
+        "probability_interval_width",
+        "liquidity_buffer",
+        "single_recommendation_exposure",
+        "existing_structural_conflict",
+        "not_selected_by_global_optimum"
+      ]
+    },
+    "Price": {
+      "description": "Price per share in a prediction market. Range \\[0, 1\\].",
+      "type": "string"
+    },
+    "Probability": {
+      "description": "Statistical probability, confidence, or model weight stored losslessly.",
+      "type": "string"
+    },
+    "QuantRecommendationView": {
+      "description": "Full outbound projection of one actionable recommendation.\n\nBeyond the frozen decision contract, the view carries the two governance\nfacts a client needs to decide whether an `OrderIntent` may still be\ncreated without a follow-up round-trip: the parent report's current\nlifecycle [`Self::report_status`] and the id of any blocking pre-submission\nintent [`Self::active_order_intent_id`]. Both are resolved server-side (the\nsingle source of truth) so the intent-creation gate never guesses.",
+      "type": "object",
+      "properties": {
+        "active_order_intent_id": {
+          "description": "Id of the blocking pre-submission order intent, when one already exists.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "economic_tier": {
+          "$ref": "#/$defs/ExecutableEconomicTier"
+        },
+        "economic_tier_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "economics": {
+          "$ref": "#/$defs/RecommendationEconomics"
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "execution_eligibility": {
+          "$ref": "#/$defs/ExecutionEligibility"
+        },
+        "factor_breakdown": {
+          "$ref": "#/$defs/RecommendationFactorBreakdown"
+        },
+        "identity": {
+          "$ref": "#/$defs/RecommendationIdentity"
+        },
+        "market_context": {
+          "$ref": "#/$defs/MarketContext"
+        },
+        "market_id": {
+          "type": "string"
+        },
+        "outcome_side": {
+          "$ref": "#/$defs/OutcomeSide"
+        },
+        "portfolio_plan_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "rank": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "recommendation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "recommendation_report_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "report_route_run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "report_status": {
+          "description": "Current lifecycle state of the parent report (authoritative).",
+          "$ref": "#/$defs/RecommendationReportStatus"
+        },
+        "route": {
+          "$ref": "#/$defs/BuyModelRoute"
+        },
+        "status": {
+          "$ref": "#/$defs/RecommendationStatus"
+        },
+        "token_id": {
+          "type": "string"
+        },
+        "trade_plan": {
+          "$ref": "#/$defs/RecommendationTradePlan"
+        },
+        "valid_from": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "valid_until": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "recommendation_id",
+        "recommendation_report_id",
+        "report_route_run_id",
+        "portfolio_plan_id",
+        "economic_tier_id",
+        "rank",
+        "route",
+        "market_id",
+        "event_id",
+        "token_id",
+        "outcome_side",
+        "economics",
+        "economic_tier",
+        "identity",
+        "market_context",
+        "trade_plan",
+        "factor_breakdown",
+        "execution_eligibility",
+        "valid_from",
+        "valid_until",
+        "status",
+        "created_at",
+        "report_status"
+      ]
+    },
+    "QuantReportDetailView": {
+      "description": "Full report header projection: lifecycle + account base + replay handles +\nthe report-level [`ReportSummary`].",
+      "type": "object",
+      "properties": {
+        "account_snapshot_ref": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "account_source": {
+          "$ref": "#/$defs/AccountSource"
+        },
+        "capital_base_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "decision_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "decision_policy_snapshot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "expired_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "fact_delivery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportFactDeliveryView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "market_selection_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "obsoleted_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "portfolio_decision": {
+          "$ref": "#/$defs/PortfolioDecisionResult"
+        },
+        "portfolio_plan_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "predecessor_report_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "published_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "recommendation_report_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "report_kind": {
+          "$ref": "#/$defs/ReportKind"
+        },
+        "report_run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "represented_routes": {
+          "$ref": "#/$defs/RepresentedRouteSet"
+        },
+        "revoked_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportRunView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime_mode": {
+          "$ref": "#/$defs/QuantRuntimeMode"
+        },
+        "scenario_artifact_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "scenario_artifact_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "status": {
+          "$ref": "#/$defs/RecommendationReportStatus"
+        },
+        "status_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "successor_report_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "summary": {
+          "$ref": "#/$defs/ReportSummary"
+        },
+        "superseded_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "top_n": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "valid_until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "recommendation_report_id",
+        "report_run_id",
+        "report_kind",
+        "decision_at",
+        "runtime_mode",
+        "top_n",
+        "status",
+        "account_source",
+        "capital_base_usd",
+        "account_snapshot_ref",
+        "decision_policy_snapshot_id",
+        "market_selection_id",
+        "portfolio_plan_id",
+        "portfolio_decision",
+        "represented_routes",
+        "summary",
+        "created_at"
+      ]
+    },
+    "QuantReportView": {
+      "description": "List-row projection of a recommendation report (header + summary roll-up).",
+      "type": "object",
+      "properties": {
+        "account_source": {
+          "$ref": "#/$defs/AccountSource"
+        },
+        "capital_base_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "decision_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "empty_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmptyReportReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expired_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "obsoleted_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "published_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "published_recommendation_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "recommendation_report_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "report_kind": {
+          "$ref": "#/$defs/ReportKind"
+        },
+        "represented_routes": {
+          "$ref": "#/$defs/RepresentedRouteSet"
+        },
+        "revoked_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "runtime_mode": {
+          "$ref": "#/$defs/QuantRuntimeMode"
+        },
+        "scenario_artifact_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "status": {
+          "$ref": "#/$defs/RecommendationReportStatus"
+        },
+        "status_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "successor_report_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "superseded_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "top_n": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "total_hard_reserved_cash_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "valid_until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "recommendation_report_id",
+        "represented_routes",
+        "report_kind",
+        "status",
+        "runtime_mode",
+        "decision_at",
+        "top_n",
+        "account_source",
+        "capital_base_usd",
+        "published_recommendation_count",
+        "total_hard_reserved_cash_usd",
+        "created_at"
+      ]
+    },
+    "QuantRuntimeMode": {
+      "description": "Governed runtime mode for report generation and optional execution.",
+      "type": "string",
+      "enum": [
+        "report_only",
+        "semi_auto",
+        "auto_execution"
+      ]
+    },
+    "RecommendationChangedFieldView": {
+      "description": "Stable field vocabulary used to group diff details without raw JSON.",
+      "type": "string",
+      "enum": [
+        "rank",
+        "profit_probability",
+        "nominal_expected_net_usd",
+        "robust_expected_net_usd",
+        "maximum_loss_usd",
+        "cvar_contribution_usd",
+        "capital_occupancy_usd_hours",
+        "marginal_portfolio_value_usd",
+        "sizing",
+        "validity",
+        "eligibility",
+        "entry",
+        "exit",
+        "factor_breakdown"
+      ]
+    },
+    "RecommendationDeltaView": {
+      "description": "Outbound projection of a single `(market, side)` recommendation delta.",
+      "type": "object",
+      "properties": {
+        "base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecommendationDiffSnapshotView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "changed_fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecommendationChangedFieldView"
+          }
+        },
+        "compare": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecommendationDiffSnapshotView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hard_reserved_cash_usd_delta": {
+          "$ref": "#/$defs/Usd"
+        },
+        "market_id": {
+          "type": "string"
+        },
+        "outcome_side": {
+          "$ref": "#/$defs/OutcomeSide"
+        }
+      },
+      "required": [
+        "market_id",
+        "outcome_side",
+        "changed_fields",
+        "hard_reserved_cash_usd_delta"
+      ]
+    },
+    "RecommendationDiffSnapshotView": {
+      "description": "Typed decision snapshot for one side of a recommendation diff.",
+      "type": "object",
+      "properties": {
+        "economics": {
+          "$ref": "#/$defs/RecommendationEconomics"
+        },
+        "execution_eligibility": {
+          "$ref": "#/$defs/ExecutionEligibility"
+        },
+        "factor_breakdown": {
+          "$ref": "#/$defs/RecommendationFactorBreakdown"
+        },
+        "rank": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "recommendation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "trade_plan": {
+          "$ref": "#/$defs/RecommendationTradePlan"
+        },
+        "valid_from": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "valid_until": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "recommendation_id",
+        "rank",
+        "economics",
+        "valid_from",
+        "valid_until",
+        "execution_eligibility",
+        "trade_plan",
+        "factor_breakdown"
+      ]
+    },
+    "RecommendationEconomics": {
+      "description": "Economic values displayed and ranked after global optimization.",
+      "type": "object",
+      "properties": {
+        "capital_occupancy_usd_hours": {
+          "$ref": "#/$defs/UsdHours"
+        },
+        "cvar_contribution_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "marginal_portfolio_value_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "max_loss_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "nominal_expected_net_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "profit_probability_bps": {
+          "$ref": "#/$defs/Bps"
+        },
+        "robust_expected_net_usd": {
+          "$ref": "#/$defs/Usd"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "profit_probability_bps",
+        "nominal_expected_net_usd",
+        "robust_expected_net_usd",
+        "max_loss_usd",
+        "cvar_contribution_usd",
+        "capital_occupancy_usd_hours",
+        "marginal_portfolio_value_usd"
+      ]
+    },
+    "RecommendationExitPlan": {
+      "description": "Exit authority carried by a recommendation.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "executable"
+            },
+            "plan": {
+              "$ref": "#/$defs/ExitPlan"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "plan"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "guidance": {
+              "$ref": "#/$defs/BootstrapExitGuidance"
+            },
+            "kind": {
+              "type": "string",
+              "const": "bootstrap_advisory"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "guidance"
+          ]
+        }
+      ]
+    },
+    "RecommendationFactorBreakdown": {
+      "description": "JSONB column wrapper for a recommendation's full factor breakdown.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FactorBreakdownEntry"
+      }
+    },
+    "RecommendationIdentity": {
+      "description": "Display identity frozen at decision time.",
+      "type": "object",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/MarketCategory"
+        },
+        "outcome_name": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "question",
+        "outcome_name"
+      ]
+    },
+    "RecommendationPolicyProvenance": {
+      "description": "Exact decision-policy lineage behind one published recommendation.\n\nBootstrap recommendations bind their immutable L2-free profile instead of\npretending that a historical execution-policy fit exists.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "artifact_hash": {
+              "type": "string",
+              "pattern": "^blake3:[0-9a-f]{64}$"
+            },
+            "artifact_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "cohort_index": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "cohort_key": {
+              "$ref": "#/$defs/TradePolicyCohortKey"
+            },
+            "kind": {
+              "type": "string",
+              "const": "trade_policy"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "artifact_id",
+            "artifact_hash",
+            "cohort_index",
+            "cohort_key"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "feature_contract": {
+              "$ref": "#/$defs/ResearchFeatureContract"
+            },
+            "kind": {
+              "type": "string",
+              "const": "bootstrap_profile"
+            },
+            "profile_ref": {
+              "$ref": "#/$defs/ResearchProfileRef"
+            },
+            "recommendation_contract_hash": {
+              "type": "string",
+              "pattern": "^blake3:[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "profile_ref",
+            "feature_contract",
+            "recommendation_contract_hash"
+          ]
+        }
+      ]
+    },
+    "RecommendationReportStatus": {
+      "description": "Publication lifecycle of an immutable recommendation report artifact.",
+      "type": "string",
+      "enum": [
+        "prepared",
+        "published",
+        "superseded",
+        "obsolete",
+        "revoked",
+        "expired"
+      ]
+    },
+    "RecommendationStatus": {
+      "description": "Lifecycle state for a single recommendation.",
+      "type": "string",
+      "enum": [
+        "prepared",
+        "published",
+        "superseded",
+        "obsolete",
+        "revoked",
+        "expired",
+        "intent_created",
+        "executed"
+      ]
+    },
+    "RecommendationTradePlan": {
+      "description": "The single authoritative recommendation plan contract.\n\nFull-L2 recommendations own an executable exit plan. Bootstrap\nrecommendations instead own explicit, non-executable manual guidance. Both\nregimes require calibration, an exact scenario binding, and live L2 entry\nand sizing evidence before publication.",
+      "type": "object",
+      "properties": {
+        "entry": {
+          "$ref": "#/$defs/EntryPlan"
+        },
+        "exit": {
+          "$ref": "#/$defs/RecommendationExitPlan"
+        },
+        "policy": {
+          "$ref": "#/$defs/RecommendationPolicyProvenance"
+        },
+        "risk_envelope": {
+          "$ref": "#/$defs/RiskEnvelope"
+        },
+        "sizing": {
+          "$ref": "#/$defs/SizingPlan"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "entry",
+        "sizing",
+        "exit",
+        "risk_envelope"
+      ]
+    },
+    "RedeemPolicy": {
+      "description": "Whether a resolved hold-to-resolution lot is redeemed by the system or\nleft for an operator.",
+      "oneOf": [
+        {
+          "description": "Operator handles CTF redemption manually.",
+          "type": "string",
+          "const": "manual"
+        },
+        {
+          "description": "System may redeem once resolution and wallet-balance checks pass.",
+          "type": "string",
+          "const": "auto"
+        }
+      ]
+    },
+    "RejectionReasonCount": {
+      "description": "One rejection-reason tally.",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "Number of candidates rejected for this reason.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reason": {
+          "description": "Rejection reason label.",
+          "$ref": "#/$defs/PortfolioRejectionReason"
+        }
+      },
+      "required": [
+        "reason",
+        "count"
+      ]
+    },
+    "ReportDiffView": {
+      "description": "Outbound projection of a [`ReportDiff`].",
+      "type": "object",
+      "properties": {
+        "added": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecommendationDeltaView"
+          }
+        },
+        "base_eligibility": {
+          "$ref": "#/$defs/EligibilitySummary"
+        },
+        "base_report_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "base_total_hard_reserved_cash_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "compare_eligibility": {
+          "$ref": "#/$defs/EligibilitySummary"
+        },
+        "compare_report_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "compare_total_hard_reserved_cash_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "removed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecommendationDeltaView"
+          }
+        },
+        "retained": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecommendationDeltaView"
+          }
+        },
+        "total_hard_reserved_cash_usd_delta": {
+          "$ref": "#/$defs/Usd"
+        }
+      },
+      "required": [
+        "base_report_id",
+        "compare_report_id",
+        "added",
+        "removed",
+        "retained",
+        "base_total_hard_reserved_cash_usd",
+        "compare_total_hard_reserved_cash_usd",
+        "total_hard_reserved_cash_usd_delta",
+        "base_eligibility",
+        "compare_eligibility"
+      ]
+    },
+    "ReportFactDeliveryStatus": {
+      "description": "Delivery lifecycle for the two-table report fact bundle.",
+      "type": "string",
+      "enum": [
+        "pending",
+        "delivering",
+        "retrying",
+        "failed",
+        "verified",
+        "cancelled"
+      ]
+    },
+    "ReportFactDeliveryView": {
+      "type": "object",
+      "properties": {
+        "announced_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "attempt_count": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "bundle_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "funnel_row_chain_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "funnel_row_count": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "last_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "next_attempt_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "recommendation_row_chain_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "recommendation_row_count": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "status": {
+          "$ref": "#/$defs/ReportFactDeliveryStatus"
+        },
+        "verified_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "status",
+        "bundle_hash",
+        "recommendation_row_count",
+        "recommendation_row_chain_hash",
+        "funnel_row_count",
+        "funnel_row_chain_hash",
+        "attempt_count"
+      ]
+    },
+    "ReportKind": {
+      "description": "Recommendation report category.",
+      "type": "string",
+      "enum": [
+        "top_n",
+        "shadow_top_n",
+        "post_run_audit"
+      ]
+    },
+    "ReportRunStatus": {
+      "description": "Durable lifecycle of one report build attempt.",
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped",
+        "abandoned"
+      ]
+    },
+    "ReportRunTerminalReason": {
+      "description": "Typed terminal reason for skipped, failed, or abandoned report runs.",
+      "type": "string",
+      "enum": [
+        "coalesced_by_newer_occurrence",
+        "schedule_reconfigured",
+        "queue_expired",
+        "build_failed",
+        "lease_expired"
+      ]
+    },
+    "ReportRunView": {
+      "description": "Durable report-run projection returned by enqueue, list, detail, and retry.",
+      "type": "object",
+      "properties": {
+        "decision_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "decision_policy_snapshot_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "heartbeat_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "knowledge_lag_secs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "lease_expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "lease_owner": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "output_report_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "report_run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "request_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requested_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "retry_of_run_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "schedule_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scheduled_for": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "status": {
+          "$ref": "#/$defs/ReportRunStatus"
+        },
+        "terminal_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportRunTerminalReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "top_n": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "trigger_key": {
+          "type": "string"
+        },
+        "trigger_kind": {
+          "$ref": "#/$defs/ReportTriggerKind"
+        }
+      },
+      "required": [
+        "report_run_id",
+        "trigger_kind",
+        "trigger_key",
+        "requested_at",
+        "status"
+      ]
+    },
+    "ReportSummary": {
+      "description": "Report-level summary persisted to `quant_recommendation_report.summary_json`.",
+      "type": "object",
+      "properties": {
+        "candidate_count": {
+          "description": "Number of scored candidates considered.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "capital_occupancy_usd_hours": {
+          "description": "Discounted capital occupation across the selected portfolio.",
+          "$ref": "#/$defs/UsdHours"
+        },
+        "category_allocation": {
+          "description": "Hard-reserved cash allocated per category.",
+          "type": "object",
+          "properties": {
+            "crypto": {
+              "$ref": "#/$defs/Usd"
+            },
+            "culture": {
+              "$ref": "#/$defs/Usd"
+            },
+            "economics": {
+              "$ref": "#/$defs/Usd"
+            },
+            "finance": {
+              "$ref": "#/$defs/Usd"
+            },
+            "geopolitics": {
+              "$ref": "#/$defs/Usd"
+            },
+            "other": {
+              "$ref": "#/$defs/Usd"
+            },
+            "politics": {
+              "$ref": "#/$defs/Usd"
+            },
+            "sports": {
+              "$ref": "#/$defs/Usd"
+            },
+            "tech": {
+              "$ref": "#/$defs/Usd"
+            },
+            "weather": {
+              "$ref": "#/$defs/Usd"
+            }
+          },
+          "additionalProperties": false
+        },
+        "cvar_usd": {
+          "description": "Exact portfolio `CVaR` under the governed tail mass.",
+          "$ref": "#/$defs/Usd"
+        },
+        "data_quality_summary": {
+          "description": "Data-quality summary.",
+          "$ref": "#/$defs/DataQualitySummary"
+        },
+        "empty_reason": {
+          "description": "Reason the report is empty, when `published_recommendation_count == 0`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmptyReportReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_allocation": {
+          "description": "Hard-reserved cash allocated per event.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Usd"
+          }
+        },
+        "execution_eligibility_summary": {
+          "description": "Execution-eligibility roll-up.",
+          "$ref": "#/$defs/EligibilitySummary"
+        },
+        "market_selection_count": {
+          "description": "Number of markets in the selection snapshot.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_single_recommendation_usd": {
+          "description": "Largest single-recommendation hard cash reservation.",
+          "$ref": "#/$defs/Usd"
+        },
+        "maximum_scenario_loss_usd": {
+          "description": "Maximum loss over every promoted scenario.",
+          "$ref": "#/$defs/Usd"
+        },
+        "nominal_expected_net_usd": {
+          "description": "Nominal discounted expected net USD for the selected portfolio.",
+          "$ref": "#/$defs/Usd"
+        },
+        "published_recommendation_count": {
+          "description": "Number of published recommendations.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "rejected_tier_count": {
+          "description": "Number of executable tiers rejected before publication.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "represented_route_count": {
+          "description": "Number of atomically ready Routes represented by this report.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "robust_expected_net_usd": {
+          "description": "Robust worst-distribution discounted expected net USD for the selected portfolio.",
+          "$ref": "#/$defs/Usd"
+        },
+        "route_allocation": {
+          "description": "Hard-reserved cash allocated per model Route.",
+          "type": "object",
+          "properties": {
+            "crypto": {
+              "$ref": "#/$defs/Usd"
+            },
+            "pooled": {
+              "$ref": "#/$defs/Usd"
+            },
+            "weather": {
+              "$ref": "#/$defs/Usd"
+            }
+          },
+          "additionalProperties": false
+        },
+        "top_rejection_reasons": {
+          "description": "Most common rejection reasons.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RejectionReasonCount"
+          }
+        },
+        "total_hard_reserved_cash_usd": {
+          "description": "Total hard cash reservation across published recommendations.",
+          "$ref": "#/$defs/Usd"
+        },
+        "warnings": {
+          "description": "Report-level warnings.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "market_selection_count",
+        "represented_route_count",
+        "candidate_count",
+        "rejected_tier_count",
+        "published_recommendation_count",
+        "total_hard_reserved_cash_usd",
+        "max_single_recommendation_usd",
+        "robust_expected_net_usd",
+        "nominal_expected_net_usd",
+        "cvar_usd",
+        "maximum_scenario_loss_usd",
+        "capital_occupancy_usd_hours",
+        "category_allocation",
+        "event_allocation",
+        "route_allocation",
+        "data_quality_summary",
+        "top_rejection_reasons",
+        "execution_eligibility_summary",
+        "warnings"
+      ]
+    },
+    "ReportTriggerKind": {
+      "description": "Stable report-generation trigger source.",
+      "type": "string",
+      "enum": [
+        "scheduled",
+        "ad_hoc"
+      ]
+    },
+    "RepresentedRouteSet": {
+      "description": "Ordered, deduplicated model Routes represented by immutable market eligibility.",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BuyModelRoute"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "routes",
+        "digest"
+      ]
+    },
+    "ResearchFeatureContract": {
+      "description": "Closed feature contracts prevent a profile from silently changing its\nhistorical information regime when a source is unavailable.",
+      "type": "string",
+      "enum": [
+        "full_l2",
+        "full_l2_crypto",
+        "full_l2_weather",
+        "trade_bootstrap",
+        "trade_bootstrap_crypto",
+        "trade_bootstrap_weather"
+      ]
+    },
+    "ResearchProfileRef": {
+      "description": "Stable immutable profile identity carried by every downstream artifact.",
+      "type": "object",
+      "properties": {
+        "content_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "content_hash"
+      ]
+    },
+    "RiskEnvelope": {
+      "description": "Hard risk bounds consumed by execution admission (not natural language).",
+      "type": "object",
+      "properties": {
+        "auto_execution_allowed": {
+          "description": "Whether auto-execution is permitted by this envelope.",
+          "type": "boolean"
+        },
+        "cvar_contribution_usd": {
+          "description": "This recommendation's exact contribution to portfolio `CVaR`.",
+          "$ref": "#/$defs/Usd"
+        },
+        "envelope_hash": {
+          "description": "Canonical hash of the envelope (admission verification).",
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "max_category_exposure_usd": {
+          "description": "Maximum category exposure in USD.",
+          "$ref": "#/$defs/Usd"
+        },
+        "max_event_exposure_usd": {
+          "description": "Maximum event exposure in USD.",
+          "$ref": "#/$defs/Usd"
+        },
+        "max_loss_usd": {
+          "description": "Maximum tolerated loss in USD.",
+          "$ref": "#/$defs/Usd"
+        },
+        "max_market_exposure_usd": {
+          "description": "Maximum market exposure in USD.",
+          "$ref": "#/$defs/Usd"
+        },
+        "max_position_usd": {
+          "description": "Maximum position size in USD.",
+          "$ref": "#/$defs/Usd"
+        },
+        "max_route_exposure_usd": {
+          "description": "Maximum model-Route exposure after admitting this recommendation.",
+          "$ref": "#/$defs/Usd"
+        },
+        "max_slippage_bps": {
+          "description": "Maximum tolerated slippage.",
+          "$ref": "#/$defs/Bps"
+        },
+        "maximum_scenario_loss_cap_usd": {
+          "description": "Governed maximum loss over every promoted joint scenario.",
+          "$ref": "#/$defs/Usd"
+        },
+        "portfolio_cvar_cap_usd": {
+          "description": "Governed portfolio `CVaR` cap used by the exact solve.",
+          "$ref": "#/$defs/Usd"
+        },
+        "requires_approval": {
+          "description": "Whether human approval is required before execution.",
+          "type": "boolean"
+        },
+        "risk_notes": {
+          "description": "Free-form risk notes for the report.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "max_loss_usd",
+        "max_slippage_bps",
+        "max_position_usd",
+        "max_market_exposure_usd",
+        "max_event_exposure_usd",
+        "max_category_exposure_usd",
+        "max_route_exposure_usd",
+        "cvar_contribution_usd",
+        "portfolio_cvar_cap_usd",
+        "maximum_scenario_loss_cap_usd",
+        "requires_approval",
+        "auto_execution_allowed",
+        "risk_notes",
+        "envelope_hash"
+      ]
+    },
+    "ScaleOutState": {
+      "description": "Unified scale-out state for deterministic and opportunistic partial exits.",
+      "type": "object",
+      "properties": {
+        "cumulative_exited_shares": {
+          "description": "Cumulative settled partial exits relative to the denominator.",
+          "$ref": "#/$defs/Shares"
+        },
+        "denominator_shares": {
+          "description": "Frozen entry-filled denominator shared by every scale-out source.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Shares"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pending_target": {
+          "description": "Cumulative target currently submitted to the venue, if any.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PendingScaleOut"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "settled_target_ids": {
+          "description": "Stable target ids already settled (append-only, deduplicated).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cumulative_exited_shares",
+        "settled_target_ids"
+      ]
+    },
+    "ScaleOutTarget": {
+      "description": "One deterministic cumulative scale-out target.",
+      "type": "object",
+      "properties": {
+        "min_price": {
+          "description": "Minimum acceptable sell price.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "description": "Human explanation for this target.",
+          "type": "string"
+        },
+        "target_cumulative_exit_pct": {
+          "description": "Target fraction exited relative to frozen entry-filled shares.",
+          "type": "string"
+        },
+        "target_id": {
+          "description": "Stable target identifier.",
+          "type": "string"
+        },
+        "trigger_price": {
+          "description": "Executable mark that activates this target.",
+          "$ref": "#/$defs/Price"
+        },
+        "valid_after": {
+          "description": "Earliest time this node is active.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "valid_until": {
+          "description": "Latest time this node is active.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "target_id",
+        "trigger_price",
+        "target_cumulative_exit_pct",
+        "reason"
+      ]
+    },
+    "ScenarioCapitalOccupancySlice": {
+      "description": "One contiguous interval during which scenario cash is unavailable.",
+      "type": "object",
+      "properties": {
+        "duration_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "locked_cash_usd": {
+          "$ref": "#/$defs/Usd"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "locked_cash_usd",
+        "duration_secs"
+      ]
+    },
+    "ScenarioEntryExecution": {
+      "description": "Entry state selected jointly with one promoted market-outcome scenario.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "aggressive_fill"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "good_til_secs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "passive_no_fill"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "good_til_secs"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fill_latency_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "passive_partial_fill"
+            },
+            "post_fill_markout_bps": {
+              "$ref": "#/$defs/Bps"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "fill_latency_ms",
+            "post_fill_markout_bps"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fill_latency_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "passive_full_fill"
+            },
+            "post_fill_markout_bps": {
+              "$ref": "#/$defs/Bps"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "fill_latency_ms",
+            "post_fill_markout_bps"
+          ]
+        }
+      ]
+    },
+    "ScenarioExecutionCashflow": {
+      "description": "Scenario-specific execution and discounted cash flow.",
+      "type": "object",
+      "properties": {
+        "capital_cost_usd": {
+          "description": "Pre-fill reservation opportunity cost. Post-fill capital cost is already\nrepresented by the scenario artifact's discounted exit cash.",
+          "$ref": "#/$defs/Usd"
+        },
+        "capital_occupancy": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScenarioCapitalOccupancySlice"
+          }
+        },
+        "delayed_maker_rebate_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "discounted_exit_cash_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "discounted_maker_rebate_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "discounted_net_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "entry_execution": {
+          "$ref": "#/$defs/ScenarioEntryExecution"
+        },
+        "filled_shares": {
+          "$ref": "#/$defs/Shares"
+        },
+        "immediate_cash_outlay_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "risk_net_usd": {
+          "description": "Tail-risk cash flow with all unreceived venue incentives forced to zero.",
+          "$ref": "#/$defs/Usd"
+        },
+        "scenario_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "scenario_index",
+        "entry_execution",
+        "filled_shares",
+        "immediate_cash_outlay_usd",
+        "discounted_exit_cash_usd",
+        "delayed_maker_rebate_usd",
+        "discounted_maker_rebate_usd",
+        "capital_cost_usd",
+        "capital_occupancy",
+        "discounted_net_usd",
+        "risk_net_usd"
+      ]
+    },
+    "Shares": {
+      "description": "Number of shares (condition tokens).",
+      "type": "string"
+    },
+    "Side": {
+      "type": "string",
+      "enum": [
+        "BUY",
+        "SELL"
+      ]
+    },
+    "SizingPlan": {
+      "description": "How much capital a recommendation should deploy and the binding cap.",
+      "type": "object",
+      "properties": {
+        "capital_occupancy_usd_hours": {
+          "description": "Discounted capital occupancy contributed by this tier.",
+          "$ref": "#/$defs/UsdHours"
+        },
+        "category_exposure_after_usd": {
+          "description": "Projected category exposure after this allocation.",
+          "$ref": "#/$defs/Usd"
+        },
+        "economic_tier_id": {
+          "description": "Exact immutable tier selected by the global MILP.",
+          "type": "string",
+          "format": "uuid"
+        },
+        "event_exposure_after_usd": {
+          "description": "Projected event exposure after this allocation.",
+          "$ref": "#/$defs/Usd"
+        },
+        "expected_filled_shares": {
+          "description": "OOS expected fill quantity; equals requested shares for aggressive entry.",
+          "$ref": "#/$defs/Shares"
+        },
+        "expected_maker_rebate_usd": {
+          "description": "Delayed maker incentive expectation; never spendable cash.",
+          "$ref": "#/$defs/Usd"
+        },
+        "hard_reserved_cash_usd": {
+          "description": "Cash reserved independently of expected passive fills or incentives.",
+          "$ref": "#/$defs/Usd"
+        },
+        "immediate_fee_usd": {
+          "description": "Immediate full-fill venue and builder fee.",
+          "$ref": "#/$defs/Usd"
+        },
+        "maker_rebate_schedule": {
+          "description": "Independent Gamma terms frozen for later maker-fill accrual. `None`\nmeans the tier was valued with zero rebate.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FrozenMakerRebateSchedule"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "market_exposure_after_usd": {
+          "description": "Projected market exposure after this allocation.",
+          "$ref": "#/$defs/Usd"
+        },
+        "portfolio_weight_pct": {
+          "description": "Suggested allocation as a fraction of the capital base.",
+          "type": "string"
+        },
+        "reference_entry_price": {
+          "description": "Aggressive executable VWAP or passive post-only limit price.",
+          "$ref": "#/$defs/Price"
+        },
+        "requested_shares": {
+          "description": "Shares submitted to the selected route.",
+          "$ref": "#/$defs/Shares"
+        },
+        "route_exposure_after_usd": {
+          "description": "Projected Route exposure after this allocation.",
+          "$ref": "#/$defs/Usd"
+        },
+        "sizing_reason": {
+          "description": "Human explanation of the sizing decision.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "economic_tier_id",
+        "requested_shares",
+        "expected_filled_shares",
+        "hard_reserved_cash_usd",
+        "immediate_fee_usd",
+        "expected_maker_rebate_usd",
+        "reference_entry_price",
+        "portfolio_weight_pct",
+        "market_exposure_after_usd",
+        "event_exposure_after_usd",
+        "category_exposure_after_usd",
+        "route_exposure_after_usd",
+        "capital_occupancy_usd_hours",
+        "sizing_reason"
+      ]
+    },
+    "SolverEvidence": {
+      "description": "Stable `HiGHS` evidence. A plan exists only when every stage is proven optimal.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "bound_scale_exponent": {
+          "description": "Exact power-of-two `HiGHS` user-bound scaling applied to this model.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "coefficient_scale": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "configured_deadline_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "deterministic_threads": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "lexicographic_model_build_count": {
+          "description": "Number of immutable matrices uploaded for the complete publishable solve.\nThis must be one; leave-one-out ranking reuses the same matrix.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "lexicographic_solve_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "lexicographic_warm_start_count": {
+          "description": "Number of later lexicographic stages seeded from the prior optimal solution.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "marginal_model_build_count": {
+          "description": "Additional matrices uploaded for leave-one-out solves. This must be zero.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "marginal_model_reuse_count": {
+          "description": "Leave-one-out solves that reuse the lexicographic matrix.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "marginal_solve_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "optimal": {
+          "type": "boolean"
+        },
+        "tie_break_proof_count": {
+          "description": "Optimal Hamming-distance solves proving that the stable identity locks\nadmit exactly one binary tier selection.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "lexicographic_model_build_count",
+        "lexicographic_solve_count",
+        "tie_break_proof_count",
+        "lexicographic_warm_start_count",
+        "marginal_model_build_count",
+        "marginal_solve_count",
+        "marginal_model_reuse_count",
+        "configured_deadline_secs",
+        "deterministic_threads",
+        "coefficient_scale",
+        "bound_scale_exponent",
+        "optimal"
+      ]
+    },
+    "ThesisInvalidationPolicy": {
+      "description": "Frozen conditions that invalidate the entry thesis.",
+      "type": "object",
+      "properties": {
+        "min_expected_return_bps": {
+          "description": "Minimum executable expected return required to keep holding.",
+          "$ref": "#/$defs/Bps"
+        },
+        "min_score_retention": {
+          "description": "Minimum fresh-score / entry-score ratio. Must be in `[0, 1]`.",
+          "type": "string"
+        },
+        "require_route_gate_eligibility": {
+          "description": "Whether the frozen Route-local model gate must still pass to keep holding.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "min_score_retention",
+        "min_expected_return_bps",
+        "require_route_gate_eligibility"
+      ]
+    },
+    "TickSize": {
+      "type": "string",
+      "enum": [
+        "0.1",
+        "0.01",
+        "0.005",
+        "0.0025",
+        "0.001",
+        "0.0001"
+      ]
+    },
+    "TradePolicyCohortDimension": {
+      "description": "Versioned provenance for one fitted cohort dimension.",
+      "type": "object",
+      "properties": {
+        "bucket_id": {
+          "type": "string"
+        },
+        "methodology_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "methodology_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "methodology_id",
+        "methodology_hash",
+        "bucket_id"
+      ]
+    },
+    "TradePolicyCohortKey": {
+      "description": "Deterministic cohort selector for prediction-market trajectory policies.",
+      "type": "object",
+      "properties": {
+        "cash_budget_tier": {
+          "$ref": "#/$defs/Usd"
+        },
+        "category": {
+          "$ref": "#/$defs/MarketCategory"
+        },
+        "entry_price_max": {
+          "$ref": "#/$defs/Price"
+        },
+        "entry_price_min": {
+          "$ref": "#/$defs/Price"
+        },
+        "entry_route": {
+          "$ref": "#/$defs/TradePolicyEntryRoute"
+        },
+        "horizon_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "liquidity": {
+          "$ref": "#/$defs/TradePolicyCohortDimension"
+        },
+        "profile_ref": {
+          "$ref": "#/$defs/ResearchProfileRef"
+        },
+        "volatility": {
+          "$ref": "#/$defs/TradePolicyCohortDimension"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "profile_ref",
+        "category",
+        "horizon_secs",
+        "entry_route",
+        "entry_price_min",
+        "entry_price_max",
+        "cash_budget_tier",
+        "liquidity",
+        "volatility"
+      ]
+    },
+    "TradePolicyEntryRoute": {
+      "description": "Entry execution route fitted and published independently within a cohort.",
+      "type": "string",
+      "enum": [
+        "aggressive",
+        "passive_post_only"
+      ]
+    },
+    "TrailingStopPolicy": {
+      "description": "A trailing-stop policy relative to the position's peak mark.",
+      "type": "object",
+      "properties": {
+        "activation_price": {
+          "description": "Price that must be reached before the trailing stop arms.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Price"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trail_bps": {
+          "description": "Trailing distance in basis points below the peak mark.",
+          "$ref": "#/$defs/Bps"
+        }
+      },
+      "required": [
+        "trail_bps"
+      ]
+    },
+    "Usd": {
+      "description": "USD-denominated monetary amount (Polymarket V2 pUSD on Polygon).",
+      "type": "string"
+    },
+    "UsdHours": {
+      "description": "Time-weighted capital occupancy in USD-hours.",
+      "type": "string"
+    },
+    "VenueIncentiveEventView": {
+      "description": "One immutable incentive ledger event, including zero-amount retractions.",
+      "type": "object",
+      "properties": {
+        "amount_usd": {
+          "$ref": "#/$defs/Usd"
+        },
+        "available_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "execution_fill_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "kind": {
+          "$ref": "#/$defs/VenueIncentiveKind"
+        },
+        "market_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "program_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "source_identity": {
+          "type": "string"
+        },
+        "source_partition": {
+          "type": "string"
+        },
+        "source_schedule_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "stage": {
+          "$ref": "#/$defs/VenueIncentiveStage"
+        },
+        "transaction_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "venue_incentive_event_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "venue_incentive_event_id",
+        "kind",
+        "stage",
+        "program_date",
+        "amount_usd",
+        "source_partition",
+        "source_identity",
+        "observed_at",
+        "available_at",
+        "evidence_hash",
+        "created_at"
+      ]
+    },
+    "VenueIncentiveKind": {
+      "type": "string",
+      "enum": [
+        "maker_rebate",
+        "taker_rebate"
+      ]
+    },
+    "VenueIncentiveStage": {
+      "description": "Append-only incentive lifecycle event. Stages are facts, not mutable\nstatus values on a single row.",
+      "type": "string",
+      "enum": [
+        "estimated_accrual",
+        "venue_awarded",
+        "wallet_credited"
+      ]
+    },
+    "VenuePositionSnapshotView": {
+      "description": "Outbound projection of one venue-held outcome position at decision time.",
+      "type": "object",
+      "properties": {
+        "avg_price": {
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/MarketCategory"
+        },
+        "cur_price": {
+          "type": "string"
+        },
+        "current_value": {
+          "type": "string"
+        },
+        "event_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "market_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "redeemable": {
+          "type": "boolean"
+        },
+        "size": {
+          "type": "string"
+        },
+        "token_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "token_id",
+        "market_id",
+        "category",
+        "outcome",
+        "size",
+        "avg_price",
+        "cur_price",
+        "current_value",
+        "redeemable"
+      ]
+    }
+  }
+}

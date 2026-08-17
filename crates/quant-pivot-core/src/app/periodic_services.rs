@@ -17,8 +17,12 @@ use crate::{
     infra::periodic_task::PeriodicTask,
     ingest::data_quality::DataQualityService,
     service::{
-        equity::EquitySnapshotService, feature_integrity::AutomaticFullParityOutcome,
-        venue_incentive::VenueIncentiveReconciliationService,
+        equity::EquitySnapshotService,
+        feature_integrity::AutomaticFullParityOutcome,
+        venue_incentive::{
+            VenueAwardSource, VenueCreditSource, VenueIncentiveReconciliationDependencies,
+            VenueIncentiveReconciliationService,
+        },
     },
 };
 
@@ -27,19 +31,25 @@ const DATA_QUALITY_REFRESH_SECS: u64 = 5;
 
 impl AppContext {
     pub fn register_venue_incentive_worker(&self, runner: &mut AppRunner) {
-        let service = Arc::new(VenueIncentiveReconciliationService::new(
-            Arc::clone(&self.execution.clob),
-            Arc::clone(&self.account.data_api),
-            Arc::clone(&self.infra.repos.venue_incentive) as Arc<dyn VenueIncentiveRepository>,
-            self.account.execution_account.execution_account_id,
-            self.account.execution_account.funder_address.clone(),
-        ));
         let poll = Duration::from_secs(
             self.config
                 .quant
                 .workers
                 .venue_incentive_reconciliation_secs,
         );
+        let service = Arc::new(VenueIncentiveReconciliationService::new(
+            VenueIncentiveReconciliationDependencies {
+                award_source: Arc::clone(&self.execution.clob) as Arc<dyn VenueAwardSource>,
+                credit_source: Arc::clone(&self.account.data_api) as Arc<dyn VenueCreditSource>,
+                repository: Arc::clone(&self.infra.repos.venue_incentive)
+                    as Arc<dyn VenueIncentiveRepository>,
+                metrics: Arc::clone(&self.infra.metrics),
+                alerts: Arc::clone(&self.governance.alerts),
+                execution_account_id: self.account.execution_account.execution_account_id,
+                funder: self.account.execution_account.funder_address.clone(),
+                cadence_secs: poll.as_secs(),
+            },
+        ));
         let lookback_days = self.config.quant.workers.venue_incentive_lookback_days;
         runner.spawn(
             TaskId::VenueIncentiveReconciliation,
@@ -48,7 +58,7 @@ impl AppContext {
                     "venue-incentive-reconciliation",
                     move || poll,
                     0.0,
-                    true,
+                    false,
                     token,
                     move || {
                         let service = Arc::clone(&service);

@@ -1,5 +1,7 @@
 # S3 Maker Rebate / 训练目标闭环审计（2026-08-17）
 
+> **Superseded（开放项状态）**：开放项与验收以 [`2026-08-17-s3-rebate-closed-loop-reaudit.md`](2026-08-17-s3-rebate-closed-loop-reaudit.md) 为准。本文保留为当时缺陷证据与冻结决策原文；不得从本文恢复已被否定的实现（net-return Buy 标签、taker rebate 进 MILP、`suggested_usd` 兼容别名）。
+
 > **范围**：对照 [`2026-08-13-full-system-deep-audit.md`](2026-08-13-full-system-deep-audit.md) §3（S3：成本模型缺 maker/taker rebate；训练目标 mid-return vs 考核目标 net-of-cost）与**当前工作区实现**，判断该条是否已形成生产级业务闭环。
 > **方法**：缺陷优先。实现交叉验证 + Polymarket 官方费用/rebate 文档 + 训练/考核合同源码。不接受“契约写了但未接线”。本文件在对话审计之后又做了一轮代码/文档/官方规范复验；§7.5、§7.6、§8.3 是复验新增项，其余为第一轮已确认、本轮复核仍成立的结论。
 > **读者**：下一轮收尾执行（实现代理）。本文件是可执行工单，不是综述。

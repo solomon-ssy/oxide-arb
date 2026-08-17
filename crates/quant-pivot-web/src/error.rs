@@ -267,7 +267,8 @@ impl From<QuantError> for WebError {
                 InfraError::MetricsRegistration { .. }
                 | InfraError::ChannelClosed { .. }
                 | InfraError::ChannelTimeout { .. }
-                | InfraError::ComputeDeadline { .. } => {
+                | InfraError::ComputeDeadline { .. }
+                | InfraError::VenueIncentiveReconciliation { .. } => {
                     Self::ServiceUnavailable("service temporarily unavailable".to_owned())
                 }
                 InfraError::ComputeCapacity { .. } => {

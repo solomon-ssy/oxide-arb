@@ -36,7 +36,7 @@ const ACTIVITY_PAGE_MAX: u32 = 500;
 const ACTIVITY_OFFSET_MAX: u32 = 5_000;
 
 /// Wallet-credit incentive type exposed by the venue activity API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum VenueIncentiveCreditKind {
     MakerRebate,
     TakerRebate,

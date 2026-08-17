@@ -1947,7 +1947,10 @@ pub struct BacktestPath {
     /// this clock beside the return series prevents ordinal alignment from
     /// masquerading as contemporaneous cross-Route dependence.
     pub decision_times: Vec<DateTime<Utc>>,
+    /// Expected return series used for selection and Sharpe statistics.
     pub group_returns: Vec<Decimal>,
+    /// Incentive-excluded return series used for drawdown and tail-loss gates.
+    pub risk_group_returns: Vec<Decimal>,
     /// Allocation-independent realized payout minus calibrated expected payout
     /// for each decision group. `None` is valid only for a validation family
     /// that does not emit Buy probability forecasts. Scenario fitting rejects

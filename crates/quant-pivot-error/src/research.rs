@@ -177,6 +177,20 @@ pub enum ResearchError {
         detail: String,
     },
 
+    /// A visible Gamma maker-rebate schedule was invalid or disagreed with the
+    /// independently visible CLOB fee curve at the same decision boundary.
+    #[error(
+        "point-in-time maker-rebate evidence rejected for market `{market_id}` at `{at}`: {reason}"
+    )]
+    PitMakerRebateEvidence {
+        /// Market whose independent fee sources could not be reconciled.
+        market_id: String,
+        /// Decision boundary rendered as an RFC 3339 timestamp.
+        at: String,
+        /// Stable machine-readable rejection reason.
+        reason: &'static str,
+    },
+
     /// A dataset plan could not be produced (e.g. an empty or inverted window,
     /// a zero sampling interval).
     #[error("dataset plan failed: {detail}")]

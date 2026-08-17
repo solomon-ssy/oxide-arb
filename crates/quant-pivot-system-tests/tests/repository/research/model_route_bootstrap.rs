@@ -80,6 +80,13 @@ fn hash(seed: char) -> ContentHash {
         .expect("bootstrap fixture hash")
 }
 
+fn bootstrap_decision_times(window_start: DateTime<Utc>) -> Vec<DateTime<Utc>> {
+    [4, 8, 12, 18]
+        .into_iter()
+        .map(|hours| window_start + Duration::hours(hours))
+        .collect()
+}
+
 fn scenario_binding(
     route: BuyModelRoute,
     bound_at: DateTime<Utc>,
@@ -291,10 +298,7 @@ async fn seed_path_set(
         })
         .await
         .expect("start bootstrap CPCV run");
-    let decision_times = [4, 8, 12, 18]
-        .into_iter()
-        .map(|hours| window_start + Duration::hours(hours))
-        .collect::<Vec<_>>();
+    let decision_times = bootstrap_decision_times(window_start);
     let group_returns = vec![dec!(0.02), dec!(-0.005), dec!(0.03), dec!(0.01)];
     let challenger_returns = group_returns
         .iter()
@@ -361,6 +365,7 @@ async fn seed_path_set(
             path_index: 0,
             decision_times,
             scenario_residuals: group_returns.iter().copied().map(Some).collect(),
+            risk_group_returns: group_returns.clone(),
             group_returns,
             sharpe: dec!(1.1),
             target_rank_ic: dec!(0.25),

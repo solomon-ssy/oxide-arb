@@ -781,12 +781,9 @@ mod tests {
     impl NewBacktestPathSet {
         fn test_fixture() -> Self {
             let window_start = Utc::now() - Duration::hours(1);
-            let periods = vec![
-                window_start + Duration::minutes(5),
-                window_start + Duration::minutes(10),
-                window_start + Duration::minutes(15),
-                window_start + Duration::minutes(20),
-            ];
+            let periods = (1..=4)
+                .map(|period| window_start + Duration::minutes(period * 5))
+                .collect::<Vec<_>>();
             Self::try_seal(NewBacktestPathSetInput {
                 path_set_id: BacktestPathSetId::from_v7(),
                 model_version_id: ModelVersionId::from_v7(),
@@ -907,6 +904,7 @@ mod tests {
                     path_index: 0,
                     decision_times: periods.clone(),
                     group_returns: vec![dec!(0.01), dec!(-0.005), dec!(0.01), dec!(-0.005)],
+                    risk_group_returns: vec![dec!(0.01), dec!(-0.005), dec!(0.01), dec!(-0.005)],
                     scenario_residuals: vec![
                         Some(dec!(0.01)),
                         Some(dec!(-0.005)),

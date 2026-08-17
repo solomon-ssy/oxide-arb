@@ -219,7 +219,7 @@ pub struct QuantReportRecommendationFactRow {
     pub cvar_contribution_usd: ChUsd,
     pub capital_occupancy_usd_hours: ChUsd,
     pub marginal_portfolio_value_usd: ChUsd,
-    pub suggested_usd: ChUsd,
+    pub hard_reserved_cash_usd: ChUsd,
     pub valid_until: i64,
 }
 

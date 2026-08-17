@@ -1502,7 +1502,7 @@ impl PgExecutionSubmissionRepository {
                 market_id: Some(order.market_id.clone()),
                 kind: VenueIncentiveKind::MakerRebate,
                 stage: VenueIncentiveStage::EstimatedAccrual,
-                program_date: incentive.settlement_date,
+                program_date: incentive.program_date,
                 amount_usd: incentive.expected_rebate_usd,
                 source_schedule_hash: Some(incentive.source_schedule_hash),
                 source_partition: source_identity.clone(),

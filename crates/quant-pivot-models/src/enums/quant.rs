@@ -16,7 +16,7 @@ pg_enum! {
     type_name = "qp_trade_policy_validation_status",
     /// Independent validation-run lifecycle. Row diagnostics are append-only;
     /// only the run summary transitions from Running to one terminal state.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum TradePolicyValidationStatus {
         #[default]
         Running => "running",
@@ -64,7 +64,7 @@ impl QuantRuntimeMode {
 pg_enum! {
     type_name = "qp_report_kind",
     /// Recommendation report category.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum ReportKind {
         #[default]
         TopN => "top_n",
@@ -76,7 +76,7 @@ pg_enum! {
 pg_enum! {
     type_name = "qp_report_trigger_kind",
     /// Stable report-generation trigger source.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum ReportTriggerKind {
         #[default]
         Scheduled => "scheduled",
@@ -87,7 +87,7 @@ pg_enum! {
 pg_enum! {
     type_name = "qp_recommendation_report_status",
     /// Publication lifecycle of an immutable recommendation report artifact.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum RecommendationReportStatus {
         #[default]
         Prepared => "prepared",
@@ -140,7 +140,7 @@ impl RecommendationReportStatus {
 pg_enum! {
     type_name = "qp_report_run_status",
     /// Durable lifecycle of one report build attempt.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum ReportRunStatus {
         #[default]
         Queued => "queued",
@@ -179,6 +179,7 @@ impl ReportRunStatus {
 pg_enum! {
     type_name = "qp_report_run_terminal_reason",
     /// Typed terminal reason for skipped, failed, or abandoned report runs.
+    @derive(schemars::JsonSchema)
     pub enum ReportRunTerminalReason {
         CoalescedByNewerOccurrence => "coalesced_by_newer_occurrence",
         ScheduleReconfigured => "schedule_reconfigured",
@@ -201,7 +202,7 @@ pg_enum! {
 pg_enum! {
     type_name = "qp_report_fact_delivery_status",
     /// Delivery lifecycle for the two-table report fact bundle.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum ReportFactDeliveryStatus {
         #[default]
         Pending => "pending",
@@ -216,7 +217,7 @@ pg_enum! {
 pg_enum! {
     type_name = "qp_resolution_projection_status",
     /// Durable projection lifecycle for immutable source resolution observations.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum ResolutionProjectionStatus {
         #[default]
         Pending => "pending",
@@ -253,7 +254,7 @@ pg_enum! {
 pg_enum! {
     type_name = "qp_outcome_reconciliation_task_status",
     /// Durable lease/retry lifecycle for attempt and recommendation-rollup work.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum OutcomeReconciliationTaskStatus {
         #[default]
         Pending => "pending",
@@ -266,7 +267,7 @@ pg_enum! {
 pg_enum! {
     type_name = "qp_recommendation_status",
     /// Lifecycle state for a single recommendation.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum RecommendationStatus {
         #[default]
         Prepared => "prepared",
@@ -377,6 +378,7 @@ wire_enum! {
 
 wire_enum! {
     /// Venue fill semantics required by an aggressive entry.
+    @derive(schemars::JsonSchema)
     pub enum FillRequirement {
         AllOrNothing => "all_or_nothing",
         AllowPartial => "allow_partial",
@@ -386,7 +388,7 @@ wire_enum! {
 pg_enum! {
     type_name = "qp_entry_condition_state",
     /// Durable state of a recommendation-level entry condition instance.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum EntryConditionState {
         #[default]
         NotRequired => "not_required",
@@ -417,7 +419,7 @@ pg_enum! {
 pg_enum! {
     type_name = "qp_order_intent_status",
     /// Governed execution-intent lifecycle state.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum OrderIntentStatus {
         #[default]
         Draft => "draft",
@@ -525,7 +527,7 @@ impl OrderIntentStatus {
 pg_enum! {
     type_name = "qp_approval_status",
     /// Human or policy approval state attached to an order intent.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum ApprovalStatus {
         #[default]
         NotRequired => "not_required",
@@ -615,7 +617,7 @@ pg_enum! {
 pg_enum! {
     type_name = "qp_factor_direction",
     /// Factor contribution direction.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum FactorDirection {
         Positive => "positive",
         Negative => "negative",
@@ -1504,7 +1506,7 @@ pg_enum! {
     /// for evidence labelling and forward extension; there is **no** simulated or
     /// configured-budget source — credentials are required and the report fails
     /// closed without them.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum AccountSource {
         #[default]
         Polymarket => "polymarket",
@@ -1518,7 +1520,7 @@ wire_enum! {
     ///
     /// Every variant has an independent producer in the report builder — there
     /// are no wire-only placeholders (zero dead semantics).
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum EmptyReportReason {
         /// The market selection was empty.
         #[default]
@@ -1537,7 +1539,7 @@ wire_enum! {
 
 wire_enum! {
     /// Why a recommendation is ineligible for execution in a given mode.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum IneligibilityReason {
         /// The runtime mode is report-only.
         #[default]
@@ -1623,7 +1625,7 @@ pg_enum! {
     type_name = "qp_exit_settlement_mode",
     /// Whether an open lot should leave the market before resolution or be held
     /// until the CTF payout vector is available.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum ExitSettlementMode {
         /// Hold the position until the market resolves.
         #[default]
@@ -1637,7 +1639,7 @@ pg_enum! {
     type_name = "qp_redeem_policy",
     /// Whether a resolved hold-to-resolution lot is redeemed by the system or
     /// left for an operator.
-    @derive(Default)
+    @derive(Default, schemars::JsonSchema)
     pub enum RedeemPolicy {
         /// Operator handles CTF redemption manually.
         #[default]

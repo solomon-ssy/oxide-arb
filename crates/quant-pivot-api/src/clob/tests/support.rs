@@ -14,7 +14,7 @@ use polymarket_client_sdk_v2::{
 use quant_pivot_models::{
     domain::order::OrderRequest,
     enums::common::{OrderType, Side},
-    types::{MarketId, Price, Shares, TokenId, Usd, VenueOrderAmount},
+    types::{EvmAddress, MarketId, Price, Shares, TokenId, Usd, VenueOrderAmount},
 };
 use reqwest::Client;
 use rust_decimal_macros::dec;
@@ -152,6 +152,14 @@ pub async fn deposit_wallet_clob_client(
     server: &MockServer,
     deposit_wallet: Address,
 ) -> ClobClient {
+    funder_clob_client(server, SignatureType::Poly1271, deposit_wallet).await
+}
+
+pub async fn funder_clob_client(
+    server: &MockServer,
+    signature_type: SignatureType,
+    funder: Address,
+) -> ClobClient {
     let signer = LocalSigner::from_str(PRIVATE_KEY)
         .expect("local signer")
         .with_chain_id(Some(POLYGON));
@@ -159,11 +167,11 @@ pub async fn deposit_wallet_clob_client(
     let mut sdk = SdkClient::new(&server.uri(), config)
         .expect("sdk client")
         .authentication_builder(&signer)
-        .signature_type(SignatureType::Poly1271)
-        .funder(deposit_wallet)
+        .signature_type(signature_type)
+        .funder(funder)
         .authenticate()
         .await
-        .expect("authenticate Deposit Wallet client");
+        .expect("authenticate funder client");
     sdk.stop_heartbeats()
         .await
         .expect("stop test heartbeat task");
@@ -171,6 +179,7 @@ pub async fn deposit_wallet_clob_client(
         sdk: Arc::new(sdk),
         http: Client::new(),
         clob_base_url: server.uri(),
+        maker_address: EvmAddress::parse(format!("{funder:#x}")).expect("funder maker"),
         signer: test_signer(),
         order_post_timeout: Duration::from_secs(15),
         rate_limiter: RateLimiter::new(),
@@ -187,6 +196,8 @@ pub async fn clob_client_order_timeout(
         sdk,
         http: Client::new(),
         clob_base_url: server.uri(),
+        maker_address: EvmAddress::parse(format!("{:#x}", test_signer().address()))
+            .expect("EOA maker"),
         signer: test_signer(),
         order_post_timeout,
         rate_limiter: RateLimiter::new(),

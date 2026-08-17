@@ -8,6 +8,7 @@ pub mod config_governance;
 pub mod content;
 pub mod data_plane;
 pub mod dataset_coverage;
+pub(crate) mod decimal_string_option;
 pub mod domain;
 pub mod domain_capability;
 pub mod domain_classification;

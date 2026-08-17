@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
@@ -44,7 +45,7 @@ use crate::{
 };
 
 /// List-row projection of a recommendation report (header + summary roll-up).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct QuantReportView {
     pub recommendation_report_id: RecommendationReportId,
     pub represented_routes: RepresentedRouteSet,
@@ -57,7 +58,7 @@ pub struct QuantReportView {
     pub account_source: AccountSource,
     pub capital_base_usd: Usd,
     pub published_recommendation_count: u32,
-    pub total_suggested_usd: Usd,
+    pub total_hard_reserved_cash_usd: Usd,
     pub empty_reason: Option<EmptyReportReason>,
     pub published_at: Option<DateTime<Utc>>,
     pub valid_until: Option<DateTime<Utc>>,
@@ -84,7 +85,7 @@ impl From<RecommendationReportInfo> for QuantReportView {
             account_source: info.account_source,
             capital_base_usd: info.capital_base_usd,
             published_recommendation_count: info.summary_json.published_recommendation_count,
-            total_suggested_usd: info.summary_json.total_suggested_usd,
+            total_hard_reserved_cash_usd: info.summary_json.total_hard_reserved_cash_usd,
             empty_reason: info.summary_json.empty_reason,
             published_at: info.published_at,
             valid_until: info.valid_until,
@@ -101,7 +102,7 @@ impl From<RecommendationReportInfo> for QuantReportView {
 
 /// Full report header projection: lifecycle + account base + replay handles +
 /// the report-level [`ReportSummary`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct QuantReportDetailView {
     pub recommendation_report_id: RecommendationReportId,
     pub report_run_id: ReportRunId,
@@ -179,7 +180,7 @@ impl QuantReportDetailView {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReportFactDeliveryView {
     pub status: ReportFactDeliveryStatus,
     pub bundle_hash: ContentHash,
@@ -352,7 +353,7 @@ pub struct RetryReportRequest {
 }
 
 /// Durable report-run projection returned by enqueue, list, detail, and retry.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReportRunView {
     pub report_run_id: ReportRunId,
     pub trigger_kind: ReportTriggerKind,
@@ -549,16 +550,16 @@ impl From<ReportScheduleHealthInfo> for ReportScheduleHealthView {
 }
 
 /// Outbound projection of a [`ReportDiff`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReportDiffView {
     pub base_report_id: RecommendationReportId,
     pub compare_report_id: RecommendationReportId,
     pub added: Vec<RecommendationDeltaView>,
     pub removed: Vec<RecommendationDeltaView>,
     pub retained: Vec<RecommendationDeltaView>,
-    pub base_total_suggested_usd: Usd,
-    pub compare_total_suggested_usd: Usd,
-    pub total_suggested_usd_delta: Usd,
+    pub base_total_hard_reserved_cash_usd: Usd,
+    pub compare_total_hard_reserved_cash_usd: Usd,
+    pub total_hard_reserved_cash_usd_delta: Usd,
     pub base_eligibility: EligibilitySummary,
     pub compare_eligibility: EligibilitySummary,
 }
@@ -583,9 +584,9 @@ impl From<ReportDiff> for ReportDiffView {
                 .into_iter()
                 .map(RecommendationDeltaView::from)
                 .collect(),
-            base_total_suggested_usd: diff.base_total_suggested_usd,
-            compare_total_suggested_usd: diff.compare_total_suggested_usd,
-            total_suggested_usd_delta: diff.total_suggested_usd_delta,
+            base_total_hard_reserved_cash_usd: diff.base_total_hard_reserved_cash_usd,
+            compare_total_hard_reserved_cash_usd: diff.compare_total_hard_reserved_cash_usd,
+            total_hard_reserved_cash_usd_delta: diff.total_hard_reserved_cash_usd_delta,
             base_eligibility: diff.eligibility.base,
             compare_eligibility: diff.eligibility.compare,
         }
@@ -593,14 +594,14 @@ impl From<ReportDiff> for ReportDiffView {
 }
 
 /// Outbound projection of a single `(market, side)` recommendation delta.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RecommendationDeltaView {
     pub market_id: String,
     pub outcome_side: OutcomeSide,
     pub base: Option<RecommendationDiffSnapshotView>,
     pub compare: Option<RecommendationDiffSnapshotView>,
     pub changed_fields: Vec<RecommendationChangedFieldView>,
-    pub suggested_usd_delta: Usd,
+    pub hard_reserved_cash_usd_delta: Usd,
 }
 
 impl From<RecommendationDelta> for RecommendationDeltaView {
@@ -611,13 +612,13 @@ impl From<RecommendationDelta> for RecommendationDeltaView {
             base: delta.base.map(Into::into),
             compare: delta.compare.map(Into::into),
             changed_fields: delta.changed_fields.into_iter().map(Into::into).collect(),
-            suggested_usd_delta: delta.suggested_usd_delta,
+            hard_reserved_cash_usd_delta: delta.hard_reserved_cash_usd_delta,
         }
     }
 }
 
 /// Typed decision snapshot for one side of a recommendation diff.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RecommendationDiffSnapshotView {
     pub recommendation_id: RecommendationId,
     pub rank: i32,
@@ -645,7 +646,7 @@ impl From<RecommendationDiffSnapshot> for RecommendationDiffSnapshotView {
 }
 
 /// Stable field vocabulary used to group diff details without raw JSON.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RecommendationChangedFieldView {
     Rank,

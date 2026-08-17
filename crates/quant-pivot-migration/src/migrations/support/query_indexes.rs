@@ -1138,6 +1138,35 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
+        name: "idx_quant_venue_incentive_scan_health",
+        table: "quant_venue_incentive_reconciliation_scan",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "execution_account_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "program_date",
+                direction: IndexDirection::Desc,
+            },
+            IndexColumnSpec {
+                name: "kind",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "stage",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "completed_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
         name: "uq_quant_execution_transaction_ref_order_hash",
         table: "quant_execution_transaction_ref",
         method: IndexMethod::BTree,

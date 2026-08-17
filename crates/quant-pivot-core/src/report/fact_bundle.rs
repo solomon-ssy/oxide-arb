@@ -52,7 +52,7 @@ pub async fn prepare_report_fact_bundle(
             status: composed.notification.status.clone(),
             runtime_mode: composed.notification.runtime_mode,
             published_count: composed.notification.published_count,
-            total_suggested_usd: composed.notification.total_suggested_usd,
+            total_hard_reserved_cash_usd: composed.notification.total_hard_reserved_cash_usd,
             top3: composed
                 .notification
                 .top3
@@ -64,7 +64,7 @@ pub async fn prepare_report_fact_bundle(
                     profit_probability_bps: recommendation.profit_probability_bps,
                     robust_expected_net_usd: recommendation.robust_expected_net_usd,
                     marginal_portfolio_value_usd: recommendation.marginal_portfolio_value_usd,
-                    suggested_usd: recommendation.suggested_usd,
+                    hard_reserved_cash_usd: recommendation.hard_reserved_cash_usd,
                 })
                 .collect(),
             warnings: composed.notification.warnings.clone(),

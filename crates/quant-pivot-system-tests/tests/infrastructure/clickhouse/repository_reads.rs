@@ -267,7 +267,7 @@ async fn insert_recommendation_revisions(
         cvar_contribution_usd: ChUsd::from(Usd::new(Decimal::new(10, 0))),
         capital_occupancy_usd_hours: ChUsd::from(Usd::new(Decimal::new(100, 0))),
         marginal_portfolio_value_usd: ChUsd::from(Usd::new(Decimal::new(12, 0))),
-        suggested_usd: ChUsd::from(Usd::new(Decimal::new(25, 0))),
+        hard_reserved_cash_usd: ChUsd::from(Usd::new(Decimal::new(25, 0))),
         valid_until: now + 60_000,
     };
     let revised_recommendation = QuantReportRecommendationFactRow {

@@ -46,6 +46,7 @@ impl FoldModelSource for GateFoldSource {
             candidate_id: "cpcv-orchestration-gate".to_owned(),
             training_group_count,
             training_utility_bps: Decimal::ZERO,
+            training_risk_utility_bps: Decimal::ZERO,
         }))
     }
 }
@@ -70,6 +71,7 @@ impl ReplayEngine for GateReplay {
                 Ok(GroupEvaluation {
                     group_index,
                     return_value: Decimal::new(bucket - 50, 6),
+                    risk_return_value: Decimal::new(bucket - 50, 6),
                     scenario_residual: None,
                     rank_observations: Vec::new(),
                     executed_turnover: None,

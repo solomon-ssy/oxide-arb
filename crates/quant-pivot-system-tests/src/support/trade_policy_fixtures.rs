@@ -41,9 +41,9 @@ use quant_pivot_models::{
         ArtifactUri, Bps, ContentHash, DecisionPolicySnapshotId, EntryConditionTemplate,
         EntryOrderTemplate, ExecutablePriceBasis, ExitExecutionTemplate, MarketId,
         ModelInputContract, ModelSpecId, ModelTrainingContract, ModelTrainingTarget,
-        ModelVersionId, OpportunisticExitPolicy, Price, Probability, ResearchEvaluationTrack,
-        ResearchJobId, ResearchJobParams, ResearchProfileArtifact, ResearchProfileRef,
-        ResearchReadinessEvidencePayload, ResidualSharePolicy, RoleCode,
+        ModelVersionId, OpportunisticExitPolicy, PassivePlacement, Price, Probability,
+        ResearchEvaluationTrack, ResearchJobId, ResearchJobParams, ResearchProfileArtifact,
+        ResearchProfileRef, ResearchReadinessEvidencePayload, ResidualSharePolicy, RoleCode,
         SHADOW_LATENCY_PROFILE_FORMAT_VERSION, SchemaVersion, ShadowLatencyProfileV1, Shares,
         SourceSliceManifest, StructuralVolatilityOosEvidence, StructuralVolatilityOosFoldRow,
         TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId,
@@ -60,8 +60,11 @@ use quant_pivot_models::{
         TradePolicyPitCutoffEvidence, TradePolicyStatisticalSummaryRow, TradePolicyTrialAttemptId,
         TradePolicyTrialMetrics, TradePolicyValidationEvidence, TrainingDatasetId,
         TrainingExampleId, Usd, UserId, VerticalActivationTarget, VerticalGateEvidence,
-        VerticalGateKind, WorkerId, factor::FactorServingPlane, model_metrics::ModelVersionMetrics,
+        VerticalGateKind, WorkerId,
+        factor::FactorServingPlane,
+        model_metrics::ModelVersionMetrics,
         model_training::ModelTrainingObjective,
+        trade_policy_evidence::{TradePolicyEvidenceCoverage, TradePolicyMakerRebateEvidence},
     },
 };
 use quant_pivot_repository::{
@@ -96,7 +99,8 @@ use super::{
     model_spec_fixtures::new_model_spec_fixture,
 };
 
-const POLICY_CANDIDATE_ID: &str = "immediate";
+const POLICY_CANDIDATE_ID: &str = "immediate-aggressive";
+const POLICY_PASSIVE_CANDIDATE_ID: &str = "immediate-passive-post-only";
 const POLICY_SAMPLE_COUNT: u64 = 500;
 /// Canonical disposable attestation key used by fixture evidence producers and
 /// every real-binary consumer launched against the same seeded database.
@@ -873,59 +877,68 @@ impl PolicyEvidenceFixture {
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: "CandidateTrials evidence object is missing".to_owned(),
             })?;
-        let candidate =
-            payload
-                .candidates
-                .first()
-                .ok_or_else(|| ResearchError::ValidationMethodology {
-                    detail: "policy fixture candidate set is empty".to_owned(),
-                })?;
-        let mut attempt = NewTradePolicyTrialAttempt {
-            trial_attempt_id: TradePolicyTrialAttemptId::from_fit_job_ordinal(&fit_job_id, 0),
-            fit_job_id,
-            attempt_ordinal: 0,
-            experiment_family_hash,
-            research_program_hash: context.research_program_hash,
-            candidate_id: TradePolicyCandidateId::parse(&candidate.candidate_id).map_err(
-                |error| ResearchError::ValidationMethodology {
-                    detail: error.to_string(),
-                },
-            )?,
-            candidate_hash: CanonicalDigest::content_hash_json(candidate)?,
-            scope: TradePolicyTrialScope::Candidate,
-            fold_index: None,
-            path_index: None,
-            status: TradePolicyTrialStatus::Succeeded,
-            metrics_json: Some(TradePolicyTrialMetrics {
-                sample_count: POLICY_SAMPLE_COUNT,
-                effective_sample_size: Decimal::from(POLICY_SAMPLE_COUNT),
-                net_return_bps: dec!(25),
-                sharpe_ratio: Some(Decimal::ONE),
-                executable_coverage: Decimal::ONE,
-                full_l2_coverage: Decimal::ONE,
-                fee_catalog_coverage: Decimal::ONE,
-                ambiguous_touch_rate: Decimal::ZERO,
-                depth_failure_rate: Decimal::ZERO,
-                latency_stress_multiplier: Decimal::ONE,
-            }),
-            evidence_uri: Some(object.uri.clone()),
-            evidence_hash: Some(object.byte_hash),
-            evidence_row_count: Some(i64::try_from(object.row_count).map_err(|error| {
-                ResearchError::ValidationMethodology {
-                    detail: format!("policy evidence row count does not fit i64: {error}"),
-                }
-            })?),
-            failure_detail: None,
-            row_hash: ResearchHasher::canonical(&"pending-system-policy-trial-row")?,
-        };
-        attempt.row_hash =
-            attempt
-                .expected_row_hash()
-                .map_err(|error| ResearchError::ValidationMethodology {
-                    detail: format!("hash system policy trial row: {error}"),
-                })?;
         let policies = PgTradePolicyRepository::new(context.db.clone());
-        policies.append_trial_attempt(attempt).await?;
+        for (ordinal, candidate) in payload.candidates.iter().enumerate() {
+            let attempt_ordinal =
+                i64::try_from(ordinal).map_err(|error| ResearchError::ValidationMethodology {
+                    detail: format!("policy candidate ordinal does not fit i64: {error}"),
+                })?;
+            let mut attempt = NewTradePolicyTrialAttempt {
+                trial_attempt_id: TradePolicyTrialAttemptId::from_fit_job_ordinal(
+                    &fit_job_id,
+                    attempt_ordinal,
+                ),
+                fit_job_id,
+                attempt_ordinal,
+                experiment_family_hash,
+                research_program_hash: context.research_program_hash,
+                candidate_id: TradePolicyCandidateId::parse(&candidate.candidate_id).map_err(
+                    |error| ResearchError::ValidationMethodology {
+                        detail: error.to_string(),
+                    },
+                )?,
+                candidate_hash: CanonicalDigest::content_hash_json(candidate)?,
+                scope: TradePolicyTrialScope::Candidate,
+                fold_index: None,
+                path_index: None,
+                status: TradePolicyTrialStatus::Succeeded,
+                metrics_json: Some(TradePolicyTrialMetrics {
+                    sample_count: POLICY_SAMPLE_COUNT,
+                    effective_sample_size: Decimal::from(POLICY_SAMPLE_COUNT),
+                    expected_net_return_bps: if candidate.entry_execution.route()
+                        == TradePolicyEntryRoute::PassivePostOnly
+                    {
+                        dec!(27)
+                    } else {
+                        dec!(25)
+                    },
+                    risk_net_return_bps: dec!(25),
+                    expected_sharpe_ratio: Some(Decimal::ONE),
+                    executable_coverage: Decimal::ONE,
+                    full_l2_coverage: Decimal::ONE,
+                    fee_catalog_coverage: Decimal::ONE,
+                    rebate_evidence_coverage: Decimal::ONE,
+                    ambiguous_touch_rate: Decimal::ZERO,
+                    depth_failure_rate: Decimal::ZERO,
+                    latency_stress_multiplier: Decimal::ONE,
+                }),
+                evidence_uri: Some(object.uri.clone()),
+                evidence_hash: Some(object.byte_hash),
+                evidence_row_count: Some(i64::try_from(object.row_count).map_err(|error| {
+                    ResearchError::ValidationMethodology {
+                        detail: format!("policy evidence row count does not fit i64: {error}"),
+                    }
+                })?),
+                failure_detail: None,
+                row_hash: ResearchHasher::canonical(&"pending-system-policy-trial-row")?,
+            };
+            attempt.row_hash = attempt.expected_row_hash().map_err(|error| {
+                ResearchError::ValidationMethodology {
+                    detail: format!("hash system policy trial row: {error}"),
+                }
+            })?;
+            policies.append_trial_attempt(attempt).await?;
+        }
         let ledger = policies.list_trial_attempts(&fit_job_id, None).await?;
         let cutoff = ledger
             .last()
@@ -1019,7 +1032,7 @@ impl PolicyEvidenceFixture {
             validation: TradePolicyValidationEvidence {
                 trial_ledger_cutoff: None,
                 trial_ledger_hash: None,
-                attempted_candidate_count: Some(1),
+                attempted_candidate_count: Some(2),
                 cpcv_path_count: Some(21),
                 deflated_sharpe_ratio: Some(Decimal::ONE),
                 probability_of_backtest_overfitting: Some(Decimal::ZERO),
@@ -1028,6 +1041,7 @@ impl PolicyEvidenceFixture {
                 depth_failure_rate: Some(Decimal::ZERO),
                 common_candidate_support: Some(Decimal::ONE),
                 fee_catalog_coverage: Some(Decimal::ONE),
+                rebate_evidence_coverage: Some(Decimal::ONE),
                 eligible_market_coverage: Some(Decimal::ONE),
             },
         })
@@ -1149,39 +1163,72 @@ fn evidence_records(
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: "policy evidence candidate set is empty".to_owned(),
             })?;
-    let subject = EvidenceSubject {
+    let selected = EvidenceSubject {
         example: TrainingExampleId::from_v7(),
         market: MarketId::new("system-policy-market"),
         token: TokenId::new("system-policy-token"),
-        candidate: &candidate.candidate_id,
+        candidate,
     };
-    let record = match kind {
+    match kind {
         TradePolicyEvidenceObjectKind::ObservationEligibility => {
-            Some(observation_record(context, &subject)?)
+            Ok(vec![observation_record(context, &selected)?])
         }
-        TradePolicyEvidenceObjectKind::Fills => Some(fill_record(context, &subject)?),
-        TradePolicyEvidenceObjectKind::CandidateTrials => {
-            Some(candidate_trial_record(context, &subject)?)
-        }
-        TradePolicyEvidenceObjectKind::CohortTrials => {
-            Some(cohort_trial_record(context, &subject)?)
-        }
-        TradePolicyEvidenceObjectKind::CpcvPaths => Some(cpcv_record(context)?),
+        TradePolicyEvidenceObjectKind::Fills => context
+            .candidates
+            .iter()
+            .map(|candidate| {
+                let subject = EvidenceSubject {
+                    example: selected.example,
+                    market: selected.market.clone(),
+                    token: selected.token.clone(),
+                    candidate,
+                };
+                fill_record(context, &subject)
+            })
+            .collect(),
+        TradePolicyEvidenceObjectKind::CandidateTrials => context
+            .candidates
+            .iter()
+            .map(|candidate| {
+                let subject = EvidenceSubject {
+                    example: selected.example,
+                    market: selected.market.clone(),
+                    token: selected.token.clone(),
+                    candidate,
+                };
+                candidate_trial_record(context, &subject)
+            })
+            .collect(),
+        TradePolicyEvidenceObjectKind::CohortTrials => context
+            .candidates
+            .iter()
+            .map(|candidate| {
+                let subject = EvidenceSubject {
+                    example: selected.example,
+                    market: selected.market.clone(),
+                    token: selected.token.clone(),
+                    candidate,
+                };
+                cohort_trial_record(context, &subject)
+            })
+            .collect(),
+        TradePolicyEvidenceObjectKind::CpcvPaths => Ok(vec![cpcv_record(context)?]),
         TradePolicyEvidenceObjectKind::CoverageGaps
-        | TradePolicyEvidenceObjectKind::VerticalGates => None,
+        | TradePolicyEvidenceObjectKind::VerticalGates => Ok(Vec::new()),
         TradePolicyEvidenceObjectKind::StatisticalSummaries => {
-            Some(summary_record(context, &subject)?)
+            Ok(vec![summary_record(context, &selected)?])
         }
-        TradePolicyEvidenceObjectKind::StructuralVolatilityOos => Some(volatility_record(context)?),
-    };
-    Ok(record.into_iter().collect())
+        TradePolicyEvidenceObjectKind::StructuralVolatilityOos => {
+            Ok(vec![volatility_record(context)?])
+        }
+    }
 }
 
 struct EvidenceSubject<'a> {
     example: TrainingExampleId,
     market: MarketId,
     token: TokenId,
-    candidate: &'a str,
+    candidate: &'a TradePolicyCandidateSpec,
 }
 
 fn observation_record(
@@ -1215,7 +1262,11 @@ fn observation_record(
                     },
                 )?),
             cohort_hash: context.cohort_hash,
-            candidate_count: 1,
+            candidate_count: u32::try_from(context.candidates.len()).map_err(|error| {
+                ResearchError::ValidationMethodology {
+                    detail: format!("policy evidence candidate count does not fit u32: {error}"),
+                }
+            })?,
             available_capabilities: capabilities,
             common_candidate_eligible_scenarios: scenarios,
         },
@@ -1226,13 +1277,16 @@ fn fill_record(
     context: &EvidenceRowContext<'_>,
     subject: &EvidenceSubject<'_>,
 ) -> QuantResult<PolicyEvidenceRecord> {
+    let passive =
+        subject.candidate.entry_execution.route() == TradePolicyEntryRoute::PassivePostOnly;
+    let rebate_schedule_hash = ResearchHasher::canonical(&"system-policy-rebate-schedule-v1")?;
     PolicyEvidenceRecord::from_typed(
-        "fill-0001",
+        format!("fill-{}", subject.candidate.candidate_id),
         Some(context.now),
         &TradePolicyFillEvidenceRow {
             example_id: subject.example,
             cohort_hash: context.cohort_hash,
-            candidate_id: subject.candidate.to_owned(),
+            candidate_id: subject.candidate.candidate_id.clone(),
             outcome_side: OutcomeSide::Yes,
             latency_multiplier: Decimal::ONE,
             leg_ordinal: 0,
@@ -1240,15 +1294,27 @@ fn fill_record(
             exit_reason: None,
             triggered_at: context.now,
             filled_at: context.now,
-            liquidity_role: TradePolicyEvidenceLiquidityRole::Taker,
+            liquidity_role: if passive {
+                TradePolicyEvidenceLiquidityRole::Maker
+            } else {
+                TradePolicyEvidenceLiquidityRole::Taker
+            },
             outcome: TradePolicyEvidenceFillOutcome::Filled,
             requested_shares: Some(Shares::new(dec!(10))),
             filled_shares: Shares::new(dec!(10)),
             vwap: Some(Price::new(dec!(0.5))),
             gross_amount: Usd::new(dec!(5)),
-            fee: Usd::ZERO,
-            cash_delta: dec!(-5),
+            execution_fee_usd: Usd::ZERO,
+            expected_maker_rebate_usd: if passive {
+                Usd::new(dec!(0.01))
+            } else {
+                Usd::ZERO
+            },
+            risk_cash_delta: dec!(-5),
             fee_schedule_hash: Some(ResearchHasher::canonical(&"system-policy-fee-schedule-v1")?),
+            maker_rebate_evidence: passive.then_some(TradePolicyMakerRebateEvidence::Available {
+                schedule_hash: rebate_schedule_hash,
+            }),
             stream_session_id: Some(Uuid::nil()),
             token_sequence: Some(1),
             source_event_hash: Some(ResearchHasher::canonical(&"system-policy-source-event-v1")?),
@@ -1260,14 +1326,16 @@ fn candidate_trial_record(
     context: &EvidenceRowContext<'_>,
     subject: &EvidenceSubject<'_>,
 ) -> QuantResult<PolicyEvidenceRecord> {
+    let passive =
+        subject.candidate.entry_execution.route() == TradePolicyEntryRoute::PassivePostOnly;
     PolicyEvidenceRecord::from_typed(
-        "candidate-trial-0001",
+        format!("candidate-trial-{}", subject.candidate.candidate_id),
         Some(context.now),
         &TradePolicyCandidateTrialRow {
             example_id: subject.example,
             market_id: subject.market.clone(),
             token_id: subject.token.clone(),
-            candidate_id: subject.candidate.to_owned(),
+            candidate_id: subject.candidate.candidate_id.clone(),
             cohort_hash: context.cohort_hash,
             outcome_side: OutcomeSide::Yes,
             latency_multiplier: Decimal::ONE,
@@ -1281,12 +1349,20 @@ fn candidate_trial_record(
             exit_fill_ratio: Decimal::ONE,
             entry_filled_shares: Shares::new(dec!(10)),
             exited_shares: Shares::new(dec!(10)),
-            total_fees: Usd::ZERO,
-            net_return_bps: Some(dec!(25)),
+            execution_fee_usd: Usd::ZERO,
+            expected_maker_rebate_usd: if passive {
+                Usd::new(dec!(0.01))
+            } else {
+                Usd::ZERO
+            },
+            expected_net_return_bps: Some(if passive { dec!(27) } else { dec!(25) }),
+            risk_net_return_bps: Some(dec!(25)),
             ambiguous_touch: false,
-            full_l2: true,
-            fee_covered: true,
-            passive_reconciled_trade_covered: None,
+            full_l2_coverage: TradePolicyEvidenceCoverage::Covered,
+            fee_coverage: TradePolicyEvidenceCoverage::Covered,
+            rebate_evidence_coverage: TradePolicyEvidenceCoverage::Covered,
+            passive_reconciled_trade_coverage: passive
+                .then_some(TradePolicyEvidenceCoverage::Covered),
             gap: None,
         },
     )
@@ -1296,21 +1372,25 @@ fn cohort_trial_record(
     context: &EvidenceRowContext<'_>,
     subject: &EvidenceSubject<'_>,
 ) -> QuantResult<PolicyEvidenceRecord> {
+    let passive =
+        subject.candidate.entry_execution.route() == TradePolicyEntryRoute::PassivePostOnly;
     PolicyEvidenceRecord::from_typed(
-        "cohort-trial-0001",
+        format!("cohort-trial-{}", subject.candidate.candidate_id),
         Some(context.now),
         &TradePolicyCohortTrialRow {
             cohort: context.cohort.key.clone(),
             cohort_hash: context.cohort_hash,
-            candidate_id: subject.candidate.to_owned(),
+            candidate_id: subject.candidate.candidate_id.clone(),
             latency_multiplier: Decimal::ONE,
             sample_count: POLICY_SAMPLE_COUNT,
             effective_sample_size: Decimal::from(POLICY_SAMPLE_COUNT),
-            weighted_mean_return_bps: dec!(25),
-            sharpe_ratio: Decimal::ONE,
+            weighted_mean_expected_return_bps: if passive { dec!(27) } else { dec!(25) },
+            weighted_mean_risk_return_bps: dec!(25),
+            expected_sharpe_ratio: Decimal::ONE,
             executable_coverage: Decimal::ONE,
             full_l2_coverage: Decimal::ONE,
             fee_catalog_coverage: Decimal::ONE,
+            rebate_evidence_coverage: Decimal::ONE,
             ambiguous_touch_rate: Decimal::ZERO,
             depth_failure_rate: Decimal::ZERO,
         },
@@ -1325,10 +1405,11 @@ fn cpcv_record(context: &EvidenceRowContext<'_>) -> QuantResult<PolicyEvidenceRe
             cohort_hash: context.cohort_hash,
             latency_multiplier: Decimal::ONE,
             path_index: 0,
-            group_returns: vec![dec!(0.01), dec!(0.02)],
-            sharpe_ratio: Decimal::ONE,
-            max_drawdown: dec!(0.01),
-            tail_loss: dec!(0.02),
+            expected_group_returns: vec![dec!(0.01), dec!(0.02)],
+            risk_group_returns: vec![dec!(0.01), dec!(0.02)],
+            expected_sharpe_ratio: Decimal::ONE,
+            risk_max_drawdown: dec!(0.01),
+            risk_tail_loss: dec!(0.02),
         },
     )
 }
@@ -1342,7 +1423,7 @@ fn summary_record(
         Some(context.now),
         &TradePolicyStatisticalSummaryRow {
             cohort_hash: context.cohort_hash,
-            selected_candidate_id: subject.candidate.to_owned(),
+            selected_candidate_id: subject.candidate.candidate_id.clone(),
             latency_multiplier: Decimal::ONE,
             sample_count: POLICY_SAMPLE_COUNT,
             common_sample_count: POLICY_SAMPLE_COUNT,
@@ -1400,16 +1481,28 @@ fn volatility_record(context: &EvidenceRowContext<'_>) -> QuantResult<PolicyEvid
 }
 
 fn policy_candidates() -> Vec<TradePolicyCandidateSpec> {
-    vec![TradePolicyCandidateSpec {
-        candidate_id: POLICY_CANDIDATE_ID.to_owned(),
-        entry_condition: EntryConditionTemplate::Immediate,
-        entry_execution: EntryOrderTemplate::Aggressive {
-            fill_requirement: FillRequirement::AllOrNothing,
-            max_slippage_bps: Bps::new(dec!(50)),
-            max_book_age_ms: 2_000,
+    vec![
+        TradePolicyCandidateSpec {
+            candidate_id: POLICY_CANDIDATE_ID.to_owned(),
+            entry_condition: EntryConditionTemplate::Immediate,
+            entry_execution: EntryOrderTemplate::Aggressive {
+                fill_requirement: FillRequirement::AllOrNothing,
+                max_slippage_bps: Bps::new(dec!(50)),
+                max_book_age_ms: 2_000,
+            },
+            exit: policy_exit_template(),
         },
-        exit: policy_exit_template(),
-    }]
+        TradePolicyCandidateSpec {
+            candidate_id: POLICY_PASSIVE_CANDIDATE_ID.to_owned(),
+            entry_condition: EntryConditionTemplate::Immediate,
+            entry_execution: EntryOrderTemplate::PassivePostOnly {
+                placement: PassivePlacement::JoinBestBid,
+                good_til_secs: 30,
+                max_book_age_ms: 2_000,
+            },
+            exit: policy_exit_template(),
+        },
+    ]
 }
 
 fn policy_exit_template() -> TradePolicyExitTemplate {
@@ -1505,6 +1598,7 @@ fn policy_cohort(key: TradePolicyCohortKey) -> TradePolicyCohort {
         passive_reconciled_trade_coverage: None,
         passive_fill_distribution: None,
         fee_catalog_coverage: Decimal::ONE,
+        rebate_evidence_coverage: Decimal::ONE,
         cpcv_path_count: 21,
         trial_count: 1,
         deflated_sharpe_ratio: Decimal::ONE,

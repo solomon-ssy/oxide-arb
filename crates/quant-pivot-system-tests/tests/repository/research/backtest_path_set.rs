@@ -343,6 +343,7 @@ impl PathSetFixture<'_> {
                 path_index: 0,
                 decision_times,
                 scenario_residuals: group_returns.iter().copied().map(Some).collect(),
+                risk_group_returns: group_returns.clone(),
                 group_returns,
                 sharpe: dec!(0.8),
                 target_rank_ic: dec!(0.12),

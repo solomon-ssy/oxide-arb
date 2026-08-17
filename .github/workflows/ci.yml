@@ -196,6 +196,9 @@ jobs:
       - name: Verify generated research-model API contracts
         working-directory: ui
         run: pnpm check:research-model-api
+      - name: Verify generated quant operator API contracts
+        working-directory: ui
+        run: pnpm check:quant-operator-api
       - name: Verify generated enum catalog
         working-directory: ui
         run: pnpm check:enum-catalog

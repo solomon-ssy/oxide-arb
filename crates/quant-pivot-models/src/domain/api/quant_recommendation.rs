@@ -11,6 +11,7 @@
 //! reconstruct the decision trail without binding to internal id newtypes.
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::{
@@ -36,7 +37,7 @@ use crate::{
 /// lifecycle [`Self::report_status`] and the id of any blocking pre-submission
 /// intent [`Self::active_order_intent_id`]. Both are resolved server-side (the
 /// single source of truth) so the intent-creation gate never guesses.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct QuantRecommendationView {
     pub recommendation_id: RecommendationId,
     pub recommendation_report_id: RecommendationReportId,

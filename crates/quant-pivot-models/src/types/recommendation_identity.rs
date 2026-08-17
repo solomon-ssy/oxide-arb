@@ -1,12 +1,13 @@
 //! Human-readable recommendation identity.
 
+use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::enums::common::MarketCategory;
 
 /// Display identity frozen at decision time.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct RecommendationIdentity {
     pub category: MarketCategory,

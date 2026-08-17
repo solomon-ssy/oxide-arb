@@ -27,7 +27,10 @@ use quant_pivot_migration::{
 };
 use quant_pivot_models::{
     config::{ClickHouseConfig, DeployConfig, DeployConfigLoadRequest, PostgresConfig},
-    domain::api::{ConfigApiContractSchema, ResearchModelApiContractSchema},
+    domain::api::{
+        ConfigApiContractSchema, ResearchModelApiContractSchema,
+        operator_contract::QuantOperatorApiContractSchema,
+    },
     hashing::CanonicalDigest,
     runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
     security::hash_password,
@@ -145,6 +148,12 @@ enum Commands {
     #[command(name = "research-model-api-schema")]
     ResearchModelApiSchema {
         #[arg(long, default_value = "schema/api/research-model-v1.schema.json")]
+        output: PathBuf,
+    },
+    /// Generate the Rust-owned operator API schema used by the SPA.
+    #[command(name = "quant-operator-api-schema")]
+    QuantOperatorApiSchema {
+        #[arg(long, default_value = "schema/api/quant-operator-v1.schema.json")]
         output: PathBuf,
     },
     /// Generate the Rust enum catalog consumed by the SPA presentation layer.
@@ -441,6 +450,7 @@ async fn run() -> Result<()> {
         }
         Commands::ConfigApiSchema { output } => write_config_api_schema(&output),
         Commands::ResearchModelApiSchema { output } => write_model_api_schema(&output),
+        Commands::QuantOperatorApiSchema { output } => write_operator_api_schema(&output),
         Commands::EnumCatalogSchema { output } => enum_catalog::write_schema(&output),
         Commands::PreproductionReset { command } => (command).preproduction_reset().await,
     }
@@ -471,6 +481,22 @@ fn write_model_api_schema(output: &PathBuf) -> Result<()> {
         output
             .parent()
             .context("research-model API schema path has no parent")?,
+    )
+    .with_context(|| format!("create {}", output.display()))?;
+    fs::write(output, rendered).with_context(|| format!("write {}", output.display()))?;
+    println!("generated {}", output.display());
+    Ok(())
+}
+
+fn write_operator_api_schema(output: &PathBuf) -> Result<()> {
+    let schema = schemars::schema_for!(QuantOperatorApiContractSchema);
+    let mut rendered =
+        serde_json::to_string_pretty(&schema).context("render operator API contract schema")?;
+    rendered.push('\n');
+    fs::create_dir_all(
+        output
+            .parent()
+            .context("operator API schema path has no parent")?,
     )
     .with_context(|| format!("create {}", output.display()))?;
     fs::write(output, rendered).with_context(|| format!("write {}", output.display()))?;

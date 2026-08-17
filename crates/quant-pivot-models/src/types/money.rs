@@ -54,7 +54,11 @@ macro_rules! decimal_newtype {
             DeriveValueType,
         )]
         #[serde(transparent)]
-        pub struct $name(Decimal);
+        pub struct $name(
+            #[serde(with = "rust_decimal::serde::str")]
+            #[schemars(with = "String")]
+            Decimal,
+        );
 
         impl $name {
             pub const ZERO: Self = Self(Decimal::ZERO);

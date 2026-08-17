@@ -424,6 +424,11 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
+        table: "quant_venue_incentive_reconciliation_scan",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
         table: "quant_factor_definition",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,

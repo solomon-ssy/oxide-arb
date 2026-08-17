@@ -90,7 +90,7 @@ mod source_slice;
 #[allow(clippy::needless_update)] // Insert DTOs omit DB-managed timestamps.
 mod trade_policy;
 mod trade_policy_trial;
-mod venue_incentive;
+pub mod venue_incentive;
 
 pub use account::{
     AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery, LiveAccountSnapshot,

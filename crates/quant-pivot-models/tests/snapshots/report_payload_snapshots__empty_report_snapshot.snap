@@ -35,7 +35,7 @@ expression: empty_report()
     "candidate_count": 8,
     "rejected_tier_count": 3,
     "published_recommendation_count": 0,
-    "total_suggested_usd": "0",
+    "total_hard_reserved_cash_usd": "0",
     "max_single_recommendation_usd": "0",
     "robust_expected_net_usd": "75",
     "nominal_expected_net_usd": "95",

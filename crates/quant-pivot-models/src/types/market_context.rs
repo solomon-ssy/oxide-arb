@@ -1,6 +1,7 @@
 //! Decision-time market readability block.
 
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +11,7 @@ use crate::{
 };
 
 /// Frozen top-of-book and metadata at recommendation decision time.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct MarketContext {
     pub best_bid: Option<Price>,
@@ -24,5 +25,7 @@ pub struct MarketContext {
     pub market_status: MarketStatus,
     pub neg_risk: bool,
     pub tick_size: TickSize,
+    #[serde(with = "crate::types::decimal_string_option")]
+    #[schemars(with = "Option<String>")]
     pub fee_rate: Option<Decimal>,
 }

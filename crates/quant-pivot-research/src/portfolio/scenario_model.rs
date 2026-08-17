@@ -2646,6 +2646,7 @@ mod tests {
             paths: BacktestPaths::from(vec![BacktestPath {
                 path_index: 0,
                 decision_times: periods,
+                risk_group_returns: group_returns.clone(),
                 group_returns,
                 scenario_residuals,
                 sharpe: dec!(0.5),

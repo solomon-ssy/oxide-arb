@@ -2847,6 +2847,7 @@ impl PortfolioReplayTemplate {
         Ok(GroupEvaluation {
             group_index,
             return_value,
+            risk_return_value: return_value,
             scenario_residual: Some(residual),
             rank_observations,
             executed_turnover: None,
@@ -3749,6 +3750,11 @@ impl FoldReplayEngineAdapter<'_> {
                 .iter()
                 .map(|observation| observation.net_return_bps.inner() / Decimal::from(10_000))
                 .collect(),
+            risk_group_returns: result
+                .portfolio_returns
+                .iter()
+                .map(|observation| observation.net_return_bps.inner() / Decimal::from(10_000))
+                .collect(),
             executed_turnover: result.report.turnover,
         })
     }
@@ -3858,6 +3864,7 @@ fn evaluate_portfolio_groups(
         evaluations.push(GroupEvaluation {
             group_index,
             return_value: Decimal::ZERO,
+            risk_return_value: Decimal::ZERO,
             scenario_residual: Some(scenario_residual),
             rank_observations,
             executed_turnover: None,
@@ -4516,6 +4523,7 @@ mod tests {
     fn cached_replay() -> PathEconomicReplay {
         PathEconomicReplay {
             group_returns: vec![dec!(0.01), dec!(-0.005)],
+            risk_group_returns: vec![dec!(0.01), dec!(-0.005)],
             executed_turnover: dec!(0.125),
         }
     }
@@ -4708,6 +4716,7 @@ mod tests {
                     path_index: 0,
                     decision_times: periods.to_vec(),
                     group_returns: selection_returns.clone(),
+                    risk_group_returns: selection_returns.clone(),
                     scenario_residuals: vec![None, None],
                     sharpe: dec!(0.25),
                     target_rank_ic: dec!(0.1),
@@ -4719,6 +4728,7 @@ mod tests {
                     path_index: 1,
                     decision_times: periods.to_vec(),
                     group_returns: vec![dec!(0.02), dec!(0.01)],
+                    risk_group_returns: vec![dec!(0.02), dec!(0.01)],
                     scenario_residuals: vec![None, None],
                     sharpe: dec!(2),
                     target_rank_ic: dec!(0.2),

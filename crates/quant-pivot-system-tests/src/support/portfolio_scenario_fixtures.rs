@@ -939,6 +939,7 @@ async fn seed_path_set(
         paths: vec![BacktestPath {
             path_index: 0,
             decision_times,
+            risk_group_returns: group_returns.clone(),
             group_returns,
             scenario_residuals,
             sharpe: dec!(0.65),

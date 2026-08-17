@@ -46,4 +46,7 @@ pub enum InfraError {
 
     #[error("web server runtime error: {detail}")]
     ServerRuntime { detail: String },
+
+    #[error("venue incentive reconciliation failed for {failed_days} day(s): {detail}")]
+    VenueIncentiveReconciliation { failed_days: usize, detail: String },
 }

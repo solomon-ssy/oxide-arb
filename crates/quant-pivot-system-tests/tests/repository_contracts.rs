@@ -163,7 +163,7 @@ async fn run_account_scenarios() -> Result<(), String> {
         equity_snapshot::high_water_mark_max,
         equity_snapshot::drawdown_pct_hwm_hwm,
         equity_snapshot::realized_pnl_matches_sum,
-        venue_incentive::revisions_are_pit_cumulative,
+        venue_incentive::award_snapshots_revise_retract,
         venue_incentive::wallet_credit_is_cash,
         venue_incentive::conflicting_identity_rolls_back,
         portfolio_optimizer::optimizer_meta_persisted_row,

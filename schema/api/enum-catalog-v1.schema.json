@@ -4826,6 +4826,21 @@
       ]
     },
     {
+      "name": "VenueIncentiveReconciliationScanStatus",
+      "module": "fee",
+      "kind": "postgres",
+      "members": [
+        {
+          "rust_variant": "Succeeded",
+          "wire_value": "succeeded"
+        },
+        {
+          "rust_variant": "Failed",
+          "wire_value": "failed"
+        }
+      ]
+    },
+    {
       "name": "VenueIncentiveStage",
       "module": "fee",
       "kind": "postgres",

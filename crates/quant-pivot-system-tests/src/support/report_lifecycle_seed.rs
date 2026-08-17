@@ -74,7 +74,9 @@ pub async fn materialize_report_facts(
                     economics.capital_occupancy_usd_hours.inner(),
                 )),
                 marginal_portfolio_value_usd: ChUsd::from(economics.marginal_portfolio_value_usd),
-                suggested_usd: ChUsd::from(recommendation.trade_plan.sizing.hard_reserved_cash_usd),
+                hard_reserved_cash_usd: ChUsd::from(
+                    recommendation.trade_plan.sizing.hard_reserved_cash_usd,
+                ),
                 valid_until: recommendation.valid_until.timestamp_millis(),
             })
         })
@@ -190,7 +192,7 @@ pub async fn seal_report_facts(
             marginal_portfolio_value_usd: recommendation
                 .economics_json
                 .marginal_portfolio_value_usd,
-            suggested_usd: recommendation.trade_plan.sizing.hard_reserved_cash_usd,
+            hard_reserved_cash_usd: recommendation.trade_plan.sizing.hard_reserved_cash_usd,
         })
         .collect();
     let bundle = ReportFactBundleV2 {
@@ -204,7 +206,7 @@ pub async fn seal_report_facts(
             status: report.status.as_str().to_owned(),
             runtime_mode: report.runtime_mode,
             published_count: report.summary_json.published_recommendation_count,
-            total_suggested_usd: report.summary_json.total_suggested_usd,
+            total_hard_reserved_cash_usd: report.summary_json.total_hard_reserved_cash_usd,
             top3: notification_top3,
             warnings: report.summary_json.warnings.clone(),
             empty_reason: report.summary_json.empty_reason,

@@ -590,7 +590,7 @@ pub async fn report_fact_accepts_snapshot() {
         cvar_contribution_usd: ChUsd::from(Usd::new(dec!(10))),
         capital_occupancy_usd_hours: ChUsd::from(Usd::new(dec!(25))),
         marginal_portfolio_value_usd: ChUsd::from(Usd::new(dec!(11))),
-        suggested_usd: ChUsd::from(Usd::new(dec!(25))),
+        hard_reserved_cash_usd: ChUsd::from(Usd::new(dec!(25))),
         valid_until: now + 60_000,
     };
     let mut decision_insert = client

@@ -28,7 +28,7 @@ pub struct ReportFactNotificationRecommendationV2 {
     pub profit_probability_bps: Bps,
     pub robust_expected_net_usd: Usd,
     pub marginal_portfolio_value_usd: Usd,
-    pub suggested_usd: Usd,
+    pub hard_reserved_cash_usd: Usd,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ pub struct ReportFactNotificationV2 {
     pub status: String,
     pub runtime_mode: QuantRuntimeMode,
     pub published_count: u32,
-    pub total_suggested_usd: Usd,
+    pub total_hard_reserved_cash_usd: Usd,
     pub top3: Vec<ReportFactNotificationRecommendationV2>,
     pub warnings: Vec<String>,
     pub empty_reason: Option<EmptyReportReason>,

@@ -4,6 +4,7 @@ use crate::enums::common::OrderType;
 
 pg_enum! {
     type_name = "qp_order_intent_kind",
+    @derive(schemars::JsonSchema)
     pub enum OrderIntentKind {
         Buy => "buy",
     }
@@ -170,6 +171,7 @@ impl KillSwitchState {
 
 pg_enum! {
     type_name = "qp_exit_state",
+    @derive(schemars::JsonSchema)
     pub enum ExitState {
         NotStarted => "not_started",
         Monitoring => "monitoring",
@@ -258,6 +260,7 @@ wire_enum! {
 pg_enum! {
     type_name = "qp_exit_reason",
     /// Why a position lot exited (persisted on `quant_order_intent.exit_reason`).
+    @derive(schemars::JsonSchema)
     pub enum ExitReason {
         TakeProfit => "take_profit",
         StopLoss => "stop_loss",

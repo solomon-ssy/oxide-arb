@@ -10,6 +10,7 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use validator::Validate;
 
@@ -43,7 +44,7 @@ use crate::{
 };
 
 /// Outbound projection of a governed order intent (full operator transparency).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct OrderIntentView {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
@@ -120,7 +121,7 @@ impl From<OrderIntentInfo> for OrderIntentView {
 }
 
 /// Shared summary embedded by recommendation and intent detail views.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct EntryConditionInstanceSummaryView {
     pub condition_instance_id: EntryConditionInstanceId,
     pub artifact_id: Option<EntryConditionArtifactId>,
@@ -295,7 +296,7 @@ impl From<EntryConditionAuditInfo> for EntryConditionAuditView {
 }
 
 /// Authoritative read-time projection of one lot's governed exit monitor.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ExitMonitorObservationView {
     pub state: ExitState,
     pub reason: Option<ExitReason>,
@@ -307,6 +308,8 @@ pub struct ExitMonitorObservationView {
     pub effective_stop: Option<Price>,
     pub next_scale_out: Option<NextScaleOutProjection>,
     pub cumulative_exited_shares: Shares,
+    #[serde(with = "crate::types::decimal_string_option")]
+    #[schemars(with = "Option<String>")]
     pub cumulative_exit_pct: Option<Decimal>,
     pub latest_reinference: Option<ExitReinferenceObservation>,
     pub last_check_at: Option<DateTime<Utc>>,
@@ -512,7 +515,8 @@ pub struct PositionListQuery {
 }
 
 /// Inbound body for `POST /quant/intents` (create from a recommendation).
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Validate, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateIntentRequest {
     pub recommendation_id: RecommendationId,
     #[validate(length(min = 1, max = 512))]

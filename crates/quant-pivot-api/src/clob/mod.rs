@@ -123,6 +123,7 @@ pub struct ClobClient {
     sdk: Arc<SdkClient<Authenticated<Normal>>>,
     http: Client,
     clob_base_url: String,
+    maker_address: EvmAddress,
     signer: Arc<OrderSigner>,
     order_post_timeout: Duration,
     rate_limiter: RateLimiter,
@@ -466,12 +467,12 @@ impl ClobClient {
     pub async fn maker_rebate_awards(
         &self,
         date: NaiveDate,
-        maker_address: &EvmAddress,
     ) -> Result<Vec<MakerRebateAward>, ApiError> {
         self.rate_limiter.acquire("GET /rebates/current").await;
         let url = format!(
-            "{}/rebates/current?date={date}&maker_address={maker_address}",
-            self.clob_base_url.trim_end_matches('/')
+            "{}/rebates/current?date={date}&maker_address={}",
+            self.clob_base_url.trim_end_matches('/'),
+            self.maker_address,
         );
         let raw_body = get_text_with_retry(&self.http, &RetryPolicy::clob_default(), &url).await?;
         let raw = serde_json::from_str::<Vec<RawMakerRebateAward>>(&raw_body).map_err(|error| {
@@ -481,8 +482,15 @@ impl ClobClient {
             }
         })?;
         raw.into_iter()
-            .map(|award| normalize_maker_rebate_award(award, date, maker_address))
+            .map(|award| normalize_maker_rebate_award(award, date, &self.maker_address))
             .collect()
+    }
+
+    /// Maker identity frozen into the authenticated SDK order builder and all
+    /// maker-scoped read APIs.
+    #[must_use]
+    pub const fn maker_address(&self) -> &EvmAddress {
+        &self.maker_address
     }
 
     /// Capture one append-only V2 CLOB market-info observation.
@@ -696,11 +704,19 @@ impl ClobClient {
                 body: error.to_string(),
                 retryable: false,
             })?;
+        let maker_address =
+            EvmAddress::parse(format!("{:#x}", topology.funder)).map_err(|error| {
+                ApiError::Deserialize {
+                    context: "authenticated CLOB maker address".to_owned(),
+                    detail: error.to_string(),
+                }
+            })?;
 
         Ok(Self {
             sdk: Arc::new(sdk),
             http,
             clob_base_url: config.clob_base_url.clone(),
+            maker_address,
             signer,
             order_post_timeout: Duration::from_millis(config.order_post_timeout_ms),
             rate_limiter: RateLimiter::new(),

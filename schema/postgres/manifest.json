@@ -24376,6 +24376,162 @@
       "type": "timestamp with time zone"
     },
     {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "venue_incentive_reconciliation_scan_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_account_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "kind",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "qp_venue_incentive_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "stage",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "qp_venue_incentive_stage"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "program_date",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "date"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "started_at",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "completed_at",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "status",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "qp_venue_incentive_reconciliation_scan_status"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "response_digest",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "response_count",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "integer"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "error_code",
+      "nullable": true,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "timestamp with time zone"
+    },
+    {
       "collation": "default",
       "compression": "",
       "default": null,
@@ -31706,6 +31862,33 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((completed_at >= started_at) AND (response_count >= 0) AND ((response_digest IS NULL) OR (response_digest ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((error_code IS NULL) OR ((char_length(error_code) >= 1) AND (char_length(error_code) <= 128))) AND (((status = 'succeeded'::qp_venue_incentive_reconciliation_scan_status) AND (response_digest IS NOT NULL) AND (error_code IS NULL)) OR ((status = 'failed'::qp_venue_incentive_reconciliation_scan_status) AND (response_digest IS NULL) AND (response_count = 0) AND (error_code IS NOT NULL)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_venue_incentive_scan_result",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_venue_incentive_reconciliation_scan-execution_account_",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (venue_incentive_reconciliation_scan_id)",
+      "initially_deferred": false,
+      "name": "quant_venue_incentive_reconciliation_scan_pkey",
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "PRIMARY KEY (source_id, instrument_key, local_date, temperature_statistic)",
       "initially_deferred": false,
       "name": "pk-quant_weather_daily_temperature_projection",
@@ -33385,6 +33568,13 @@
         "taker_rebate"
       ],
       "name": "qp_venue_incentive_kind"
+    },
+    {
+      "labels": [
+        "succeeded",
+        "failed"
+      ],
+      "name": "qp_venue_incentive_reconciliation_scan_status"
     },
     {
       "labels": [
@@ -39674,6 +39864,55 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_venue_incentive_reconciliation_scan",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_reconciliation_scan",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_reconciliation_scan",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_reconciliation_scan",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_reconciliation_scan",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_reconciliation_scan",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_venue_incentive_reconciliation_scan",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_weather_daily_temperature_projection",
       "privilege": "DELETE"
     },
@@ -44611,6 +44850,26 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_venue_incentive_scan_health ON public.quant_venue_incentive_reconciliation_scan USING btree (execution_account_id, program_date DESC, kind, stage, completed_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_venue_incentive_scan_health",
+      "primary": false,
+      "ready": true,
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_venue_incentive_reconciliation_scan_pkey ON public.quant_venue_incentive_reconciliation_scan USING btree (venue_incentive_reconciliation_scan_id)",
+      "method": "btree",
+      "name": "quant_venue_incentive_reconciliation_scan_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_venue_incentive_reconciliation_scan",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_weather_daily_temperature_open ON public.quant_weather_daily_temperature_projection USING btree (day_closed, local_date, station)",
       "method": "btree",
       "name": "idx_quant_weather_daily_temperature_open",
@@ -45696,6 +45955,13 @@
     },
     {
       "kind": "r",
+      "name": "quant_venue_incentive_reconciliation_scan",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_weather_daily_temperature_projection",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -46367,6 +46633,12 @@
       "enabled": "O",
       "name": "trg_quant_venue_incentive_event_append_only",
       "table": "quant_venue_incentive_event"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_venue_incentive_scan_append_only BEFORE DELETE OR UPDATE ON public.quant_venue_incentive_reconciliation_scan FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_venue_incentive_scan_append_only",
+      "table": "quant_venue_incentive_reconciliation_scan"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_weather_daily_temperature_projection_updated_at BEFORE UPDATE ON public.quant_weather_daily_temperature_projection FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",

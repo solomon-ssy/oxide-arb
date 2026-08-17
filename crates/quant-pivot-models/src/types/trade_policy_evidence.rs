@@ -15,7 +15,7 @@ use crate::{
     },
 };
 
-pub const POLICY_EVIDENCE_OBJECT_FORMAT_VERSION: u32 = 1;
+pub const POLICY_EVIDENCE_OBJECT_FORMAT_VERSION: u32 = 2;
 
 /// One monthly expanding-window Polymarket OOS fold for the parameter-free
 /// deadline-resolution and fitted DR-AS volatility benchmarks.
@@ -92,12 +92,33 @@ pub enum TradePolicyEvidenceFillOutcome {
     Unfilled,
 }
 
+/// Why no maker-rebate schedule was visible at the replay boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradePolicyMakerRebateUnavailableReason {
+    NotListed,
+    NotYetVisible,
+}
+
+/// Immutable maker-rebate lineage attached to a simulated maker fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum TradePolicyMakerRebateEvidence {
+    Available {
+        schedule_hash: ContentHash,
+    },
+    Unavailable {
+        reason: TradePolicyMakerRebateUnavailableReason,
+    },
+}
+
 /// Point-in-time inputs proven available for one replay observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradePolicyObservationCapability {
     FullL2,
     PitFeeSchedule,
+    PitMakerRebateEvidence,
     ModelReinference,
     WeatherLinkage,
 }
@@ -145,12 +166,39 @@ pub struct TradePolicyFillEvidenceRow {
     pub filled_shares: Shares,
     pub vwap: Option<Price>,
     pub gross_amount: Usd,
-    pub fee: Usd,
-    pub cash_delta: Decimal,
+    pub execution_fee_usd: Usd,
+    pub expected_maker_rebate_usd: Usd,
+    pub risk_cash_delta: Decimal,
     pub fee_schedule_hash: Option<ContentHash>,
+    pub maker_rebate_evidence: Option<TradePolicyMakerRebateEvidence>,
     pub stream_session_id: Option<Uuid>,
     pub token_sequence: Option<u64>,
     pub source_event_hash: Option<ContentHash>,
+}
+
+/// Availability state for one point-in-time replay evidence family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradePolicyEvidenceCoverage {
+    Covered,
+    Missing,
+}
+
+impl TradePolicyEvidenceCoverage {
+    #[must_use]
+    pub const fn is_covered(self) -> bool {
+        matches!(self, Self::Covered)
+    }
+}
+
+impl From<bool> for TradePolicyEvidenceCoverage {
+    fn from(covered: bool) -> Self {
+        if covered {
+            Self::Covered
+        } else {
+            Self::Missing
+        }
+    }
 }
 
 /// Terminal executable result for one observation/candidate/latency scenario.
@@ -174,12 +222,15 @@ pub struct TradePolicyCandidateTrialRow {
     pub exit_fill_ratio: Decimal,
     pub entry_filled_shares: Shares,
     pub exited_shares: Shares,
-    pub total_fees: Usd,
-    pub net_return_bps: Option<Decimal>,
+    pub execution_fee_usd: Usd,
+    pub expected_maker_rebate_usd: Usd,
+    pub expected_net_return_bps: Option<Decimal>,
+    pub risk_net_return_bps: Option<Decimal>,
     pub ambiguous_touch: bool,
-    pub full_l2: bool,
-    pub fee_covered: bool,
-    pub passive_reconciled_trade_covered: Option<bool>,
+    pub full_l2_coverage: TradePolicyEvidenceCoverage,
+    pub fee_coverage: TradePolicyEvidenceCoverage,
+    pub rebate_evidence_coverage: TradePolicyEvidenceCoverage,
+    pub passive_reconciled_trade_coverage: Option<TradePolicyEvidenceCoverage>,
     pub gap: Option<TradePolicyReplayGap>,
 }
 
@@ -193,11 +244,13 @@ pub struct TradePolicyCohortTrialRow {
     pub latency_multiplier: Decimal,
     pub sample_count: u64,
     pub effective_sample_size: Decimal,
-    pub weighted_mean_return_bps: Decimal,
-    pub sharpe_ratio: Decimal,
+    pub weighted_mean_expected_return_bps: Decimal,
+    pub weighted_mean_risk_return_bps: Decimal,
+    pub expected_sharpe_ratio: Decimal,
     pub executable_coverage: Decimal,
     pub full_l2_coverage: Decimal,
     pub fee_catalog_coverage: Decimal,
+    pub rebate_evidence_coverage: Decimal,
     pub ambiguous_touch_rate: Decimal,
     pub depth_failure_rate: Decimal,
 }
@@ -209,10 +262,11 @@ pub struct TradePolicyCpcvPathRow {
     pub cohort_hash: ContentHash,
     pub latency_multiplier: Decimal,
     pub path_index: u32,
-    pub group_returns: Vec<Decimal>,
-    pub sharpe_ratio: Decimal,
-    pub max_drawdown: Decimal,
-    pub tail_loss: Decimal,
+    pub expected_group_returns: Vec<Decimal>,
+    pub risk_group_returns: Vec<Decimal>,
+    pub expected_sharpe_ratio: Decimal,
+    pub risk_max_drawdown: Decimal,
+    pub risk_tail_loss: Decimal,
 }
 
 /// Explicit excluded observation/candidate scenario and its evidence reason.

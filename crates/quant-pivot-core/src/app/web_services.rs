@@ -30,7 +30,7 @@ use quant_pivot_repository::{
         ResolutionObservationRepository, RoleMenuRepository, RolePermissionRepository,
         RoleRepository, RuntimeActivityRepository, ServingEvidenceRepository,
         TradePolicyRepository, TrainingDatasetRepository, UserRepository, UserRoleRepository,
-        quant::settlement_redeem::SettlementRedeemRepository,
+        VenueIncentiveRepository, quant::settlement_redeem::SettlementRedeemRepository,
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -286,24 +286,7 @@ async fn build_app_state(
             Arc::clone(&ctx.governance.applicator) as Arc<dyn PolicySnapshotPort>,
             ctx.config.market_data.finalized_exchange_history.clone(),
         )),
-        quant_reports: Arc::new(CoreQuantReportPort::new(CoreQuantReportPortDeps {
-            report_repo: Arc::clone(&repos.recommendation_report)
-                as Arc<dyn RecommendationReportRepository>,
-            report_run_repo: Arc::clone(&repos.report_run) as Arc<dyn ReportRunRepository>,
-            portfolio_plan_repo: Arc::clone(&repos.portfolio_plan)
-                as Arc<dyn PortfolioPlanRepository>,
-            recommendation_repo: Arc::clone(&repos.recommendation)
-                as Arc<dyn RecommendationRepository>,
-            order_intent_repo: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
-            lifecycle: Arc::clone(&ctx.report.lifecycle),
-            serving_evidence: Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
-                &ctx.infra.ch,
-            ))) as Arc<dyn ServingEvidenceRepository>,
-            feature_repo: Arc::clone(&repos.feature) as Arc<dyn FeatureRepository>,
-            runtime_config_repo: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
-            quant_fact_read: Arc::clone(&ctx.infra.quant_fact_read),
-            operation_logs: Arc::clone(&repos.operation_log) as Arc<dyn OperationLogRepository>,
-        })),
+        quant_reports: ctx.build_quant_report_port(),
         order_intents,
         entry_conditions: Arc::clone(&repos.entry_condition) as Arc<dyn EntryConditionRepository>,
         account_read: Arc::new(CoreAccountReadPort::new(
@@ -312,6 +295,8 @@ async fn build_app_state(
             Arc::clone(&ctx.account.provider_factory),
             Arc::clone(&ctx.governance.applicator) as Arc<dyn PolicySnapshotPort>,
         )),
+        venue_incentives: Arc::clone(&repos.venue_incentive) as Arc<dyn VenueIncentiveRepository>,
+        execution_account_id: ctx.account.execution_account.execution_account_id,
         execution_read: execution.execution_read,
         settlement_control: execution.settlement_control,
         reconciliation: execution.reconciliation,
@@ -363,6 +348,28 @@ fn build_trade_policy_port(
 }
 
 impl AppContext {
+    fn build_quant_report_port(&self) -> Arc<CoreQuantReportPort> {
+        let repos = &self.infra.repos;
+        Arc::new(CoreQuantReportPort::new(CoreQuantReportPortDeps {
+            report_repo: Arc::clone(&repos.recommendation_report)
+                as Arc<dyn RecommendationReportRepository>,
+            report_run_repo: Arc::clone(&repos.report_run) as Arc<dyn ReportRunRepository>,
+            portfolio_plan_repo: Arc::clone(&repos.portfolio_plan)
+                as Arc<dyn PortfolioPlanRepository>,
+            recommendation_repo: Arc::clone(&repos.recommendation)
+                as Arc<dyn RecommendationRepository>,
+            order_intent_repo: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
+            lifecycle: Arc::clone(&self.report.lifecycle),
+            serving_evidence: Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
+                &self.infra.ch,
+            ))) as Arc<dyn ServingEvidenceRepository>,
+            feature_repo: Arc::clone(&repos.feature) as Arc<dyn FeatureRepository>,
+            runtime_config_repo: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
+            quant_fact_read: Arc::clone(&self.infra.quant_fact_read),
+            operation_logs: Arc::clone(&repos.operation_log) as Arc<dyn OperationLogRepository>,
+        }))
+    }
+
     fn build_feature_integrity(&self) -> Arc<dyn FeatureIntegrityPort> {
         Arc::new(FeatureIntegrityService::new(
             Arc::clone(&self.report.feature_parity),

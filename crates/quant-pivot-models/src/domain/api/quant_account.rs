@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::{
@@ -11,7 +12,7 @@ use crate::{
 };
 
 /// Outbound projection of one venue-held outcome position at decision time.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct VenuePositionSnapshotView {
     pub token_id: String,
     pub market_id: String,
@@ -43,7 +44,7 @@ impl From<&PositionSnapshot> for VenuePositionSnapshotView {
 }
 
 /// Persisted decision-time venue account snapshot (immutable audit evidence).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AccountSnapshotView {
     pub account_snapshot_id: AccountSnapshotId,
     pub as_of: DateTime<Utc>,
@@ -80,7 +81,7 @@ impl From<AccountSnapshotInfo> for AccountSnapshotView {
 }
 
 /// Live venue account read (re-fetched on every request; not persisted).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct LiveAccountView {
     pub fetched_at: DateTime<Utc>,
     pub budget_cap_usd: Usd,
@@ -121,7 +122,7 @@ impl LiveAccountView {
 }
 
 /// Persisted strategy-capital equity curve snapshot.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct EquitySnapshotView {
     pub equity_snapshot_id: EquitySnapshotId,
     pub as_of: DateTime<Utc>,
@@ -131,8 +132,14 @@ pub struct EquitySnapshotView {
     pub available_usd: Usd,
     pub reserved_usd: Usd,
     pub realized_pnl_cumulative_usd: Usd,
+    /// Wallet-confirmed incentive credits, shown for attribution only.
+    /// This amount is already reflected in venue NLV and must not be added to
+    /// capital base, available cash, or realized `PnL` a second time.
+    pub incentive_credit_cumulative_usd: Usd,
     pub unrealized_pnl_usd: Usd,
     pub high_water_mark_usd: Usd,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub drawdown_pct: Decimal,
     pub account_snapshot_ref: Option<AccountSnapshotId>,
     pub created_at: DateTime<Utc>,
@@ -149,6 +156,7 @@ impl From<EquitySnapshotInfo> for EquitySnapshotView {
             available_usd: info.available_usd,
             reserved_usd: info.reserved_usd,
             realized_pnl_cumulative_usd: info.realized_pnl_cumulative_usd,
+            incentive_credit_cumulative_usd: info.incentive_credit_cumulative_usd,
             unrealized_pnl_usd: info.unrealized_pnl_usd,
             high_water_mark_usd: info.high_water_mark_usd,
             drawdown_pct: info.drawdown_pct,

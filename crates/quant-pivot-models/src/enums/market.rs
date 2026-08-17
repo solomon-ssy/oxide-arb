@@ -2,6 +2,7 @@
 
 pg_enum! {
     type_name = "qp_market_status",
+    @derive(schemars::JsonSchema)
     pub enum MarketStatus {
         Discovered => "discovered",
         Active => "active",

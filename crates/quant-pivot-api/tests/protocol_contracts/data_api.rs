@@ -2,7 +2,7 @@
 
 use quant_pivot_api::data_api::DataApiClient;
 use quant_pivot_error::api::ApiError;
-use quant_pivot_models::config::DataApiConfig;
+use quant_pivot_models::{config::DataApiConfig, types::EvmAddress};
 use rust_decimal_macros::dec;
 use serde_json::Value;
 use wiremock::{
@@ -179,4 +179,55 @@ async fn positions_error_surfaces_error() {
         } => {}
         other => panic!("expected non-retryable Http error, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn incentives_paginate_all_pages() {
+    let server = MockServer::start().await;
+    let wallet = EvmAddress::parse(FUNDER).expect("fixture funder");
+    let market = format!("0x{}", "2".repeat(64));
+    let activity = |timestamp: i64, kind: &str, hash_seed: char| {
+        serde_json::json!({
+            "proxyWallet": FUNDER,
+            "timestamp": timestamp,
+            "conditionId": market.clone(),
+            "type": kind,
+            "usdcSize": "0.75",
+            "transactionHash": format!("0x{}", hash_seed.to_string().repeat(64))
+        })
+    };
+    Mock::given(method("GET"))
+        .and(path("/activity"))
+        .and(query_param("offset", "0"))
+        .and(query_param("limit", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            activity(101, "MAKER_REBATE", '3'),
+            activity(102, "TAKER_REBATE", '4')
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/activity"))
+        .and(query_param("offset", "2"))
+        .and(query_param("limit", "2"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([activity(
+                103,
+                "MAKER_REBATE",
+                '5'
+            )])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let credits = data_api_client(&server, 2)
+        .incentive_credits(&wallet, 100, 200)
+        .await
+        .expect("paginated incentive activity");
+
+    assert_eq!(credits.len(), 3);
+    assert_eq!(credits[0].occurred_at.timestamp(), 101);
+    assert_eq!(credits[2].occurred_at.timestamp(), 103);
 }

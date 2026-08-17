@@ -19,7 +19,7 @@ use quant_pivot_models::{
         data_plane::{
             DecisionBoundary, DecisionSource, WeatherObservationFact, WeatherObservationReportKind,
         },
-        market::{CatalogMarketChangeInfo, MarketRegistryInfo},
+        market::{CatalogMarketChangeInfo, MarketRegistryInfo, fee::MarketFeeSchedule},
         quant::{LinkageOutcome, MarketLinkage, MarketSubject, ModelVersionInfo},
     },
     enums::{
@@ -53,16 +53,24 @@ use quant_pivot_models::{
         WeatherDailyTemperatureCrossedTerminalBound, WeatherDailyTemperatureEnteredBand,
         WeatherDailyTemperatureInput, WeatherObservationDayClosedOutsideBand,
         WeatherTemperatureStatistic,
+        trade_policy_evidence::{
+            TradePolicyEvidenceCoverage, TradePolicyMakerRebateEvidence,
+            TradePolicyMakerRebateUnavailableReason,
+        },
     },
 };
 use quant_pivot_research::{
-    execution_semantics::{BookWalkOutcome, LiquidityRole, PitFeeSchedule},
+    execution_semantics::{
+        BookWalkOutcome, FeeError, LiquidityRole, PitFeeSchedule, PitMakerRebateSchedule,
+        PitMarketExecutionEconomics,
+    },
     model::{QuantModelRuntime, SignalCandidate},
     pit::BookSnapshotAt,
     policy_evidence::PolicyEvidenceRecord,
     policy_replay::{
-        PolicyReplayBook, PolicyReplayLatency, PolicyReplayObservation, PolicyReplayOutcome,
-        PolicyReplayResolution, PolicyReplaySignal, PolicyReplayTrade, replay_policy_candidate,
+        MakerRebateUnavailableReason, PitMakerRebateEvidence, PolicyReplayBook,
+        PolicyReplayLatency, PolicyReplayObservation, PolicyReplayOutcome, PolicyReplayResolution,
+        PolicyReplaySignal, PolicyReplayTrade, replay_policy_candidate,
     },
     policy_validation::{
         PolicyPerformanceObservation, PolicyPerformanceRequest, PolicyPerformanceSummary,
@@ -78,7 +86,7 @@ use crate::{
     projection::inference_batch::build_frozen_runtime_input,
 };
 
-pub(super) const WEATHER_REPLAY_ORCHESTRATOR_VERSION: &str = "weather_policy_orchestrator_v1";
+pub(super) const WEATHER_REPLAY_ORCHESTRATOR_VERSION: &str = "weather_policy_orchestrator_v2";
 
 #[derive(Debug, Clone)]
 struct TimedSignal {
@@ -398,6 +406,100 @@ impl WeatherPolicyEvidence {
         );
         Ok(records)
     }
+
+    fn append_outcome(
+        &mut self,
+        replay: &WeatherExampleReplay,
+        outcome: &PolicyReplayOutcome,
+        cohort_hash: ContentHash,
+    ) {
+        self.candidate_trials.push(TradePolicyCandidateTrialRow {
+            example_id: replay.example.example_id,
+            market_id: replay.example.market_id.clone(),
+            token_id: replay.token_id.clone(),
+            candidate_id: outcome.candidate_id.clone(),
+            cohort_hash,
+            outcome_side: outcome.outcome_side,
+            latency_multiplier: outcome.latency.stress_multiplier,
+            entry_triggered_at: outcome.entry_triggered_at,
+            entered_at: outcome.entered_at,
+            terminal_at: outcome.terminal_at,
+            terminal_reason: outcome.terminal_reason,
+            entry_fill_ratio: outcome.entry_fill_ratio,
+            entry_fill_latency_ms: outcome.entry_fill_latency_ms,
+            post_fill_markout_bps: outcome.post_fill_markout_bps,
+            exit_fill_ratio: outcome.exit_fill_ratio,
+            entry_filled_shares: outcome.entry_filled_shares,
+            exited_shares: outcome.exited_shares,
+            execution_fee_usd: outcome.execution_fee_usd,
+            expected_maker_rebate_usd: outcome.expected_maker_rebate_usd,
+            expected_net_return_bps: outcome.expected_net_return_bps,
+            risk_net_return_bps: outcome.risk_net_return_bps,
+            ambiguous_touch: outcome.ambiguous_touch,
+            full_l2_coverage: outcome.full_l2_coverage,
+            fee_coverage: outcome.fee_covered.into(),
+            rebate_evidence_coverage: outcome.rebate_evidence_covered.into(),
+            passive_reconciled_trade_coverage: outcome
+                .passive_reconciled_trade_covered
+                .map(TradePolicyEvidenceCoverage::from),
+            gap: outcome.gap,
+        });
+        if let Some(gap) = outcome.gap {
+            self.coverage_gaps.push(TradePolicyCoverageGapRow {
+                example_id: replay.example.example_id,
+                market_id: replay.example.market_id.clone(),
+                token_id: replay.token_id.clone(),
+                candidate_id: Some(outcome.candidate_id.clone()),
+                cohort_hash: Some(cohort_hash),
+                latency_multiplier: Some(outcome.latency.stress_multiplier),
+                decision_at: replay.example.decision_at(),
+                gap,
+                detail: format!("shared replay kernel terminal: {gap:?}"),
+            });
+        }
+        self.fills.extend(outcome.fills.iter().map(|fill| {
+            TradePolicyFillEvidenceRow {
+                example_id: replay.example.example_id,
+                cohort_hash,
+                candidate_id: outcome.candidate_id.clone(),
+                outcome_side: outcome.outcome_side,
+                latency_multiplier: outcome.latency.stress_multiplier,
+                leg_ordinal: fill.leg_ordinal,
+                side: fill.side,
+                exit_reason: fill.exit_reason,
+                triggered_at: fill.triggered_at,
+                filled_at: fill.filled_at,
+                liquidity_role: if fill.exit_reason == Some(ExitReason::ResolutionRedeem) {
+                    TradePolicyEvidenceLiquidityRole::Resolution
+                } else {
+                    match fill.liquidity_role {
+                        LiquidityRole::Maker => TradePolicyEvidenceLiquidityRole::Maker,
+                        LiquidityRole::Taker => TradePolicyEvidenceLiquidityRole::Taker,
+                    }
+                },
+                outcome: match fill.outcome {
+                    BookWalkOutcome::Filled => TradePolicyEvidenceFillOutcome::Filled,
+                    BookWalkOutcome::Partial => TradePolicyEvidenceFillOutcome::Partial,
+                    BookWalkOutcome::Unfilled => TradePolicyEvidenceFillOutcome::Unfilled,
+                },
+                requested_shares: fill.requested_shares,
+                filled_shares: fill.filled_shares,
+                vwap: fill.vwap,
+                gross_amount: fill.gross_amount,
+                execution_fee_usd: fill.execution_fee_usd,
+                expected_maker_rebate_usd: fill.expected_maker_rebate_usd,
+                risk_cash_delta: fill.risk_cash_delta,
+                fee_schedule_hash: fill.fee_schedule_hash,
+                maker_rebate_evidence: fill
+                    .maker_rebate_evidence
+                    .as_ref()
+                    .map(policy_rebate_evidence),
+                stream_session_id: fill.stream_session_id,
+                token_sequence: fill.token_sequence,
+                source_event_hash: fill.source_event_hash,
+            }
+        }));
+    }
 }
 
 pub(super) struct WeatherEvidenceRequest<'a> {
@@ -531,6 +633,7 @@ struct CandidateTrialMetrics {
     executable_coverage: Decimal,
     full_l2_coverage: Decimal,
     fee_catalog_coverage: Decimal,
+    rebate_evidence_coverage: Decimal,
     ambiguous_touch_rate: Decimal,
     depth_failure_rate: Decimal,
     passive_reconciled_trade_coverage: Option<Decimal>,
@@ -612,11 +715,14 @@ fn append_weather_latency_evidence(
             latency_multiplier: run.latency_multiplier,
             sample_count: metrics.sample_count,
             effective_sample_size: run.summary.effective_sample_size,
-            weighted_mean_return_bps: candidate_performance.weighted_mean_return_bps,
-            sharpe_ratio: candidate_performance.sharpe_ratio,
+            weighted_mean_expected_return_bps: candidate_performance
+                .weighted_mean_expected_return_bps,
+            weighted_mean_risk_return_bps: candidate_performance.weighted_mean_risk_return_bps,
+            expected_sharpe_ratio: candidate_performance.expected_sharpe_ratio,
             executable_coverage: metrics.executable_coverage,
             full_l2_coverage: metrics.full_l2_coverage,
             fee_catalog_coverage: metrics.fee_catalog_coverage,
+            rebate_evidence_coverage: metrics.rebate_evidence_coverage,
             ambiguous_touch_rate: metrics.ambiguous_touch_rate,
             depth_failure_rate: metrics.depth_failure_rate,
         });
@@ -629,10 +735,11 @@ fn append_weather_latency_evidence(
                 cohort_hash: *cohort_hash,
                 latency_multiplier: run.latency_multiplier,
                 path_index: path.path_index,
-                group_returns: path.group_returns.clone(),
-                sharpe_ratio: path.sharpe_ratio,
-                max_drawdown: path.max_drawdown,
-                tail_loss: path.tail_loss,
+                expected_group_returns: path.expected_group_returns.clone(),
+                risk_group_returns: path.risk_group_returns.clone(),
+                expected_sharpe_ratio: path.expected_sharpe_ratio,
+                risk_max_drawdown: path.risk_max_drawdown,
+                risk_tail_loss: path.risk_tail_loss,
             }),
     );
     evidence
@@ -690,18 +797,29 @@ fn append_row_evidence(
                     outcome.candidate_id == *candidate_id
                         && outcome.cash_budget == cash_budget
                         && outcome.latency.stress_multiplier == multiplier
-                        && outcome.net_return_bps.is_some()
+                        && outcome.expected_net_return_bps.is_some()
+                        && outcome.risk_net_return_bps.is_some()
                 })
             })
         };
         let available_capabilities = [
             (
-                replay.outcomes.iter().all(|outcome| outcome.full_l2),
+                replay
+                    .outcomes
+                    .iter()
+                    .all(|outcome| outcome.full_l2_coverage.is_covered()),
                 TradePolicyObservationCapability::FullL2,
             ),
             (
                 replay.outcomes.iter().all(|outcome| outcome.fee_covered),
                 TradePolicyObservationCapability::PitFeeSchedule,
+            ),
+            (
+                replay
+                    .outcomes
+                    .iter()
+                    .all(|outcome| outcome.rebate_evidence_covered),
+                TradePolicyObservationCapability::PitMakerRebateEvidence,
             ),
             (
                 replay.model_reinference_available,
@@ -742,84 +860,7 @@ fn append_row_evidence(
             .iter()
             .filter(|outcome| outcome.cash_budget == cash_budget)
         {
-            evidence
-                .candidate_trials
-                .push(TradePolicyCandidateTrialRow {
-                    example_id: replay.example.example_id,
-                    market_id: replay.example.market_id.clone(),
-                    token_id: replay.token_id.clone(),
-                    candidate_id: outcome.candidate_id.clone(),
-                    cohort_hash: *cohort_hash,
-                    outcome_side: outcome.outcome_side,
-                    latency_multiplier: outcome.latency.stress_multiplier,
-                    entry_triggered_at: outcome.entry_triggered_at,
-                    entered_at: outcome.entered_at,
-                    terminal_at: outcome.terminal_at,
-                    terminal_reason: outcome.terminal_reason,
-                    entry_fill_ratio: outcome.entry_fill_ratio,
-                    entry_fill_latency_ms: outcome.entry_fill_latency_ms,
-                    post_fill_markout_bps: outcome.post_fill_markout_bps,
-                    exit_fill_ratio: outcome.exit_fill_ratio,
-                    entry_filled_shares: outcome.entry_filled_shares,
-                    exited_shares: outcome.exited_shares,
-                    total_fees: outcome.total_fees,
-                    net_return_bps: outcome.net_return_bps,
-                    ambiguous_touch: outcome.ambiguous_touch,
-                    full_l2: outcome.full_l2,
-                    fee_covered: outcome.fee_covered,
-                    passive_reconciled_trade_covered: outcome.passive_reconciled_trade_covered,
-                    gap: outcome.gap,
-                });
-            if let Some(gap) = outcome.gap {
-                evidence.coverage_gaps.push(TradePolicyCoverageGapRow {
-                    example_id: replay.example.example_id,
-                    market_id: replay.example.market_id.clone(),
-                    token_id: replay.token_id.clone(),
-                    candidate_id: Some(outcome.candidate_id.clone()),
-                    cohort_hash: Some(*cohort_hash),
-                    latency_multiplier: Some(outcome.latency.stress_multiplier),
-                    decision_at: replay.example.decision_at(),
-                    gap,
-                    detail: format!("shared replay kernel terminal: {gap:?}"),
-                });
-            }
-            for fill in &outcome.fills {
-                evidence.fills.push(TradePolicyFillEvidenceRow {
-                    example_id: replay.example.example_id,
-                    cohort_hash: *cohort_hash,
-                    candidate_id: outcome.candidate_id.clone(),
-                    outcome_side: outcome.outcome_side,
-                    latency_multiplier: outcome.latency.stress_multiplier,
-                    leg_ordinal: fill.leg_ordinal,
-                    side: fill.side,
-                    exit_reason: fill.exit_reason,
-                    triggered_at: fill.triggered_at,
-                    filled_at: fill.filled_at,
-                    liquidity_role: if fill.exit_reason == Some(ExitReason::ResolutionRedeem) {
-                        TradePolicyEvidenceLiquidityRole::Resolution
-                    } else {
-                        match fill.liquidity_role {
-                            LiquidityRole::Maker => TradePolicyEvidenceLiquidityRole::Maker,
-                            LiquidityRole::Taker => TradePolicyEvidenceLiquidityRole::Taker,
-                        }
-                    },
-                    outcome: match fill.outcome {
-                        BookWalkOutcome::Filled => TradePolicyEvidenceFillOutcome::Filled,
-                        BookWalkOutcome::Partial => TradePolicyEvidenceFillOutcome::Partial,
-                        BookWalkOutcome::Unfilled => TradePolicyEvidenceFillOutcome::Unfilled,
-                    },
-                    requested_shares: fill.requested_shares,
-                    filled_shares: fill.filled_shares,
-                    vwap: fill.vwap,
-                    gross_amount: fill.gross_amount,
-                    fee: fill.fee,
-                    cash_delta: fill.cash_delta,
-                    fee_schedule_hash: fill.fee_schedule_hash,
-                    stream_session_id: fill.stream_session_id,
-                    token_sequence: fill.token_sequence,
-                    source_event_hash: fill.source_event_hash,
-                });
-            }
+            evidence.append_outcome(replay, outcome, *cohort_hash);
         }
     }
     Ok(())
@@ -850,7 +891,7 @@ fn performance_observations(
                 market_id: replay.example.market_id.clone(),
                 decision_at: replay.example.decision_at(),
                 label_horizon_end,
-                candidate_return_bps: candidate_ids
+                candidate_expected_return_bps: candidate_ids
                     .iter()
                     .map(|candidate_id| {
                         replay
@@ -861,12 +902,50 @@ fn performance_observations(
                                     && outcome.cash_budget == cash_budget
                                     && outcome.latency.stress_multiplier == latency_multiplier
                             })
-                            .and_then(|outcome| outcome.net_return_bps)
+                            .and_then(|outcome| outcome.expected_net_return_bps)
+                    })
+                    .collect(),
+                candidate_risk_return_bps: candidate_ids
+                    .iter()
+                    .map(|candidate_id| {
+                        replay
+                            .outcomes
+                            .iter()
+                            .find(|outcome| {
+                                outcome.candidate_id == *candidate_id
+                                    && outcome.cash_budget == cash_budget
+                                    && outcome.latency.stress_multiplier == latency_multiplier
+                            })
+                            .and_then(|outcome| outcome.risk_net_return_bps)
                     })
                     .collect(),
             })
         })
         .collect()
+}
+
+const fn policy_rebate_evidence(
+    evidence: &PitMakerRebateEvidence,
+) -> TradePolicyMakerRebateEvidence {
+    match evidence {
+        PitMakerRebateEvidence::Available { schedule_hash, .. } => {
+            TradePolicyMakerRebateEvidence::Available {
+                schedule_hash: *schedule_hash,
+            }
+        }
+        PitMakerRebateEvidence::Unavailable { reason } => {
+            TradePolicyMakerRebateEvidence::Unavailable {
+                reason: match reason {
+                    MakerRebateUnavailableReason::NotListed => {
+                        TradePolicyMakerRebateUnavailableReason::NotListed
+                    }
+                    MakerRebateUnavailableReason::NotYetVisible => {
+                        TradePolicyMakerRebateUnavailableReason::NotYetVisible
+                    }
+                },
+            }
+        }
+    }
 }
 
 fn trial_metrics_for_candidate(
@@ -909,11 +988,23 @@ fn trial_metrics_for_candidate(
         sample_count,
         executable_coverage: ratio(
             rows.iter()
-                .filter(|outcome| outcome.net_return_bps.is_some())
+                .filter(|outcome| {
+                    outcome.expected_net_return_bps.is_some()
+                        && outcome.risk_net_return_bps.is_some()
+                })
                 .count(),
         )?,
-        full_l2_coverage: ratio(rows.iter().filter(|outcome| outcome.full_l2).count())?,
+        full_l2_coverage: ratio(
+            rows.iter()
+                .filter(|outcome| outcome.full_l2_coverage.is_covered())
+                .count(),
+        )?,
         fee_catalog_coverage: ratio(rows.iter().filter(|outcome| outcome.fee_covered).count())?,
+        rebate_evidence_coverage: ratio(
+            rows.iter()
+                .filter(|outcome| outcome.rebate_evidence_covered)
+                .count(),
+        )?,
         ambiguous_touch_rate: ratio(
             rows.iter()
                 .filter(|outcome| outcome.ambiguous_touch)
@@ -959,6 +1050,7 @@ fn statistical_gate_passes(
         && metrics.executable_coverage >= gate.min_eligible_market_coverage
         && metrics.full_l2_coverage >= gate.min_full_l2_coverage
         && metrics.fee_catalog_coverage >= gate.min_fee_catalog_coverage
+        && metrics.rebate_evidence_coverage == Decimal::ONE
         && passive_gate_passes
         && metrics.ambiguous_touch_rate <= gate.max_ambiguous_touch_rate
         && metrics.depth_failure_rate <= gate.max_depth_failure_rate
@@ -1240,6 +1332,10 @@ fn fitted_cohort(request: FittedCohortRequest<'_>) -> QuantResult<TradePolicyCoh
             one_x_metrics.fee_catalog_coverage,
             two_x_metrics.fee_catalog_coverage,
         ),
+        rebate_evidence_coverage: min_metric(
+            one_x_metrics.rebate_evidence_coverage,
+            two_x_metrics.rebate_evidence_coverage,
+        ),
         cpcv_path_count: u32::try_from(one_x.cpcv_paths.len().min(two_x.cpcv_paths.len()))
             .map_err(|error| methodology(format!("cohort CPCV path count overflow: {error}")))?,
         trial_count,
@@ -1492,17 +1588,28 @@ fn base_observations(
         .zip(books)
         .map(|(((at, decision_tick), boundary), book)| {
             let book = book.and_then(policy_book);
-            let fee_schedule = market_info_at(
+            let market_fee_schedule = market_info_at(
                 request.page,
                 &example.market_id,
                 &initial_signal.token_id,
                 boundary,
             )
-            .map(|market_info| {
-                PitFeeSchedule::from_market_fee_schedule(&market_info.fee_schedule())
-                    .map_err(|error| methodology(format!("invalid PIT fee schedule: {error:?}")))
-            })
-            .transpose()?;
+            .map(ClobMarketInfoVersion::fee_schedule);
+            let fee_schedule = market_fee_schedule
+                .as_ref()
+                .map(|schedule| {
+                    PitFeeSchedule::from_market_fee_schedule(schedule).map_err(|error| {
+                        methodology(format!("invalid PIT fee schedule: {error:?}"))
+                    })
+                })
+                .transpose()?;
+            let maker_rebate_evidence = maker_rebate_evidence_at(
+                request.page,
+                &example.market_id,
+                boundary,
+                market_fee_schedule.as_ref(),
+                *at,
+            )?;
             let signal = request
                 .signals
                 .at(
@@ -1528,6 +1635,7 @@ fn base_observations(
                 condition_truth: ConditionTruth::Satisfied,
                 book,
                 fee_schedule,
+                maker_rebate_evidence,
                 signal,
                 passive_trade_coverage,
                 passive_trades,
@@ -1592,6 +1700,68 @@ fn market_info_at<'a>(
                 &right.payload_hash,
             ))
         })
+}
+
+fn maker_rebate_evidence_at(
+    page: &ReplayPage,
+    market_id: &MarketId,
+    boundary: &DecisionBoundary,
+    fee_schedule: Option<&MarketFeeSchedule>,
+    at: DateTime<Utc>,
+) -> QuantResult<PitMakerRebateEvidence> {
+    let Some(market) = catalog_market_at_boundary(page, market_id, boundary)? else {
+        return Ok(PitMakerRebateEvidence::Unavailable {
+            reason: MakerRebateUnavailableReason::NotYetVisible,
+        });
+    };
+    let Some(source_schedule) = market.maker_rebate_schedule.as_ref() else {
+        return Ok(PitMakerRebateEvidence::Unavailable {
+            reason: MakerRebateUnavailableReason::NotListed,
+        });
+    };
+    let schedule = PitMakerRebateSchedule::from_market_schedule(source_schedule)
+        .map_err(|error| rebate_evidence_error(market_id, at, error))?;
+    match schedule.validate_at(at) {
+        Ok(()) => {}
+        Err(FeeError::NotPointInTime) => {
+            return Ok(PitMakerRebateEvidence::Unavailable {
+                reason: MakerRebateUnavailableReason::NotYetVisible,
+            });
+        }
+        Err(error) => return Err(rebate_evidence_error(market_id, at, error)),
+    }
+    if let Some(fee_schedule) = fee_schedule {
+        let economics =
+            PitMarketExecutionEconomics::resolve(fee_schedule, Some(source_schedule), at)
+                .map_err(|error| rebate_evidence_error(market_id, at, error))?;
+        let schedule = economics
+            .maker_rebate_schedule
+            .ok_or_else(|| rebate_evidence_error(market_id, at, FeeError::NotPointInTime))?;
+        return Ok(PitMakerRebateEvidence::Available {
+            schedule_hash: schedule.schedule_hash,
+            schedule,
+        });
+    }
+    Ok(PitMakerRebateEvidence::Available {
+        schedule_hash: schedule.schedule_hash,
+        schedule,
+    })
+}
+
+fn rebate_evidence_error(market_id: &MarketId, at: DateTime<Utc>, error: FeeError) -> QuantError {
+    let reason = match error {
+        FeeError::NotPointInTime => "not_point_in_time",
+        FeeError::InvalidSchedule => "invalid_schedule",
+        FeeError::InvalidFill => "invalid_fill",
+        FeeError::CashBudgetInvariant => "cash_budget_invariant",
+        FeeError::SourceMismatch => "source_mismatch",
+    };
+    ResearchError::PitMakerRebateEvidence {
+        market_id: market_id.to_string(),
+        at: at.to_rfc3339(),
+        reason,
+    }
+    .into()
 }
 
 fn passive_trades(
@@ -2295,30 +2465,43 @@ fn catalog_market_at(
     page: &ReplayPage,
     example: &TrainingExample,
 ) -> QuantResult<MarketRegistryInfo> {
-    let version = page
-        .catalog_markets
-        .iter()
-        .filter(|version| {
-            version.market_id == example.market_id
-                && version.source_effective_at
-                    <= example
-                        .decision_boundary
-                        .cutoff_for(DecisionSource::Catalog)
-                && version.available_at <= example.decision_at()
-        })
-        .max_by(|left, right| catalog_change_order(left, right))
-        .ok_or_else(|| {
+    catalog_market_at_boundary(page, &example.market_id, &example.decision_boundary)?.ok_or_else(
+        || {
             methodology(format!(
                 "market {} has no PIT catalog row",
                 example.market_id
             ))
-        })?;
-    serde_json::from_value(version.payload.clone().into_inner()).map_err(|error| {
-        methodology(format!(
-            "market {} catalog payload is invalid: {error}",
-            version.market_id
-        ))
-    })
+        },
+    )
+}
+
+fn catalog_market_at_boundary(
+    page: &ReplayPage,
+    market_id: &MarketId,
+    boundary: &DecisionBoundary,
+) -> QuantResult<Option<MarketRegistryInfo>> {
+    let version = page
+        .catalog_markets
+        .iter()
+        .filter(|version| {
+            &version.market_id == market_id
+                && version.source_effective_at <= boundary.cutoff_for(DecisionSource::Catalog)
+                && version.available_at <= boundary.decision_at()
+        })
+        .max_by(|left, right| catalog_change_order(left, right));
+    version
+        .map(|version| {
+            serde_json::from_value(version.payload.clone().into_inner()).map_err(|error| {
+                ResearchError::PitResolution {
+                    detail: format!(
+                        "market {} catalog payload is invalid: {error}",
+                        version.market_id
+                    ),
+                }
+                .into()
+            })
+        })
+        .transpose()
 }
 
 fn catalog_change_order(

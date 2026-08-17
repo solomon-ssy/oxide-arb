@@ -44,7 +44,7 @@ pub const POLICY_BOOTSTRAP_REPLICATIONS: usize = 2_000;
 /// Hash-bound policy-performance methodology. Bump whenever candidate support,
 /// CPCV path selection, DSR/PBO inputs, ESS, or bootstrap semantics change.
 pub const POLICY_PERFORMANCE_METHODOLOGY_VERSION: &str =
-    "policy_performance_common_support_cpcv_dsr_pbo_v3";
+    "policy_performance_expected_selection_risk_tail_v4";
 
 /// One observation's terminal candidate vector. `None` is an explicit replay
 /// gap and excludes this observation from every candidate's common support.
@@ -54,7 +54,8 @@ pub struct PolicyPerformanceObservation {
     pub market_id: MarketId,
     pub decision_at: DateTime<Utc>,
     pub label_horizon_end: DateTime<Utc>,
-    pub candidate_return_bps: Vec<Option<Decimal>>,
+    pub candidate_expected_return_bps: Vec<Option<Decimal>>,
+    pub candidate_risk_return_bps: Vec<Option<Decimal>>,
 }
 
 /// Immutable methodology input shared by Fit and independent Validate.
@@ -69,8 +70,9 @@ pub struct PolicyPerformanceRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyCandidatePerformance {
     pub candidate_id: String,
-    pub weighted_mean_return_bps: Decimal,
-    pub sharpe_ratio: Decimal,
+    pub weighted_mean_expected_return_bps: Decimal,
+    pub weighted_mean_risk_return_bps: Decimal,
+    pub expected_sharpe_ratio: Decimal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,16 +83,19 @@ pub struct PolicyCpcvFoldAttempt {
     pub training_group_count: u64,
     pub test_group_count: u64,
     pub training_utility_bps: Decimal,
+    pub training_risk_utility_bps: Decimal,
     pub test_utility_bps: Decimal,
+    pub test_risk_utility_bps: Decimal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyCpcvPathEvidence {
     pub path_index: u32,
-    pub group_returns: Vec<Decimal>,
-    pub sharpe_ratio: Decimal,
-    pub max_drawdown: Decimal,
-    pub tail_loss: Decimal,
+    pub expected_group_returns: Vec<Decimal>,
+    pub risk_group_returns: Vec<Decimal>,
+    pub expected_sharpe_ratio: Decimal,
+    pub risk_max_drawdown: Decimal,
+    pub risk_tail_loss: Decimal,
 }
 
 /// Complete statistical result for one cohort and latency scenario.
@@ -114,14 +119,16 @@ pub struct PolicyPerformanceSummary {
 
 struct CommonObservation<'a> {
     source: &'a PolicyPerformanceObservation,
-    returns: Vec<Decimal>,
+    expected_returns: Vec<Decimal>,
+    risk_returns: Vec<Decimal>,
     uniqueness_weight: Decimal,
 }
 
 #[derive(Clone)]
 struct PolicyGroup {
     timeline: TimelineGroup,
-    candidate_returns_bps: Vec<Decimal>,
+    candidate_expected_returns_bps: Vec<Decimal>,
+    candidate_risk_returns_bps: Vec<Decimal>,
     weight: Decimal,
 }
 
@@ -159,6 +166,8 @@ impl FoldModelSource for PolicyFoldSource<'_> {
         let filter = request.filter;
         let candidate_index = best_candidate(self.groups, &filter.group_indices)?;
         let utility = weighted_candidate_mean(self.groups, &filter.group_indices, candidate_index)?;
+        let risk_utility =
+            weighted_candidate_risk_mean(self.groups, &filter.group_indices, candidate_index)?;
         Ok(FoldRuntime::Policy(PolicyFoldRuntime {
             validation_fold_index: combination_index,
             candidate_index,
@@ -169,6 +178,7 @@ impl FoldModelSource for PolicyFoldSource<'_> {
                 ))
             })?,
             training_utility_bps: utility,
+            training_risk_utility_bps: risk_utility,
         }))
     }
 }
@@ -187,6 +197,11 @@ impl ReplayEngine for PolicyReplay<'_> {
         let selected = model.as_policy()?;
         let test_utility =
             weighted_candidate_mean(self.groups, &filter.group_indices, selected.candidate_index)?;
+        let test_risk_utility = weighted_candidate_risk_mean(
+            self.groups,
+            &filter.group_indices,
+            selected.candidate_index,
+        )?;
         self.audit
             .lock()
             .map_err(|_| methodology("policy CPCV audit mutex is poisoned".to_owned()))?
@@ -199,7 +214,9 @@ impl ReplayEngine for PolicyReplay<'_> {
                     methodology(format!("policy test group count does not fit u64: {error}"))
                 })?,
                 training_utility_bps: selected.training_utility_bps,
+                training_risk_utility_bps: selected.training_risk_utility_bps,
                 test_utility_bps: test_utility,
+                test_risk_utility_bps: test_risk_utility,
             });
         filter
             .group_indices
@@ -210,10 +227,12 @@ impl ReplayEngine for PolicyReplay<'_> {
                         "policy replay group index {group_index} is invalid"
                     ))
                 })?;
-                let realized = group.candidate_returns_bps[selected.candidate_index];
+                let realized = group.candidate_expected_returns_bps[selected.candidate_index];
+                let risk_realized = group.candidate_risk_returns_bps[selected.candidate_index];
                 Ok(GroupEvaluation {
                     group_index,
                     return_value: realized / Decimal::from(10_000),
+                    risk_return_value: risk_realized / Decimal::from(10_000),
                     scenario_residual: None,
                     rank_observations: vec![RankObservation {
                         score: selected.training_utility_bps,
@@ -256,10 +275,11 @@ pub fn evaluate_policy_performance(
             .into_iter()
             .map(|path| PolicyCpcvPathEvidence {
                 path_index: path.path_index,
-                group_returns: path.group_returns,
-                sharpe_ratio: path.sharpe,
-                max_drawdown: path.max_drawdown,
-                tail_loss: path.tail_loss,
+                expected_group_returns: path.group_returns,
+                risk_group_returns: path.risk_group_returns,
+                expected_sharpe_ratio: path.sharpe,
+                risk_max_drawdown: path.max_drawdown,
+                risk_tail_loss: path.tail_loss,
             })
             .collect(),
         cpcv_folds: folds,
@@ -280,14 +300,22 @@ fn build_validation_basis<'a>(
         .iter()
         .zip(weights)
         .filter_map(|(observation, uniqueness_weight)| {
-            observation
-                .candidate_return_bps
+            let expected_returns = observation
+                .candidate_expected_return_bps
                 .iter()
                 .copied()
-                .collect::<Option<Vec<_>>>()
-                .map(|returns| CommonObservation {
+                .collect::<Option<Vec<_>>>();
+            let risk_returns = observation
+                .candidate_risk_return_bps
+                .iter()
+                .copied()
+                .collect::<Option<Vec<_>>>();
+            expected_returns
+                .zip(risk_returns)
+                .map(|(expected_returns, risk_returns)| CommonObservation {
                     source: observation,
-                    returns,
+                    expected_returns,
+                    risk_returns,
                     uniqueness_weight,
                 })
         })
@@ -426,7 +454,7 @@ fn policy_significance(
             .iter()
             .map(|group| {
                 group
-                    .candidate_returns_bps
+                    .candidate_expected_returns_bps
                     .iter()
                     .map(|value| *value / Decimal::from(10_000))
                     .collect()
@@ -519,8 +547,9 @@ fn validate_request(request: &PolicyPerformanceRequest<'_>) -> QuantResult<()> {
     let mut observation_ids = BTreeSet::new();
     let mut prior = None;
     for observation in request.observations {
-        let candidate_count_matches =
-            observation.candidate_return_bps.len() == request.candidate_ids.len();
+        let candidate_count_matches = observation.candidate_expected_return_bps.len()
+            == request.candidate_ids.len()
+            && observation.candidate_risk_return_bps.len() == request.candidate_ids.len();
         let has_positive_horizon = observation.decision_at < observation.label_horizon_end;
         let unique_observation = observation_ids.insert(&observation.observation_id);
         let time_ordered = prior.is_none_or(|value| value <= observation.decision_at);
@@ -631,12 +660,23 @@ fn build_groups(
                     "policy group has non-positive uniqueness weight".to_owned(),
                 ));
             }
-            let candidate_returns_bps = (0..candidate_count)
+            let candidate_expected_returns_bps = (0..candidate_count)
                 .map(|candidate| {
                     observations
                         .iter()
                         .map(|observation| {
-                            observation.returns[candidate] * observation.uniqueness_weight
+                            observation.expected_returns[candidate] * observation.uniqueness_weight
+                        })
+                        .sum::<Decimal>()
+                        / weight
+                })
+                .collect();
+            let candidate_risk_returns_bps = (0..candidate_count)
+                .map(|candidate| {
+                    observations
+                        .iter()
+                        .map(|observation| {
+                            observation.risk_returns[candidate] * observation.uniqueness_weight
                         })
                         .sum::<Decimal>()
                         / weight
@@ -647,7 +687,8 @@ fn build_groups(
                     decision_at,
                     label_horizon_end,
                 },
-                candidate_returns_bps,
+                candidate_expected_returns_bps,
+                candidate_risk_returns_bps,
                 weight,
             })
         })
@@ -657,7 +698,7 @@ fn build_groups(
 fn best_candidate(groups: &[PolicyGroup], group_indices: &[usize]) -> QuantResult<usize> {
     let candidate_count = groups
         .first()
-        .map(|group| group.candidate_returns_bps.len())
+        .map(|group| group.candidate_expected_returns_bps.len())
         .ok_or_else(|| {
             methodology("cannot select a policy candidate from zero groups".to_owned())
         })?;
@@ -686,17 +727,52 @@ fn weighted_candidate_mean(
                 "policy group index {group_index} is outside the matrix"
             ))
         })?;
-        let value = group.candidate_returns_bps.get(candidate).ok_or_else(|| {
-            methodology(format!(
-                "policy candidate index {candidate} is outside the matrix"
-            ))
-        })?;
+        let value = group
+            .candidate_expected_returns_bps
+            .get(candidate)
+            .ok_or_else(|| {
+                methodology(format!(
+                    "policy candidate index {candidate} is outside the matrix"
+                ))
+            })?;
         weighted += *value * group.weight;
         total_weight += group.weight;
     }
     if total_weight <= Decimal::ZERO {
         return Err(methodology(
             "policy fold has no positive training/test weight after purge".to_owned(),
+        ));
+    }
+    Ok((weighted / total_weight).round_dp(8))
+}
+
+fn weighted_candidate_risk_mean(
+    groups: &[PolicyGroup],
+    group_indices: &[usize],
+    candidate: usize,
+) -> QuantResult<Decimal> {
+    let mut weighted = Decimal::ZERO;
+    let mut total_weight = Decimal::ZERO;
+    for &group_index in group_indices {
+        let group = groups.get(group_index).ok_or_else(|| {
+            methodology(format!(
+                "policy group index {group_index} is outside the matrix"
+            ))
+        })?;
+        let value = group
+            .candidate_risk_returns_bps
+            .get(candidate)
+            .ok_or_else(|| {
+                methodology(format!(
+                    "policy risk candidate index {candidate} is outside the matrix"
+                ))
+            })?;
+        weighted += *value * group.weight;
+        total_weight += group.weight;
+    }
+    if total_weight <= Decimal::ZERO {
+        return Err(methodology(
+            "policy risk fold has no positive training/test weight after purge".to_owned(),
         ));
     }
     Ok((weighted / total_weight).round_dp(8))
@@ -713,12 +789,19 @@ fn candidate_performance(
         .map(|(candidate, candidate_id)| {
             let returns = groups
                 .iter()
-                .map(|group| group.candidate_returns_bps[candidate] / Decimal::from(10_000))
+                .map(|group| {
+                    group.candidate_expected_returns_bps[candidate] / Decimal::from(10_000)
+                })
                 .collect::<Vec<_>>();
             Ok(PolicyCandidatePerformance {
                 candidate_id: candidate_id.clone(),
-                weighted_mean_return_bps: weighted_candidate_mean(groups, &indices, candidate)?,
-                sharpe_ratio: sharpe_ratio(&returns, Decimal::ONE),
+                weighted_mean_expected_return_bps: weighted_candidate_mean(
+                    groups, &indices, candidate,
+                )?,
+                weighted_mean_risk_return_bps: weighted_candidate_risk_mean(
+                    groups, &indices, candidate,
+                )?,
+                expected_sharpe_ratio: sharpe_ratio(&returns, Decimal::ONE),
             })
         })
         .collect()
@@ -771,7 +854,7 @@ fn clustered_bootstrap_lower_bound(
                 ))
             })?;
             for observation in &clusters[index] {
-                weighted += observation.returns[candidate] * observation.uniqueness_weight;
+                weighted += observation.expected_returns[candidate] * observation.uniqueness_weight;
                 weight += observation.uniqueness_weight;
             }
         }
@@ -822,16 +905,18 @@ mod tests {
                 let index_i64 = i64::from(index);
                 let decision_at = start + Duration::hours(index_i64 * 6);
                 let trend = Decimal::from_i64(index_i64 % 7 - 3).expect("decimal");
+                let candidate_expected_return_bps = vec![
+                    Some(Decimal::from(35) + trend),
+                    Some(Decimal::from(5) - trend * Decimal::from(3)),
+                    Some(Decimal::from(-10) + trend * Decimal::from(2)),
+                ];
                 PolicyPerformanceObservation {
                     observation_id: format!("observation-{index}"),
                     market_id: MarketId::new(format!("market-{}", index % 10)),
                     decision_at,
                     label_horizon_end: decision_at + Duration::hours(24),
-                    candidate_return_bps: vec![
-                        Some(Decimal::from(35) + trend),
-                        Some(Decimal::from(5) - trend * Decimal::from(3)),
-                        Some(Decimal::from(-10) + trend * Decimal::from(2)),
-                    ],
+                    candidate_risk_return_bps: candidate_expected_return_bps.clone(),
+                    candidate_expected_return_bps,
                 }
             })
             .collect()
@@ -862,12 +947,9 @@ mod tests {
             summary.cpcv_paths.len(),
             usize::try_from(POLICY_CPCV_PATHS).expect("usize")
         );
-        assert!(
-            summary
-                .cpcv_paths
-                .iter()
-                .all(|path| path.group_returns.len() == 80)
-        );
+        assert!(summary.cpcv_paths.iter().all(|path| {
+            path.expected_group_returns.len() == 80 && path.risk_group_returns.len() == 80
+        }));
         assert_eq!(summary.selected_candidate_id, "stable");
         assert!(summary.effective_sample_size > Decimal::ZERO);
     }
@@ -876,7 +958,8 @@ mod tests {
     fn common_support_candidate_symmetric() {
         let mut rows = observations();
         for row in &mut rows[..16] {
-            row.candidate_return_bps[2] = None;
+            row.candidate_expected_return_bps[2] = None;
+            row.candidate_risk_return_bps[2] = None;
         }
         let candidate_ids = vec!["stable".to_owned(), "noisy".to_owned(), "weak".to_owned()];
         let summary = evaluate_policy_performance(&PolicyPerformanceRequest {
@@ -905,7 +988,8 @@ mod tests {
                 observations: &observations()
                     .into_iter()
                     .map(|mut observation| {
-                        observation.candidate_return_bps.truncate(1);
+                        observation.candidate_expected_return_bps.truncate(1);
+                        observation.candidate_risk_return_bps.truncate(1);
                         observation
                     })
                     .collect::<Vec<_>>(),

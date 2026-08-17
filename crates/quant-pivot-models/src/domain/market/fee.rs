@@ -71,9 +71,15 @@ pub struct FrozenMakerRebateSchedule {
     pub effective_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub fees_enabled: bool,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub platform_rate: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub exponent: Decimal,
     pub taker_only: bool,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub rebate_rate: Decimal,
 }
 
@@ -173,7 +179,10 @@ pub enum MakerRebateEligibility {
 #[serde(deny_unknown_fields)]
 pub struct DeferredVenueIncentive {
     pub expected_rebate_usd: Usd,
-    pub settlement_date: NaiveDate,
+    /// UTC program day containing the maker fill.
+    pub program_date: NaiveDate,
+    /// Modeling assumption for discounting, never evidence of wallet credit.
+    pub expected_credit_at: DateTime<Utc>,
     pub source_schedule_hash: ContentHash,
     pub eligibility: MakerRebateEligibility,
 }

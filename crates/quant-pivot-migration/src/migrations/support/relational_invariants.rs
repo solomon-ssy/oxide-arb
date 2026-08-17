@@ -2077,6 +2077,12 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK ((amount_usd >= 0) AND (char_length(source_partition) BETWEEN 1 AND 512) AND (char_length(source_identity) BETWEEN 1 AND 600) AND ((source_schedule_hash IS NULL) OR (source_schedule_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= observed_at) AND (((stage = 'estimated_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NOT NULL) AND (market_id IS NOT NULL) AND (source_schedule_hash IS NOT NULL)) OR ((stage = 'venue_awarded'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NULL) AND (market_id IS NOT NULL) AND (source_schedule_hash IS NULL)) OR ((stage = 'wallet_credited'::qp_venue_incentive_stage) AND (execution_fill_id IS NULL) AND (source_schedule_hash IS NULL))))",
     },
     ConstraintSpec {
+        name: "ck_quant_venue_incentive_scan_result",
+        table: "quant_venue_incentive_reconciliation_scan",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((completed_at >= started_at) AND (response_count >= 0) AND ((response_digest IS NULL) OR (response_digest ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((error_code IS NULL) OR (char_length(error_code) BETWEEN 1 AND 128)) AND (((status = 'succeeded'::qp_venue_incentive_reconciliation_scan_status) AND (response_digest IS NOT NULL) AND (error_code IS NULL)) OR ((status = 'failed'::qp_venue_incentive_reconciliation_scan_status) AND (response_digest IS NULL) AND (response_count = 0) AND (error_code IS NOT NULL))))",
+    },
+    ConstraintSpec {
         name: "ck_quant_execution_transaction_ref_hash",
         table: "quant_execution_transaction_ref",
         kind: ConstraintKind::Check,

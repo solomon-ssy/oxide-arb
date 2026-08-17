@@ -870,7 +870,7 @@ fn risk_envelope(
 
 fn auto_execution_allowed(
     rank: u32,
-    suggested_usd: Usd,
+    hard_reserved_cash_usd: Usd,
     already_authorized: Usd,
     config: &DecisionPolicySnapshot,
 ) -> bool {
@@ -878,7 +878,7 @@ fn auto_execution_allowed(
     rank <= policy.max_orders_per_report
         && already_authorized
             .inner()
-            .checked_add(suggested_usd.inner())
+            .checked_add(hard_reserved_cash_usd.inner())
             .is_some_and(|total| total <= policy.max_total_usd_per_report.value)
 }
 
@@ -966,7 +966,7 @@ fn report_summary(
             .or_default() += amount;
         *route_allocation.entry(recommendation.route).or_default() += amount;
     }
-    let total_suggested_usd = recommendations
+    let total_hard_reserved_cash_usd = recommendations
         .iter()
         .map(|recommendation| {
             recommendation
@@ -1010,7 +1010,7 @@ fn report_summary(
             recommendations.len(),
             "published recommendation count",
         )?,
-        total_suggested_usd,
+        total_hard_reserved_cash_usd,
         max_single_recommendation_usd,
         robust_expected_net_usd: robust,
         nominal_expected_net_usd: nominal,
@@ -1122,7 +1122,9 @@ fn recommendation_events(
                     economics.capital_occupancy_usd_hours.inner(),
                 )),
                 marginal_portfolio_value_usd: ChUsd::from(economics.marginal_portfolio_value_usd),
-                suggested_usd: ChUsd::from(recommendation.trade_plan.sizing.hard_reserved_cash_usd),
+                hard_reserved_cash_usd: ChUsd::from(
+                    recommendation.trade_plan.sizing.hard_reserved_cash_usd,
+                ),
                 valid_until: recommendation.valid_until.timestamp_millis(),
             })
         })
@@ -1142,7 +1144,7 @@ fn report_notification(
         status: RecommendationReportStatus::Published.to_string(),
         runtime_mode,
         published_count: count_u32(recommendations.len(), "notification count")?,
-        total_suggested_usd: summary.total_suggested_usd,
+        total_hard_reserved_cash_usd: summary.total_hard_reserved_cash_usd,
         top3: recommendations
             .iter()
             .take(3)
@@ -1155,7 +1157,7 @@ fn report_notification(
                 marginal_portfolio_value_usd: recommendation
                     .economics_json
                     .marginal_portfolio_value_usd,
-                suggested_usd: recommendation.trade_plan.sizing.hard_reserved_cash_usd,
+                hard_reserved_cash_usd: recommendation.trade_plan.sizing.hard_reserved_cash_usd,
             })
             .collect(),
         warnings: summary.warnings.clone(),

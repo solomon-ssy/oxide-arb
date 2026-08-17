@@ -1204,6 +1204,10 @@ pub struct ExecutionFeeMeasurementId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VenueIncentiveEventId(Uuid);
 
+/// One immutable upstream incentive-reconciliation partition scan.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VenueIncentiveReconciliationScanId(Uuid);
+
 /// One execution-order to EVM transaction relationship.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExecutionTransactionRefId(Uuid);

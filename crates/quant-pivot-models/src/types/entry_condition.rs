@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -31,7 +32,7 @@ pub const ENTRY_CONDITION_MAX_CANDIDATES: usize = 16;
 pub const ENTRY_CONDITION_INPUT_CHANNEL: &str = "quant_entry_condition_input";
 
 /// Recommendation trade-plan reference to an immutable condition artifact.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum EntryConditionPlan {
     /// No conditional wait; admission may proceed immediately.
@@ -550,7 +551,7 @@ pub struct WeatherObservationDayClosedOutsideBand {
 }
 
 /// Three-state leaf/composite truth. Missing input never becomes false.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "reason")]
 pub enum ConditionTruth {
     Satisfied,
@@ -695,7 +696,7 @@ pub struct CryptoEnteredFoldState {
 }
 
 /// Typed fail-closed reason attached to an unavailable evaluation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ConditionUnavailableReason {
     SourceNotConfigured {

@@ -11,6 +11,7 @@
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +30,7 @@ use crate::{
 
 /// Governed intent amount. Aggressive BUY orders carry a total cash budget;
 /// resting orders and SELL orders carry an exact share quantity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "unit", content = "value")]
 pub enum OrderAmount {
     CashBudget(Usd),
@@ -87,7 +88,7 @@ pub struct PreparedVenueOrder {
 }
 
 /// Persisted classification of the latest governed thesis re-inference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExitReinferenceVerdictKind {
     Holds,
@@ -96,7 +97,7 @@ pub enum ExitReinferenceVerdictKind {
 }
 
 /// Latest re-inference evidence persisted on the intent at the governed cadence.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExitReinferenceObservation {
     pub observed_at: DateTime<Utc>,
@@ -105,6 +106,8 @@ pub struct ExitReinferenceObservation {
     pub factor_snapshot_hash: ContentHash,
     pub mark: Price,
     pub score: Probability,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub score_retention: Decimal,
     pub expected_return_bps: Bps,
     pub route_gate_eligible: bool,
@@ -150,10 +153,12 @@ impl VenueOrderAmount {
 }
 
 /// Exact next cumulative scale-out projection shared by monitor and read APIs.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NextScaleOutProjection {
     pub target_id: String,
     pub trigger_price: Price,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub target_cumulative_exit_pct: Decimal,
     pub delta_shares: Shares,
 }
@@ -163,7 +168,7 @@ pub struct NextScaleOutProjection {
 /// `side` is always [`Side::Buy`] for an opening recommendation (the outcome is
 /// chosen by `token_id`); the type stays general so a future closing intent can
 /// reuse it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EntryOrderSpec {
     /// Outcome token to trade.
@@ -218,16 +223,20 @@ impl EntryOrderSpec {
 /// for the price/time/trailing/partial ladder. `entry_reference_price` and
 /// `entry_composite_score` are the frozen entry-thesis baselines used for
 /// percentage-based stops/targets and signal-degradation re-inference.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExitPolicySpec {
     /// Take-profit price target.
     pub take_profit_price: Option<Price>,
     /// Take-profit as a percentage move from the entry reference price.
+    #[serde(with = "crate::types::decimal_string_option")]
+    #[schemars(with = "Option<String>")]
     pub take_profit_pct: Option<Decimal>,
     /// Stop-loss price target.
     pub stop_loss_price: Option<Price>,
     /// Stop-loss as a percentage move from the entry reference price.
+    #[serde(with = "crate::types::decimal_string_option")]
+    #[schemars(with = "Option<String>")]
     pub stop_loss_pct: Option<Decimal>,
     /// Absolute time-based exit.
     pub time_exit_at: Option<DateTime<Utc>>,
@@ -308,16 +317,20 @@ impl ExitPolicySpec {
 }
 
 /// One in-flight cumulative scale-out target.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PendingScaleOut {
     /// Deterministic target id; opportunistic cumulative targets have no id.
     pub target_id: Option<String>,
     /// Desired cumulative exit fraction of the frozen entry-filled denominator.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub target_cumulative_exit_pct: Decimal,
 }
 
 /// Unified scale-out state for deterministic and opportunistic partial exits.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult, JsonSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ScaleOutState {
     /// Frozen entry-filled denominator shared by every scale-out source.

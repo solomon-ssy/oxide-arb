@@ -564,7 +564,7 @@ fn notification_payload(bundle: &ReportFactBundleV2) -> ReportNotificationPayloa
         status: bundle.notification.status.clone(),
         runtime_mode: bundle.notification.runtime_mode,
         published_count: bundle.notification.published_count,
-        total_suggested_usd: bundle.notification.total_suggested_usd,
+        total_hard_reserved_cash_usd: bundle.notification.total_hard_reserved_cash_usd,
         top3: bundle
             .notification
             .top3
@@ -576,7 +576,7 @@ fn notification_payload(bundle: &ReportFactBundleV2) -> ReportNotificationPayloa
                 profit_probability_bps: recommendation.profit_probability_bps,
                 robust_expected_net_usd: recommendation.robust_expected_net_usd,
                 marginal_portfolio_value_usd: recommendation.marginal_portfolio_value_usd,
-                suggested_usd: recommendation.suggested_usd,
+                hard_reserved_cash_usd: recommendation.hard_reserved_cash_usd,
             })
             .collect(),
         warnings: bundle.notification.warnings.clone(),

@@ -42,10 +42,11 @@ use quant_pivot_models::{
         FeatureParityStateId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
         OperationDetailDocument, OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId,
         OrderIntentId, PortfolioPlanId, PositionSnapshot, Price, Probability, RecommendationId,
-        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId, ReportDataQualitySnapshotId, ReportTriggerKey, RoleCode,
-        SelectionExclusionSummary, Shares, ThesisInvalidationPolicy, TokenId,
-        TradePolicyCohortProvenance, Usd, VenueOrderAmount, WorkerId, factor::FactorServingPlane,
+        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
+        ReportTriggerKey, RoleCode, SelectionExclusionSummary, Shares, ThesisInvalidationPolicy,
+        TokenId, TradePolicyCohortProvenance, Usd, VenueOrderAmount, WorkerId,
+        factor::FactorServingPlane,
     },
 };
 use quant_pivot_repository::{
@@ -161,7 +162,7 @@ pub async fn report_transaction_persists_intents() {
     let market_id = "0xmarket";
     seed_market_catalog(&db, event_id, market_id).await;
     let ids = TxnIds::seed(&db, &rc_id, &infra, market_id, event_id).await;
-    create_assert_report_transaction(&db, &ids).await;
+    Box::pin(create_assert_report_transaction(&db, &ids)).await;
     assert_recommendation_roundtrip(&db, &ids.report).await;
     explicitly_enable_entry_test(&db).await;
     assert_reserved_tracks_intent(
@@ -421,8 +422,13 @@ async fn create_assert_report_transaction(db: &DatabaseConnection, ids: &TxnIds)
     let trigger_key = (ids).report_trigger_key();
     let typed_trigger_key =
         ReportTriggerKey::parse(trigger_key.clone()).expect("report trigger key");
-    let created =
-        persist_and_publish_report(db, (ids).build_report_transaction(), &trigger_key, 10).await;
+    let transaction = (ids).build_report_transaction();
+    let trade_plan_json = serde_json::to_string(&transaction.recommendations[0].trade_plan)
+        .expect("serialize typed recommendation trade plan");
+    serde_json::from_str::<RecommendationTradePlan>(&trade_plan_json).unwrap_or_else(|error| {
+        panic!("trade plan must round-trip before JSONB: {error}; {trade_plan_json}")
+    });
+    let created = persist_and_publish_report(db, transaction, &trigger_key, 10).await;
     assert_eq!(created.recommendation_report_id, ids.report);
     assert_eq!(created.capital_base_usd, Usd::new(dec!(10000)));
     assert_eq!(created.account_snapshot_ref, ids.account_snapshot);

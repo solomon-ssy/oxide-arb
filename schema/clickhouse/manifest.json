@@ -4409,7 +4409,7 @@
       "sorting_key": "recommendation_report_id, recommendation_id",
       "primary_key": "recommendation_report_id, recommendation_id",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_report_recommendation_fact (`event_time` DateTime64(3, 'UTC'), `recommendation_report_id` String, `recommendation_id` String, `report_route_run_id` String, `economic_tier_id` String, `route` LowCardinality(String), `rank` UInt32, `market_id` String, `token_id` String, `side` Enum8('yes' = 1, 'no' = 2), `profit_probability_bps` Int64, `nominal_expected_net_usd` Decimal(38, 18), `robust_expected_net_usd` Decimal(38, 18), `max_loss_usd` Decimal(38, 18), `cvar_contribution_usd` Decimal(38, 18), `capital_occupancy_usd_hours` Decimal(38, 18), `marginal_portfolio_value_usd` Decimal(38, 18), `suggested_usd` Decimal(38, 18), `valid_until` DateTime64(3, 'UTC')) ENGINE = ReplacingMergeTree(event_time) ORDER BY (recommendation_report_id, recommendation_id) SETTINGS index_granularity = 8192",
+      "create_table_query": "CREATE TABLE quant_report_recommendation_fact (`event_time` DateTime64(3, 'UTC'), `recommendation_report_id` String, `recommendation_id` String, `report_route_run_id` String, `economic_tier_id` String, `route` LowCardinality(String), `rank` UInt32, `market_id` String, `token_id` String, `side` Enum8('yes' = 1, 'no' = 2), `profit_probability_bps` Int64, `nominal_expected_net_usd` Decimal(38, 18), `robust_expected_net_usd` Decimal(38, 18), `max_loss_usd` Decimal(38, 18), `cvar_contribution_usd` Decimal(38, 18), `capital_occupancy_usd_hours` Decimal(38, 18), `marginal_portfolio_value_usd` Decimal(38, 18), `hard_reserved_cash_usd` Decimal(38, 18), `valid_until` DateTime64(3, 'UTC')) ENGINE = ReplacingMergeTree(event_time) ORDER BY (recommendation_report_id, recommendation_id) SETTINGS index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -4549,7 +4549,7 @@
         },
         {
           "position": 18,
-          "name": "suggested_usd",
+          "name": "hard_reserved_cash_usd",
           "column_type": "Decimal(38, 18)",
           "default_kind": "",
           "default_expression": "",

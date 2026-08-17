@@ -972,11 +972,13 @@ impl TradePolicyService {
             let metrics = TradePolicyTrialMetrics {
                 sample_count: trial.sample_count,
                 effective_sample_size: trial.effective_sample_size,
-                net_return_bps: trial.weighted_mean_return_bps,
-                sharpe_ratio: Some(trial.sharpe_ratio),
+                expected_net_return_bps: trial.weighted_mean_expected_return_bps,
+                risk_net_return_bps: trial.weighted_mean_risk_return_bps,
+                expected_sharpe_ratio: Some(trial.expected_sharpe_ratio),
                 executable_coverage: trial.executable_coverage,
                 full_l2_coverage: trial.full_l2_coverage,
                 fee_catalog_coverage: trial.fee_catalog_coverage,
+                rebate_evidence_coverage: trial.rebate_evidence_coverage,
                 ambiguous_touch_rate: trial.ambiguous_touch_rate,
                 depth_failure_rate: trial.depth_failure_rate,
                 latency_stress_multiplier: trial.latency_multiplier,
@@ -2464,6 +2466,7 @@ struct AggregatePolicyEvidence {
     depth_failure_rate: Decimal,
     common_candidate_support: Decimal,
     fee_catalog_coverage: Decimal,
+    rebate_evidence_coverage: Decimal,
     eligible_market_coverage: Decimal,
 }
 
@@ -2510,7 +2513,7 @@ fn build_fit_artifact_payload(
         evidence
             .candidate_trials
             .iter()
-            .filter(|trial| trial.full_l2)
+            .filter(|trial| trial.full_l2_coverage.is_covered())
             .count(),
     )
     .map_err(|error| ResearchError::ValidationMethodology {
@@ -2634,6 +2637,7 @@ fn policy_validation_evidence(
         depth_failure_rate: Some(aggregate.depth_failure_rate),
         common_candidate_support: Some(aggregate.common_candidate_support),
         fee_catalog_coverage: Some(aggregate.fee_catalog_coverage),
+        rebate_evidence_coverage: Some(aggregate.rebate_evidence_coverage),
         eligible_market_coverage: Some(aggregate.eligible_market_coverage),
     })
 }
@@ -2695,6 +2699,12 @@ impl WeatherPolicyEvidence {
                 .map(|cohort| cohort.fee_catalog_coverage)
                 .min()
                 .unwrap_or(first.fee_catalog_coverage),
+            rebate_evidence_coverage: self
+                .cohorts
+                .iter()
+                .map(|cohort| cohort.rebate_evidence_coverage)
+                .min()
+                .unwrap_or(first.rebate_evidence_coverage),
             eligible_market_coverage: self
                 .cohorts
                 .iter()
@@ -2711,19 +2721,25 @@ fn append_statistical_attempts(
     selected_trial: &TradePolicyCohortTrialRow,
     passed: bool,
 ) -> QuantResult<()> {
-    let base_metrics =
-        |net_return_bps: Decimal, sharpe_ratio: Option<Decimal>| TradePolicyTrialMetrics {
+    let base_metrics = |expected_net_return_bps: Decimal,
+                        risk_net_return_bps: Decimal,
+                        expected_sharpe_ratio: Option<Decimal>|
+     -> TradePolicyTrialMetrics {
+        TradePolicyTrialMetrics {
             sample_count: run.summary.common_sample_count,
             effective_sample_size: run.summary.effective_sample_size,
-            net_return_bps,
-            sharpe_ratio,
+            expected_net_return_bps,
+            risk_net_return_bps,
+            expected_sharpe_ratio,
             executable_coverage: selected_trial.executable_coverage,
             full_l2_coverage: selected_trial.full_l2_coverage,
             fee_catalog_coverage: selected_trial.fee_catalog_coverage,
+            rebate_evidence_coverage: selected_trial.rebate_evidence_coverage,
             ambiguous_touch_rate: selected_trial.ambiguous_touch_rate,
             depth_failure_rate: selected_trial.depth_failure_rate,
             latency_stress_multiplier: run.latency_multiplier,
-        };
+        }
+    };
     for fold in &run.summary.cpcv_folds {
         attempts.push(TrialAttemptSpec {
             candidate_id: fold.selected_candidate_id.clone(),
@@ -2735,16 +2751,28 @@ fn append_statistical_attempts(
             })?),
             path_index: None,
             status: TradePolicyTrialStatus::Succeeded,
-            metrics: Some(base_metrics(fold.test_utility_bps, None)),
+            metrics: Some(base_metrics(
+                fold.test_utility_bps,
+                fold.test_risk_utility_bps,
+                None,
+            )),
             evidence_kind: Some(TradePolicyEvidenceObjectKind::StatisticalSummaries),
             failure_detail: None,
         });
     }
     for path in &run.summary.cpcv_paths {
-        let path_mean_bps = if path.group_returns.is_empty() {
+        let expected_path_mean_bps = if path.expected_group_returns.is_empty() {
             Decimal::ZERO
         } else {
-            path.group_returns.iter().sum::<Decimal>() / Decimal::from(path.group_returns.len())
+            path.expected_group_returns.iter().sum::<Decimal>()
+                / Decimal::from(path.expected_group_returns.len())
+                * Decimal::from(10_000)
+        };
+        let risk_path_mean_bps = if path.risk_group_returns.is_empty() {
+            Decimal::ZERO
+        } else {
+            path.risk_group_returns.iter().sum::<Decimal>()
+                / Decimal::from(path.risk_group_returns.len())
                 * Decimal::from(10_000)
         };
         attempts.push(TrialAttemptSpec {
@@ -2757,7 +2785,11 @@ fn append_statistical_attempts(
                 }
             })?),
             status: TradePolicyTrialStatus::Succeeded,
-            metrics: Some(base_metrics(path_mean_bps, Some(path.sharpe_ratio))),
+            metrics: Some(base_metrics(
+                expected_path_mean_bps,
+                risk_path_mean_bps,
+                Some(path.expected_sharpe_ratio),
+            )),
             evidence_kind: Some(TradePolicyEvidenceObjectKind::CpcvPaths),
             failure_detail: None,
         });
@@ -2781,8 +2813,9 @@ fn append_statistical_attempts(
             TradePolicyTrialStatus::Failed
         },
         metrics: Some(base_metrics(
-            selected.weighted_mean_return_bps,
-            Some(selected.sharpe_ratio),
+            selected.weighted_mean_expected_return_bps,
+            selected.weighted_mean_risk_return_bps,
+            Some(selected.expected_sharpe_ratio),
         )),
         evidence_kind: Some(TradePolicyEvidenceObjectKind::StatisticalSummaries),
         failure_detail: (!passed).then(|| {

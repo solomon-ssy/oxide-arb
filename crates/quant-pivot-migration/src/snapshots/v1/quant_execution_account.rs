@@ -34,6 +34,9 @@ pub struct Model {
     #[sea_orm(has_many)]
     pub quant_venue_incentive_events: HasMany<super::quant_venue_incentive_event::Entity>,
     #[sea_orm(has_many)]
+    pub quant_venue_incentive_reconciliation_scans:
+        HasMany<super::quant_venue_incentive_reconciliation_scan::Entity>,
+    #[sea_orm(has_many)]
     pub quant_positions: HasMany<super::quant_position::Entity>,
     #[sea_orm(has_many)]
     pub quant_settlement_redeems: HasMany<super::quant_settlement_redeem::Entity>,

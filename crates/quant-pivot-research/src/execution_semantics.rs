@@ -236,12 +236,18 @@ impl PitMakerRebateSchedule {
         let expected_rebate_usd = Usd::new(quantize_venue_amount(
             fee_schedule.fee_equivalent(price, shares, fill_at)?.inner() * self.rebate_rate,
         ));
+        let program_date = fill_at.date_naive();
+        let expected_credit_at = DateTime::<Utc>::from_naive_utc_and_offset(
+            program_date
+                .checked_add_days(Days::new(1))
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .ok_or(FeeError::InvalidFill)?,
+            Utc,
+        );
         Ok(Some(DeferredVenueIncentive {
             expected_rebate_usd,
-            settlement_date: fill_at
-                .date_naive()
-                .checked_add_days(Days::new(1))
-                .ok_or(FeeError::InvalidFill)?,
+            program_date,
+            expected_credit_at,
             source_schedule_hash: self.schedule_hash,
             eligibility: MakerRebateEligibility::EligibleMakerFill,
         }))
@@ -1135,6 +1141,43 @@ mod tests {
         let resolved = PitMarketExecutionEconomics::resolve(&clob, Some(&gamma), fees.effective_at)
             .expect("future rebate source is unavailable, not a fee failure");
         assert!(resolved.maker_rebate_schedule.is_none());
+    }
+
+    #[test]
+    fn visible_invalid_rebate_rejected() {
+        let fees = PitFeeSchedule::semantics_fixture();
+        let market_id = MarketId::new("0xmarket");
+        let clob = MarketFeeSchedule {
+            market_id: market_id.clone(),
+            market_info_version_id: ClobMarketInfoVersionId::from_v7(),
+            market_info_payload_hash: fees.schedule_hash,
+            platform_rate: fees.platform_rate,
+            exponent: fees.exponent,
+            taker_only: fees.taker_only,
+            builder_maker_fee_bps: Bps::ZERO,
+            builder_taker_fee_bps: Bps::ZERO,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+            effective_at: fees.effective_at,
+            available_at: fees.available_at,
+        };
+        let gamma = MarketMakerRebateSchedule {
+            market_id,
+            fees_enabled: true,
+            platform_rate: fees.platform_rate,
+            exponent: fees.exponent,
+            taker_only: fees.taker_only,
+            rebate_rate: dec!(1.01),
+            effective_at: fees.effective_at,
+            available_at: fees.available_at,
+            catalog_change_hash: ContentHash::parse(&format!("blake3:{}", "4".repeat(64)))
+                .expect("hash"),
+            schedule_hash: ContentHash::parse(&format!("blake3:{}", "5".repeat(64))).expect("hash"),
+        };
+
+        assert_eq!(
+            PitMarketExecutionEconomics::resolve(&clob, Some(&gamma), fees.effective_at),
+            Err(FeeError::InvalidSchedule)
+        );
     }
 
     #[test]

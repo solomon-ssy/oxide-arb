@@ -83,8 +83,8 @@ pub struct RecommendationDelta {
     pub compare: Option<RecommendationDiffSnapshot>,
     /// Stable, typed summary used by the UI to prioritize high-signal changes.
     pub changed_fields: Vec<RecommendationChangedField>,
-    /// `compare − base` suggested USD (absent side counts as zero); signed.
-    pub suggested_usd_delta: Usd,
+    /// `compare − base` hard-reserved cash (absent side counts as zero); signed.
+    pub hard_reserved_cash_usd_delta: Usd,
 }
 
 /// Report-level execution-eligibility shift across the two reports.
@@ -107,14 +107,14 @@ pub struct ReportDiff {
     pub added: Vec<RecommendationDelta>,
     /// Positions present in `base` but not in `compare`.
     pub removed: Vec<RecommendationDelta>,
-    /// Positions present in both (rank / suggested USD may differ).
+    /// Positions present in both (rank / hard-reserved cash may differ).
     pub retained: Vec<RecommendationDelta>,
-    /// Total suggested USD across the base report's recommendations.
-    pub base_total_suggested_usd: Usd,
-    /// Total suggested USD across the compare report's recommendations.
-    pub compare_total_suggested_usd: Usd,
-    /// `compare − base` total suggested USD; signed.
-    pub total_suggested_usd_delta: Usd,
+    /// Total hard-reserved cash across the base report's recommendations.
+    pub base_total_hard_reserved_cash_usd: Usd,
+    /// Total hard-reserved cash across the compare report's recommendations.
+    pub compare_total_hard_reserved_cash_usd: Usd,
+    /// `compare − base` total hard-reserved cash; signed.
+    pub total_hard_reserved_cash_usd_delta: Usd,
     /// Report-level execution-eligibility shift.
     pub eligibility: EligibilityShift,
 }
@@ -128,7 +128,7 @@ impl RecommendationInfo {
     }
 }
 
-fn total_suggested(recs: &[RecommendationInfo]) -> Usd {
+fn total_hard_reservation(recs: &[RecommendationInfo]) -> Usd {
     recs.iter()
         .map(|rec| rec.trade_plan.sizing.hard_reserved_cash_usd)
         .sum()
@@ -175,8 +175,8 @@ impl RecommendationReportInfo {
             }
         }
 
-        let base_total = total_suggested(base_recs);
-        let compare_total = total_suggested(compare_recs);
+        let base_total = total_hard_reservation(base_recs);
+        let compare_total = total_hard_reservation(compare_recs);
 
         ReportDiff {
             base_report_id: self.recommendation_report_id,
@@ -184,9 +184,9 @@ impl RecommendationReportInfo {
             added,
             removed,
             retained,
-            base_total_suggested_usd: base_total,
-            compare_total_suggested_usd: compare_total,
-            total_suggested_usd_delta: compare_total - base_total,
+            base_total_hard_reserved_cash_usd: base_total,
+            compare_total_hard_reserved_cash_usd: compare_total,
+            total_hard_reserved_cash_usd_delta: compare_total - base_total,
             eligibility: EligibilityShift {
                 base: self.summary_json.execution_eligibility_summary,
                 compare: compare.summary_json.execution_eligibility_summary,
@@ -211,7 +211,7 @@ fn recommendation_delta(
         base: base.map(Into::into),
         compare: compare.map(Into::into),
         changed_fields: recommendation_changed_fields(base, compare),
-        suggested_usd_delta: delta,
+        hard_reserved_cash_usd_delta: delta,
     })
 }
 

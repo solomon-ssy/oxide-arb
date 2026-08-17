@@ -67,6 +67,8 @@ pub mod entity {
     pub const QUANT_EXECUTION_ACCOUNT: &str = "quant_execution_account";
     /// `quant_venue_incentive_event`.
     pub const QUANT_VENUE_INCENTIVE_EVENT: &str = "quant_venue_incentive_event";
+    pub const QUANT_VENUE_INCENTIVE_RECONCILIATION_SCAN: &str =
+        "quant_venue_incentive_reconciliation_scan";
     /// `quant_capital_allocation`.
     pub const QUANT_CAPITAL_ALLOCATION: &str = "quant_capital_allocation";
     /// `quant_position`.

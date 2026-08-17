@@ -1284,16 +1284,9 @@ fn incentive_delay_secs(entry: &PassiveEntryEconomics) -> QuantResult<u64> {
     let Some(incentive) = entry.full_fill_maker_rebate else {
         return Ok(0);
     };
-    let settlement = incentive
-        .settlement_date
-        .and_hms_opt(0, 0, 0)
-        .ok_or_else(|| ReportError::InvariantViolation {
-            stage: "economic_passive_scenario",
-            detail: "maker rebate settlement date cannot form a UTC instant".to_owned(),
-        })?
-        .and_utc();
     u64::try_from(
-        settlement
+        incentive
+            .expected_credit_at
             .signed_duration_since(entry.decision_at)
             .num_seconds()
             .max(0),

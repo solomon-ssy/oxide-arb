@@ -121,6 +121,7 @@ pub mod quant_trade_policy_validation;
 pub mod quant_trade_policy_validation_row;
 pub mod quant_training_dataset;
 pub mod quant_venue_incentive_event;
+pub mod quant_venue_incentive_reconciliation_scan;
 pub mod quant_weather_daily_temperature_projection;
 pub mod quant_weather_observation_current;
 pub mod research_profile_artifact;
@@ -257,6 +258,7 @@ pub const TABLES: &[&str] = &[
     "quant_trade_policy_validation_row",
     "quant_training_dataset",
     "quant_venue_incentive_event",
+    "quant_venue_incentive_reconciliation_scan",
     "quant_weather_daily_temperature_projection",
     "quant_weather_observation_current",
     "research_profile_artifact",
@@ -415,6 +417,7 @@ pub const ENUMS: &[&str] = &[
     "qp_user_status",
     "qp_venue_order_status",
     "qp_venue_incentive_kind",
+    "qp_venue_incentive_reconciliation_scan_status",
     "qp_venue_incentive_stage",
     "qp_venue_trade_status",
     "qp_weather_temperature_statistic",
@@ -543,6 +546,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_trade_policy_validation_row.rs"),
     include_bytes!("quant_training_dataset.rs"),
     include_bytes!("quant_venue_incentive_event.rs"),
+    include_bytes!("quant_venue_incentive_reconciliation_scan.rs"),
     include_bytes!("quant_weather_daily_temperature_projection.rs"),
     include_bytes!("quant_weather_observation_current.rs"),
     include_bytes!("research_profile_artifact.rs"),

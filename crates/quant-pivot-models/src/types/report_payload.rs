@@ -21,6 +21,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use quant_pivot_error::hashing::CanonicalDigestError;
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +49,7 @@ use crate::{
 // ── Entry plan: when to buy ───────────────────────────────────────────────
 
 /// When and how a recommendation becomes executable.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 pub struct EntryPlan {
     /// Immutable condition artifact reference evaluated at recommendation scope.
     pub condition: EntryConditionPlan,
@@ -71,7 +72,7 @@ pub struct EntryPlan {
 }
 
 /// How an armed entry is submitted to the venue.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum EntryOrderPolicy {
     /// Rest a bounded, post-only limit order until the recommendation expires.
@@ -97,7 +98,7 @@ impl EntryOrderPolicy {
 // ── Sizing plan: how much to buy ──────────────────────────────────────────
 
 /// How much capital a recommendation should deploy and the binding cap.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 pub struct SizingPlan {
     /// Exact immutable tier selected by the global MILP.
     pub economic_tier_id: EconomicTierId,
@@ -117,6 +118,8 @@ pub struct SizingPlan {
     /// Aggressive executable VWAP or passive post-only limit price.
     pub reference_entry_price: Price,
     /// Suggested allocation as a fraction of the capital base.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub portfolio_weight_pct: Decimal,
     /// Projected market exposure after this allocation.
     pub market_exposure_after_usd: Usd,
@@ -138,25 +141,33 @@ pub struct SizingPlan {
 ///
 /// Runtime configuration may disable or shadow it, but never supplies or
 /// tightens these decision thresholds.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct OpportunisticExitPolicy {
     pub min_confidence: Probability,
     pub min_expected_alpha_bps: Bps,
     pub min_p_exit_better: Probability,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub max_cumulative_exit_pct: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub min_incremental_exit_pct: Decimal,
 }
 
 /// When and how a recommendation should be exited.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 pub struct ExitPlan {
     /// Take-profit price target.
     pub take_profit_price: Option<Price>,
     /// Take-profit as a percentage move.
+    #[serde(with = "crate::types::decimal_string_option")]
+    #[schemars(with = "Option<String>")]
     pub take_profit_pct: Option<Decimal>,
     /// Stop-loss price target.
     pub stop_loss_price: Option<Price>,
     /// Stop-loss as a percentage move.
+    #[serde(with = "crate::types::decimal_string_option")]
+    #[schemars(with = "Option<String>")]
     pub stop_loss_pct: Option<Decimal>,
     /// Absolute time-based exit.
     pub time_exit_at: Option<DateTime<Utc>>,
@@ -180,7 +191,7 @@ pub struct ExitPlan {
     pub exit_reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TradePolicyCohortProvenance {
     pub artifact_id: TradePolicyArtifactId,
     pub artifact_hash: ContentHash,
@@ -192,7 +203,7 @@ pub struct TradePolicyCohortProvenance {
 ///
 /// Bootstrap recommendations bind their immutable L2-free profile instead of
 /// pretending that a historical execution-policy fit exists.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum RecommendationPolicyProvenance {
     TradePolicy {
@@ -223,7 +234,7 @@ impl From<TradePolicyCohortProvenance> for RecommendationPolicyProvenance {
 ///
 /// This intentionally contains no synthetic take-profit, stop-loss, trailing,
 /// or opportunistic-exit thresholds. It is not accepted by execution paths.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapExitGuidance {
     pub reference_horizon_secs: u64,
@@ -233,7 +244,7 @@ pub struct BootstrapExitGuidance {
 }
 
 /// Exit authority carried by a recommendation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum RecommendationExitPlan {
     Executable { plan: Box<ExitPlan> },
@@ -254,7 +265,7 @@ impl From<ExitPlan> for RecommendationExitPlan {
 /// recommendations instead own explicit, non-executable manual guidance. Both
 /// regimes require calibration, an exact scenario binding, and live L2 entry
 /// and sizing evidence before publication.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct RecommendationTradePlan {
     pub policy: Box<RecommendationPolicyProvenance>,
@@ -265,13 +276,15 @@ pub struct RecommendationTradePlan {
 }
 
 /// One deterministic cumulative scale-out target.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ScaleOutTarget {
     /// Stable target identifier.
     pub target_id: String,
     /// Executable mark that activates this target.
     pub trigger_price: Price,
     /// Target fraction exited relative to frozen entry-filled shares.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub target_cumulative_exit_pct: Decimal,
     /// Minimum acceptable sell price.
     pub min_price: Option<Price>,
@@ -284,7 +297,7 @@ pub struct ScaleOutTarget {
 }
 
 /// A trailing-stop policy relative to the position's peak mark.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TrailingStopPolicy {
     /// Trailing distance in basis points below the peak mark.
     pub trail_bps: Bps,
@@ -293,9 +306,11 @@ pub struct TrailingStopPolicy {
 }
 
 /// Frozen conditions that invalidate the entry thesis.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ThesisInvalidationPolicy {
     /// Minimum fresh-score / entry-score ratio. Must be in `[0, 1]`.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub min_score_retention: Decimal,
     /// Minimum executable expected return required to keep holding.
     pub min_expected_return_bps: Bps,
@@ -306,7 +321,7 @@ pub struct ThesisInvalidationPolicy {
 // ── Risk envelope: admission inputs ──────────────────────────────────────
 
 /// Hard risk bounds consumed by execution admission (not natural language).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 pub struct RiskEnvelope {
     /// Maximum tolerated loss in USD.
     pub max_loss_usd: Usd,
@@ -381,7 +396,7 @@ impl RiskEnvelope {
 // ── Factor breakdown ─────────────────────────────────────────────────────
 
 /// One factor's signed contribution to a recommendation's composite score.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FactorBreakdownEntry {
     /// Factor name.
     pub factor_name: String,
@@ -391,6 +406,8 @@ pub struct FactorBreakdownEntry {
     /// indeterminate) — drives the report's distinct "—" rendering.
     pub value_state: FactorValueState,
     /// Raw factor value before normalization.
+    #[serde(with = "crate::types::decimal_string_option")]
+    #[schemars(with = "Option<String>")]
     pub raw_value: Option<Decimal>,
     /// Normalized factor score in `[0, 1]`; `None` when the factor was missing
     /// or indeterminate (never a fabricated neutral).
@@ -403,8 +420,12 @@ pub struct FactorBreakdownEntry {
     #[serde(default)]
     pub indeterminate_reason: Option<FactorIndeterminateReason>,
     /// Weight applied by the model.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub weight: Decimal,
     /// Signed contribution to the composite score.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schemars(with = "String")]
     pub contribution: Decimal,
     /// Confidence attached to the factor.
     pub confidence: Probability,
@@ -417,7 +438,7 @@ pub struct FactorBreakdownEntry {
 }
 
 /// JSONB column wrapper for a recommendation's full factor breakdown.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 #[serde(transparent)]
 pub struct RecommendationFactorBreakdown(pub Vec<FactorBreakdownEntry>);
 
@@ -477,7 +498,7 @@ impl EvidenceRefs {
 /// Computed and persisted with the recommendation. The create-intent and
 /// admission flow consumes it. `eligible_modes` always contains
 /// [`QuantRuntimeMode::ReportOnly`] (a report is the report-only artifact).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionEligibility {
     /// Runtime modes in which this recommendation is eligible for execution.
@@ -510,7 +531,7 @@ impl ExecutionEligibility {
 // ── Report summary ───────────────────────────────────────────────────────
 
 /// Report-level summary persisted to `quant_recommendation_report.summary_json`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct ReportSummary {
     /// Number of markets in the selection snapshot.
@@ -523,9 +544,9 @@ pub struct ReportSummary {
     pub rejected_tier_count: u32,
     /// Number of published recommendations.
     pub published_recommendation_count: u32,
-    /// Total suggested USD across published recommendations.
-    pub total_suggested_usd: Usd,
-    /// Largest single suggested USD.
+    /// Total hard cash reservation across published recommendations.
+    pub total_hard_reserved_cash_usd: Usd,
+    /// Largest single-recommendation hard cash reservation.
     pub max_single_recommendation_usd: Usd,
     /// Robust worst-distribution discounted expected net USD for the selected portfolio.
     pub robust_expected_net_usd: Usd,
@@ -537,11 +558,11 @@ pub struct ReportSummary {
     pub maximum_scenario_loss_usd: Usd,
     /// Discounted capital occupation across the selected portfolio.
     pub capital_occupancy_usd_hours: UsdHours,
-    /// Suggested USD allocated per category.
+    /// Hard-reserved cash allocated per category.
     pub category_allocation: BTreeMap<MarketCategory, Usd>,
-    /// Suggested USD allocated per event.
+    /// Hard-reserved cash allocated per event.
     pub event_allocation: BTreeMap<EventId, Usd>,
-    /// Suggested USD allocated per model Route.
+    /// Hard-reserved cash allocated per model Route.
     pub route_allocation: BTreeMap<BuyModelRoute, Usd>,
     /// Data-quality summary.
     pub data_quality_summary: DataQualitySummary,
@@ -556,7 +577,7 @@ pub struct ReportSummary {
 }
 
 /// Confidence distribution across published recommendations.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ConfidenceSummary {
     /// Mean confidence.
     pub mean_confidence: Probability,
@@ -567,7 +588,7 @@ pub struct ConfidenceSummary {
 }
 
 /// Counts of candidates by data-quality classification.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DataQualitySummary {
     /// Fresh inputs.
     pub fresh_count: u32,
@@ -609,7 +630,7 @@ impl Sum for DataQualitySummary {
 }
 
 /// One rejection-reason tally.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RejectionReasonCount {
     /// Rejection reason label.
     pub reason: PortfolioRejectionReason,
@@ -618,7 +639,9 @@ pub struct RejectionReasonCount {
 }
 
 /// Stable economic admission or global-optimum exclusion reason.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PortfolioRejectionReason {
     ScenarioExitCapacity,
@@ -633,7 +656,7 @@ pub enum PortfolioRejectionReason {
 }
 
 /// Execution-eligibility roll-up across published recommendations.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EligibilitySummary {
     /// Eligible under report-only.
     pub eligible_report_only: u32,

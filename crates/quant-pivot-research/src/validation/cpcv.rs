@@ -302,6 +302,7 @@ pub struct PolicyFoldRuntime {
     pub candidate_id: String,
     pub training_group_count: u64,
     pub training_utility_bps: Decimal,
+    pub training_risk_utility_bps: Decimal,
 }
 
 impl FoldRuntime {
@@ -405,6 +406,10 @@ pub struct GroupEvaluation {
     /// realized tick `PnL` / allocated capital for Buy-side, realized lot
     /// proceeds / cost basis for the Sell-side).
     pub return_value: Decimal,
+    /// Conservative return used by drawdown and tail-loss gates. It equals
+    /// `return_value` unless expected economics include an unreceived venue
+    /// incentive that hard-risk metrics must exclude.
+    pub risk_return_value: Decimal,
     /// Allocation-independent calibration residual used by the scenario-model
     /// fit after complete OOS path reconstruction.
     pub scenario_residual: Option<Decimal>,
@@ -430,6 +435,7 @@ pub struct GroupEvaluation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathEconomicReplay {
     pub group_returns: Vec<Decimal>,
+    pub risk_group_returns: Vec<Decimal>,
     pub executed_turnover: Decimal,
 }
 
@@ -935,15 +941,22 @@ fn build_path(
             groups.len()
         )));
     }
-    let (group_returns, path_turnover) = if let Some(replay) = economic_replay {
-        if replay.group_returns.len() != evaluations.len() {
+    let (group_returns, risk_group_returns, path_turnover) = if let Some(replay) = economic_replay {
+        if replay.group_returns.len() != evaluations.len()
+            || replay.risk_group_returns.len() != evaluations.len()
+        {
             return Err(methodology(format!(
-                "path {path_index} stateful replay returned {} periods for {} groups",
+                "path {path_index} stateful replay returned {}/{} expected/risk periods for {} groups",
                 replay.group_returns.len(),
+                replay.risk_group_returns.len(),
                 evaluations.len()
             )));
         }
-        (replay.group_returns, Some(replay.executed_turnover))
+        (
+            replay.group_returns,
+            replay.risk_group_returns,
+            Some(replay.executed_turnover),
+        )
     } else {
         let turnover = evaluations
             .iter()
@@ -954,6 +967,10 @@ fn build_path(
             evaluations
                 .iter()
                 .map(|evaluation| evaluation.return_value)
+                .collect(),
+            evaluations
+                .iter()
+                .map(|evaluation| evaluation.risk_return_value)
                 .collect(),
             turnover,
         )
@@ -979,12 +996,13 @@ fn build_path(
     // undefined).
     let target_rank_ic =
         stats::spearman(&pooled_scores, &pooled_realized).round_dp(RESEARCH_DECIMAL_SCALE);
-    let max_drawdown = max_drawdown_from_returns(&group_returns);
-    let tail_loss = tail_loss_from_returns(&group_returns, Decimal::new(10, 2))?;
+    let max_drawdown = max_drawdown_from_returns(&risk_group_returns);
+    let tail_loss = tail_loss_from_returns(&risk_group_returns, Decimal::new(10, 2))?;
     Ok(BacktestPath {
         path_index,
         decision_times: groups.iter().map(|group| group.decision_at).collect(),
         group_returns,
+        risk_group_returns,
         scenario_residuals,
         sharpe,
         target_rank_ic,
@@ -1218,6 +1236,8 @@ mod tests {
                     group_index,
                     return_value: Decimal::from(u64::try_from(group_index).unwrap_or(0))
                         / Decimal::from(10_000),
+                    risk_return_value: Decimal::from(u64::try_from(group_index).unwrap_or(0))
+                        / Decimal::from(10_000),
                     scenario_residual: None,
                     rank_observations: vec![RankObservation {
                         score: dec!(1),
@@ -1412,6 +1432,7 @@ mod tests {
                     .map(|&group_index| GroupEvaluation {
                         group_index,
                         return_value: Decimal::ZERO,
+                        risk_return_value: Decimal::ZERO,
                         scenario_residual: None,
                         rank_observations: Vec::new(),
                         executed_turnover: Some(Decimal::ONE),
@@ -1466,6 +1487,7 @@ mod tests {
                     .map(|&group_index| GroupEvaluation {
                         group_index,
                         return_value: Decimal::ZERO,
+                        risk_return_value: Decimal::ZERO,
                         scenario_residual: None,
                         rank_observations: Vec::new(),
                         executed_turnover: None,
@@ -1484,6 +1506,7 @@ mod tests {
                 self.path_calls.fetch_add(1, Ordering::Relaxed);
                 Ok(Some(PathEconomicReplay {
                     group_returns: vec![dec!(0.001); groups.len()],
+                    risk_group_returns: vec![dec!(0.001); groups.len()],
                     executed_turnover: dec!(0.25),
                 }))
             }
@@ -1577,6 +1600,7 @@ mod tests {
                     .map(|&group_index| GroupEvaluation {
                         group_index,
                         return_value: Decimal::ZERO,
+                        risk_return_value: Decimal::ZERO,
                         scenario_residual: None,
                         rank_observations: vec![RankObservation {
                             score: Decimal::from(group_index as u64),

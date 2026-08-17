@@ -438,6 +438,18 @@ pub enum QpVenueIncentiveStage {
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
+    enum_name = "qp_venue_incentive_reconciliation_scan_status"
+)]
+pub enum QpVenueIncentiveReconciliationScanStatus {
+    #[sea_orm(string_value = "succeeded")]
+    Succeeded,
+    #[sea_orm(string_value = "failed")]
+    Failed,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
     enum_name = "qp_execution_order_state"
 )]
 pub enum QpExecutionOrderState {

@@ -515,11 +515,11 @@ fn report_path(report: &RecommendationReportInfo) -> String {
 
 fn notification_body(report: &RecommendationReportInfo, n: &ReportNotificationPayload) -> String {
     let mut body = format!(
-        "status={} mode={} recommendations={} total_suggested_usd={}",
+        "status={} mode={} recommendations={} total_hard_reserved_cash_usd={}",
         n.status,
         n.runtime_mode.as_str(),
         n.published_count,
-        n.total_suggested_usd,
+        n.total_hard_reserved_cash_usd,
     );
     if let Some(reason) = n.empty_reason {
         let _ = write!(body, " empty_reason={}", reason.as_str());
@@ -535,7 +535,7 @@ fn notification_body(report: &RecommendationReportInfo, n: &ReportNotificationPa
             probability = rec.profit_probability_bps,
             robust = rec.robust_expected_net_usd,
             marginal = rec.marginal_portfolio_value_usd,
-            usd = rec.suggested_usd,
+            usd = rec.hard_reserved_cash_usd,
         );
     }
     for warning in &n.warnings {
@@ -570,7 +570,7 @@ mod tests {
             status: "published".to_owned(),
             runtime_mode: QuantRuntimeMode::SemiAuto,
             published_count: 2,
-            total_suggested_usd: Usd::new(dec!(500)),
+            total_hard_reserved_cash_usd: Usd::new(dec!(500)),
             top3: vec![
                 NotificationRecommendation {
                     market_id: "0xA".to_owned(),
@@ -579,7 +579,7 @@ mod tests {
                     profit_probability_bps: Bps::new(dec!(7100)),
                     robust_expected_net_usd: Usd::new(dec!(25)),
                     marginal_portfolio_value_usd: Usd::new(dec!(20)),
-                    suggested_usd: Usd::new(dec!(300)),
+                    hard_reserved_cash_usd: Usd::new(dec!(300)),
                 },
                 NotificationRecommendation {
                     market_id: "0xB".to_owned(),
@@ -588,7 +588,7 @@ mod tests {
                     profit_probability_bps: Bps::new(dec!(6600)),
                     robust_expected_net_usd: Usd::new(dec!(15)),
                     marginal_portfolio_value_usd: Usd::new(dec!(12)),
-                    suggested_usd: Usd::new(dec!(200)),
+                    hard_reserved_cash_usd: Usd::new(dec!(200)),
                 },
             ],
             warnings: vec!["thin book".to_owned()],
@@ -596,7 +596,7 @@ mod tests {
         };
         let body = notification_body(&report, &payload);
         assert!(body.contains("mode=semi_auto"), "{body}");
-        assert!(body.contains("total_suggested_usd=500"), "{body}");
+        assert!(body.contains("total_hard_reserved_cash_usd=500"), "{body}");
         assert!(body.contains("0xA"), "top-1 market present: {body}");
         assert!(body.contains("0xB"), "top-2 market present: {body}");
         assert!(body.contains("warning: thin book"), "{body}");

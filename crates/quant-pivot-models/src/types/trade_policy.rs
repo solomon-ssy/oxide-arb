@@ -1,6 +1,6 @@
 //! Governed trade-policy artifact contracts.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
@@ -29,8 +29,8 @@ use crate::{
 };
 
 /// Breaking wire version for the standalone policy artifact family.
-pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 2;
-pub const TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION: u32 = 2;
+pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 3;
+pub const TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION: u32 = 3;
 pub const TRADE_POLICY_MAX_CANDIDATES: usize = 32;
 
 /// Immutable statistical and execution-quality thresholds used for publication.
@@ -219,7 +219,7 @@ impl TradePolicyFitContract {
 }
 
 /// Versioned provenance for one fitted cohort dimension.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TradePolicyCohortDimension {
     pub methodology_id: String,
@@ -228,7 +228,7 @@ pub struct TradePolicyCohortDimension {
 }
 
 /// Deterministic cohort selector for prediction-market trajectory policies.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TradePolicyCohortKey {
     pub profile_ref: ResearchProfileRef,
@@ -444,7 +444,9 @@ pub enum EntryOrderTemplate {
 }
 
 /// Entry execution route fitted and published independently within a cohort.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TradePolicyEntryRoute {
     Aggressive,
@@ -637,6 +639,7 @@ pub struct TradePolicyCohort {
     pub passive_reconciled_trade_coverage: Option<Decimal>,
     pub passive_fill_distribution: Option<PassiveFillDistribution>,
     pub fee_catalog_coverage: Decimal,
+    pub rebate_evidence_coverage: Decimal,
     pub cpcv_path_count: u32,
     pub trial_count: u32,
     pub deflated_sharpe_ratio: Decimal,
@@ -661,6 +664,7 @@ pub struct TradePolicyValidationEvidence {
     pub depth_failure_rate: Option<Decimal>,
     pub common_candidate_support: Option<Decimal>,
     pub fee_catalog_coverage: Option<Decimal>,
+    pub rebate_evidence_coverage: Option<Decimal>,
     pub eligible_market_coverage: Option<Decimal>,
 }
 
@@ -672,11 +676,13 @@ pub struct TradePolicyValidationEvidence {
 pub struct TradePolicyTrialMetrics {
     pub sample_count: u64,
     pub effective_sample_size: Decimal,
-    pub net_return_bps: Decimal,
-    pub sharpe_ratio: Option<Decimal>,
+    pub expected_net_return_bps: Decimal,
+    pub risk_net_return_bps: Decimal,
+    pub expected_sharpe_ratio: Option<Decimal>,
     pub executable_coverage: Decimal,
     pub full_l2_coverage: Decimal,
     pub fee_catalog_coverage: Decimal,
+    pub rebate_evidence_coverage: Decimal,
     pub ambiguous_touch_rate: Decimal,
     pub depth_failure_rate: Decimal,
     pub latency_stress_multiplier: Decimal,
@@ -695,6 +701,7 @@ impl TradePolicyTrialMetrics {
             self.executable_coverage,
             self.full_l2_coverage,
             self.fee_catalog_coverage,
+            self.rebate_evidence_coverage,
             self.ambiguous_touch_rate,
             self.depth_failure_rate,
         ]
@@ -910,6 +917,8 @@ pub enum TradePolicyPublicationBlocker {
     InsufficientCommonCandidateSupport,
     MissingFeeCatalogCoverage,
     InsufficientFeeCatalogCoverage,
+    MissingRebateEvidenceCoverage,
+    IncompleteRebateEvidenceCoverage,
     MissingEligibleMarketCoverage,
     InsufficientEligibleMarketCoverage,
     InsufficientCohortEffectiveSampleSize { cohort_index: u32 },
@@ -920,6 +929,7 @@ pub enum TradePolicyPublicationBlocker {
     InsufficientPassiveTradeCoverage { cohort_index: u32 },
     InvalidPassiveFillDistribution { cohort_index: u32 },
     InsufficientCohortFeeCoverage { cohort_index: u32 },
+    IncompleteCohortRebateEvidence { cohort_index: u32 },
     InsufficientCohortCpcvPaths { cohort_index: u32 },
     CohortDeflatedSharpeRatioBelowGate { cohort_index: u32 },
     CohortPboAboveGate { cohort_index: u32 },
@@ -930,9 +940,11 @@ pub enum TradePolicyPublicationBlocker {
     InvalidParameterSource { cohort_index: u32 },
 }
 
-/// Canonicalize and validate one fit candidate set. Candidate order is not a
-/// semantic dimension; ids are unique and exactly one Immediate baseline is
-/// mandatory.
+/// Canonicalize and validate one fit candidate set.
+///
+/// Candidate order is not a semantic dimension; ids are unique and each entry
+/// route has exactly one Immediate baseline so OOS fitting compares aggressive
+/// and passive execution under identical entry predicates.
 pub fn canonicalize_policy_candidates(
     mut candidates: Vec<TradePolicyCandidateSpec>,
 ) -> Result<Vec<TradePolicyCandidateSpec>, String> {
@@ -942,7 +954,7 @@ pub fn canonicalize_policy_candidates(
         ));
     }
     let mut ids = BTreeSet::new();
-    let mut immediate_count = 0_usize;
+    let mut immediate_counts = BTreeMap::new();
     for candidate in &mut candidates {
         let id = candidate.candidate_id.trim();
         if id.is_empty() || id.len() > 128 {
@@ -952,7 +964,11 @@ pub fn canonicalize_policy_candidates(
             return Err(format!("duplicate condition candidate id `{id}`"));
         }
         match &mut candidate.entry_condition {
-            EntryConditionTemplate::Immediate => immediate_count += 1,
+            EntryConditionTemplate::Immediate => {
+                *immediate_counts
+                    .entry(candidate.entry_execution.route())
+                    .or_insert(0_usize) += 1;
+            }
             EntryConditionTemplate::Conditional {
                 root,
                 confirmation_ms,
@@ -972,8 +988,17 @@ pub fn canonicalize_policy_candidates(
         candidate.entry_execution.validate_entry_execution()?;
         candidate.exit.validate_exit_template()?;
     }
-    if immediate_count != 1 {
-        return Err("policy candidates must contain exactly one Immediate baseline".to_owned());
+    if [
+        TradePolicyEntryRoute::Aggressive,
+        TradePolicyEntryRoute::PassivePostOnly,
+    ]
+    .into_iter()
+    .any(|route| immediate_counts.get(&route).copied().unwrap_or_default() != 1)
+    {
+        return Err(
+            "policy candidates must contain exactly one Immediate baseline per entry route"
+                .to_owned(),
+        );
     }
     candidates.sort_by(|left, right| left.candidate_id.cmp(&right.candidate_id));
     Ok(candidates)
@@ -1426,6 +1451,13 @@ impl TradePolicyArtifactPayload {
             }
             Some(_) => {}
         }
+        match validation.rebate_evidence_coverage {
+            None => blockers.push(TradePolicyPublicationBlocker::MissingRebateEvidenceCoverage),
+            Some(value) if value != Decimal::ONE => {
+                blockers.push(TradePolicyPublicationBlocker::IncompleteRebateEvidenceCoverage);
+            }
+            Some(_) => {}
+        }
         match validation.eligible_market_coverage {
             None => blockers.push(TradePolicyPublicationBlocker::MissingEligibleMarketCoverage),
             Some(value) if value < gate.min_eligible_market_coverage => {
@@ -1500,6 +1532,11 @@ impl TradePolicyArtifactPayload {
             if cohort.fee_catalog_coverage < gate.min_fee_catalog_coverage {
                 blockers.push(
                     TradePolicyPublicationBlocker::InsufficientCohortFeeCoverage { cohort_index },
+                );
+            }
+            if cohort.rebate_evidence_coverage != Decimal::ONE {
+                blockers.push(
+                    TradePolicyPublicationBlocker::IncompleteCohortRebateEvidence { cohort_index },
                 );
             }
             if cohort.cpcv_path_count < gate.min_cpcv_paths {
@@ -1698,6 +1735,7 @@ mod tests {
                 depth_failure_rate: None,
                 common_candidate_support: None,
                 fee_catalog_coverage: None,
+                rebate_evidence_coverage: None,
                 eligible_market_coverage: None,
             },
         };

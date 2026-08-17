@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
@@ -50,7 +51,9 @@ pub struct PositionSnapshot {
 /// The planner uses this as the starting point for `exposure_after` projections
 /// and cap-room checks. Built from [`PositionSnapshot`]s via
 /// [`ExposureBreakdown::from_positions`].
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ExposureBreakdown {
     /// Net USD exposure per market.

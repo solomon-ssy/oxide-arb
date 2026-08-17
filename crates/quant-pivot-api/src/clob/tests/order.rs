@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use alloy::primitives::Address;
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
+use polymarket_client_sdk_v2::clob::types::SignatureType;
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::{
     config::PolymarketConfig,
@@ -11,7 +12,7 @@ use quant_pivot_models::{
         common::{OrderType, TickSize},
         execution::{VenueOrderStatus, VenueTradeStatus},
     },
-    types::{EvmTransactionHash, MarketId, OrderId, VenueTradeId},
+    types::{EvmAddress, EvmTransactionHash, MarketId, OrderId, VenueTradeId},
 };
 use rust_decimal_macros::dec;
 use serde_json::Value;
@@ -21,9 +22,9 @@ use wiremock::{
 };
 
 use super::support::{
-    clob_client_order_timeout, deposit_wallet_clob_client, mount_clob_balance_requirements,
-    mount_clob_requirements, mount_derive_api_key, mount_post_order, test_clob_client,
-    test_order_request, test_signer, test_token_id,
+    clob_client_order_timeout, deposit_wallet_clob_client, funder_clob_client,
+    mount_clob_balance_requirements, mount_clob_requirements, mount_derive_api_key,
+    mount_post_order, test_clob_client, test_order_request, test_signer, test_token_id,
 };
 use crate::{
     clob::{ClobClient, OrderSubmissionStage},
@@ -332,6 +333,78 @@ async fn deposit_wallet_uses_identity() {
             .is_some_and(|signature| signature.len() > 132),
         "POLY_1271 order signature must be ERC-7739 wrapped, not a 65-byte ECDSA signature"
     );
+}
+
+async fn assert_maker_identity(signature_type: Option<SignatureType>, funder: Address) {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_requirements(&server, &token_id).await;
+    mount_post_order(
+        &server,
+        r#"{
+            "errorMsg":"",
+            "makingAmount":"50",
+            "orderID":"venue-maker-identity",
+            "status":"matched",
+            "success":true,
+            "takingAmount":"40",
+            "transactionHashes":[]
+        }"#,
+        1,
+    )
+    .await;
+    let client = match signature_type {
+        Some(signature_type) => funder_clob_client(&server, signature_type, funder).await,
+        None => test_clob_client(&server).await,
+    };
+    let maker = client.maker_address().clone();
+    let date = NaiveDate::from_ymd_opt(2026, 8, 15).expect("fixture date");
+    Mock::given(method("GET"))
+        .and(path("/rebates/current"))
+        .and(query_param("date", "2026-08-15"))
+        .and(query_param("maker_address", maker.as_str()))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "date": "2026-08-15",
+                "condition_id": CONDITION_ID,
+                "asset_address": format!("0x{}", "3".repeat(40)),
+                "maker_address": maker.as_str(),
+                "rebated_fees_usdc": "0.25"
+            }])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .place_order(&test_order_request(OrderType::Fak))
+        .await
+        .expect("place identity order");
+    let awards = client
+        .maker_rebate_awards(date)
+        .await
+        .expect("read maker awards");
+    let requests = server.received_requests().await.expect("request ledger");
+    let order: Value = requests
+        .iter()
+        .find(|request| request.url.path() == "/order")
+        .map(|request| serde_json::from_slice(&request.body).expect("order JSON"))
+        .expect("order request");
+    let signed_order_maker = order["order"]["maker"]
+        .as_str()
+        .and_then(|value| EvmAddress::parse(value.to_ascii_lowercase()).ok())
+        .expect("signed order maker");
+
+    assert_eq!(awards[0].maker_address, signed_order_maker);
+    assert_eq!(&signed_order_maker, client.maker_address());
+}
+
+#[tokio::test]
+async fn rebate_matches_order_maker() {
+    assert_maker_identity(None, test_signer().address()).await;
+    assert_maker_identity(Some(SignatureType::Proxy), Address::repeat_byte(0x41)).await;
+    assert_maker_identity(Some(SignatureType::GnosisSafe), Address::repeat_byte(0x42)).await;
 }
 
 #[tokio::test]

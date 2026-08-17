@@ -175,7 +175,7 @@ pub struct NotificationRecommendation {
     pub profit_probability_bps: Bps,
     pub robust_expected_net_usd: Usd,
     pub marginal_portfolio_value_usd: Usd,
-    pub suggested_usd: Usd,
+    pub hard_reserved_cash_usd: Usd,
 }
 
 /// Operator-facing notification payload for a committed report.
@@ -186,7 +186,7 @@ pub struct ReportNotificationPayload {
     pub status: String,
     pub runtime_mode: QuantRuntimeMode,
     pub published_count: u32,
-    pub total_suggested_usd: Usd,
+    pub total_hard_reserved_cash_usd: Usd,
     pub top3: Vec<NotificationRecommendation>,
     pub warnings: Vec<String>,
     pub empty_reason: Option<EmptyReportReason>,

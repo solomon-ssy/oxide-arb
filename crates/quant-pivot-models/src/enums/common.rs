@@ -15,6 +15,7 @@ use thiserror::Error;
 
 pg_enum! {
     type_name = "qp_side",
+    @derive(schemars::JsonSchema)
     pub enum Side {
         Buy => "BUY",
         Sell => "SELL",
@@ -45,7 +46,7 @@ impl Side {
 }
 
 /// Polymarket CLOB order time-in-force types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderType {
     /// Fill-or-Kill: must fill entirely and immediately, or cancel. Never retried.
@@ -409,6 +410,7 @@ pub struct TickSizeParseError(pub String);
 
 pg_enum! {
     type_name = "qp_tick_size",
+    @derive(schemars::JsonSchema)
     @from_str(trim)
     @from_str(err = TickSizeParseError)
     pub enum TickSize {

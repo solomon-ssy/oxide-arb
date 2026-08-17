@@ -548,7 +548,7 @@ CREATE TABLE IF NOT EXISTS quant_report_recommendation_fact (
     `cvar_contribution_usd` Decimal(38, 18),
     `capital_occupancy_usd_hours` Decimal(38, 18),
     `marginal_portfolio_value_usd` Decimal(38, 18),
-    `suggested_usd` Decimal(38, 18),
+    `hard_reserved_cash_usd` Decimal(38, 18),
     `valid_until` DateTime64(3, 'UTC')
 ) ENGINE = ReplacingMergeTree(event_time)
 ORDER BY (recommendation_report_id, recommendation_id) SETTINGS index_granularity = 8192;

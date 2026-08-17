@@ -106,7 +106,7 @@ pub fn report_summary() -> ReportSummary {
         candidate_count: 8,
         rejected_tier_count: 3,
         published_recommendation_count: 2,
-        total_suggested_usd: Usd::new(dec!(500)),
+        total_hard_reserved_cash_usd: Usd::new(dec!(500)),
         max_single_recommendation_usd: Usd::new(dec!(300)),
         robust_expected_net_usd: Usd::new(dec!(75)),
         nominal_expected_net_usd: Usd::new(dec!(95)),
@@ -142,10 +142,10 @@ pub fn recommendation(
     rank: i32,
     market: &str,
     side: OutcomeSide,
-    suggested_usd: Usd,
+    hard_reserved_cash_usd: Usd,
 ) -> RecommendationInfo {
     let economics = recommendation_economics();
-    let tier = economic_tier(market, side, suggested_usd, economics);
+    let tier = economic_tier(market, side, hard_reserved_cash_usd, economics);
     RecommendationInfo {
         recommendation_id: id,
         recommendation_report_id: report_id,
@@ -165,7 +165,7 @@ pub fn recommendation(
         trade_plan: RecommendationTradePlan {
             policy: Box::new(trade_policy_provenance().into()),
             entry: entry_plan(),
-            sizing: Box::new(sizing_plan(suggested_usd)),
+            sizing: Box::new(sizing_plan(hard_reserved_cash_usd)),
             exit: Box::new(exit_plan().into()),
             risk_envelope: Box::new(risk_envelope()),
         },
@@ -195,13 +195,13 @@ const fn recommendation_economics() -> RecommendationEconomics {
 fn economic_tier(
     market: &str,
     side: OutcomeSide,
-    suggested_usd: Usd,
+    hard_reserved_cash_usd: Usd,
     economics: RecommendationEconomics,
 ) -> ExecutableEconomicTier {
     let lineage_hash = content_hash();
     let limit_price = Price::new(dec!(0.43));
-    let requested_shares = Shares::new(suggested_usd.inner() / limit_price.inner());
-    let full_fill_cost = ImmediateExecutionCost::new(suggested_usd, Usd::ZERO, Usd::ZERO)
+    let requested_shares = Shares::new(hard_reserved_cash_usd.inner() / limit_price.inner());
+    let full_fill_cost = ImmediateExecutionCost::new(hard_reserved_cash_usd, Usd::ZERO, Usd::ZERO)
         .expect("valid passive full-fill cost");
     ExecutableEconomicTier {
         economic_tier_id: EconomicTierId::from_content_hash(&lineage_hash),
@@ -219,7 +219,7 @@ fn economic_tier(
             limit_price,
             decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             good_til_secs: 3_600,
-            hard_reserved_cash_usd: suggested_usd,
+            hard_reserved_cash_usd,
             expected_filled_shares: requested_shares,
             full_fill_cost,
             fill_distribution: PassiveFillDistribution {
@@ -248,13 +248,13 @@ fn economic_tier(
                     post_fill_markout_bps: Bps::ZERO,
                 },
                 filled_shares: requested_shares,
-                immediate_cash_outlay_usd: suggested_usd,
-                discounted_exit_cash_usd: suggested_usd + Usd::new(dec!(90)),
+                immediate_cash_outlay_usd: hard_reserved_cash_usd,
+                discounted_exit_cash_usd: hard_reserved_cash_usd + Usd::new(dec!(90)),
                 delayed_maker_rebate_usd: Usd::ZERO,
                 discounted_maker_rebate_usd: Usd::ZERO,
                 capital_cost_usd: Usd::ZERO,
                 capital_occupancy: vec![ScenarioCapitalOccupancySlice {
-                    locked_cash_usd: suggested_usd,
+                    locked_cash_usd: hard_reserved_cash_usd,
                     duration_secs: 86_400,
                 }],
                 discounted_net_usd: Usd::new(dec!(90)),
@@ -267,13 +267,13 @@ fn economic_tier(
                     post_fill_markout_bps: Bps::ZERO,
                 },
                 filled_shares: requested_shares,
-                immediate_cash_outlay_usd: suggested_usd,
-                discounted_exit_cash_usd: suggested_usd - Usd::new(dec!(120)),
+                immediate_cash_outlay_usd: hard_reserved_cash_usd,
+                discounted_exit_cash_usd: hard_reserved_cash_usd - Usd::new(dec!(120)),
                 delayed_maker_rebate_usd: Usd::ZERO,
                 discounted_maker_rebate_usd: Usd::ZERO,
                 capital_cost_usd: Usd::ZERO,
                 capital_occupancy: vec![ScenarioCapitalOccupancySlice {
-                    locked_cash_usd: suggested_usd,
+                    locked_cash_usd: hard_reserved_cash_usd,
                     duration_secs: 86_400,
                 }],
                 discounted_net_usd: Usd::new(dec!(-120)),
@@ -282,7 +282,7 @@ fn economic_tier(
         ],
         hard_reservation_envelope: vec![HardReservationBucket {
             end_secs: 86_400,
-            reserved_cash_usd: suggested_usd,
+            reserved_cash_usd: hard_reserved_cash_usd,
         }],
         economics,
         lineage_hash,
@@ -306,22 +306,22 @@ fn entry_plan() -> EntryPlan {
     }
 }
 
-fn sizing_plan(suggested_usd: Usd) -> SizingPlan {
+fn sizing_plan(hard_reserved_cash_usd: Usd) -> SizingPlan {
     let tier_id = EconomicTierId::from_content_hash(&content_hash());
     SizingPlan {
         economic_tier_id: tier_id,
-        requested_shares: Shares::new(suggested_usd.inner() / dec!(0.43)),
-        expected_filled_shares: Shares::new(suggested_usd.inner() / dec!(0.43)),
-        hard_reserved_cash_usd: suggested_usd,
+        requested_shares: Shares::new(hard_reserved_cash_usd.inner() / dec!(0.43)),
+        expected_filled_shares: Shares::new(hard_reserved_cash_usd.inner() / dec!(0.43)),
+        hard_reserved_cash_usd,
         immediate_fee_usd: Usd::ZERO,
         expected_maker_rebate_usd: Usd::ZERO,
         maker_rebate_schedule: None,
         reference_entry_price: Price::new(dec!(0.43)),
         portfolio_weight_pct: dec!(0.05),
-        market_exposure_after_usd: suggested_usd,
-        event_exposure_after_usd: suggested_usd,
-        category_exposure_after_usd: suggested_usd,
-        route_exposure_after_usd: suggested_usd,
+        market_exposure_after_usd: hard_reserved_cash_usd,
+        event_exposure_after_usd: hard_reserved_cash_usd,
+        category_exposure_after_usd: hard_reserved_cash_usd,
+        route_exposure_after_usd: hard_reserved_cash_usd,
         capital_occupancy_usd_hours: UsdHours::new(dec!(12000)),
         sizing_reason: "selected executable tier from the exact global MILP".to_owned(),
     }

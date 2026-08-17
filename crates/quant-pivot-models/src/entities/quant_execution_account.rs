@@ -7,6 +7,7 @@ use super::{
     quant_account_snapshot, quant_execution_fill, quant_order_intent, quant_position,
     quant_settlement_external_cursor, quant_settlement_governed_action,
     quant_settlement_inventory_lot, quant_settlement_redeem, quant_venue_incentive_event,
+    quant_venue_incentive_reconciliation_scan,
 };
 use crate::{
     enums::quant::ExecutionWalletKind,
@@ -37,6 +38,9 @@ pub struct Model {
     pub execution_fill: HasMany<quant_execution_fill::Entity>,
     #[sea_orm(has_many, relation_enum = "VenueIncentiveEvent")]
     pub venue_incentive_event: HasMany<quant_venue_incentive_event::Entity>,
+    #[sea_orm(has_many, relation_enum = "VenueIncentiveReconciliationScan")]
+    pub venue_incentive_reconciliation_scan:
+        HasMany<quant_venue_incentive_reconciliation_scan::Entity>,
     #[sea_orm(has_many, relation_enum = "Position")]
     pub position: HasMany<quant_position::Entity>,
     #[sea_orm(has_many, relation_enum = "SettlementRedeem")]

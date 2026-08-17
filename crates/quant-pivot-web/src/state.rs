@@ -28,6 +28,7 @@ use quant_pivot_models::{
             MaterializationRunStatus,
         },
     },
+    types::ExecutionAccountId,
 };
 use quant_pivot_repository::traits::{
     BasisAlertRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
@@ -35,7 +36,7 @@ use quant_pivot_repository::traits::{
     FreshBootRepository, MarketLinkageRepository, MarketRepository, MenuRepository,
     OperationLogRepository, PolicyRepository, QuantFactReadRepository, RoleMenuRepository,
     RolePermissionRepository, RoleRepository, RuntimeActivityRepository, TrainingDatasetRepository,
-    UserRepository, UserRoleRepository,
+    UserRepository, UserRoleRepository, VenueIncentiveRepository,
 };
 
 /// Dependency bundle shared by all handlers and middleware.
@@ -130,6 +131,10 @@ pub struct AppState {
     pub quant_reports: Arc<dyn QuantReportPort>,
     /// Venue account live + snapshot read surface.
     pub account_read: Arc<dyn AccountReadPort>,
+    /// Append-only incentive ledger and reconciliation scan manifests.
+    pub venue_incentives: Arc<dyn VenueIncentiveRepository>,
+    /// Canonical venue account scoped by all incentive endpoints.
+    pub execution_account_id: ExecutionAccountId,
     /// Order-intent read and governed mutation API.
     pub order_intents: Arc<dyn OrderIntentPort>,
     /// Recommendation-owned condition state and WORM audit timeline.

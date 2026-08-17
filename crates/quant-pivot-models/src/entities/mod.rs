@@ -134,6 +134,7 @@ pub mod quant_trade_policy_validation;
 pub mod quant_trade_policy_validation_row;
 pub mod quant_training_dataset;
 pub mod quant_venue_incentive_event;
+pub mod quant_venue_incentive_reconciliation_scan;
 #[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_weather_daily_temperature_projection;
 #[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
