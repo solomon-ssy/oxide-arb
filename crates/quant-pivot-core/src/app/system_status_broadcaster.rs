@@ -14,7 +14,7 @@ use quant_pivot_models::{
         governance::{OperationalPhase, SystemStatus},
         ports::{SystemCapabilityPort, runtime_control::CatalogState},
     },
-    enums::quant::QuantRuntimeMode,
+    enums::quant::EntryAuthorizationPolicy,
 };
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
@@ -163,9 +163,9 @@ impl SystemStatusBroadcaster {
 
     fn current_status(&self) -> SystemStatus {
         // `publish` reads the same snapshot; peek once for dedup only.
-        self.publisher
-            .peek()
-            .unwrap_or_else(|| SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly))
+        self.publisher.peek().unwrap_or_else(|| {
+            SystemStatus::bootstrap(EntryAuthorizationPolicy::OperatorApprovalRequired)
+        })
     }
 }
 
@@ -199,14 +199,14 @@ mod tests {
                 lifecycle::{MarketDataConnectivity, WsShardConnectivity},
             },
             ports::{
-                CatalogStatusPort, QuantModeTransitionReport, RuntimeControlPort,
+                CatalogStatusPort, EntryAuthorizationTransitionReport, RuntimeControlPort,
                 SystemCapabilityPort, runtime_control::CatalogState,
             },
             runtime::{CoreEvent, CoreEventPublisher},
         },
         enums::{
-            execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
-            system::CapabilityReason,
+            execution::KillSwitchState, quant::EntryAuthorizationPolicy,
+            settlement::SettlementWritePolicy, system::CapabilityReason,
         },
     };
     use tokio::sync::{watch, watch::Receiver};
@@ -248,7 +248,7 @@ mod tests {
     impl RuntimeControlPort for CatalogAwareControl {
         fn snapshot(&self) -> RuntimeControlSnapshot {
             RuntimeControlSnapshot {
-                quant_runtime_mode: QuantRuntimeMode::ReportOnly,
+                entry_authorization_policy: EntryAuthorizationPolicy::OperatorApprovalRequired,
                 settlement_write_policy: SettlementWritePolicy::Disabled,
                 kill_switch_state: KillSwitchState::Closed,
                 kill_switch_requires_ack: false,
@@ -259,13 +259,13 @@ mod tests {
             }
         }
 
-        async fn switch_quant_mode(
+        async fn switch_entry_authorization_policy(
             &self,
-            _target: QuantRuntimeMode,
+            _target: EntryAuthorizationPolicy,
             _expected_revision: i64,
             _actor: &str,
             _reason: &str,
-        ) -> QuantResult<QuantModeTransitionReport> {
+        ) -> QuantResult<EntryAuthorizationTransitionReport> {
             unimplemented!()
         }
 
@@ -287,7 +287,7 @@ mod tests {
                 false,
             );
             SystemStatus {
-                quant_runtime_mode: QuantRuntimeMode::ReportOnly,
+                entry_authorization_policy: EntryAuthorizationPolicy::OperatorApprovalRequired,
                 uptime_secs: 0,
                 active_markets: 0,
                 catalog,
@@ -302,9 +302,14 @@ mod tests {
                         connected_ratio_bps: 0,
                     },
                 },
-                kill_switch: SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly).kill_switch,
-                execution_recovery: SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly)
-                    .execution_recovery,
+                kill_switch: SystemStatus::bootstrap(
+                    EntryAuthorizationPolicy::OperatorApprovalRequired,
+                )
+                .kill_switch,
+                execution_recovery: SystemStatus::bootstrap(
+                    EntryAuthorizationPolicy::OperatorApprovalRequired,
+                )
+                .execution_recovery,
                 checked_at: Utc::now(),
             }
         }
@@ -316,7 +321,7 @@ mod tests {
 
     #[test]
     fn fingerprint_ignores_checked_uptime() {
-        let mut first = SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly);
+        let mut first = SystemStatus::bootstrap(EntryAuthorizationPolicy::OperatorApprovalRequired);
         first.uptime_secs = 1;
         let mut second = first.clone();
         second.uptime_secs = 99;
@@ -325,7 +330,8 @@ mod tests {
 
     #[test]
     fn fingerprint_tracks_catalog_transition() {
-        let mut warming = SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly);
+        let mut warming =
+            SystemStatus::bootstrap(EntryAuthorizationPolicy::OperatorApprovalRequired);
         warming.catalog = CatalogState::Warming;
 
         let mut ready = warming.clone();
@@ -344,7 +350,8 @@ mod tests {
 
     #[test]
     fn fingerprint_tracks_ws_connectivity() {
-        let mut status = SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly);
+        let mut status =
+            SystemStatus::bootstrap(EntryAuthorizationPolicy::OperatorApprovalRequired);
         status.market_data = MarketDataConnectivity {
             ready: false,
             last_message_age_ms: None,

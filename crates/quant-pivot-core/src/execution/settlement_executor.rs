@@ -27,6 +27,7 @@ use quant_pivot_api::{
             AlloyRelayerPreparationRpc, DurableRelayerEnvelope, PreparedRelayerEnvelope,
             RelayerError, RelayerPollOutcome, RelayerRequestBuilder, RelayerTransport,
         },
+        wallet_call::PreparedWalletCall,
     },
     wallet::WalletTopology,
 };
@@ -47,7 +48,8 @@ use quant_pivot_models::{
         },
     },
     types::{
-        ContentHash, EvmAddress, EvmTransactionHash, EvmUint256, SettlementChainSubmissionId,
+        ContentHash, EvmAddress, EvmTransactionHash, EvmUint256, RelayerTransactionId,
+        SettlementChainSubmissionId,
         settlement_payload::{SettlementChainReceiptEvidence, SettlementFailureHistory},
     },
 };
@@ -76,6 +78,12 @@ pub struct ProductionSettlementExecutor {
     signer: Arc<OrderSigner>,
     topology: WalletTopology,
     credentials: SettlementCredentialAvailability,
+}
+
+pub(crate) enum WalletEnvelopeDispatch {
+    EoaAccepted,
+    RelayerAccepted(RelayerTransactionId),
+    Ambiguous,
 }
 
 impl ProductionSettlementExecutor {
@@ -185,9 +193,9 @@ impl ProductionSettlementExecutor {
         }
     }
 
-    async fn prepare_envelope(
+    pub(crate) async fn prepare_envelope<C: PreparedWalletCall>(
         &self,
-        call: &PreparedSettlementCall,
+        call: &C,
     ) -> Result<EnvelopeFields, SettlementExecutorError> {
         match self.topology.kind {
             ExecutionWalletKind::Eoa => {
@@ -227,6 +235,52 @@ impl ProductionSettlementExecutor {
                     envelope_hash: prepared.signed_envelope_hash(),
                     transaction_hash: None,
                 })
+            }
+        }
+    }
+
+    pub(crate) async fn dispatch_envelope(
+        &self,
+        envelope: &EnvelopeFields,
+    ) -> Result<WalletEnvelopeDispatch, SettlementExecutorError> {
+        match envelope.kind {
+            SettlementSubmissionKind::DirectEoa => {
+                let expected_hash = envelope
+                    .transaction_hash
+                    .as_ref()
+                    .ok_or_else(|| corrupt("prepared EOA envelope has no transaction hash"))?;
+                match EoaSettlementEnvelopeBuilder
+                    .broadcast_durable(&self.eoa_rpc, &envelope.envelope, expected_hash)
+                    .await
+                {
+                    Ok(_) => Ok(WalletEnvelopeDispatch::EoaAccepted),
+                    Err(EoaSettlementError::AmbiguousBroadcast { .. }) => {
+                        Ok(WalletEnvelopeDispatch::Ambiguous)
+                    }
+                    Err(source) => Err(corrupt(source.to_string())),
+                }
+            }
+            SettlementSubmissionKind::Relayer => match self
+                .relayer()?
+                .submit_durable(&envelope.envelope, envelope.envelope_hash)
+                .await
+            {
+                Ok(accepted) => Ok(WalletEnvelopeDispatch::RelayerAccepted(
+                    accepted.transaction_id,
+                )),
+                Err(RelayerError::AmbiguousSubmission { .. }) => {
+                    Ok(WalletEnvelopeDispatch::Ambiguous)
+                }
+                Err(RelayerError::SubmissionRejected { .. }) => {
+                    Err(SettlementExecutorError::Terminal {
+                        failure_code: SettlementFailureCode::SubmissionRejected,
+                        detail: "relayer rejected the exact durable body".to_owned(),
+                    })
+                }
+                Err(source) => Err(corrupt(source.to_string())),
+            },
+            SettlementSubmissionKind::ExternallyObserved => {
+                Err(corrupt("externally observed envelope cannot be dispatched"))
             }
         }
     }
@@ -496,14 +550,14 @@ impl SettlementGovernedActionExecutor for ProductionSettlementExecutor {
     }
 }
 
-struct EnvelopeFields {
-    kind: SettlementSubmissionKind,
-    prepared_block: EoaPreparedBlock,
-    nonce: EvmUint256,
-    gas_limit: Option<EvmUint256>,
-    envelope: Vec<u8>,
-    envelope_hash: ContentHash,
-    transaction_hash: Option<EvmTransactionHash>,
+pub(crate) struct EnvelopeFields {
+    pub kind: SettlementSubmissionKind,
+    pub prepared_block: EoaPreparedBlock,
+    pub nonce: EvmUint256,
+    pub gas_limit: Option<EvmUint256>,
+    pub envelope: Vec<u8>,
+    pub envelope_hash: ContentHash,
+    pub transaction_hash: Option<EvmTransactionHash>,
 }
 
 fn new_submission(

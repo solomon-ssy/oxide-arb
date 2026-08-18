@@ -6,9 +6,7 @@ use quant_pivot_models::{
     clickhouse::{QuantReportRecommendationFactRow, ReportMarketFunnelRow},
     domain::quant::ExecutableEconomicTier,
     domain::quant::NewReportTransaction,
-    enums::quant::{
-        EmptyReportReason, OutcomeSide, QuantRuntimeMode, ReportKind, ReportTriggerKind,
-    },
+    enums::quant::{EmptyReportReason, OutcomeSide, ReportKind, ReportTriggerKind},
     runtime_config::BuyModelRoute,
     runtime_config::ReportDeliveryPolicy,
     types::{
@@ -192,7 +190,6 @@ pub struct ReportNotificationPayload {
     pub report_id: RecommendationReportId,
     pub kind: ReportKind,
     pub status: String,
-    pub runtime_mode: QuantRuntimeMode,
     pub published_count: u32,
     pub total_hard_reserved_cash_usd: Usd,
     pub top3: Vec<NotificationRecommendation>,

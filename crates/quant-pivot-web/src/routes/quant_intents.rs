@@ -11,8 +11,8 @@
 //! | POST | `/quant/intents/{id}/reject` | `order_intent:reject` (governed) | Reject a pending intent |
 //! | POST | `/quant/intents/{id}/cancel` | `order_intent:cancel` (governed) | Cancel a not-yet-submitted intent |
 //!
-//! Create is mode-gated: `report_only` is rejected (409), `semi_auto` yields a
-//! `PendingApproval` intent, `auto_execution` yields `ApprovedByPolicy`. Approve
+//! Create applies the live entry-authorization policy: operator approval yields
+//! `PendingAuthorization`; an active policy yields `Authorized`. Approve
 //! re-checks every invalidation condition (fail-closed) and may only narrow the
 //! order. All mutations reserve / release capital atomically with the intent
 //! transition and are recorded in the operation log.
@@ -34,7 +34,7 @@ use quant_pivot_models::{
         ports::{
             ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand, RejectIntentCommand,
         },
-        quant::PositionInfo,
+        quant::StrategyPositionLot,
     },
     enums::{
         operation_log::OperationCategory,
@@ -136,7 +136,7 @@ pub async fn get(
 pub(crate) async fn exit_monitor_observation(
     state: &AppState,
     intent: &OrderIntentView,
-    position: &PositionInfo,
+    position: &StrategyPositionLot,
 ) -> Result<ExitMonitorObservationView, WebError> {
     let now = Utc::now();
     let max_book_age_ms = state

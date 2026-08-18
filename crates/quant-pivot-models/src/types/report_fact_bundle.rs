@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     clickhouse::{QuantReportRecommendationFactRow, ReportMarketFunnelRow},
-    enums::quant::{EmptyReportReason, OutcomeSide, QuantRuntimeMode, ReportKind},
+    enums::quant::{EmptyReportReason, OutcomeSide, ReportKind},
     runtime_config::{BuyModelRoute, ReportDeliveryPolicy},
     types::{Bps, ContentHash, RecommendationReportId, Usd},
 };
@@ -35,7 +35,6 @@ pub struct ReportFactNotificationRecommendationV2 {
 pub struct ReportFactNotificationV2 {
     pub kind: ReportKind,
     pub status: String,
-    pub runtime_mode: QuantRuntimeMode,
     pub published_count: u32,
     pub total_hard_reserved_cash_usd: Usd,
     pub top3: Vec<ReportFactNotificationRecommendationV2>,

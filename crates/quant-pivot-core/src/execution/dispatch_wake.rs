@@ -1,5 +1,5 @@
 //! Process-local wake signal from the intent-approval path to the
-//! `auto_execution` dispatcher worker.
+//! authorized-intent dispatcher worker.
 //!
 //! The **durable** work queue is Postgres: `ApprovedByPolicy` intent rows,
 //! dequeued under a per-intent `SELECT … FOR UPDATE` claim. This signal only
@@ -28,7 +28,7 @@ impl DispatchWake {
         }
     }
 
-    /// Signal that a new `auto_execution` intent is ready to submit.
+    /// Signal that a newly authorized intent is ready to submit.
     ///
     /// Uses `notify_one`: if the dispatcher is not currently waiting, a single
     /// permit is buffered so the next [`Self::wait`] returns immediately (one

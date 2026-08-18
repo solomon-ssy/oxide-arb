@@ -60,7 +60,7 @@ pub fn pooled_profile_ref() -> ResearchProfileRef {
         .profile_ref
 }
 
-/// Exact built-in pooled `ReportOnly` bootstrap `ResearchProfile` reference.
+/// Exact built-in pooled `AnalysisOnly` bootstrap `ResearchProfile` reference.
 #[must_use]
 pub fn pooled_bootstrap_profile_ref() -> ResearchProfileRef {
     builtin_research_profiles()

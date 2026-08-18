@@ -1,6 +1,9 @@
 //! Quant-pivot persistence DTOs for schema-first repositories.
 
 mod account;
+mod account_chain_execution;
+mod account_pause;
+mod account_recovery;
 #[allow(clippy::needless_update)] // Insert DTO omits DB-managed availability timestamps.
 mod attribution;
 #[allow(clippy::needless_update)] // NewBacktestReport omits DB-managed created_at
@@ -13,6 +16,7 @@ mod basis_alert;
 mod calibration_artifact;
 mod candidate;
 mod capital;
+mod clob_trade_observation;
 #[allow(clippy::needless_update)] // NewModelComparisonReport omits DB-managed created_at
 mod comparison;
 #[allow(clippy::needless_update)] // NewTrainingDatasetPlan omits materialization/timestamps
@@ -23,8 +27,6 @@ mod entry_condition;
 mod execution;
 mod execution_account;
 mod execution_attempt_outcome;
-mod execution_fee_measurement;
-mod execution_fill;
 mod exit_training;
 mod factor;
 mod feature;
@@ -54,7 +56,6 @@ mod model_route_bootstrap;
 mod outcome_reconciliation;
 mod portfolio;
 mod portfolio_scenario;
-mod position;
 mod promotion_permit;
 mod recommendation;
 mod recommendation_execution_rollup;
@@ -87,6 +88,7 @@ pub mod settlement_readiness;
 mod shadow;
 #[allow(clippy::needless_update)] // NewSourceSlice omits DB-managed timestamps
 mod source_slice;
+mod strategy_position_lot;
 #[allow(clippy::needless_update)] // Insert DTOs omit DB-managed timestamps.
 mod trade_policy;
 mod trade_policy_trial;
@@ -95,6 +97,18 @@ pub mod venue_incentive;
 pub use account::{
     AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery, LiveAccountSnapshot,
     NewAccountSnapshot, NewEquitySnapshot,
+};
+pub use account_chain_execution::{
+    AccountChainEventCursor, AccountChainExecutionInfo, AccountChainExecutionInsertOutcome,
+    NewAccountChainExecution,
+};
+pub use account_pause::{
+    AccountPauseConfirmation, AccountPauseDispatch, AccountPauseSubmissionInfo,
+    NewAccountPauseSubmission,
+};
+pub use account_recovery::{
+    AccountExecutionAssociationInfo, AccountExecutionAssociationOutcome,
+    AccountRecoveryIncidentInfo, NewAccountExecutionAssociation, NewAccountRecoveryIncident,
 };
 pub use attribution::{
     AttributionArtifactContractError, AttributionArtifactInfo, AttributionSubject,
@@ -111,6 +125,7 @@ pub use calibration_artifact::{
 };
 pub use candidate::{DomainAvailability, MarketCandidate, MarketDataHealth};
 pub use capital::{CapitalAllocationInfo, CapitalAllocationPatch, NewCapitalAllocation};
+pub use clob_trade_observation::{ClobTradeObservationInfo, NewClobTradeObservation};
 pub use comparison::{ModelComparisonReportInfo, NewModelComparisonReport};
 pub use dataset::{
     CompleteTrainingDatasetBuild, NewTrainingDatasetPlan, TrainingDatasetInfo,
@@ -128,18 +143,16 @@ pub use entry_condition::{
     NewEntryConditionInstance, WeatherDailyTemperatureProjectionInfo,
 };
 pub use execution::{
-    ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalSettlement, ExecutionIdentityEnrichment,
-    ExecutionIdentityRefs, ExecutionOrderIdentityRefs, ExecutionOrderInfo, ExecutionOrderPatch,
-    ExecutionTradeObservation, ExecutionTradeRef, ExecutionTransactionRef, ExitLedgerWrite,
-    NewExecutionOrder, NewExecutionTradeRef, NewExecutionTransactionRef, NewOrderIntent,
-    OrderIntentInfo, SubmissionLedgerWrite,
+    ApproveOrderIntentOutcome, AuthorizeOrderIntent, CapitalSettlement,
+    ExecutionIdentityEnrichment, ExecutionIdentityRefs, ExecutionOrderIdentityRefs,
+    ExecutionOrderInfo, ExecutionOrderPatch, ExecutionTradeObservation, ExecutionTradeRef,
+    ExecutionTransactionRef, ExitLedgerWrite, NewExecutionOrder, NewExecutionTradeRef,
+    NewExecutionTransactionRef, NewOrderIntent, OrderIntentInfo, SubmissionLedgerWrite,
 };
 pub use execution_account::{ExecutionAccountInfo, NewExecutionAccount};
 pub use execution_attempt_outcome::{
     ExecutionAttemptOutcomeContractError, ExecutionAttemptOutcomeInfo, NewExecutionAttemptOutcome,
 };
-pub use execution_fee_measurement::{ExecutionFeeMeasurementInfo, NewExecutionFeeMeasurement};
-pub use execution_fill::{ExecutionFillInfo, NewExecutionFill, PendingExecutionFeeSettlement};
 pub use exit_training::{ExitTrainingLotRow, LotExitEventRow};
 pub use factor::{
     FactorDefinitionInfo, FactorDefinitionProjectionError, FactorRegistrationOutcome,
@@ -227,12 +240,13 @@ pub use model_route_bootstrap::{
     ModelRouteBootstrapRoute,
 };
 pub use outcome_reconciliation::{
-    ExecutionAttemptBarrier, ExecutionAttemptDeferredReason, ExecutionAttemptDerivation,
-    ExecutionAttemptReconciliationCandidate, ExecutionAttemptReconciliationError,
-    ExecutionAttemptReconciliationResult, ExecutionAttemptSourceGraph, ExecutionAttemptTaskClaim,
-    ExecutionRollupTaskClaim, OutcomeTaskSettlement,
-    RecommendationResolutionReconciliationCandidate, ResolutionOutcomeDeferredReason,
-    ResolutionOutcomeReconciliationResult, ResolutionOutcomeTaskClaim,
+    AccountExecutionFeeFact, ExecutionAttemptBarrier, ExecutionAttemptDeferredReason,
+    ExecutionAttemptDerivation, ExecutionAttemptReconciliationCandidate,
+    ExecutionAttemptReconciliationError, ExecutionAttemptReconciliationResult,
+    ExecutionAttemptSourceGraph, ExecutionAttemptTaskClaim, ExecutionRollupTaskClaim,
+    OutcomeTaskSettlement, RecommendationResolutionReconciliationCandidate,
+    ResolutionOutcomeDeferredReason, ResolutionOutcomeReconciliationResult,
+    ResolutionOutcomeTaskClaim,
 };
 pub use portfolio::{NewPortfolioPlan, PortfolioPlanInfo};
 pub use portfolio_scenario::{
@@ -243,10 +257,6 @@ pub use portfolio_scenario::{
     PortfolioScenarioRouteModelLineage, PortfolioScenarioVisibility, ScenarioDistribution,
     ScenarioMarketOutcome, ScenarioPayoutState, ScenarioWeight, StructuralExclusivityGroup,
     StructuralOutcomeRef,
-};
-pub use position::{
-    CumulativePositionExit, CumulativePositionFill, NewPosition, PositionExit,
-    PositionExitReconciliation, PositionFill, PositionInfo,
 };
 pub use promotion_permit::{
     CommitModelRoutePromotion, IssuePromotionPermit, ModelRoutePromotionPolicy,
@@ -323,6 +333,10 @@ pub use shadow::{
 pub use source_slice::{
     BeginSourceSliceOutcome, CompleteSourceSlice, NewSourceSlice, SourceSliceIdentity,
     SourceSliceIdentityInput, SourceSliceInfo,
+};
+pub use strategy_position_lot::{
+    CumulativePositionExit, CumulativePositionFill, NewStrategyPositionLot, PositionExit,
+    PositionExitReconciliation, PositionFill, StrategyPositionLot,
 };
 pub use trade_policy::{
     CompleteTradePolicyValidation, FailTradePolicyValidation, NewTradePolicyArtifact,

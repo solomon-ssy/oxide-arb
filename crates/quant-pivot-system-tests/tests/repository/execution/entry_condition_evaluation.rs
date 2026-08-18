@@ -5,18 +5,17 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::quant::ApplyEntryConditionEvaluation,
     entities::{quant_execution_order, quant_order_intent},
-    enums::quant::{EntryConditionState, QuantRuntimeMode},
+    enums::quant::EntryConditionState,
     types::{
         ConditionTruth, ContentHash, EntryConditionFoldState, EntryConditionInstanceId, WorkerId,
     },
 };
 use quant_pivot_repository::{
-    postgres::{PgEntryConditionRepository, PgRecommendationReportRepository},
-    traits::{EntryConditionRepository, RecommendationReportRepository},
+    postgres::PgEntryConditionRepository, traits::EntryConditionRepository,
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
-    support::execution_pg_seed::{ReportSeedConfig, seed_report_price, seed_shared_demo_infra},
+    support::execution_pg_seed::{ReportSeedConfig, seed_price_report, seed_shared_demo_infra},
 };
 use sea_orm::{DatabaseConnection, EntityTrait, PaginatorTrait};
 
@@ -28,7 +27,7 @@ pub async fn semantic_revision_atomic_deduplicated() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let infra = seed_shared_demo_infra(&db).await;
-    let ids = seed_report_price(
+    let ids = seed_price_report(
         &db,
         &infra,
         ReportSeedConfig {
@@ -41,12 +40,6 @@ pub async fn semantic_revision_atomic_deduplicated() {
         },
     )
     .await;
-    let report = PgRecommendationReportRepository::new(db.clone())
-        .find_by_id(&ids.report)
-        .await
-        .expect("report lookup")
-        .expect("report");
-    assert_eq!(report.runtime_mode, QuantRuntimeMode::ReportOnly);
     let repo = PgEntryConditionRepository::new(db.clone());
     let worker = WorkerId::from_v7();
     let now = Utc::now();
@@ -194,7 +187,7 @@ async fn assert_outbox_claim_race(
 }
 
 async fn assert_report_no_rows(db: &DatabaseConnection) {
-    // ReportOnly still owns the complete condition evidence ledger, but no row
+    // AnalysisOnly still owns the complete condition evidence ledger, but no row
     // can reach the signing/submission boundary because no intent is created.
     assert_eq!(
         quant_order_intent::Entity::find()

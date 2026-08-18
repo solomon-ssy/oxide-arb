@@ -1447,7 +1447,7 @@ impl CpcvBacktestService {
             CpcvProgress::TOTAL,
         ));
         let predictive_only =
-            research_profile.spec.serving_authority == ServingAuthority::ReportOnlyWithLiveL2;
+            research_profile.spec.serving_authority == ServingAuthority::AnalysisOnlyWithLiveL2;
         let (ticks, scenario_methodology) = if predictive_only {
             (Vec::new(), None)
         } else {

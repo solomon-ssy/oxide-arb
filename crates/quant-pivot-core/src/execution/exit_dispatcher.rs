@@ -21,7 +21,7 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     domain::quant::{
         ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, NewReconciliation, PositionExit,
-        PositionInfo,
+        StrategyPositionLot,
     },
     enums::{
         clickhouse::ChQuantLedgerEventKind,
@@ -62,7 +62,7 @@ use crate::{
 /// A triggered exit to submit for one open position lot.
 pub struct ExitSubmitRequest {
     /// The lot being (partially) exited.
-    pub lot: PositionInfo,
+    pub lot: StrategyPositionLot,
     /// Why the exit fired (recorded on the order + intent).
     pub reason: ExitReason,
     /// The concrete sell order (side / type / limit / shares).
@@ -106,12 +106,18 @@ impl CoreExitDispatcher {
             pending_scale_out,
         } = request;
 
+        let intent_id = lot
+            .order_intent_id
+            .ok_or_else(|| ExecutionError::IntentDenied {
+                reason: "recovery-origin position lot is not authorized for strategy exit"
+                    .to_owned(),
+            })?;
         let intent = self
             .deps
             .intents
-            .find_by_id(&lot.order_intent_id)
+            .find_by_id(&intent_id)
             .await?
-            .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, lot.order_intent_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, intent_id))?;
         let prepared_order = self
             .prepare_exit_order(&lot, &order, &intent.profile_ref)
             .await?;
@@ -193,7 +199,7 @@ impl CoreExitDispatcher {
 
     async fn prepare_exit_order(
         &self,
-        lot: &PositionInfo,
+        lot: &StrategyPositionLot,
         order: &ExitOrderSpec,
         profile_ref: &ResearchProfileRef,
     ) -> QuantResult<PreparedVenueOrder> {
@@ -295,13 +301,18 @@ impl CoreExitDispatcher {
 
 /// Build the write-ahead Exit execution-order row (`state = Submitted`).
 fn build_exit_order(
-    lot: &PositionInfo,
+    lot: &StrategyPositionLot,
     order: &ExitOrderSpec,
     prepared_order_json: PreparedVenueOrder,
 ) -> Result<NewExecutionOrder, ExecutionError> {
     Ok(NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
-        order_intent_id: lot.order_intent_id,
+        order_intent_id: lot
+            .order_intent_id
+            .ok_or_else(|| ExecutionError::IntentDenied {
+                reason: "recovery-origin position lot cannot create a strategy exit order"
+                    .to_owned(),
+            })?,
         order_phase: ExecutionOrderPhase::Exit,
         market_id: lot.market_id.clone(),
         token_id: lot.token_id.clone(),
@@ -326,7 +337,7 @@ fn build_exit_order(
 /// confirmed realized `PnL` (for the breaker's daily-loss dimension) when filled.
 fn build_exit_ledger_write(
     result: &VenueSubmitResult,
-    lot: &PositionInfo,
+    lot: &StrategyPositionLot,
     reason: ExitReason,
     execution_order: &ExecutionOrderInfo,
 ) -> (ExitLedgerWrite, Option<Usd>) {
@@ -525,10 +536,6 @@ fn exit_reconciliation_row(
         )),
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: Some(result.expected_fee),
-        derived_fee_usd: None,
-        settled_fee_usd: None,
-        fee_delta_usd: None,
         resolved_by,
         resolved_at,
     }

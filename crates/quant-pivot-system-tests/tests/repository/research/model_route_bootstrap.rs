@@ -25,7 +25,7 @@ use quant_pivot_models::{
         user::{Column as UserColumn, Entity as UserEntity},
     },
     enums::{
-        quant::{DatasetPurpose, FeatureParityLatchState, ModelRunKind, QuantRuntimeMode},
+        quant::{DatasetPurpose, EntryAuthorizationPolicy, FeatureParityLatchState, ModelRunKind},
         runtime_config::ConfigResourceKind,
     },
     runtime_config::{ActivePolicyBundle, BuyModelRoute, PortfolioScenarioModelArtifactBinding},
@@ -684,7 +684,7 @@ impl BootstrapFixture {
                 .copied()
                 .expect("bootstrap ModelRouting revision"),
             expected_runtime_control_revision: runtime_revision,
-            current_runtime_mode: QuantRuntimeMode::ReportOnly,
+            current_entry_authorization_policy: EntryAuthorizationPolicy::OperatorApprovalRequired,
             non_route_policy_hash: self.non_route_policy_hash,
             evaluated_at: self.evaluated_at,
         })

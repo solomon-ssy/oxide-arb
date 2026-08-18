@@ -24,7 +24,7 @@ pub struct Model {
     pub model_routing_revision_id: PolicyRevisionId,
     pub report_schedule_revision_id: PolicyRevisionId,
     pub operations_policy_revision_id: PolicyRevisionId,
-    pub execution_automation_policy_revision_id: PolicyRevisionId,
+    pub execution_authorization_policy_revision_id: PolicyRevisionId,
     pub source: DecisionPolicySnapshotSource,
     pub created_by_kind: PolicyActorKind,
     pub created_by_user_id: Option<UserId>,

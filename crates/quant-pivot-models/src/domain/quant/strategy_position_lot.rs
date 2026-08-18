@@ -1,4 +1,4 @@
-//! Position ledger persistence DTOs.
+//! Strategy position-lot persistence contracts.
 
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
@@ -7,21 +7,23 @@ use serde::{Deserialize, Serialize};
 use crate::{
     enums::{
         common::MarketCategory,
-        execution::{ExitReason, PositionLedgerState},
+        execution::{ExitReason, PositionLedgerState, StrategyPositionOriginKind},
         quant::{AccountSource, OutcomeSide},
     },
     types::{
-        EventId, ExecutionAccountId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId,
-        Usd,
+        AccountRecoveryIncidentId, EventId, ExecutionAccountId, MarketId, OrderIntentId, Price,
+        Shares, StrategyPositionLotId, TokenId, Usd,
     },
 };
 
 /// Persisted current-position ledger row (one lot per filled entry intent).
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "crate::entities::quant_position::Entity")]
-pub struct PositionInfo {
-    pub position_id: PositionId,
-    pub order_intent_id: OrderIntentId,
+#[sea_orm(entity = "crate::entities::quant_strategy_position_lot::Entity")]
+pub struct StrategyPositionLot {
+    pub strategy_position_lot_id: StrategyPositionLotId,
+    pub origin_kind: StrategyPositionOriginKind,
+    pub order_intent_id: Option<OrderIntentId>,
+    pub recovery_incident_id: Option<AccountRecoveryIncidentId>,
     pub execution_account_id: ExecutionAccountId,
     pub token_id: TokenId,
     pub market_id: MarketId,
@@ -39,18 +41,21 @@ pub struct PositionInfo {
     pub closed_at: Option<DateTime<Utc>>,
 }
 
-info_from_model!(PositionInfo, crate::entities::quant_position::Model, {
-    position_id, order_intent_id, execution_account_id, token_id, market_id, event_id, category, side,
+info_from_model!(StrategyPositionLot, crate::entities::quant_strategy_position_lot::Model, {
+    strategy_position_lot_id, origin_kind, order_intent_id, recovery_incident_id,
+    execution_account_id, token_id, market_id, event_id, category, side,
     state, shares, avg_price, cost_usd, realized_pnl_usd, source, opened_at,
     updated_at, closed_at,
 });
 
-/// Insert payload for `quant_position`.
+/// Insert payload for `quant_strategy_position_lot`.
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::quant_position::ActiveModel")]
-pub struct NewPosition {
-    pub position_id: PositionId,
-    pub order_intent_id: OrderIntentId,
+#[sea_orm(active_model = "crate::entities::quant_strategy_position_lot::ActiveModel")]
+pub struct NewStrategyPositionLot {
+    pub strategy_position_lot_id: StrategyPositionLotId,
+    pub origin_kind: StrategyPositionOriginKind,
+    pub order_intent_id: Option<OrderIntentId>,
+    pub recovery_incident_id: Option<AccountRecoveryIncidentId>,
     pub execution_account_id: ExecutionAccountId,
     pub token_id: TokenId,
     pub market_id: MarketId,

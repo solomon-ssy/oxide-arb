@@ -1,30 +1,33 @@
-//! `quant_position` table entity.
+//! `quant_strategy_position_lot` strategy-owned lot entity.
 
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    event, market, quant_execution_account, quant_order_intent, quant_settlement_inventory_lot,
+    event, market, quant_account_recovery_incident, quant_execution_account, quant_order_intent,
+    quant_settlement_inventory_lot,
 };
 use crate::{
     enums::{
         common::MarketCategory,
-        execution::PositionLedgerState,
+        execution::{PositionLedgerState, StrategyPositionOriginKind},
         quant::{AccountSource, OutcomeSide},
     },
     types::{
-        EventId, ExecutionAccountId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId,
-        Usd,
+        AccountRecoveryIncidentId, EventId, ExecutionAccountId, MarketId, OrderIntentId, Price,
+        Shares, StrategyPositionLotId, TokenId, Usd,
     },
 };
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "quant_position")]
+#[sea_orm(table_name = "quant_strategy_position_lot")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub position_id: PositionId,
-    pub order_intent_id: OrderIntentId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
+    pub origin_kind: StrategyPositionOriginKind,
+    pub order_intent_id: Option<OrderIntentId>,
+    pub recovery_incident_id: Option<AccountRecoveryIncidentId>,
     pub execution_account_id: ExecutionAccountId,
     pub token_id: TokenId,
     pub market_id: MarketId,
@@ -48,7 +51,14 @@ pub struct Model {
         from = "order_intent_id",
         to = "order_intent_id"
     )]
-    pub order_intent: BelongsTo<quant_order_intent::Entity>,
+    pub order_intent: BelongsTo<Option<quant_order_intent::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "RecoveryIncident",
+        from = "recovery_incident_id",
+        to = "account_recovery_incident_id"
+    )]
+    pub recovery_incident: BelongsTo<Option<quant_account_recovery_incident::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "ExecutionAccount",

@@ -370,7 +370,7 @@ impl MakerAwardFixture<'_> {
         NewVenueIncentiveEvent {
             venue_incentive_event_id: VenueIncentiveEventId::from_v7(),
             execution_account_id: self.account_id,
-            execution_fill_id: None,
+            clob_trade_observation_id: None,
             market_id: Some(MarketId::new(self.market_id)),
             kind: VenueIncentiveKind::MakerRebate,
             stage: VenueIncentiveStage::VenueReportedAccrual,
@@ -399,7 +399,7 @@ fn wallet_credit(
     NewVenueIncentiveEvent {
         venue_incentive_event_id: VenueIncentiveEventId::from_v7(),
         execution_account_id,
-        execution_fill_id: None,
+        clob_trade_observation_id: None,
         market_id: None,
         kind,
         stage: VenueIncentiveStage::WalletCredited,

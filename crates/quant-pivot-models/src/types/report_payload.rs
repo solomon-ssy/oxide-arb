@@ -30,8 +30,8 @@ use crate::{
         common::MarketCategory,
         factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
         quant::{
-            EmptyReportReason, ExitSettlementMode, FactorDirection, FillRequirement,
-            IneligibilityReason, QuantRuntimeMode, RedeemPolicy,
+            EmptyReportReason, ExecutionAuthorityCeiling, ExitSettlementMode, FactorDirection,
+            FillRequirement, IneligibilityReason, RedeemPolicy,
         },
     },
     hashing::CanonicalDigest,
@@ -347,10 +347,6 @@ pub struct RiskEnvelope {
     pub portfolio_cvar_cap_usd: Usd,
     /// Governed maximum loss over every promoted joint scenario.
     pub maximum_scenario_loss_cap_usd: Usd,
-    /// Whether human approval is required before execution.
-    pub requires_approval: bool,
-    /// Whether auto-execution is permitted by this envelope.
-    pub auto_execution_allowed: bool,
     /// Free-form risk notes for the report.
     pub risk_notes: Vec<String>,
     /// Canonical hash of the envelope (admission verification).
@@ -359,9 +355,8 @@ pub struct RiskEnvelope {
 
 /// Canonical numeric subset hashed into [`RiskEnvelope::envelope_hash`].
 ///
-/// The composer-set flags (`requires_approval` / `auto_execution_allowed`) and
-/// free-form notes are intentionally excluded so flipping them never changes the
-/// admission anchor. Field order and names are part of the hash contract.
+/// Free-form notes are intentionally excluded from the admission anchor. Field
+/// order and names are part of the hash contract.
 #[derive(Serialize)]
 pub struct RiskEnvelopeHashInput {
     pub loss_usd: Usd,
@@ -497,38 +492,24 @@ impl EvidenceRefs {
 
 // ── Execution eligibility (computed, mode-orthogonal) ─────────────────────
 
-/// Per-recommendation execution eligibility across runtime modes.
-///
-/// Computed and persisted with the recommendation. The create-intent and
-/// admission flow consumes it. `eligible_modes` always contains
-/// [`QuantRuntimeMode::ReportOnly`] (a report is the report-only artifact).
+/// Per-recommendation execution authority ceiling and immutable blockers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionEligibility {
-    /// Runtime modes in which this recommendation is eligible for execution.
-    pub eligible_modes: Vec<QuantRuntimeMode>,
-    /// Reasons the recommendation is ineligible (empty when fully eligible).
-    pub ineligibility_reasons: Vec<IneligibilityReason>,
-    /// Whether human approval is required.
-    pub approval_required: bool,
-    /// Auto-execution policy id, when applicable.
-    pub auto_policy_id: Option<String>,
+    pub ceiling: ExecutionAuthorityCeiling,
+    pub blockers: Vec<IneligibilityReason>,
+    pub policy_binding: Option<String>,
 }
 
 impl ExecutionEligibility {
-    /// Whether the recommendation supports order execution in `mode`.
-    ///
-    /// [`QuantRuntimeMode::ReportOnly`] and [`QuantRuntimeMode::SemiAuto`] are
-    /// eligible when listed in [`Self::eligible_modes`]. Auto-execution additionally
-    /// requires an empty [`Self::ineligibility_reasons`] (the only frozen denial
-    /// is exhaustion of report-level automation caps; live risk is rechecked by
-    /// execution admission).
     #[must_use]
-    pub fn is_eligible(&self, mode: QuantRuntimeMode) -> bool {
-        if !self.eligible_modes.contains(&mode) {
-            return false;
-        }
-        mode != QuantRuntimeMode::AutoExecution || self.ineligibility_reasons.is_empty()
+    pub fn allows_operator(&self) -> bool {
+        self.ceiling.allows_operator()
+    }
+
+    #[must_use]
+    pub fn allows_policy(&self) -> bool {
+        self.blockers.is_empty() && self.ceiling.allows_policy() && self.policy_binding.is_some()
     }
 }
 
@@ -662,12 +643,9 @@ pub enum PortfolioRejectionReason {
 /// Execution-eligibility roll-up across published recommendations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EligibilitySummary {
-    /// Eligible under report-only.
-    pub eligible_report_only: u32,
-    /// Eligible under semi-auto.
-    pub eligible_semi_auto: u32,
-    /// Eligible under auto-execution.
-    pub eligible_auto_execution: u32,
+    pub analysis_only: u32,
+    pub operator_approval: u32,
+    pub policy_automatic: u32,
 }
 
 impl Add for EligibilitySummary {
@@ -683,9 +661,9 @@ impl Add for EligibilitySummary {
 impl AddAssign for EligibilitySummary {
     #[inline]
     fn add_assign(&mut self, rhs: Self) {
-        self.eligible_report_only += rhs.eligible_report_only;
-        self.eligible_semi_auto += rhs.eligible_semi_auto;
-        self.eligible_auto_execution += rhs.eligible_auto_execution;
+        self.analysis_only += rhs.analysis_only;
+        self.operator_approval += rhs.operator_approval;
+        self.policy_automatic += rhs.policy_automatic;
     }
 }
 

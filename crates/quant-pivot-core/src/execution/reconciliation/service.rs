@@ -28,8 +28,8 @@ use quant_pivot_models::{
         data_plane::DecisionClock,
         quant::{
             CapitalReconcileSettlement, CumulativePositionExit, CumulativePositionFill,
-            ExecutionOrderIdentityRefs, ExecutionOrderInfo, OrderIntentInfo, PositionInfo,
-            RecommendationInfo, ReconciliationLedgerWrite,
+            ExecutionOrderIdentityRefs, ExecutionOrderInfo, OrderIntentInfo, RecommendationInfo,
+            ReconciliationLedgerWrite, StrategyPositionLot,
         },
         runtime::{CoreEvent, CoreEventPublisher, ReconciliationLifecycleEvent},
     },
@@ -51,7 +51,7 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
     ExecutionOrderRepository, ExecutionSubmissionRepository, OrderIntentRepository,
-    PositionRepository, RecommendationRepository, ReconciliationRepository,
+    RecommendationRepository, ReconciliationRepository, StrategyPositionLotRepository,
 };
 use quant_pivot_research::execution_semantics::{
     LiquidityRole, PitFeeSchedule, PitMakerRebateEvidence, PitMarketExecutionEconomics,
@@ -128,7 +128,7 @@ pub struct ReconciliationServiceDeps {
     pub execution_orders: Arc<dyn ExecutionOrderRepository>,
     pub intents: Arc<dyn OrderIntentRepository>,
     pub recommendations: Arc<dyn RecommendationRepository>,
-    pub positions: Arc<dyn PositionRepository>,
+    pub positions: Arc<dyn StrategyPositionLotRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
@@ -824,10 +824,6 @@ impl ReconciliationService {
             expected_cash_delta_usd: None,
             venue_cash_delta_usd: None,
             realized_pnl_usd: None,
-            expected_fee_usd: None,
-            derived_fee_usd: None,
-            settled_fee_usd: None,
-            fee_delta_usd: None,
             resolved_by: None,
             resolved_at: None,
         };
@@ -874,7 +870,10 @@ impl ReconciliationService {
 
     /// The open position lot backing an exit order (its cost basis prices the
     /// realized `PnL`); `None` for entry orders or an absent lot.
-    async fn exit_lot(&self, order: &ExecutionOrderInfo) -> QuantResult<Option<PositionInfo>> {
+    async fn exit_lot(
+        &self,
+        order: &ExecutionOrderInfo,
+    ) -> QuantResult<Option<StrategyPositionLot>> {
         if order.order_phase == ExecutionOrderPhase::Exit {
             Ok(self
                 .deps
@@ -895,7 +894,7 @@ impl ReconciliationService {
         order: &ExecutionOrderInfo,
         recommendation: &RecommendationInfo,
         execution_account_id: ExecutionAccountId,
-        lot: Option<&PositionInfo>,
+        lot: Option<&StrategyPositionLot>,
         decision: TerminalDecision,
         evidence: ReconciliationEvidenceChain,
         now: DateTime<Utc>,
@@ -963,9 +962,6 @@ struct EntryReconcileInput<'a> {
 }
 
 struct ReconciliationFee {
-    expected: Usd,
-    derived: Option<Usd>,
-    settled: Option<Usd>,
     applied: Usd,
 }
 
@@ -974,7 +970,6 @@ struct TradeFeeAggregate {
     shares: Shares,
     expected: Usd,
     derived: Option<Usd>,
-    settled: Option<Usd>,
 }
 
 fn reconciliation_fee(
@@ -1001,7 +996,7 @@ fn reconciliation_fee(
         let Some(measurement) = item.fee_evidence.as_ref() else {
             continue;
         };
-        let (trade_id, role, observed_at, derived, settled) = match measurement {
+        let (trade_id, role, observed_at, derived) = match measurement {
             FeeMeasurement::PreparedExpected { .. } => continue,
             FeeMeasurement::AuthenticatedTradeDerived {
                 trade_id,
@@ -1014,21 +1009,8 @@ fn reconciliation_fee(
                 *liquidity_role,
                 *matched_at,
                 Some(*derived_fee),
-                None,
             ),
-            FeeMeasurement::OnChainSettled {
-                venue_trade_id,
-                liquidity_role,
-                settled_fee,
-                matched_at,
-                ..
-            } => (
-                venue_trade_id.clone(),
-                *liquidity_role,
-                *matched_at,
-                None,
-                Some(*settled_fee),
-            ),
+            FeeMeasurement::OnChainSettled { .. } => continue,
         };
         let shares = item
             .shares
@@ -1057,15 +1039,11 @@ fn reconciliation_fee(
                 if let Some(value) = derived {
                     current.derived = Some(value);
                 }
-                if let Some(value) = settled {
-                    current.settled = Some(value);
-                }
             })
             .or_insert(TradeFeeAggregate {
                 shares,
                 expected,
                 derived,
-                settled,
             });
     }
     if trades.is_empty() {
@@ -1079,12 +1057,7 @@ fn reconciliation_fee(
             .map_err(|error| ExecutionError::ReconciliationUnresolvable {
                 reason: format!("frozen fee schedule cannot price operator fill: {error:?}"),
             })?;
-        return Ok(ReconciliationFee {
-            expected,
-            derived: None,
-            settled: None,
-            applied: expected,
-        });
+        return Ok(ReconciliationFee { applied: expected });
     }
     let authenticated_shares = trades
         .values()
@@ -1097,24 +1070,10 @@ fn reconciliation_fee(
         }
         .into());
     }
-    let expected = trades
-        .values()
-        .fold(Usd::ZERO, |total, trade| total + trade.expected);
-    let derived = trades.values().try_fold(Usd::ZERO, |total, trade| {
-        trade.derived.map(|fee| total + fee)
-    });
-    let settled = trades.values().try_fold(Usd::ZERO, |total, trade| {
-        trade.settled.map(|fee| total + fee)
-    });
     let applied = trades.values().fold(Usd::ZERO, |total, trade| {
-        total + trade.settled.or(trade.derived).unwrap_or(trade.expected)
+        total + trade.derived.unwrap_or(trade.expected)
     });
-    Ok(ReconciliationFee {
-        expected,
-        derived,
-        settled,
-        applied,
-    })
+    Ok(ReconciliationFee { applied })
 }
 
 /// Neutral ledger correction before a terminal verdict is applied.
@@ -1143,10 +1102,6 @@ fn neutral_terminal_write(
         expected_cash_delta_usd: None,
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: None,
-        derived_fee_usd: None,
-        settled_fee_usd: None,
-        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     }
@@ -1222,13 +1177,9 @@ fn entry_reconcile_write(
             write.venue_avg_price = avg_price;
             write.expected_cash_delta_usd =
                 Some(Usd::new(order.prepared_order_json.total_cash_delta));
-            write.expected_fee_usd = Some(fee.expected);
-            write.derived_fee_usd = fee.derived;
-            write.settled_fee_usd = fee.settled;
             write.venue_cash_delta_usd = Some(Usd::new(
                 -((filled_shares * price).inner() + fee.applied.inner()),
             ));
-            write.fee_delta_usd = fee.settled.map(|settled| settled - fee.expected);
             if full || venue_terminal {
                 write.resolved_by = Some(resolved_by);
                 write.resolved_at = Some(now);
@@ -1270,7 +1221,7 @@ fn entry_reconcile_write(
 #[cfg(test)]
 fn compute_exit_realized_pnl(
     order: &ExecutionOrderInfo,
-    lot: &PositionInfo,
+    lot: &StrategyPositionLot,
     filled_shares: Shares,
     avg_price: Option<Price>,
     evidence: &ReconciliationEvidenceChain,
@@ -1287,7 +1238,7 @@ fn compute_exit_realized_pnl(
 struct ExitReconcileWriteInput<'a> {
     write: ReconciliationLedgerWrite,
     order: &'a ExecutionOrderInfo,
-    lot: Option<&'a PositionInfo>,
+    lot: Option<&'a StrategyPositionLot>,
     filled_shares: Shares,
     avg_price: Option<Price>,
     venue_terminal: bool,
@@ -1360,10 +1311,6 @@ fn exit_reconcile_write(
                 Some(Usd::new(order.prepared_order_json.total_cash_delta));
             write.venue_cash_delta_usd = Some(proceeds_usd);
             write.realized_pnl_usd = Some(realized_pnl_usd);
-            write.expected_fee_usd = Some(fee.expected);
-            write.derived_fee_usd = fee.derived;
-            write.settled_fee_usd = fee.settled;
-            write.fee_delta_usd = fee.settled.map(|settled| settled - fee.expected);
             write.cumulative_exit = Some(CumulativePositionExit {
                 cumulative_shares: filled_shares,
                 avg_price: exit_price,
@@ -1466,18 +1413,19 @@ const fn system_note(
 mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::quant::{ExecutionOrderInfo, PositionInfo},
+        domain::quant::{ExecutionOrderInfo, StrategyPositionLot},
         enums::{
             common::{MarketCategory, OrderType, Side},
             execution::{
                 ExecutionOrderPhase, ExitReason, OrderTypeKind, PositionLedgerState,
-                ReconciliationResult,
+                ReconciliationResult, StrategyPositionOriginKind,
             },
             quant::{AccountSource, ExecutionOrderState, OutcomeSide},
         },
         types::{
-            ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price,
-            ReconciliationEvidenceChain, Shares, TokenId, Usd, VenueOrderAmount,
+            ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, Price,
+            ReconciliationEvidenceChain, Shares, StrategyPositionLotId, TokenId, Usd,
+            VenueOrderAmount,
         },
     };
     use rust_decimal::Decimal;
@@ -1489,10 +1437,12 @@ mod tests {
     };
     use crate::test_fixtures::execution_pg_seed::prepared_order;
 
-    fn lot(avg: Decimal) -> PositionInfo {
-        PositionInfo {
-            position_id: PositionId::from_v7(),
-            order_intent_id: OrderIntentId::from_v7(),
+    fn lot(avg: Decimal) -> StrategyPositionLot {
+        StrategyPositionLot {
+            strategy_position_lot_id: StrategyPositionLotId::from_v7(),
+            origin_kind: StrategyPositionOriginKind::SystemIntent,
+            order_intent_id: Some(OrderIntentId::from_v7()),
+            recovery_incident_id: None,
             execution_account_id: ExecutionAccountId::from_v7(),
             token_id: TokenId::new("token-1"),
             market_id: MarketId::new("0xmkt"),

@@ -62,7 +62,7 @@ pub(crate) use quant_pivot_models::{
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCohortManifest,
         DatasetCoverage, DatasetManifest, DatasetSourceLineage, MarketId, ModelSpecId,
-        OrderIntentId, PayoutRatio, PositionId, Price, SchemaVersion, Shares, TokenId,
+        OrderIntentId, PayoutRatio, Price, SchemaVersion, Shares, StrategyPositionLotId, TokenId,
         TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId,
         TrainingSampleSource, TrainingSampleSources, Usd, factor::FactorServingPlane,
     },
@@ -150,7 +150,7 @@ pub struct LotSamplePlan {
     /// Entry intent owning the lot.
     pub order_intent_id: OrderIntentId,
     /// Position lot id.
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     /// Market the lot trades.
     pub market_id: MarketId,
     /// Outcome token held.
@@ -169,7 +169,7 @@ pub struct LotSamplePlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LotTrainingContext {
     pub order_intent_id: OrderIntentId,
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub outcome_side: OutcomeSide,
     pub remaining_shares: Shares,
     pub avg_price: Price,
@@ -657,7 +657,7 @@ pub fn dataset_source_fingerprint(examples: &[TrainingExample]) -> QuantResult<C
                 .map(|context| context.order_intent_id.to_string())
                 .unwrap_or_default(),
             left.lot_context
-                .map(|context| context.position_id.to_string())
+                .map(|context| context.strategy_position_lot_id.to_string())
                 .unwrap_or_default(),
             left.boundary.decision_at(),
         )
@@ -670,7 +670,7 @@ pub fn dataset_source_fingerprint(examples: &[TrainingExample]) -> QuantResult<C
                     .unwrap_or_default(),
                 right
                     .lot_context
-                    .map(|context| context.position_id.to_string())
+                    .map(|context| context.strategy_position_lot_id.to_string())
                     .unwrap_or_default(),
                 right.boundary.decision_at(),
             ))
@@ -1052,7 +1052,12 @@ impl TrainingDatasetArtifact {
                 a.token_id.as_str(),
                 a.lot_context
                     .as_ref()
-                    .map(|ctx| (ctx.order_intent_id.to_string(), ctx.position_id.to_string()))
+                    .map(|ctx| {
+                        (
+                            ctx.order_intent_id.to_string(),
+                            ctx.strategy_position_lot_id.to_string(),
+                        )
+                    })
                     .unwrap_or_default(),
                 a.decision_at(),
             )
@@ -1061,7 +1066,12 @@ impl TrainingDatasetArtifact {
                     b.token_id.as_str(),
                     b.lot_context
                         .as_ref()
-                        .map(|ctx| (ctx.order_intent_id.to_string(), ctx.position_id.to_string()))
+                        .map(|ctx| {
+                            (
+                                ctx.order_intent_id.to_string(),
+                                ctx.strategy_position_lot_id.to_string(),
+                            )
+                        })
                         .unwrap_or_default(),
                     b.decision_at(),
                 ))
@@ -1391,8 +1401,8 @@ mod tests {
         },
         hashing::CanonicalDigest,
         types::{
-            ContentHash, ModelSpecId, OrderIntentId, PositionId, Price, Probability, SchemaVersion,
-            Shares, TrainingSampleSource,
+            ContentHash, ModelSpecId, OrderIntentId, Price, Probability, SchemaVersion, Shares,
+            StrategyPositionLotId, TrainingSampleSource,
             factor::{
                 FactorComputationContract, FactorContextEffect, FactorDefinitionDocument,
                 FactorDefinitionRef, FactorExplanation, FactorOutputSemantics, FactorServingPlane,
@@ -1582,7 +1592,7 @@ mod tests {
         base.sample_source = TrainingSampleSource::ExitDecision;
         base.lot_context = Some(LotTrainingContext {
             order_intent_id: OrderIntentId::from_v7(),
-            position_id: PositionId::from_v7(),
+            strategy_position_lot_id: StrategyPositionLotId::from_v7(),
             outcome_side: OutcomeSide::No,
             remaining_shares: Shares::new(dec!(100)),
             avg_price: Price::new(dec!(0.45)),

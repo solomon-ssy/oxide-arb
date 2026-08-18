@@ -79,7 +79,7 @@ impl PgRuntimeControlRepository {
 }
 
 fn validate_update(update: &RuntimeControlUpdate) -> Result<(), StorageError> {
-    let changed_domains = usize::from(update.quant_runtime_mode.is_some())
+    let changed_domains = usize::from(update.entry_authorization_policy.is_some())
         + usize::from(update.settlement_write_policy.is_some())
         + usize::from(update.kill_switch_state.is_some());
     if changed_domains != 1 {
@@ -135,8 +135,8 @@ impl RuntimeControlRepository for PgRuntimeControlRepository {
         }
 
         let next_mode = update
-            .quant_runtime_mode
-            .unwrap_or(current.quant_runtime_mode);
+            .entry_authorization_policy
+            .unwrap_or(current.entry_authorization_policy);
         let next_policy = update
             .settlement_write_policy
             .unwrap_or(current.settlement_write_policy);
@@ -146,7 +146,7 @@ impl RuntimeControlRepository for PgRuntimeControlRepository {
         let next_requires_ack = update
             .kill_switch_requires_ack
             .unwrap_or(current.kill_switch_requires_ack);
-        if next_mode == current.quant_runtime_mode
+        if next_mode == current.entry_authorization_policy
             && next_policy == current.settlement_write_policy
             && next_kill_switch == current.kill_switch_state
             && next_requires_ack == current.kill_switch_requires_ack
@@ -167,8 +167,8 @@ impl RuntimeControlRepository for PgRuntimeControlRepository {
                 runtime_control_transition_id: RuntimeControlTransitionId::from_v7(),
                 from_revision: current.revision,
                 to_revision: next_revision,
-                from_quant_runtime_mode: current.quant_runtime_mode,
-                to_quant_runtime_mode: next_mode,
+                from_entry_authorization_policy: current.entry_authorization_policy,
+                to_entry_authorization_policy: next_mode,
                 from_settlement_write_policy: current.settlement_write_policy,
                 to_settlement_write_policy: next_policy,
                 from_kill_switch_state: current.kill_switch_state,
@@ -186,7 +186,7 @@ impl RuntimeControlRepository for PgRuntimeControlRepository {
         .map_err(StorageError::from)?;
 
         let mut active: ActiveModel = current.into_active_model();
-        active.quant_runtime_mode = Set(next_mode);
+        active.entry_authorization_policy = Set(next_mode);
         active.settlement_write_policy = Set(next_policy);
         active.kill_switch_state = Set(next_kill_switch);
         active.kill_switch_requires_ack = Set(next_requires_ack);

@@ -14,7 +14,7 @@ use quant_pivot_models::{
         pagination::{PageRequest, Paginated},
         ports::KillSwitchPort,
     },
-    enums::{execution::ReconciliationResult, quant::QuantRuntimeMode},
+    enums::{execution::ReconciliationResult, quant::EntryAuthorizationPolicy},
 };
 use quant_pivot_repository::traits::ReconciliationRepository;
 
@@ -107,7 +107,7 @@ pub async fn build_execution_recovery_summary(
 ) -> QuantResult<ExecutionRecoverySummary> {
     let unresolvable_count = reconciliation.count_blocking_unresolvable().await?;
     let kill_switch_view = kill_switch.view();
-    let mode = runtime_controls.quant_runtime_mode();
+    let mode = runtime_controls.entry_authorization_policy();
     Ok(summary_from_parts(
         unresolvable_count,
         &kill_switch_view,
@@ -122,7 +122,7 @@ pub async fn build_execution_recovery_view(
     runtime_controls: &RuntimeControlsHandle,
 ) -> QuantResult<ExecutionRecoveryView> {
     let kill_switch_view = kill_switch.view();
-    let mode = runtime_controls.quant_runtime_mode();
+    let mode = runtime_controls.entry_authorization_policy();
     let unresolvable_count = reconciliation.count_blocking_unresolvable().await?;
     let summary = summary_from_parts(unresolvable_count, &kill_switch_view, mode);
 
@@ -153,11 +153,11 @@ pub async fn build_execution_recovery_view(
 fn summary_from_parts(
     unresolvable_count: u64,
     kill_switch: &KillSwitchView,
-    mode: QuantRuntimeMode,
+    mode: EntryAuthorizationPolicy,
 ) -> ExecutionRecoverySummary {
     let has_unresolvable = unresolvable_count > 0;
     let kill_switch_requires_ack = kill_switch.requires_operator_ack;
-    let auto_execution_blocked = mode == QuantRuntimeMode::AutoExecution
+    let policy_automatic_blocked = mode == EntryAuthorizationPolicy::PolicyAutomatic
         && (!kill_switch.state.allows_new_entry() || has_unresolvable || kill_switch_requires_ack);
 
     let mut next_steps = Vec::new();
@@ -167,8 +167,11 @@ fn summary_from_parts(
     if kill_switch_requires_ack {
         next_steps.push(ExecutionRecoveryStep::AcknowledgeKillSwitch);
     }
-    if mode == QuantRuntimeMode::AutoExecution && next_steps.is_empty() && auto_execution_blocked {
-        next_steps.push(ExecutionRecoveryStep::VerifyModePreflight);
+    if mode == EntryAuthorizationPolicy::PolicyAutomatic
+        && next_steps.is_empty()
+        && policy_automatic_blocked
+    {
+        next_steps.push(ExecutionRecoveryStep::VerifyAuthorizationPreflight);
     }
 
     ExecutionRecoverySummary {
@@ -176,8 +179,8 @@ fn summary_from_parts(
         unresolvable_count,
         kill_switch_requires_ack,
         kill_switch_state: kill_switch.state,
-        quant_runtime_mode: mode,
-        auto_execution_blocked,
+        entry_authorization_policy: mode,
+        policy_automatic_blocked,
         next_steps,
     }
 }
@@ -187,7 +190,7 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         domain::{api::ExecutionRecoveryStep, governance::KillSwitchView},
-        enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
+        enums::{execution::KillSwitchState, quant::EntryAuthorizationPolicy},
     };
 
     use super::summary_from_parts;
@@ -208,7 +211,7 @@ mod tests {
         let summary = summary_from_parts(
             2,
             &kill_switch(KillSwitchState::ExecutionHalted, true),
-            QuantRuntimeMode::AutoExecution,
+            EntryAuthorizationPolicy::PolicyAutomatic,
         );
         assert_eq!(
             summary.next_steps,
@@ -217,7 +220,7 @@ mod tests {
                 ExecutionRecoveryStep::AcknowledgeKillSwitch,
             ]
         );
-        assert!(summary.auto_execution_blocked);
+        assert!(summary.policy_automatic_blocked);
     }
 
     #[test]
@@ -225,12 +228,12 @@ mod tests {
         let summary = summary_from_parts(
             0,
             &kill_switch(KillSwitchState::ExecutionHalted, true),
-            QuantRuntimeMode::AutoExecution,
+            EntryAuthorizationPolicy::PolicyAutomatic,
         );
         assert_eq!(
             summary.next_steps,
             vec![ExecutionRecoveryStep::AcknowledgeKillSwitch]
         );
-        assert!(summary.auto_execution_blocked);
+        assert!(summary.policy_automatic_blocked);
     }
 }

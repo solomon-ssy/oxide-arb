@@ -26,8 +26,8 @@ use reqwest::{Client, Url};
 use serde::Deserialize;
 
 use super::{
-    adapter::PreparedSettlementCall,
     typed::{IntoEvmBlockHash, IntoEvmTransactionHash, IntoEvmUint, SettlementValueError},
+    wallet_call::PreparedWalletCall,
 };
 use crate::{keystore::OrderSigner, wallet::WalletTopology};
 
@@ -233,12 +233,12 @@ pub trait EoaSettlementRpc: Send + Sync {
 pub struct EoaSettlementEnvelopeBuilder;
 
 impl EoaSettlementEnvelopeBuilder {
-    pub async fn prepare<R: EoaSettlementRpc>(
+    pub async fn prepare<R: EoaSettlementRpc, C: PreparedWalletCall>(
         &self,
         rpc: &R,
         signer: &OrderSigner,
         topology: &WalletTopology,
-        call: &PreparedSettlementCall,
+        call: &C,
     ) -> Result<PreparedEoaEnvelope, EoaSettlementError> {
         verify_eoa_identity(signer, topology, call)?;
         let chain_id = rpc.chain_id().await?;
@@ -308,19 +308,29 @@ impl EoaSettlementEnvelopeBuilder {
         prepared: &PreparedEoaEnvelope,
     ) -> Result<EvmTransactionHash, EoaSettlementError> {
         prepared.verify_durable_identity()?;
-        let returned_hash = rpc
-            .broadcast_raw(prepared.signed_envelope())
+        self.broadcast_durable(rpc, prepared.signed_envelope(), &prepared.transaction_hash)
             .await
-            .map_err(|error| match error {
-                ambiguous @ EoaSettlementError::AmbiguousBroadcast { .. } => ambiguous,
-                other => EoaSettlementError::AmbiguousBroadcast {
-                    detail: other.to_string(),
-                },
-            })?;
+    }
+
+    pub async fn broadcast_durable<R: EoaSettlementRpc>(
+        &self,
+        rpc: &R,
+        signed_envelope: &[u8],
+        expected_hash: &EvmTransactionHash,
+    ) -> Result<EvmTransactionHash, EoaSettlementError> {
+        let returned_hash =
+            rpc.broadcast_raw(signed_envelope)
+                .await
+                .map_err(|error| match error {
+                    ambiguous @ EoaSettlementError::AmbiguousBroadcast { .. } => ambiguous,
+                    other => EoaSettlementError::AmbiguousBroadcast {
+                        detail: other.to_string(),
+                    },
+                })?;
         let returned = (returned_hash).into_evm_transaction_hash()?;
-        if returned != prepared.transaction_hash {
+        if &returned != expected_hash {
             return Err(EoaSettlementError::BroadcastHashMismatch {
-                expected: prepared.transaction_hash.to_string(),
+                expected: expected_hash.to_string(),
                 actual: returned.to_string(),
             });
         }
@@ -452,10 +462,10 @@ struct CanonicalBlockResponse {
     hash: B256,
 }
 
-fn verify_eoa_identity(
+fn verify_eoa_identity<C: PreparedWalletCall>(
     signer: &OrderSigner,
     topology: &WalletTopology,
-    call: &PreparedSettlementCall,
+    call: &C,
 ) -> Result<(), EoaSettlementError> {
     if topology.kind != ExecutionWalletKind::Eoa {
         return Err(EoaSettlementError::WrongWalletKind);

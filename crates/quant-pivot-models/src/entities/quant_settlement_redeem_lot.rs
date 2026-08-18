@@ -3,11 +3,12 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::{quant_order_intent, quant_position, quant_settlement_redeem};
+use super::{quant_order_intent, quant_settlement_redeem, quant_strategy_position_lot};
 use crate::{
     enums::quant::OutcomeSide,
     types::{
-        OrderIntentId, PositionId, SettlementRedeemId, SettlementRedeemLotId, Shares, TokenId, Usd,
+        OrderIntentId, SettlementRedeemId, SettlementRedeemLotId, Shares, StrategyPositionLotId,
+        TokenId, Usd,
     },
 };
 
@@ -18,7 +19,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub settlement_redeem_lot_id: SettlementRedeemLotId,
     pub settlement_redeem_id: SettlementRedeemId,
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub side: OutcomeSide,
@@ -38,10 +39,10 @@ pub struct Model {
     #[sea_orm(
         belongs_to,
         relation_enum = "Position",
-        from = "position_id",
-        to = "position_id"
+        from = "strategy_position_lot_id",
+        to = "strategy_position_lot_id"
     )]
-    pub position: BelongsTo<quant_position::Entity>,
+    pub position: BelongsTo<quant_strategy_position_lot::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "OrderIntent",

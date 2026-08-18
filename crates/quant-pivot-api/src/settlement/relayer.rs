@@ -34,11 +34,11 @@ use self::deposit_wallet_wire::{
     Factory::proxyCall as DepositWalletProxyCall,
 };
 use super::{
-    adapter::PreparedSettlementCall,
     eoa::EoaPreparedBlock,
     typed::{
         IntoAlloyAddress, IntoEvmAddress, IntoEvmBlockHash, IntoEvmUint, SettlementValueError,
     },
+    wallet_call::PreparedWalletCall,
 };
 use crate::{keystore::OrderSigner, wallet::WalletTopology};
 
@@ -357,13 +357,13 @@ pub trait RelayerPreparationRpc: Send + Sync {
 pub struct RelayerRequestBuilder;
 
 impl RelayerRequestBuilder {
-    pub async fn prepare<R: RelayerPreparationRpc>(
+    pub async fn prepare<R: RelayerPreparationRpc, C: PreparedWalletCall>(
         &self,
         transport: &RelayerTransport,
         rpc: &R,
         signer: &OrderSigner,
         topology: &WalletTopology,
-        call: &PreparedSettlementCall,
+        call: &C,
     ) -> Result<PreparedRelayerEnvelope, RelayerError> {
         verify_relayer_identity(signer, topology, call)?;
         let chain_id = rpc.chain_id().await?;
@@ -1223,10 +1223,10 @@ fn build_proxy_body(
     })
 }
 
-fn build_deposit_wallet_body(
+fn build_deposit_wallet_body<C: PreparedWalletCall>(
     signer: &OrderSigner,
     topology: &WalletTopology,
-    call: &PreparedSettlementCall,
+    call: &C,
     nonce: u64,
     deadline: u64,
 ) -> Result<FrozenDepositWalletRequest, RelayerError> {
@@ -1319,10 +1319,10 @@ fn encode_signature(signature: &Signature, base_v: u8) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
-fn verify_relayer_identity(
+fn verify_relayer_identity<C: PreparedWalletCall>(
     signer: &OrderSigner,
     topology: &WalletTopology,
-    call: &PreparedSettlementCall,
+    call: &C,
 ) -> Result<(), RelayerError> {
     if topology.kind == ExecutionWalletKind::Eoa {
         return Err(RelayerError::WrongWalletKind);
@@ -1459,14 +1459,14 @@ mod tests {
     };
 
     use super::{
-        EoaPreparedBlock, FrozenDepositWalletRequest, PreparedSettlementCall, RelayerError,
-        RelayerPollOutcome, RelayerPreparationRpc, RelayerRequestBuilder, RelayerTransactionState,
-        RelayerTransport, build_deposit_wallet_body, verify_deposit_scope,
+        EoaPreparedBlock, FrozenDepositWalletRequest, RelayerError, RelayerPollOutcome,
+        RelayerPreparationRpc, RelayerRequestBuilder, RelayerTransactionState, RelayerTransport,
+        build_deposit_wallet_body, verify_deposit_scope,
     };
     use crate::{
         keystore::OrderSigner,
         settlement::{
-            adapter::{SettlementAdapterGateway, verified_redeem_fixture},
+            adapter::{PreparedSettlementCall, SettlementAdapterGateway, verified_redeem_fixture},
             contracts::verified_deployment_fixture_at,
         },
         wallet::{WalletTopology, derive_deposit_wallet_address},

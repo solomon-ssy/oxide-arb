@@ -6,10 +6,10 @@ use super::sea_orm_active_enums::{QpExecutionOrderPhase, QpFeeLiquidityRole, QpS
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "quant_execution_fill")]
+#[sea_orm(table_name = "quant_clob_trade_observation")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub execution_fill_id: Uuid,
+    pub clob_trade_observation_id: Uuid,
     pub execution_order_id: Uuid,
     pub order_intent_id: Uuid,
     pub execution_account_id: Uuid,
@@ -28,6 +28,8 @@ pub struct Model {
     pub shares: Decimal,
     pub price: Decimal,
     pub principal_usd: Decimal,
+    pub provisional_fee_usd: Decimal,
+    pub provisional_fee_rate_bps: Decimal,
     pub matched_at: DateTimeWithTimeZone,
     pub available_at: DateTimeWithTimeZone,
     #[sea_orm(column_type = "Text")]
@@ -57,8 +59,6 @@ pub struct Model {
         on_delete = "NoAction"
     )]
     pub quant_execution_account: BelongsTo<super::quant_execution_account::Entity>,
-    #[sea_orm(has_many)]
-    pub quant_execution_fee_measurements: HasMany<super::quant_execution_fee_measurement::Entity>,
     #[sea_orm(has_many)]
     pub quant_venue_incentive_events: HasMany<super::quant_venue_incentive_event::Entity>,
 }

@@ -76,6 +76,17 @@ clob_market_info_refresh_secs = 900
 chain_id = 137
 
 [polymarket.onchain]
+# Field: polymarket.onchain.provider_id
+# Purpose: Stable identity of the settlement/read RPC provider and failure domain.
+# Requirement: Required; recommended value: "polygon_public_rpc".
+# Type/unit/range: String; unitless; no additional scalar restriction beyond the serialized Rust type.
+# Validation/cross-field contract: No additional semantic or cross-field rule beyond the scalar and type contract.
+# Operational impact: Changes quant-pivot-api Polygon settlement and on-chain evidence adapter; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-api Polygon settlement and on-chain evidence adapter
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+provider_id = "polygon_public_rpc"
 # Field: polymarket.onchain.rpc_timeout_ms
 # Purpose: RPC request timeout (ms). Default: `10000`.
 # Requirement: Required; recommended value: 10000.
@@ -164,8 +175,8 @@ request_timeout_ms = 15000
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
 claim_lease_secs = 30
-# Field: polymarket.settlement.semi_auto_authorization_ttl_secs
-# Purpose: Fixed TTL for a `SemiAuto` settlement authorization challenge.
+# Field: polymarket.settlement.operator_authorization_ttl_secs
+# Purpose: Fixed TTL for an operator settlement-authorization challenge.
 # Requirement: Required; recommended value: 300.
 # Type/unit/range: Integer; seconds; minimum=0.
 # Validation/cross-field contract: [deploy.settlement.authorization-ttl] When Always: The authorization TTL must be between 30 and 3600 seconds inclusive.
@@ -174,7 +185,7 @@ claim_lease_secs = 30
 # Apply: process restart required; startup validation is fail-closed.
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
-semi_auto_authorization_ttl_secs = 300
+operator_authorization_ttl_secs = 300
 # Field: polymarket.settlement.discovery_poll_secs
 # Purpose: Durable discovery cadence; catalog events may only wake this poll early.
 # Requirement: Required; recommended value: 30.
@@ -614,6 +625,17 @@ full_history_blocks_per_tick = 5000
 batch_size = 1000
 
 [market_data.finalized_exchange_history.hypersync]
+# Field: market_data.finalized_exchange_history.hypersync.provider_id
+# Purpose: Stable identity of the primary extraction provider and failure domain.
+# Requirement: Required; recommended value: "envio_hypersync_polygon".
+# Type/unit/range: String; unitless; no additional scalar restriction beyond the serialized Rust type.
+# Validation/cross-field contract: No additional semantic or cross-field rule beyond the scalar and type contract.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+provider_id = "envio_hypersync_polygon"
 # Field: market_data.finalized_exchange_history.hypersync.endpoint
 # Purpose: Primary finalized Polygon exchange-history extraction endpoint.
 # Requirement: Required; recommended value: "https://polygon.hypersync.xyz".
@@ -638,6 +660,17 @@ endpoint = "https://polygon.hypersync.xyz"
 api_token = ""
 
 [market_data.finalized_exchange_history.attestor]
+# Field: market_data.finalized_exchange_history.attestor.provider_id
+# Purpose: Stable identity of the independent archive witness provider.
+# Requirement: Required; recommended value: "publicnode_polygon_archive".
+# Type/unit/range: String; unitless; no additional scalar restriction beyond the serialized Rust type.
+# Validation/cross-field contract: No additional semantic or cross-field rule beyond the scalar and type contract.
+# Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core market-data ingestion, durability, and reconciliation pipeline
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+provider_id = "publicnode_polygon_archive"
 # Field: market_data.finalized_exchange_history.attestor.max_blocks_per_log_request
 # Purpose: Maximum inclusive block span in one `eth_getLogs` request.
 # Requirement: Required; recommended value: 10.
@@ -663,7 +696,7 @@ max_concurrent_log_requests = 2
 
 # Field: market_data.finalized_exchange_history.attestor.rpc_endpoint
 # Purpose: JSON-RPC endpoint in a trust and failure domain independent of Envio.
-# Requirement: Required; recommended value: {"source":"public","url":"https://polygon-rpc.com"}.
+# Requirement: Required; recommended value: {"source":"public","url":"https://polygon-bor-rpc.publicnode.com"}.
 # Type/unit/range: Variant; unitless; no additional scalar restriction beyond the serialized Rust type.
 # Validation/cross-field contract: [deploy.exchange-history.authority] When Always: Enabled history requires authenticated HyperSync extraction, an independent non-Envio archive RPC witness, and the fixed fresh-boot PIT/frontier policy.
 # Operational impact: Changes quant-pivot-core market-data ingestion, durability, and reconciliation pipeline; the process must restart and pass fail-closed startup validation before the new value is consumed.
@@ -673,7 +706,7 @@ max_concurrent_log_requests = 2
 # Variants: protected, public.
 [market_data.finalized_exchange_history.attestor.rpc_endpoint]
 source = "public"
-url = "https://polygon-rpc.com"
+url = "https://polygon-bor-rpc.publicnode.com"
 
 [domain_sources.binance]
 # Field: domain_sources.binance.enabled
@@ -6493,7 +6526,7 @@ disabled = false
 # Purpose: Wallet private key for signing, CLOB L1 auth, and runtime L2 derivation.
 # Requirement: Optional; recommended value: no implicit default.
 # Type/unit/range: String; unitless; write_only.
-# Validation/cross-field contract: [deploy.account-read-credentials] When Every runtime mode, including report_only: A private key and non-empty funder address are both required because reports freeze real collateral and position state; report_only is not simulation.
+# Validation/cross-field contract: [deploy.account-read-credentials] When Whenever the production account is read: A private key and non-empty funder address are required because reports freeze real collateral and position state; account reads are not simulation.
 # Operational impact: Changes quant-pivot-api keystore and venue identity bootstrap; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-api keystore and venue identity bootstrap
 # Apply: process restart required; startup validation is fail-closed.
@@ -6761,13 +6794,35 @@ execution_breaker_tick_secs = 5
 # Sensitivity/redaction: public; deployment projection never exposes protected literals.
 # Variants: not applicable.
 equity_snapshot_secs = 300
+# Field: quant.workers.venue_incentive_reconciliation_secs
+# Purpose: Venue maker-award and wallet-credit reconciliation cadence.
+# Requirement: Required; recommended value: 3600.
+# Type/unit/range: Integer; seconds; minimum=0.
+# Validation/cross-field contract: No additional semantic or cross-field rule beyond the scalar and type contract.
+# Operational impact: Changes quant-pivot-core bounded report, reconciliation, and execution workers; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core bounded report, reconciliation, and execution workers
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+venue_incentive_reconciliation_secs = 3600
+# Field: quant.workers.venue_incentive_lookback_days
+# Purpose: Closed UTC days re-read on every incentive pass. Re-reading is intentional because venue awards can arrive after the program day.
+# Requirement: Required; recommended value: 35.
+# Type/unit/range: Integer; days; minimum=0.
+# Validation/cross-field contract: No additional semantic or cross-field rule beyond the scalar and type contract.
+# Operational impact: Changes quant-pivot-core bounded report, reconciliation, and execution workers; the process must restart and pass fail-closed startup validation before the new value is consumed.
+# Consumer: quant-pivot-core bounded report, reconciliation, and execution workers
+# Apply: process restart required; startup validation is fail-closed.
+# Sensitivity/redaction: public; deployment projection never exposes protected literals.
+# Variants: not applicable.
+venue_incentive_lookback_days = 35
 
 [quant.account]
 # Field: quant.account.funder
 # Purpose: Polymarket proxy/funder address used as `user=<funder>` for Data API position reads. Required to generate reports (all modes).
 # Requirement: Optional; recommended value: no implicit default.
 # Type/unit/range: String; unitless; no additional scalar restriction beyond the serialized Rust type.
-# Validation/cross-field contract: [deploy.account-read-credentials] When Every runtime mode, including report_only: A private key and non-empty funder address are both required because reports freeze real collateral and position state; report_only is not simulation.
+# Validation/cross-field contract: [deploy.account-read-credentials] When Whenever the production account is read: A private key and non-empty funder address are required because reports freeze real collateral and position state; account reads are not simulation.
 # Operational impact: Changes quant-pivot-core credential-gated venue account snapshot and report capital freeze; the process must restart and pass fail-closed startup validation before the new value is consumed.
 # Consumer: quant-pivot-core credential-gated venue account snapshot and report capital freeze
 # Apply: process restart required; startup validation is fail-closed.

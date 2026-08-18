@@ -1371,8 +1371,8 @@ impl TradePolicyService {
                 pit_cutoff: request.selection.pit_cutoff,
                 activation_target: match request.evaluation_track {
                     ResearchEvaluationTrack::ResearchOnly => VerticalActivationTarget::ResearchOnly,
-                    ResearchEvaluationTrack::SemiAutoCandidate => {
-                        VerticalActivationTarget::SemiAuto
+                    ResearchEvaluationTrack::ExecutionCandidate => {
+                        VerticalActivationTarget::OperatorApproval
                     }
                 },
                 progress,
@@ -2544,7 +2544,9 @@ fn build_fit_artifact_payload(
         format_version: TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
         activation_target: match request.evaluation_track {
             ResearchEvaluationTrack::ResearchOnly => VerticalActivationTarget::ResearchOnly,
-            ResearchEvaluationTrack::SemiAutoCandidate => VerticalActivationTarget::SemiAuto,
+            ResearchEvaluationTrack::ExecutionCandidate => {
+                VerticalActivationTarget::OperatorApproval
+            }
         },
         fit_contract: TradePolicyFitContract {
             profile_ref: plan.profile.profile_ref.clone(),

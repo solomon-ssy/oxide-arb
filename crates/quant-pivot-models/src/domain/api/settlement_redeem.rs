@@ -32,10 +32,10 @@ use crate::{
     },
     types::{
         ContentHash, EvmAddress, EvmBlockHash, EvmCalldataHash, EvmCodeHash, EvmTransactionHash,
-        ExecutionAccountId, MarketId, OrderIntentId, PositionId, RelayerTransactionId,
+        ExecutionAccountId, MarketId, OrderIntentId, RelayerTransactionId,
         SettlementActionIdempotencyKey, SettlementChainSubmissionId, SettlementEvidenceVersion,
         SettlementGovernedActionId, SettlementInventoryLotId, SettlementRedeemId,
-        SettlementRedeemLotId, Shares, TokenId, Usd, UserId,
+        SettlementRedeemLotId, Shares, StrategyPositionLotId, TokenId, Usd, UserId,
         settlement_payload::{
             SettlementBalanceEvidence, SettlementChainReceiptEvidence, SettlementFailureHistory,
         },
@@ -50,7 +50,7 @@ pub struct SettlementInventoryLotView {
     pub inventory_digest: ContentHash,
     pub contributor_lots_digest: ContentHash,
     pub execution_account_id: ExecutionAccountId,
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub side: OutcomeSide,
@@ -71,7 +71,7 @@ impl From<SettlementInventoryLotInfo> for SettlementInventoryLotView {
             inventory_digest: info.inventory_digest,
             contributor_lots_digest: info.contributor_lots_digest,
             execution_account_id: info.execution_account_id,
-            position_id: info.position_id,
+            strategy_position_lot_id: info.strategy_position_lot_id,
             order_intent_id: info.order_intent_id,
             token_id: info.token_id,
             side: info.side,
@@ -91,7 +91,7 @@ impl From<SettlementInventoryLotInfo> for SettlementInventoryLotView {
 pub struct SettlementRedeemLotView {
     pub settlement_redeem_lot_id: SettlementRedeemLotId,
     pub settlement_redeem_id: SettlementRedeemId,
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub side: OutcomeSide,
@@ -107,7 +107,7 @@ impl From<SettlementRedeemLotInfo> for SettlementRedeemLotView {
         Self {
             settlement_redeem_lot_id: info.settlement_redeem_lot_id,
             settlement_redeem_id: info.settlement_redeem_id,
-            position_id: info.position_id,
+            strategy_position_lot_id: info.strategy_position_lot_id,
             order_intent_id: info.order_intent_id,
             token_id: info.token_id,
             side: info.side,
@@ -333,7 +333,7 @@ pub struct SettlementRedeemDetailView {
     pub submissions: Vec<SettlementChainSubmissionView>,
 }
 
-/// Exact compare-and-swap request for one `SemiAuto` batch authorization.
+/// Exact compare-and-swap request for one operator batch authorization.
 #[derive(Debug, Clone, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct SettlementAuthorizationRequest {
@@ -395,8 +395,8 @@ pub enum SettlementGovernedActionBlockReason {
     DeploymentNotReady,
     OperatorApprovalAlreadySatisfied,
     OperatorApprovalRequired,
-    RuntimeModeNotSemiAuto,
-    RuntimeModeWritePolicyMismatch,
+    OperatorAuthorizationRequired,
+    AuthorizationPolicyMismatch,
     SettlementCaseNotFound,
     SettlementCaseScopeMismatch,
     ManualOnlyInventory,

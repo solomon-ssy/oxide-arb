@@ -91,10 +91,7 @@ use toml::{Value as TomlValue, de::Error as TomlDeError};
 pub use validation_contract::DeployValidationRuleDescriptor;
 pub use web::{JwtConfig, PasswordCryptoConfig, WebConfig};
 
-use crate::{
-    config::validation::validate_deploy_mode, enums::quant::QuantRuntimeMode,
-    types::DeploymentEnvironment,
-};
+use crate::types::DeploymentEnvironment;
 
 const MAX_CONFIG_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -429,21 +426,20 @@ impl DeployConfig {
         Ok(())
     }
 
-    /// Run the **quant-mode-aware** portion of deploy validation (credential
-    /// policy, JWT strength). Called once the effective [`QuantRuntimeMode`]
-    /// is known — the persisted operational mode, not a config value.
+    /// Validate credentials and web authentication required by every execution-
+    /// capable deployment, independently of runtime authorization state.
     #[must_use]
-    pub fn validate_for_quant_mode(&self, mode: QuantRuntimeMode) -> ConfigValidationReport {
-        let report = validate_deploy_mode(self, mode);
+    pub fn validate_execution(&self) -> ConfigValidationReport {
+        let report = self.execution_validation_report();
         for w in &report.warnings {
-            tracing::warn!(mode = ?mode, "Deploy config warning: {w}");
+            tracing::warn!("Deploy config warning: {w}");
         }
         report
     }
 
-    /// Fail-closed gate for quant-mode-aware validation.
-    pub fn ensure_mode_valid(&self, mode: QuantRuntimeMode) -> QuantResult<()> {
-        let report = self.validate_for_quant_mode(mode);
+    /// Fail-closed gate for execution credentials and authentication.
+    pub fn ensure_execution_valid(&self) -> QuantResult<()> {
+        let report = self.validate_execution();
         if report.has_errors() {
             return Err(ConfigError::from(report).into());
         }
@@ -547,34 +543,30 @@ mod tests {
     }
 
     #[test]
-    fn report_only_requires_credentials() {
-        // report_only is not dry-run: it reads the real venue account, so a
+    fn execution_requires_credentials() {
+        // production account reads is not dry-run: it reads the real venue account, so a
         // missing private key / funder fails closed in every mode.
         let deploy = DeployConfig::default();
-        assert!(
-            deploy
-                .validate_for_quant_mode(QuantRuntimeMode::ReportOnly)
-                .has_errors()
-        );
+        assert!(deploy.validate_execution().has_errors());
     }
 
     #[test]
-    fn report_only_validates_credentials() {
+    fn execution_validates_credentials() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
         deploy.web.jwt.signing_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into();
         deploy
-            .ensure_mode_valid(QuantRuntimeMode::ReportOnly)
-            .expect("report_only with credentials must validate");
+            .ensure_execution_valid()
+            .expect("production account reads with credentials must validate");
     }
 
     #[test]
     fn ensure_fails_missing_credentials() {
         let deploy = DeployConfig::default();
         let err = deploy
-            .ensure_mode_valid(QuantRuntimeMode::AutoExecution)
-            .expect_err("AutoExecution without credentials must fail closed");
+            .ensure_execution_valid()
+            .expect_err("policy-authorized execution without credentials must fail closed");
         assert!(err.to_string().contains("missing required credentials"));
     }
 

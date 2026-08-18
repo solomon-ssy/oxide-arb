@@ -29,7 +29,7 @@ use quant_pivot_models::{
     },
     enums::{
         common::MarketCategory,
-        quant::QuantRuntimeMode,
+        quant::ExecutionAuthorityCeiling,
         rbac::{Operation, ResourceType, RoleKind, RoleStatus, UserStatus},
     },
     runtime_config::{BuyModelRoute, PortfolioScenarioModelArtifactBinding},
@@ -282,7 +282,7 @@ impl PermitContext {
             candidate_manifest_id: self.candidate_manifest_id,
             candidate_manifest_hash: self.candidate_manifest_hash,
             promotion_gate_hash: self.promotion_gate_hash,
-            allowed_runtime_modes: vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto],
+            maximum_execution_authority: ExecutionAuthorityCeiling::OperatorApproval,
             non_route_policy_hash: content_hash(hash_seed),
             serving_constraints_hash: content_hash('7'),
             expires_at,

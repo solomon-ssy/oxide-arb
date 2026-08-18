@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    market, quant_execution_fill, quant_execution_trade_ref, quant_execution_transaction_ref,
-    quant_order_intent, quant_reconciliation,
+    market, quant_clob_trade_observation, quant_execution_trade_ref,
+    quant_execution_transaction_ref, quant_order_intent, quant_reconciliation,
 };
 use crate::{
     enums::{
@@ -67,7 +67,7 @@ pub struct Model {
     #[sea_orm(has_many, relation_enum = "TradeRefs")]
     pub trade_refs: HasMany<quant_execution_trade_ref::Entity>,
     #[sea_orm(has_many, relation_enum = "Fills")]
-    pub fills: HasMany<quant_execution_fill::Entity>,
+    pub fills: HasMany<quant_clob_trade_observation::Entity>,
     #[sea_orm(has_many, relation_enum = "TransactionRefs")]
     pub transaction_refs: HasMany<quant_execution_transaction_ref::Entity>,
 }

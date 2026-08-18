@@ -56,7 +56,7 @@ use quant_pivot_models::{
         catalog::CatalogTimestampQuality,
         feature::EvidenceSourceKind,
         market::MarketStatus,
-        quant::{DataQualityStatus, DatasetPurpose, FeedbackCohort, QuantRuntimeMode},
+        quant::{DataQualityStatus, DatasetPurpose, FeedbackCohort},
     },
     hashing::CanonicalDigest,
     types::{
@@ -75,10 +75,10 @@ use quant_pivot_repository::{
         PgDomainSourceCursorRepository, PgExchangeHistoryRepository,
         PgExecutionAttemptOutcomeRepository, PgFactorRepository, PgFeatureRepository,
         PgMarketLinkageRepository, PgMarketRepository, PgModelRegistryRepository,
-        PgPolicyRepository, PgPositionRepository, PgRecommendationExecutionRollupRepository,
+        PgPolicyRepository, PgRecommendationExecutionRollupRepository,
         PgRecommendationReportRepository, PgRecommendationRepository,
         PgRecommendationResolutionOutcomeRepository, PgResolutionObservationRepository,
-        PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgStrategyPositionLotRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
         DomainSourceCursorRepository, FactWriter, FactorRepository, FeatureRepository,
@@ -553,10 +553,7 @@ async fn seed_feedback_report(
     let decision_at = DateTime::from_timestamp_millis(historical_decision_at.timestamp_millis())
         .context("database time is outside chrono's millisecond range")?;
     let ids = prepare_report_on_infra(db, infra, &config, decision_at).await;
-    let mut options = ReportBuildOptions::published_single(&ids);
-    if ordinal == 0 {
-        options.runtime_mode = QuantRuntimeMode::ReportOnly;
-    }
+    let options = ReportBuildOptions::published_single(&ids);
     let recommendation = options
         .recommendations
         .first()
@@ -868,7 +865,7 @@ async fn feedback_service(
             market_repo: Arc::new(PgMarketRepository::new(db.clone())),
             artifact_store: Arc::clone(&store),
             dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
-            position_repo: Arc::new(PgPositionRepository::new(db.clone())),
+            position_repo: Arc::new(PgStrategyPositionLotRepository::new(db.clone())),
             clob_market_info_repo: Arc::new(PgClobMarketInfoRepository::new(db.clone())),
             linkage_repo: Arc::new(PgMarketLinkageRepository::new(db.clone())),
             model_registry: Arc::new(PgModelRegistryRepository::new(db.clone())),

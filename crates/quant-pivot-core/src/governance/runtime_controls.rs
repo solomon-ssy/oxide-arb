@@ -7,7 +7,8 @@ use chrono::Utc;
 use quant_pivot_models::{
     domain::governance::RuntimeControlSnapshot,
     enums::{
-        execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
+        execution::KillSwitchState, quant::EntryAuthorizationPolicy,
+        settlement::SettlementWritePolicy,
     },
 };
 
@@ -37,8 +38,8 @@ impl RuntimeControlsHandle {
 
     #[must_use]
     #[inline]
-    pub fn quant_runtime_mode(&self) -> QuantRuntimeMode {
-        self.load().quant_runtime_mode
+    pub fn entry_authorization_policy(&self) -> EntryAuthorizationPolicy {
+        self.load().entry_authorization_policy
     }
 
     #[must_use]
@@ -75,7 +76,7 @@ impl RuntimeControlsHandle {
 impl Default for RuntimeControlsHandle {
     fn default() -> Self {
         Self::new(RuntimeControlSnapshot {
-            quant_runtime_mode: QuantRuntimeMode::ReportOnly,
+            entry_authorization_policy: EntryAuthorizationPolicy::OperatorApprovalRequired,
             settlement_write_policy: SettlementWritePolicy::Disabled,
             kill_switch_state: KillSwitchState::Closed,
             kill_switch_requires_ack: false,
@@ -96,15 +97,18 @@ mod tests {
         let handle = RuntimeControlsHandle::default();
         let mut next = handle.snapshot();
         next.revision = 1;
-        next.quant_runtime_mode = QuantRuntimeMode::SemiAuto;
-        next.settlement_write_policy = SettlementWritePolicy::SemiAuto;
+        next.entry_authorization_policy = EntryAuthorizationPolicy::OperatorApprovalRequired;
+        next.settlement_write_policy = SettlementWritePolicy::OperatorApproval;
         assert!(handle.publish_if_newer(next.clone()));
         assert_eq!(handle.snapshot(), next);
 
         let mut stale = next;
         stale.revision = 0;
-        stale.quant_runtime_mode = QuantRuntimeMode::ReportOnly;
+        stale.entry_authorization_policy = EntryAuthorizationPolicy::OperatorApprovalRequired;
         assert!(!handle.publish_if_newer(stale));
-        assert_eq!(handle.quant_runtime_mode(), QuantRuntimeMode::SemiAuto);
+        assert_eq!(
+            handle.entry_authorization_policy(),
+            EntryAuthorizationPolicy::OperatorApprovalRequired
+        );
     }
 }

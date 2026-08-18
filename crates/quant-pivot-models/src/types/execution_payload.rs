@@ -19,14 +19,56 @@ use crate::{
     domain::market::fee::{BuilderFeeAttribution, FrozenMakerRebateSchedule},
     enums::{
         common::{OrderType, Side},
-        quant::{ExitSettlementMode, RedeemPolicy},
+        quant::{AuthorizationKind, ExitSettlementMode, RedeemPolicy},
     },
     types::{
-        Bps, ContentHash, ModelVersionId, OpportunisticExitPolicy, Price, Probability,
-        ResearchProfileRef, ScaleOutTarget, Shares, ThesisInvalidationPolicy, TokenId,
-        TrailingStopPolicy, Usd,
+        Bps, ContentHash, DecisionPolicySnapshotId, ModelVersionId, OpportunisticExitPolicy, Price,
+        Probability, ResearchProfileRef, ScaleOutTarget, Shares, ThesisInvalidationPolicy, TokenId,
+        TrailingStopPolicy, Usd, UserId,
     },
 };
+
+/// Immutable provenance that granted an intent permission to submit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum AuthorizationEvidence {
+    OperatorApproval {
+        operator_id: UserId,
+        reason: String,
+        authorized_at: DateTime<Utc>,
+    },
+    ActivePolicy {
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        policy_hash: ContentHash,
+        authorized_at: DateTime<Utc>,
+    },
+}
+
+impl AuthorizationEvidence {
+    #[must_use]
+    pub const fn kind(&self) -> AuthorizationKind {
+        match self {
+            Self::OperatorApproval { .. } => AuthorizationKind::OperatorApproval,
+            Self::ActivePolicy { .. } => AuthorizationKind::ActivePolicy,
+        }
+    }
+
+    #[must_use]
+    pub const fn authorized_at(&self) -> DateTime<Utc> {
+        match self {
+            Self::OperatorApproval { authorized_at, .. }
+            | Self::ActivePolicy { authorized_at, .. } => *authorized_at,
+        }
+    }
+
+    #[must_use]
+    pub fn operator_reason(&self) -> Option<&str> {
+        match self {
+            Self::OperatorApproval { reason, .. } => Some(reason),
+            Self::ActivePolicy { .. } => None,
+        }
+    }
+}
 
 /// Governed intent amount. Aggressive BUY orders carry a total cash budget;
 /// resting orders and SELL orders carry an exact share quantity.

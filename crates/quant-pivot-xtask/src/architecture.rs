@@ -17,7 +17,7 @@ use syn::{
 };
 use toml::Value;
 
-use crate::function_design;
+use crate::{function_design, implementation_ledger};
 
 const TEST_ONLY_EXTERNAL_DEPENDENCIES: &[&str] = &[
     "actix-http",
@@ -96,9 +96,11 @@ pub fn run() -> Result<()> {
     violations.extend(validate_settlement_runtime_reachability(
         &metadata.workspace_root,
     )?);
-    violations.extend(validate_phase_ledger(&metadata.workspace_root)?);
+    violations.extend(implementation_ledger::validate(&metadata.workspace_root)?);
     violations.extend(validate_attribution_removal(&metadata.workspace_root)?);
-    violations.extend(validate_phase_allocation_removal(&metadata.workspace_root)?);
+    violations.extend(validate_profile_allocation_removal(
+        &metadata.workspace_root,
+    )?);
     violations.extend(validate_factor_publication_removal(
         &metadata.workspace_root,
     )?);
@@ -497,7 +499,7 @@ fn validate_attribution_removal(workspace_root: &Path) -> Result<Vec<String>> {
 
     let mut violations = validate_removed_contract(
         workspace_root,
-        "Phase 11.9 attribution",
+        "removed attribution contract",
         REMOVED_PATHS,
         REMOVED_TOKENS,
         &[
@@ -522,7 +524,7 @@ fn validate_attribution_removal(workspace_root: &Path) -> Result<Vec<String>> {
     Ok(violations)
 }
 
-fn validate_phase_allocation_removal(workspace_root: &Path) -> Result<Vec<String>> {
+fn validate_profile_allocation_removal(workspace_root: &Path) -> Result<Vec<String>> {
     const REMOVED_PATHS: &[&str] = &[
         "crates/quant-pivot-core/src/service/profile_allocation.rs",
         "crates/quant-pivot-models/src/domain/quant/profile_allocation.rs",
@@ -540,7 +542,7 @@ fn validate_phase_allocation_removal(workspace_root: &Path) -> Result<Vec<String
 
     validate_removed_contract(
         workspace_root,
-        "Phase 11.9 profile-allocation",
+        "removed profile-allocation contract",
         REMOVED_PATHS,
         REMOVED_TOKENS,
         &[
@@ -1030,7 +1032,7 @@ fn validate_model_category_routes(workspace_root: &Path) -> Result<Vec<String>> 
     )?;
     let (preflight_path, preflight) = read_architecture_source(
         workspace_root,
-        "crates/quant-pivot-core/src/governance/mode_preflight.rs",
+        "crates/quant-pivot-core/src/governance/entry_authorization_preflight.rs",
     )?;
     let (capability_path, capability) = read_architecture_source(
         workspace_root,
@@ -3239,320 +3241,6 @@ fn allowed_workspace_dependencies(package: &str) -> &'static [&'static str] {
     }
 }
 
-const PHASE_11_9_LEDGER_PATH: &str =
-    "docs/plans/quant-pivot/phase-11/11.9-attribution-feedback-and-auto-retraining.md";
-const PHASE_11_9_LEDGER_STATES: &[&str] = &[
-    "TODO",
-    "IN_PROGRESS",
-    "BLOCKED",
-    "PAUSED",
-    "DONE",
-    "SUPERSEDED",
-];
-const PHASE_11_9_CHECKPOINT_FIELDS: &[&str] = &[
-    "baseline_branch",
-    "baseline_head",
-    "working_tree_summary",
-    "current_task_id",
-    "current_task_objective",
-    "dependency_status",
-    "changed_paths",
-    "last_passed_command",
-    "last_failed_command_and_root_cause",
-    "evidence_artifacts_and_hashes",
-    "active_long_running_command",
-    "exact_resume_command",
-    "next_single_action",
-    "updated_at",
-];
-
-#[derive(Debug)]
-struct PhaseLedgerTask {
-    status: String,
-    dependencies: Vec<String>,
-    detail: String,
-}
-
-fn validate_phase_ledger(workspace_root: &Path) -> Result<Vec<String>> {
-    let path = workspace_root.join(PHASE_11_9_LEDGER_PATH);
-    let source = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    Ok(validate_ledger_source(&source)
-        .into_iter()
-        .map(|violation| format!("{}: {violation}", path.display()))
-        .collect())
-}
-
-fn validate_ledger_source(source: &str) -> Vec<String> {
-    let mut violations = Vec::new();
-    let Some((before_implementation, implementation_and_after)) =
-        split_markdown_heading(source, "## 11. Implementation Ledger")
-    else {
-        return vec!["missing `## 11. Implementation Ledger`".to_owned()];
-    };
-    let Some((implementation, evidence_and_after)) =
-        split_markdown_heading(implementation_and_after, "## 12. Evidence Ledger")
-    else {
-        return vec!["missing `## 12. Evidence Ledger`".to_owned()];
-    };
-    let Some((evidence, _decisions)) =
-        split_markdown_heading(evidence_and_after, "## 13. 决策账本")
-    else {
-        return vec!["missing `## 13. 决策账本`".to_owned()];
-    };
-
-    let mut checkpoint = BTreeMap::new();
-    for field in PHASE_11_9_CHECKPOINT_FIELDS {
-        let marker = format!("- `{field}`:");
-        let value = before_implementation
-            .lines()
-            .find_map(|line| {
-                line.trim()
-                    .strip_prefix(&marker)
-                    .map(|value| value.trim().trim_matches('`').to_owned())
-            })
-            .unwrap_or_default();
-        if value.is_empty() {
-            violations.push(format!("checkpoint field `{field}` is missing or empty"));
-        }
-        checkpoint.insert(*field, value);
-    }
-
-    let mut tasks = BTreeMap::<String, PhaseLedgerTask>::new();
-    for line in implementation.lines() {
-        let Some(cells) = markdown_cells(line) else {
-            continue;
-        };
-        let Some(id) = cells.first() else {
-            continue;
-        };
-        if !is_ledger_task_id(id) || cells.len() < 4 {
-            continue;
-        }
-        if tasks.contains_key(*id) {
-            violations.push(format!("task ID `{id}` is duplicated"));
-            continue;
-        }
-        let status = cells[1].to_owned();
-        if !PHASE_11_9_LEDGER_STATES.contains(&status.as_str()) {
-            violations.push(format!("task `{id}` uses unsupported status `{status}`"));
-        }
-        let (dependencies, detail_start) = if cells.len() >= 5 {
-            (
-                parse_phase_ledger_dependencies(cells[2], id, &mut violations),
-                3,
-            )
-        } else {
-            (Vec::new(), 2)
-        };
-        tasks.insert(
-            (*id).to_owned(),
-            PhaseLedgerTask {
-                status,
-                dependencies,
-                detail: cells[detail_start..].join(" | "),
-            },
-        );
-    }
-    if tasks.is_empty() {
-        violations.push("implementation ledger contains no task rows".to_owned());
-        return violations;
-    }
-
-    let in_progress = tasks
-        .iter()
-        .filter_map(|(id, task)| (task.status == "IN_PROGRESS").then_some(id.as_str()))
-        .collect::<Vec<_>>();
-    if in_progress.len() > 1 {
-        violations.push(format!(
-            "multiple tasks are IN_PROGRESS: {}",
-            in_progress.join(", ")
-        ));
-    }
-    let checkpoint_task = checkpoint
-        .get("current_task_id")
-        .map(String::as_str)
-        .unwrap_or_default();
-    match (checkpoint_task, in_progress.as_slice()) {
-        ("无" | "none", []) => {}
-        (_, [active]) if checkpoint_task == *active => {}
-        _ => violations.push(format!(
-            "checkpoint current_task_id `{checkpoint_task}` does not match IN_PROGRESS tasks [{}]",
-            in_progress.join(", ")
-        )),
-    }
-
-    let passed_tasks = evidence
-        .lines()
-        .filter_map(markdown_cells)
-        .filter(|cells| cells.len() >= 4 && cells[2].starts_with("PASS"))
-        .flat_map(|cells| extract_ledger_task_ids(cells[1]))
-        .collect::<BTreeSet<_>>();
-
-    for (id, task) in &tasks {
-        if task.status == "DONE" && !passed_tasks.contains(id) {
-            violations.push(format!("DONE task `{id}` has no PASS evidence row"));
-        }
-        if task.status == "SUPERSEDED"
-            && !task.detail.contains("replacement=")
-            && !task.detail.contains("§13")
-        {
-            violations.push(format!(
-                "SUPERSEDED task `{id}` lacks `replacement=` or a §13 decision reference"
-            ));
-        }
-        if task.status == "BLOCKED"
-            && (!task.detail.contains("blocker=")
-                || !task.detail.contains("unblock=")
-                || !task.detail.contains("resume="))
-        {
-            violations.push(format!(
-                "BLOCKED task `{id}` must record blocker=, unblock=, and resume="
-            ));
-        }
-        validate_ledger_dependencies(id, task, &tasks, &mut violations);
-    }
-
-    let status_line = source
-        .lines()
-        .find(|line| line.starts_with("> 状态："))
-        .unwrap_or_default();
-    if (status_line.contains("Phase 11.9 已完成") || status_line.contains("完整双垂直生产激活"))
-        && tasks
-            .values()
-            .any(|task| !matches!(task.status.as_str(), "DONE" | "SUPERSEDED"))
-    {
-        violations.push(
-            "phase status claims completion while implementation tasks remain open".to_owned(),
-        );
-    }
-
-    violations
-}
-
-fn split_markdown_heading<'a>(source: &'a str, heading: &str) -> Option<(&'a str, &'a str)> {
-    source.split_once(&format!("\n{heading}\n"))
-}
-
-fn markdown_cells(line: &str) -> Option<Vec<&str>> {
-    let line = line.trim();
-    if !line.starts_with('|') || !line.ends_with('|') {
-        return None;
-    }
-    Some(line.trim_matches('|').split('|').map(str::trim).collect())
-}
-
-fn is_ledger_task_id(value: &str) -> bool {
-    let Some(value) = value.strip_prefix('W') else {
-        return false;
-    };
-    let Some((wave, task)) = value.split_once('-') else {
-        return false;
-    };
-    !wave.is_empty()
-        && wave.chars().all(|character| character.is_ascii_digit())
-        && !task.is_empty()
-        && task
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-')
-}
-
-fn extract_ledger_task_ids(value: &str) -> Vec<String> {
-    value
-        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '-'))
-        .filter(|token| is_ledger_task_id(token))
-        .map(str::to_owned)
-        .collect()
-}
-
-fn parse_phase_ledger_dependencies(
-    value: &str,
-    task_id: &str,
-    violations: &mut Vec<String>,
-) -> Vec<String> {
-    if matches!(value, "" | "无") {
-        return Vec::new();
-    }
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|dependency| !dependency.is_empty())
-        .filter_map(|dependency| {
-            let reference = dependency.strip_suffix('*').unwrap_or(dependency);
-            if is_ledger_task_id(reference)
-                || (dependency.ends_with('*') && is_ledger_task_prefix(reference))
-            {
-                Some(dependency.to_owned())
-            } else {
-                violations.push(format!(
-                    "task `{task_id}` has invalid dependency expression `{dependency}`"
-                ));
-                None
-            }
-        })
-        .collect()
-}
-
-fn is_ledger_task_prefix(value: &str) -> bool {
-    let Some(value) = value.strip_prefix('W') else {
-        return false;
-    };
-    let Some((wave, prefix)) = value.split_once('-') else {
-        return false;
-    };
-    !wave.is_empty()
-        && wave.chars().all(|character| character.is_ascii_digit())
-        && !prefix.is_empty()
-        && prefix
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-')
-}
-
-fn validate_ledger_dependencies(
-    task_id: &str,
-    task: &PhaseLedgerTask,
-    tasks: &BTreeMap<String, PhaseLedgerTask>,
-    violations: &mut Vec<String>,
-) {
-    for dependency in &task.dependencies {
-        let dependency_ids = dependency.strip_suffix('*').map_or_else(
-            || vec![dependency.as_str()],
-            |prefix| {
-                tasks
-                    .keys()
-                    .filter(|id| id.starts_with(prefix))
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-            },
-        );
-        if dependency_ids.is_empty() {
-            violations.push(format!(
-                "task `{task_id}` dependency `{dependency}` matches no task"
-            ));
-            continue;
-        }
-        for dependency_id in dependency_ids {
-            if dependency_id == task_id {
-                violations.push(format!("task `{task_id}` depends on itself"));
-                continue;
-            }
-            let Some(dependency_task) = tasks.get(dependency_id) else {
-                violations.push(format!(
-                    "task `{task_id}` references unknown dependency `{dependency_id}`"
-                ));
-                continue;
-            };
-            if matches!(task.status.as_str(), "IN_PROGRESS" | "DONE")
-                && !matches!(dependency_task.status.as_str(), "DONE" | "SUPERSEDED")
-            {
-                violations.push(format!(
-                    "task `{task_id}` is {} while dependency `{dependency_id}` is {}",
-                    task.status, dependency_task.status
-                ));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -3562,8 +3250,8 @@ mod tests {
 
     use super::{
         CargoDependency, CargoMetadata, CargoPackage, validate_config_secret_types,
-        validate_feedback_dead_semantics, validate_ledger_source, validate_persistence_documents,
-        validate_public_exports, validate_source_style,
+        validate_feedback_dead_semantics, validate_persistence_documents, validate_public_exports,
+        validate_source_style,
     };
 
     fn dependency(name: &str, kind: Option<&str>, features: &[&str]) -> CargoDependency {
@@ -3591,43 +3279,6 @@ mod tests {
         }
     }
 
-    fn phase_11_9_fixture(implementation: &str, evidence: &str) -> String {
-        format!(
-            r"
-> 状态：**Phase 11.9 执行中**
-
-## 0. 文档使用规则与恢复协议
-
-- `baseline_branch`: `quant-pivot`
-- `baseline_head`: `abc123`
-- `working_tree_summary`: clean
-- `current_task_id`: `W2-00`
-- `current_task_objective`: ledger
-- `dependency_status`: `W1-01=DONE`
-- `changed_paths`: docs
-- `last_passed_command`: tests
-- `last_failed_command_and_root_cause`: 无
-- `evidence_artifacts_and_hashes`: none
-- `active_long_running_command`: 无
-- `exact_resume_command`: cargo test
-- `next_single_action`: validate
-- `updated_at`: `2026-07-24`
-
-## 11. Implementation Ledger
-
-{implementation}
-
-## 12. Evidence Ledger
-
-| 日期 | Item | 结果 | 证据 |
-|---|---|---|---|
-{evidence}
-
-## 13. 决策账本
-"
-        )
-    }
-
     #[test]
     fn feedback_dead_semantics_absent() {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3637,79 +3288,6 @@ mod tests {
         let violations =
             validate_feedback_dead_semantics(&workspace_root).expect("scan removed semantics");
         assert!(violations.is_empty(), "{violations:#?}");
-    }
-
-    #[test]
-    fn phase_11_accepts_dependencies() {
-        let source = phase_11_9_fixture(
-            r"
-| ID | 状态 | 依赖 | 任务 | 完成证据 |
-|---|---|---|---|---|
-| W0-01 | SUPERSEDED | 无 | old plan | replacement=W2-00 |
-| W1-01 | DONE | 无 | baseline | tests |
-| W2-00 | IN_PROGRESS | W1-01 | ledger | tests |
-| W2-A01 | TODO | W2-00 | outcome | tests |
-| W4-E01 | TODO | W2-A* | exit | tests |
-",
-            "| 2026-07-24 | W1-01 | PASS | verified |",
-        );
-
-        assert!(validate_ledger_source(&source).is_empty());
-    }
-
-    #[test]
-    fn ledger_ignores_heading_text() {
-        let source = phase_11_9_fixture(
-            r"
-| ID | 状态 | 依赖 | 任务 | 完成证据 |
-|---|---|---|---|---|
-| W1-01 | DONE | 无 | baseline | tests |
-| W2-00 | IN_PROGRESS | W1-01 | ledger | tests |
-",
-            r"| 2026-07-24 | W2-00 | FAIL | mentions `## 13. 决策账本` without opening a section |
-| 2026-07-24 | W1-01 | PASS（recovery） | verified |",
-        );
-
-        assert!(validate_ledger_source(&source).is_empty());
-    }
-
-    #[test]
-    fn phase_rejects_missing_evidence() {
-        let source = phase_11_9_fixture(
-            r"
-| ID | 状态 | 依赖 | 任务 | 完成证据 |
-|---|---|---|---|---|
-| W1-01 | DONE | 无 | baseline | tests |
-| W2-00 | IN_PROGRESS | W1-01 | ledger | tests |
-| W2-A01 | IN_PROGRESS | W2-00 | outcome | tests |
-| W2-A02 | DONE | W2-A01 | payout | tests |
-| W3-01 | SUPERSEDED | 无 | old route | no replacement |
-",
-            "",
-        );
-
-        let violations = validate_ledger_source(&source);
-
-        assert!(
-            violations
-                .iter()
-                .any(|violation| violation.contains("multiple tasks are IN_PROGRESS"))
-        );
-        assert!(
-            violations
-                .iter()
-                .any(|violation| violation.contains("W1-01") && violation.contains("no PASS"))
-        );
-        assert!(
-            violations
-                .iter()
-                .any(|violation| violation.contains("W2-A02") && violation.contains("dependency"))
-        );
-        assert!(
-            violations
-                .iter()
-                .any(|violation| violation.contains("W3-01") && violation.contains("replacement"))
-        );
     }
 
     #[test]

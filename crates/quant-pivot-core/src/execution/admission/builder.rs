@@ -195,7 +195,7 @@ impl AdmissionInputBuilder {
             .map(FreshBook::into_snapshot);
         let data_quality = deps.data_quality.snapshot();
         let controls = deps.runtime_controls.snapshot();
-        let mode = controls.quant_runtime_mode;
+        let authorization_policy = controls.entry_authorization_policy;
         let kill_switch = controls.kill_switch_state;
         let settlement_recovery =
             if requires_automatic_settlement_recovery(&intent.exit_policy_json) {
@@ -209,7 +209,7 @@ impl AdmissionInputBuilder {
                         SettlementRecoveryAdmissionRequest {
                             execution_account_id: intent.execution_account_id,
                             route,
-                            runtime_mode: mode,
+                            authorization_policy,
                             write_policy: controls.settlement_write_policy,
                         },
                         now,
@@ -246,7 +246,7 @@ impl AdmissionInputBuilder {
             condition,
             recommendation,
             report: fetched.report,
-            mode,
+            authorization_policy,
             kill_switch,
             account: fetched.account,
             allocation: fetched.allocation,

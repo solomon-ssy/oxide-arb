@@ -8,7 +8,7 @@ use quant_pivot_models::{
     domain::ports::PolicySnapshotPort, enums::system::CapabilityId, types::Usd,
 };
 use quant_pivot_repository::traits::{
-    EquitySnapshotRepository, PositionRepository, VenueIncentiveRepository,
+    EquitySnapshotRepository, StrategyPositionLotRepository, VenueIncentiveRepository,
 };
 
 use super::AppContext;
@@ -135,7 +135,7 @@ impl AppContext {
         let runtime_config = Arc::clone(&self.governance.applicator);
         let equity_service = Arc::new(EquitySnapshotService::new(
             Arc::clone(&self.infra.repos.equity_snapshot) as Arc<dyn EquitySnapshotRepository>,
-            Arc::clone(&self.infra.repos.position) as Arc<dyn PositionRepository>,
+            Arc::clone(&self.infra.repos.position) as Arc<dyn StrategyPositionLotRepository>,
             Arc::clone(&self.infra.repos.venue_incentive) as Arc<dyn VenueIncentiveRepository>,
             self.account.execution_account.execution_account_id,
         ));

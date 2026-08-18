@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::{
     domain::quant::{AccountSnapshotInfo, EquitySnapshotInfo, LiveAccountSnapshot},
     enums::{common::MarketCategory, quant::AccountSource},
-    types::{AccountSnapshotId, EquitySnapshotId, ExposureBreakdown, PositionSnapshot, Usd},
+    types::{AccountSnapshotId, EquitySnapshotId, ExposureBreakdown, Usd, VenuePositionSnapshot},
 };
 
 /// Outbound projection of one venue-held outcome position at decision time.
@@ -26,8 +26,8 @@ pub struct VenuePositionSnapshotView {
     pub redeemable: bool,
 }
 
-impl From<&PositionSnapshot> for VenuePositionSnapshotView {
-    fn from(position: &PositionSnapshot) -> Self {
+impl From<&VenuePositionSnapshot> for VenuePositionSnapshotView {
+    fn from(position: &VenuePositionSnapshot) -> Self {
         Self {
             token_id: position.token_id.to_string(),
             market_id: position.market_id.to_string(),

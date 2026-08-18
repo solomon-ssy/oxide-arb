@@ -57,22 +57,28 @@ pub mod entity {
     pub const QUANT_EXECUTION_ORDER: &str = "quant_execution_order";
     /// `quant_execution_trade_ref`.
     pub const QUANT_EXECUTION_TRADE_REF: &str = "quant_execution_trade_ref";
-    /// `quant_execution_fill`.
-    pub const QUANT_EXECUTION_FILL: &str = "quant_execution_fill";
-    /// `quant_execution_fee_measurement`.
-    pub const QUANT_EXECUTION_FEE_MEASUREMENT: &str = "quant_execution_fee_measurement";
+    /// `quant_clob_trade_observation`.
+    pub const QUANT_CLOB_TRADE_OBSERVATION: &str = "quant_clob_trade_observation";
     /// `quant_execution_transaction_ref`.
     pub const QUANT_EXECUTION_TRANSACTION_REF: &str = "quant_execution_transaction_ref";
     /// `quant_execution_account`.
     pub const QUANT_EXECUTION_ACCOUNT: &str = "quant_execution_account";
+    /// `quant_account_chain_execution`.
+    pub const QUANT_ACCOUNT_CHAIN_EXECUTION: &str = "quant_account_chain_execution";
+    /// `quant_account_recovery_incident`.
+    pub const QUANT_ACCOUNT_RECOVERY_INCIDENT: &str = "quant_account_recovery_incident";
+    /// `quant_account_execution_association`.
+    pub const QUANT_ACCOUNT_EXECUTION_ASSOCIATION: &str = "quant_account_execution_association";
+    /// `quant_account_pause_submission`.
+    pub const QUANT_ACCOUNT_PAUSE_SUBMISSION: &str = "quant_account_pause_submission";
     /// `quant_venue_incentive_event`.
     pub const QUANT_VENUE_INCENTIVE_EVENT: &str = "quant_venue_incentive_event";
     pub const QUANT_VENUE_INCENTIVE_RECONCILIATION_SCAN: &str =
         "quant_venue_incentive_reconciliation_scan";
     /// `quant_capital_allocation`.
     pub const QUANT_CAPITAL_ALLOCATION: &str = "quant_capital_allocation";
-    /// `quant_position`.
-    pub const QUANT_POSITION: &str = "quant_position";
+    /// `quant_strategy_position_lot`.
+    pub const QUANT_STRATEGY_POSITION_LOT: &str = "quant_strategy_position_lot";
     /// `quant_reconciliation`.
     pub const QUANT_RECONCILIATION: &str = "quant_reconciliation";
     /// `quant_settlement_redeem`.

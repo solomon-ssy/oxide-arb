@@ -14,7 +14,7 @@ use quant_pivot_models::{
         governance::{NewOperationLog, RuntimeControlUpdate},
         market::fee::{BuilderFeeAttribution, ImmediateExecutionCost},
         quant::{
-            AggressiveEntryEconomics, ApproveOrderIntent, CalibrationArtifactPayload,
+            AggressiveEntryEconomics, AuthorizeOrderIntent, CalibrationArtifactPayload,
             CapitalOccupancyBucket, CapitalSettlement, DiscountCurvePoint, EntryConditionClaim,
             EntryExecutionEconomics, ExactVerificationEvidence, ExecutableEconomicTier,
             ExecutionIdentityRefs, ExistingPortfolioState, ExitLedgerWrite, GlobalPortfolioPlan,
@@ -48,20 +48,19 @@ use quant_pivot_models::{
         common::{MarketCategory, OrderType, Side, TickSize::Hundredth},
         execution::{
             CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, KillSwitchState,
-            OrderIntentKind, OrderTypeKind, ReconciliationEvidenceKind, ReconciliationResult,
-            VenueOrderStatus,
+            OrderTypeKind, ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus,
         },
         factor::{FactorNormalization, NormalizationSource},
         market::MarketStatus,
         model::ModelFamily,
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, CalibrationKind, DatasetPurpose, DownsideSource,
-            EmptyReportReason, EntryConditionState, ExecutionOrderState, ExecutionWalletKind,
-            ExitSettlementMode, FeatureParityLatchState, FeatureParityStateTransition,
-            FillRequirement, ModelRunKind, OrderIntentStatus, OutcomeSide, PriceComparison,
-            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
-            ReportKind,
+            AccountSource, CalibrationKind, DatasetPurpose, DownsideSource, EmptyReportReason,
+            EntryConditionState, ExecutionAuthorityCeiling, ExecutionOrderState,
+            ExecutionWalletKind, ExitSettlementMode, FeatureParityLatchState,
+            FeatureParityStateTransition, FillRequirement, ModelRunKind, OrderIntentStatus,
+            OutcomeSide, PriceComparison, RecommendationReportStatus, RecommendationStatus,
+            RedeemPolicy, ReportKind,
         },
         rbac::ResourceType,
     },
@@ -71,8 +70,8 @@ use quant_pivot_models::{
         ModelBinding, ModelBindingSource, PortfolioConfig,
     },
     types::{
-        AccountPositions, AccountSnapshotId, ArtifactUri, BookSnapshotRef, Bps,
-        CalibrationArtifactId, CapitalAllocationId, ConditionTruth, ConfirmationPolicy,
+        AccountPositions, AccountSnapshotId, ArtifactUri, AuthorizationEvidence, BookSnapshotRef,
+        Bps, CalibrationArtifactId, CapitalAllocationId, ConditionTruth, ConfirmationPolicy,
         ContentHash, DataQualitySummary, DecisionPolicySnapshotId,
         ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION, EconomicTierId,
         EligibilitySummary, EntryConditionArtifactId, EntryConditionArtifactV1,
@@ -86,15 +85,15 @@ use quant_pivot_models::{
         ModelVersionId, OperationDetailDocument, OperationLogId, OpportunisticExitPolicy,
         OrderAmount, OrderId, OrderIntentId, PayoutRatio, PendingScaleOut, PolicyBundleGeneration,
         PortfolioPlanId, PortfolioScenarioArtifactId, PortfolioScenarioModelArtifactId,
-        PositionSnapshot, PreparedFeeSchedule, PreparedVenueOrder, Price, PriceCondition,
-        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        PreparedFeeSchedule, PreparedVenueOrder, Price, PriceCondition, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
         ReportDataQualityTokens, ReportRouteRunId, ReportRunId, ReportSummary, ResearchProfileRef,
         ResearchProfileSpec, RiskEnvelope, RoleCode, SchemaVersion, SelectionExclusionSummary,
         ServingAuthority, Shares, SignalCandidateId, SizingPlan, SourceSliceManifestRef,
         ThesisInvalidationPolicy, TokenId, TradePolicyCohortProvenance, TrainingDatasetId, Usd,
-        UsdHours, UserId, VenueOrderAmount, builtin_research_profiles,
+        UsdHours, VenueOrderAmount, VenuePositionSnapshot, builtin_research_profiles,
         calibration::{
             IsotonicKnot, MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
             ModelScoreCalibrationDatasetBinding, ModelScoreCalibrationFitContract,
@@ -116,7 +115,7 @@ use quant_pivot_repository::{
         PgExecutionAccountRepository, PgExecutionSubmissionRepository, PgFactorRepository,
         PgFeatureParityRepository, PgMarketRepository, PgMarketSelectionRepository,
         PgModelRegistryRepository, PgModelRunRepository, PgOrderIntentRepository,
-        PgPolicyRepository, PgPositionRepository, PgRuntimeControlRepository,
+        PgPolicyRepository, PgRuntimeControlRepository, PgStrategyPositionLotRepository,
         PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
@@ -124,7 +123,7 @@ use quant_pivot_repository::{
         ExecutionAccountRepository, ExecutionSubmissionRepository, FactorRepository,
         FeatureParityRepository, MarketRepository, MarketSelectionRepository,
         ModelRegistryRepository, ModelRunRepository, OrderIntentRepository, PolicyRepository,
-        PositionRepository, RuntimeControlRepository, TradePolicyRepository,
+        RuntimeControlRepository, StrategyPositionLotRepository, TradePolicyRepository,
         TrainingDatasetRepository,
     },
 };
@@ -161,7 +160,7 @@ use super::{
 };
 
 /// Total cash budget: 40 shares * 0.60 gross price + 1.00 observed fee.
-/// Weather `SemiAuto` fixtures use the profile's only governed cash-budget tier.
+/// Weather execution fixtures use the profile's only governed cash-budget tier.
 pub const EXECUTION_NOTIONAL: Decimal = dec!(25);
 /// Venue-confirmed shares derived from the prepared order's gross cash amount.
 pub const ENTRY_FILLED_SHARES: Decimal = dec!(40);
@@ -217,7 +216,7 @@ pub async fn enable_test_admission(db: &DatabaseConnection, actor: &str) {
     let state = repository
         .compare_and_set(RuntimeControlUpdate {
             expected_revision: current.revision,
-            quant_runtime_mode: None,
+            entry_authorization_policy: None,
             settlement_write_policy: None,
             kill_switch_state: Some(KillSwitchState::Closed),
             kill_switch_requires_ack: Some(false),
@@ -594,7 +593,6 @@ pub struct ReportBuildOptions {
     pub entry_condition_artifacts: Vec<NewEntryConditionArtifact>,
     pub summary: ReportSummary,
     pub as_of: DateTime<Utc>,
-    pub runtime_mode: QuantRuntimeMode,
     /// Optional governed capital scale for historical fixtures that share the
     /// live account's equity high-water ledger.
     pub account_capital_usd: Option<Usd>,
@@ -617,7 +615,6 @@ impl ReportBuildOptions {
             entry_condition_artifacts: Vec::new(),
             summary: report_summary(),
             as_of: ids.decision_at,
-            runtime_mode: QuantRuntimeMode::AutoExecution,
             account_capital_usd: None,
         }
     }
@@ -630,7 +627,6 @@ impl ReportBuildOptions {
             entry_condition_artifacts: Vec::new(),
             summary: empty_report_summary(),
             as_of: ids.decision_at,
-            runtime_mode: QuantRuntimeMode::AutoExecution,
             account_capital_usd: None,
         }
     }
@@ -890,28 +886,8 @@ pub async fn seed_price_report(
     infra: &SharedDemoInfra,
     config: ReportSeedConfig,
 ) -> ExecutionTxnIds {
-    seed_price_by_mode(db, infra, config, QuantRuntimeMode::AutoExecution).await
-}
-
-/// Seed the same durable conditional evidence graph under `ReportOnly`, where
-/// evaluation is active but intent creation and venue submission are forbidden.
-pub async fn seed_report_price(
-    db: &DatabaseConnection,
-    infra: &SharedDemoInfra,
-    config: ReportSeedConfig,
-) -> ExecutionTxnIds {
-    seed_price_by_mode(db, infra, config, QuantRuntimeMode::ReportOnly).await
-}
-
-async fn seed_price_by_mode(
-    db: &DatabaseConnection,
-    infra: &SharedDemoInfra,
-    config: ReportSeedConfig,
-    runtime_mode: QuantRuntimeMode,
-) -> ExecutionTxnIds {
     let ids = prepare_report_on_infra(db, infra, &config, db.statement_time().await).await;
     let mut options = ReportBuildOptions::published_single(&ids);
-    options.runtime_mode = runtime_mode;
     let artifact = ids.price_condition_artifact();
     let recommendation = options
         .recommendations
@@ -1349,7 +1325,7 @@ pub fn demo_recommendation(
         trade_plan: trade_plan(&ids.trade_policy, economic_tier_id),
         factor_breakdown: ids.factor_breakdown(),
         evidence_refs,
-        execution_eligibility: execution_eligibility(),
+        execution_eligibility: execution_eligibility(ids.decision_policy_snapshot),
         valid_from: created_at,
         valid_until: created_at + Duration::hours(1),
         status: RecommendationStatus::Prepared,
@@ -1537,9 +1513,7 @@ pub async fn seed_pending_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds)
             new_order_intent(
                 order_intent_id,
                 ids,
-                OrderIntentStatus::PendingApproval,
-                ApprovalStatus::Pending,
-                QuantRuntimeMode::SemiAuto,
+                OrderIntentStatus::PendingAuthorization,
                 None,
             ),
             new_capital_allocation(order_intent_id, ids),
@@ -1558,10 +1532,12 @@ pub async fn seed_manual_approved_intent(
     PgOrderIntentRepository::new(db.clone())
         .approve(
             &intent_id,
-            ApproveOrderIntent {
-                approved_by: seeded_uuid("ui-demo-operator").into(),
-                approval_reason: "ui-demo-seed".to_owned(),
-                approved_at: Utc::now(),
+            AuthorizeOrderIntent {
+                evidence: AuthorizationEvidence::OperatorApproval {
+                    operator_id: seeded_uuid("ui-demo-operator").into(),
+                    reason: "ui-demo-seed".to_owned(),
+                    authorized_at: Utc::now(),
+                },
             },
             None,
             None,
@@ -1580,10 +1556,8 @@ pub async fn seed_approved_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds
             new_order_intent(
                 order_intent_id,
                 ids,
-                OrderIntentStatus::ApprovedByPolicy,
-                ApprovalStatus::NotRequired,
-                QuantRuntimeMode::AutoExecution,
-                None,
+                OrderIntentStatus::Authorized,
+                Some(Utc::now()),
             ),
             new_capital_allocation(order_intent_id, ids),
         )
@@ -1646,7 +1620,7 @@ pub async fn partial_exit_lot(
     shares: Shares,
     average_price: Price,
 ) {
-    let position = PgPositionRepository::new(db.clone())
+    let position = PgStrategyPositionLotRepository::new(db.clone())
         .find_by_intent(intent_id)
         .await
         .expect("load position before partial exit")
@@ -1813,41 +1787,26 @@ pub(super) fn new_order_intent(
     order_intent_id: OrderIntentId,
     ids: &ExecutionTxnIds,
     status: OrderIntentStatus,
-    approval_status: ApprovalStatus,
-    runtime_mode: QuantRuntimeMode,
-    approved_by: Option<UserId>,
+    authorized_at: Option<DateTime<Utc>>,
 ) -> NewOrderIntent {
-    let approved = matches!(
-        status,
-        OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
-    );
+    let authorization_evidence =
+        authorized_at.map(|authorized_at| AuthorizationEvidence::ActivePolicy {
+            decision_policy_snapshot_id: ids.decision_policy_snapshot,
+            policy_hash: ids.trade_policy.artifact_hash,
+            authorized_at,
+        });
     NewOrderIntent {
         order_intent_id,
         recommendation_id: ids.recommendation,
         execution_account_id: ids.execution_account,
-        runtime_mode,
         decision_policy_snapshot_id: ids.decision_policy_snapshot,
         model_version_id: ids.model_version,
         research_profile_artifact_id: fixture_profile_ref().artifact_id(),
-        intent_kind: OrderIntentKind::Buy,
         status,
-        approval_status,
-        approved_by,
-        approval_reason: if approved {
-            Some("ui-demo-seed".to_owned())
-        } else {
-            None
-        },
-        approved_at: approved.then(Utc::now),
-        policy_id: if runtime_mode == QuantRuntimeMode::SemiAuto {
-            Some(ids.trade_policy.artifact_id.to_string())
-        } else if status == OrderIntentStatus::ApprovedByPolicy {
-            Some("auto".to_owned())
-        } else {
-            None
-        },
-        policy_hash: (runtime_mode == QuantRuntimeMode::SemiAuto)
-            .then_some(ids.trade_policy.artifact_hash),
+        authorization_kind: authorization_evidence
+            .as_ref()
+            .map(AuthorizationEvidence::kind),
+        authorization_evidence,
         status_reason: None,
         admission_trace_ref: None,
         condition_instance_id: ids.condition_instance,
@@ -1974,10 +1933,7 @@ pub fn prepared_order(
     }
 }
 
-pub(super) fn new_execution_order(
-    intent_id: &OrderIntentId,
-    ids: &ExecutionTxnIds,
-) -> NewExecutionOrder {
+pub fn new_execution_order(intent_id: &OrderIntentId, ids: &ExecutionTxnIds) -> NewExecutionOrder {
     NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
         order_intent_id: *intent_id,
@@ -2071,10 +2027,6 @@ pub(super) fn reconciliation_row(
         expected_cash_delta_usd: None,
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: Some(Usd::new(ENTRY_FEE_USD)),
-        derived_fee_usd: None,
-        settled_fee_usd: Some(Usd::new(ENTRY_FEE_USD)),
-        fee_delta_usd: Some(Usd::ZERO),
         resolved_by: Some("venue_submit_response".to_owned()),
         resolved_at: Some(resolved_at),
     }
@@ -2106,10 +2058,6 @@ pub(super) fn exit_reconciliation_row(
         expected_cash_delta_usd: None,
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: Some(Usd::ZERO),
-        derived_fee_usd: None,
-        settled_fee_usd: Some(Usd::ZERO),
-        fee_delta_usd: Some(Usd::ZERO),
         resolved_by: Some("venue_submit_response".to_owned()),
         resolved_at: Some(resolved_at),
     }
@@ -2887,7 +2835,6 @@ fn build_report_transaction_inner(
         entry_condition_artifacts,
         summary,
         as_of,
-        runtime_mode,
         account_capital_usd,
     } = options;
     let recommendation_created_at = as_of + Duration::seconds(2);
@@ -2929,7 +2876,6 @@ fn build_report_transaction_inner(
             scenario_artifact: &scenario_artifact,
             summary,
             as_of,
-            runtime_mode,
             capital_base_usd,
         },
     );
@@ -3096,7 +3042,6 @@ struct FixtureReportInput<'a> {
     scenario_artifact: &'a PortfolioScenarioArtifact,
     summary: ReportSummary,
     as_of: DateTime<Utc>,
-    runtime_mode: QuantRuntimeMode,
     capital_base_usd: Usd,
 }
 
@@ -3108,7 +3053,6 @@ fn fixture_report(ids: &ExecutionTxnIds, input: FixtureReportInput<'_>) -> NewRe
         scenario_artifact,
         summary,
         as_of,
-        runtime_mode,
         capital_base_usd,
     } = input;
     NewRecommendationReport {
@@ -3116,7 +3060,6 @@ fn fixture_report(ids: &ExecutionTxnIds, input: FixtureReportInput<'_>) -> NewRe
         report_run_id,
         report_kind: ReportKind::TopN,
         decision_at: as_of,
-        runtime_mode,
         decision_policy_snapshot_id: ids.decision_policy_snapshot,
         market_selection_id: ids.market_selection,
         portfolio_plan_id: ids.portfolio_plan,
@@ -3462,7 +3405,7 @@ pub fn source_slice_ref(seed: char) -> SourceSliceManifestRef {
 
 impl ExecutionTxnIds {
     fn new_account_snapshot(&self) -> NewAccountSnapshot {
-        let positions = vec![PositionSnapshot {
+        let positions = vec![VenuePositionSnapshot {
             token_id: TokenId::new(&self.token),
             market_id: MarketId::new(&self.market),
             event_id: Some(EventId::new(&self.event)),
@@ -3588,8 +3531,6 @@ fn risk_envelope() -> RiskEnvelope {
         cvar_contribution_usd: Usd::new(dec!(25)),
         portfolio_cvar_cap_usd: Usd::new(dec!(1500)),
         maximum_scenario_loss_cap_usd: Usd::new(dec!(2500)),
-        requires_approval: true,
-        auto_execution_allowed: true,
         risk_notes: Vec::new(),
         envelope_hash: content_hash('f'),
     }
@@ -3670,16 +3611,13 @@ impl ExecutionTxnIds {
     }
 }
 
-fn execution_eligibility() -> ExecutionEligibility {
+fn execution_eligibility(
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+) -> ExecutionEligibility {
     ExecutionEligibility {
-        eligible_modes: vec![
-            QuantRuntimeMode::ReportOnly,
-            QuantRuntimeMode::SemiAuto,
-            QuantRuntimeMode::AutoExecution,
-        ],
-        ineligibility_reasons: Vec::new(),
-        approval_required: false,
-        auto_policy_id: None,
+        ceiling: ExecutionAuthorityCeiling::PolicyAutomatic,
+        blockers: Vec::new(),
+        policy_binding: Some(decision_policy_snapshot_id.to_string()),
     }
 }
 

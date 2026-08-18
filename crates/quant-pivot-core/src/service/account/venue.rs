@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::quant::AccountSource,
-    types::{PositionSnapshot, Usd},
+    types::{Usd, VenuePositionSnapshot},
 };
 use quant_pivot_research::portfolio::AccountSnapshot;
 
@@ -58,7 +58,7 @@ impl AccountProvider for VenueAccountProvider {
         let positions = venue_positions
             .iter()
             .map(|position| map_position(position, &self.registry))
-            .collect::<Vec<PositionSnapshot>>();
+            .collect::<Vec<VenuePositionSnapshot>>();
 
         let positions_value = positions
             .iter()

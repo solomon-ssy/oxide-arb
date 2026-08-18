@@ -11,7 +11,7 @@ name = "quant-pivot"
 path = "src/main.rs"
 
 [features]
-# The default feature set is the production profile: `report_only` is
+# The default feature set is the production profile: analysis-only output is
 # not dry-run — report sizing runs the real portfolio optimizer and classical
 # model runtime, so a full research deployment links them. S3/Polars/Parquet
 # are linked only by the explicit `research-jobs` deployment feature.

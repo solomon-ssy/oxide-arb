@@ -344,7 +344,9 @@ impl From<DecisionPolicySnapshotOptionInfo> for DecisionPolicySnapshotOptionView
                 model_routing: Some(info.model_routing_revision_id),
                 report_schedule: Some(info.report_schedule_revision_id),
                 operations_policy: Some(info.operations_policy_revision_id),
-                execution_automation_policy: Some(info.execution_automation_policy_revision_id),
+                execution_authorization_policy: Some(
+                    info.execution_authorization_policy_revision_id,
+                ),
             },
             source: info.source,
             created_at: info.created_at,

@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     constants::POLYGON_CHAIN_ID,
-    enums::quant::{ExecutionWalletKind, QuantRuntimeMode},
+    enums::quant::ExecutionWalletKind,
     types::{HkoStation, IcaoStation},
 };
 
@@ -52,9 +52,9 @@ impl DeployConfig {
                 detail: "must be between 5 and 300 seconds inclusive".to_owned(),
             });
         }
-        if !(30..=3_600).contains(&settlement.semi_auto_authorization_ttl_secs) {
+        if !(30..=3_600).contains(&settlement.operator_authorization_ttl_secs) {
             report.errors.push(ConfigValidationError::InvalidValue {
-                field: "polymarket.settlement.semi_auto_authorization_ttl_secs",
+                field: "polymarket.settlement.operator_authorization_ttl_secs",
                 detail: "must be between 30 and 3600 seconds inclusive".to_owned(),
             });
         }
@@ -1134,30 +1134,21 @@ fn validate_cache_redis(deploy: &DeployConfig, report: &mut ConfigValidationRepo
     }
 }
 
-/// Quant-mode-aware deploy validation: enforces credential and JWT policies.
-#[must_use]
-pub fn validate_deploy_mode(
-    deploy: &DeployConfig,
-    mode: QuantRuntimeMode,
-) -> ConfigValidationReport {
-    let mut report = ConfigValidationReport::default();
-    validate_credentials_quant_mode(deploy, mode, &mut report);
-    validate_web_quant_mode(deploy, mode, &mut report);
-    report
+impl DeployConfig {
+    /// Execution-capable deploy validation: enforces credential and JWT policies.
+    #[must_use]
+    pub(super) fn execution_validation_report(&self) -> ConfigValidationReport {
+        let mut report = ConfigValidationReport::default();
+        validate_execution_credentials(self, &mut report);
+        validate_execution_web(self, &mut report);
+        report
+    }
 }
 
-/// Credential policy (all modes): `report_only` is **not** dry-run — report
-/// sizing is built on the real venue account, so the private key (CLOB
-/// collateral / L2 read credential) and the funder (Data API position reads) are
-/// required in every mode. Missing either fails closed. The private key is used
-/// only for reads here; signing/submission gating stays mode-aware elsewhere.
-/// EOA auto-redeem additionally checks signer/funder equality during
-/// CTF worker assembly, where the signer address is available.
-fn validate_credentials_quant_mode(
-    deploy: &DeployConfig,
-    mode: QuantRuntimeMode,
-    report: &mut ConfigValidationReport,
-) {
+/// Every deployment reads the real venue account and can receive operator-
+/// authorized intents, so private-key, funder and wallet-topology credentials
+/// are mandatory independently of the current runtime authorization policy.
+fn validate_execution_credentials(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
     let mut missing = Vec::new();
     if !deploy.keys.private_key_present() {
         missing.push("private_key");
@@ -1174,23 +1165,18 @@ fn validate_credentials_quant_mode(
     if !missing.is_empty() {
         report
             .errors
-            .push(ConfigValidationError::MissingCredentials {
-                mode: mode.to_string(),
-                missing,
-            });
+            .push(ConfigValidationError::MissingCredentials { missing });
     }
 
     // Every contract-wallet topology moves money via the gasless relayer, so
-    // relayer API credentials are mandatory once order submission is allowed
-    // (SemiAuto / AutoExecution). ReportOnly never redeems, so it is exempt.
-    if mode.allows_order_submission()
-        && matches!(
-            deploy.quant.account.wallet_kind,
-            ExecutionWalletKind::Proxy
-                | ExecutionWalletKind::GnosisSafe
-                | ExecutionWalletKind::DepositWallet
-        )
-    {
+    // Contract wallets always require the relayer for governed settlement and
+    // break-glass account controls, even while operator approval is required.
+    if matches!(
+        deploy.quant.account.wallet_kind,
+        ExecutionWalletKind::Proxy
+            | ExecutionWalletKind::GnosisSafe
+            | ExecutionWalletKind::DepositWallet
+    ) {
         let mut relayer_missing = Vec::new();
         if deploy.polymarket.relayer.api_key().is_none() {
             relayer_missing.push("polymarket.relayer.api_key");
@@ -1202,18 +1188,13 @@ fn validate_credentials_quant_mode(
             report
                 .errors
                 .push(ConfigValidationError::MissingCredentials {
-                    mode: mode.to_string(),
                     missing: relayer_missing,
                 });
         }
     }
 }
 
-fn validate_web_quant_mode(
-    deploy: &DeployConfig,
-    _mode: QuantRuntimeMode,
-    report: &mut ConfigValidationReport,
-) {
+fn validate_execution_web(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
     if deploy.web.has_jwt_signing_key() {
         return;
     }
@@ -1449,10 +1430,7 @@ mod tests {
     fn settlement_lease_authorization_bounded() {
         let mut deploy = DeployConfig::default();
         deploy.polymarket.settlement.claim_lease_secs = 4;
-        deploy
-            .polymarket
-            .settlement
-            .semi_auto_authorization_ttl_secs = 3_601;
+        deploy.polymarket.settlement.operator_authorization_ttl_secs = 3_601;
         let report = deploy.validate_deploy_common();
         assert!(report.has_errors());
         assert!(report.errors.iter().any(|error| {
@@ -1463,7 +1441,7 @@ mod tests {
         assert!(report.errors.iter().any(|error| {
             error
                 .to_string()
-                .contains("polymarket.settlement.semi_auto_authorization_ttl_secs")
+                .contains("polymarket.settlement.operator_authorization_ttl_secs")
         }));
     }
 
@@ -1493,18 +1471,18 @@ mod tests {
     }
 
     #[test]
-    fn auto_execution_requires_credentials() {
+    fn execution_needs_credentials() {
         let deploy = DeployConfig::default();
-        let report = validate_deploy_mode(&deploy, QuantRuntimeMode::AutoExecution);
+        let report = deploy.execution_validation_report();
         assert!(report.has_errors());
     }
 
     #[test]
-    fn report_only_requires_credentials() {
-        // report_only is not dry-run: it needs a private key + funder to read
+    fn execution_requires_credentials() {
+        // production account reads is not dry-run: it needs a private key + funder to read
         // the real venue account, so missing credentials fail closed.
         let deploy = DeployConfig::default();
-        let report = validate_deploy_mode(&deploy, QuantRuntimeMode::ReportOnly);
+        let report = deploy.execution_validation_report();
         assert!(report.has_errors());
     }
 
@@ -1513,7 +1491,7 @@ mod tests {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.web.jwt.signing_key = "human-password".into();
-        let report = validate_deploy_mode(&deploy, QuantRuntimeMode::AutoExecution);
+        let report = deploy.execution_validation_report();
         assert!(report.has_errors(), "incomplete jwt keyring must be fatal");
     }
 
@@ -1531,22 +1509,22 @@ mod tests {
     }
 
     #[test]
-    fn auto_execution_accepts_credentials() {
+    fn execution_accepts_credentials() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
         deploy.web.jwt.signing_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into();
-        let report = validate_deploy_mode(&deploy, QuantRuntimeMode::AutoExecution);
+        let report = deploy.execution_validation_report();
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
     }
 
     #[test]
-    fn report_only_accepts_key() {
+    fn execution_accepts_key() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
         deploy.web.jwt.signing_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into();
-        let report = validate_deploy_mode(&deploy, QuantRuntimeMode::ReportOnly);
+        let report = deploy.execution_validation_report();
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
         assert!(report.warnings.is_empty());
     }

@@ -290,7 +290,7 @@ impl CoreExecutionDispatcher {
             result.outcome,
             VenueOutcome::Filled | VenueOutcome::PartiallyFilled
         ) {
-            self.deps.metrics.inc_execution_fill();
+            self.deps.metrics.inc_clob_trade_observation();
         }
         let write = build_ledger_write(
             &result,
@@ -361,10 +361,7 @@ impl CoreExecutionDispatcher {
 }
 
 fn ensure_submittable(intent: &OrderIntentInfo, now: DateTime<Utc>) -> Result<(), ExecutionError> {
-    if !matches!(
-        intent.status,
-        OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
-    ) {
+    if !matches!(intent.status, OrderIntentStatus::Authorized) {
         return Err(ExecutionError::NotSubmittable {
             intent_id: intent.order_intent_id.to_string(),
             state: intent.status.to_string(),
@@ -536,10 +533,6 @@ fn reconciliation_row(
         )),
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: Some(result.expected_fee),
-        derived_fee_usd: None,
-        settled_fee_usd: None,
-        fee_delta_usd: None,
         resolved_by,
         resolved_at,
     }

@@ -21,9 +21,9 @@ use quant_pivot_models::{config::QuantWorkersConfig, domain::runtime::CoreEventP
 use quant_pivot_repository::{
     clickhouse::ChNativeReadRepository,
     traits::{
-        EquitySnapshotRepository, FeatureParityRepository, PolicyRepository, PositionRepository,
+        EquitySnapshotRepository, FeatureParityRepository, PolicyRepository,
         RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
-        VenueIncentiveRepository,
+        StrategyPositionLotRepository, VenueIncentiveRepository,
     },
 };
 
@@ -57,8 +57,8 @@ impl ReportBundle {
             Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>;
         let equity_repo: Arc<dyn EquitySnapshotRepository> =
             Arc::clone(&repos.equity_snapshot) as Arc<dyn EquitySnapshotRepository>;
-        let position_repo: Arc<dyn PositionRepository> =
-            Arc::clone(&repos.position) as Arc<dyn PositionRepository>;
+        let position_repo: Arc<dyn StrategyPositionLotRepository> =
+            Arc::clone(&repos.position) as Arc<dyn StrategyPositionLotRepository>;
         let runtime_config_repo: Arc<dyn PolicyRepository> =
             Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>;
         let run_repo: Arc<dyn ReportRunRepository> =

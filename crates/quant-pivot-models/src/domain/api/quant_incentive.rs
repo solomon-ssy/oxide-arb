@@ -9,7 +9,8 @@ use crate::{
     domain::{pagination::PageRequest, quant::VenueIncentiveEventInfo},
     enums::fee::{VenueIncentiveKind, VenueIncentiveStage},
     types::{
-        ContentHash, EvmTransactionHash, ExecutionFillId, MarketId, Usd, VenueIncentiveEventId,
+        ClobTradeObservationId, ContentHash, EvmTransactionHash, MarketId, Usd,
+        VenueIncentiveEventId,
     },
 };
 
@@ -45,7 +46,7 @@ pub struct IncentiveReconciliationView {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct VenueIncentiveEventView {
     pub venue_incentive_event_id: VenueIncentiveEventId,
-    pub execution_fill_id: Option<ExecutionFillId>,
+    pub clob_trade_observation_id: Option<ClobTradeObservationId>,
     pub market_id: Option<MarketId>,
     pub kind: VenueIncentiveKind,
     pub stage: VenueIncentiveStage,
@@ -65,7 +66,7 @@ impl From<VenueIncentiveEventInfo> for VenueIncentiveEventView {
     fn from(info: VenueIncentiveEventInfo) -> Self {
         Self {
             venue_incentive_event_id: info.venue_incentive_event_id,
-            execution_fill_id: info.execution_fill_id,
+            clob_trade_observation_id: info.clob_trade_observation_id,
             market_id: info.market_id,
             kind: info.kind,
             stage: info.stage,

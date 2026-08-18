@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     entities::system_runtime_control,
     enums::{
-        execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
+        execution::KillSwitchState, quant::EntryAuthorizationPolicy,
+        settlement::SettlementWritePolicy,
     },
     types::RuntimeControlTransitionId,
 };
@@ -17,7 +18,7 @@ use crate::{
 #[sea_orm(entity = "crate::entities::system_runtime_control::Entity")]
 pub struct RuntimeControlInfo {
     pub id: i32,
-    pub quant_runtime_mode: QuantRuntimeMode,
+    pub entry_authorization_policy: EntryAuthorizationPolicy,
     pub settlement_write_policy: SettlementWritePolicy,
     pub kill_switch_state: KillSwitchState,
     pub kill_switch_requires_ack: bool,
@@ -33,7 +34,7 @@ info_from_model!(
     system_runtime_control::Model,
     {
         id,
-        quant_runtime_mode,
+        entry_authorization_policy,
         settlement_write_policy,
         kill_switch_state,
         kill_switch_requires_ack,
@@ -49,7 +50,7 @@ info_from_model!(
 /// policy, and kill-switch from separate atomics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeControlSnapshot {
-    pub quant_runtime_mode: QuantRuntimeMode,
+    pub entry_authorization_policy: EntryAuthorizationPolicy,
     pub settlement_write_policy: SettlementWritePolicy,
     pub kill_switch_state: KillSwitchState,
     pub kill_switch_requires_ack: bool,
@@ -62,7 +63,7 @@ pub struct RuntimeControlSnapshot {
 impl From<RuntimeControlInfo> for RuntimeControlSnapshot {
     fn from(info: RuntimeControlInfo) -> Self {
         Self {
-            quant_runtime_mode: info.quant_runtime_mode,
+            entry_authorization_policy: info.entry_authorization_policy,
             settlement_write_policy: info.settlement_write_policy,
             kill_switch_state: info.kill_switch_state,
             kill_switch_requires_ack: info.kill_switch_requires_ack,
@@ -78,7 +79,7 @@ impl From<RuntimeControlInfo> for RuntimeControlSnapshot {
 #[derive(Debug, Clone)]
 pub struct RuntimeControlUpdate {
     pub expected_revision: i64,
-    pub quant_runtime_mode: Option<QuantRuntimeMode>,
+    pub entry_authorization_policy: Option<EntryAuthorizationPolicy>,
     pub settlement_write_policy: Option<SettlementWritePolicy>,
     pub kill_switch_state: Option<KillSwitchState>,
     pub kill_switch_requires_ack: Option<bool>,
@@ -96,8 +97,8 @@ pub struct NewRuntimeControlTransition {
     pub runtime_control_transition_id: RuntimeControlTransitionId,
     pub from_revision: i64,
     pub to_revision: i64,
-    pub from_quant_runtime_mode: QuantRuntimeMode,
-    pub to_quant_runtime_mode: QuantRuntimeMode,
+    pub from_entry_authorization_policy: EntryAuthorizationPolicy,
+    pub to_entry_authorization_policy: EntryAuthorizationPolicy,
     pub from_settlement_write_policy: SettlementWritePolicy,
     pub to_settlement_write_policy: SettlementWritePolicy,
     pub from_kill_switch_state: KillSwitchState,

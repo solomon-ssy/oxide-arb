@@ -21,7 +21,6 @@ wire_enum! {
         ControlPlaneNotReady => "control_plane_not_ready",
         CatalogBaselineMissing => "catalog_baseline_missing",
         OperationalPhaseBlocksReports => "operational_phase_blocks_reports",
-        RuntimeModeReportOnly => "runtime_mode_report_only",
         KillSwitchBlocksEntries => "kill_switch_blocks_entries",
         OperationalPhaseBlocksSubmission => "operational_phase_blocks_submission",
         NoServingEvidence => "no_serving_evidence",

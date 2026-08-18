@@ -110,8 +110,8 @@ mod tests {
         enums::{
             execution::{ExecutionOrderPhase, ReconciliationResult},
             quant::{
-                ExecutionOrderState, QuantRuntimeMode, RecommendationReportStatus, ReportKind,
-                ReportRunStatus, TrainingDatasetStatus,
+                EntryAuthorizationPolicy, ExecutionOrderState, RecommendationReportStatus,
+                ReportKind, ReportRunStatus, TrainingDatasetStatus,
             },
             settlement::{
                 SettlementAuthorizationState, SettlementCaseState, SettlementReadinessStatus,
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn system_status_maps_key() {
         let event = CoreEvent::SystemStatusChanged(Box::new(SystemStatusView {
-            runtime: SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly),
+            runtime: SystemStatus::bootstrap(EntryAuthorizationPolicy::OperatorApprovalRequired),
             capabilities: SystemCapabilities::fail_closed(CapabilityReason::ControlPlaneNotReady),
         }));
         let (key, envelope) = event.event_envelope().expect("status maps");
@@ -159,7 +159,6 @@ mod tests {
             represented_routes: RepresentedRouteSet::from_routes([BuyModelRoute::Weather])
                 .expect("Route set"),
             report_kind: ReportKind::TopN,
-            runtime_mode: QuantRuntimeMode::ReportOnly,
             status: RecommendationReportStatus::Prepared,
             decision_at: Utc::now(),
             published_at: None,
@@ -200,7 +199,6 @@ mod tests {
             represented_routes: RepresentedRouteSet::from_routes([BuyModelRoute::Weather])
                 .expect("Route set"),
             report_kind: ReportKind::TopN,
-            runtime_mode: QuantRuntimeMode::ReportOnly,
             status: RecommendationReportStatus::Published,
             decision_at: Utc::now(),
             published_at: Some(Utc::now()),

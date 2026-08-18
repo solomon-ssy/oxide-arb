@@ -1,26 +1,25 @@
-//! `quant_execution_fill` append-only authenticated fill ledger entity.
+//! Append-only authenticated CLOB trade lifecycle observation.
 
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    quant_execution_account, quant_execution_fee_measurement, quant_execution_order,
-    quant_order_intent, quant_venue_incentive_event,
+    quant_execution_account, quant_execution_order, quant_order_intent, quant_venue_incentive_event,
 };
 use crate::{
     enums::{common::Side, execution::ExecutionOrderPhase, fee::FeeLiquidityRole},
     types::{
-        ContentHash, ExecutionAccountId, ExecutionFillId, ExecutionOrderId, MarketId, OrderId,
-        OrderIntentId, Price, Shares, TokenId, Usd, VenueTradeId,
+        Bps, ClobTradeObservationId, ContentHash, ExecutionAccountId, ExecutionOrderId, MarketId,
+        OrderId, OrderIntentId, Price, Shares, TokenId, Usd, VenueTradeId,
     },
 };
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "quant_execution_fill")]
+#[sea_orm(table_name = "quant_clob_trade_observation")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub execution_fill_id: ExecutionFillId,
+    pub clob_trade_observation_id: ClobTradeObservationId,
     pub execution_order_id: ExecutionOrderId,
     pub order_intent_id: OrderIntentId,
     pub execution_account_id: ExecutionAccountId,
@@ -36,6 +35,8 @@ pub struct Model {
     pub shares: Shares,
     pub price: Price,
     pub principal_usd: Usd,
+    pub provisional_fee_usd: Usd,
+    pub provisional_fee_rate_bps: Bps,
     pub matched_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub evidence_hash: ContentHash,
@@ -62,8 +63,6 @@ pub struct Model {
         to = "execution_account_id"
     )]
     pub execution_account: BelongsTo<quant_execution_account::Entity>,
-    #[sea_orm(has_many, relation_enum = "FeeMeasurements")]
-    pub fee_measurements: HasMany<quant_execution_fee_measurement::Entity>,
     #[sea_orm(has_many, relation_enum = "IncentiveEvents")]
     pub incentive_events: HasMany<quant_venue_incentive_event::Entity>,
 }

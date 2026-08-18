@@ -224,6 +224,36 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::PostgresLiteral("'{}'::jsonb"),
     },
     ColumnDefaultSpec {
+        table: "quant_account_chain_execution",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_account_execution_association",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_account_pause_submission",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_account_pause_submission",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_account_recovery_incident",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_account_recovery_incident",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
         table: "quant_account_snapshot",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
@@ -394,12 +424,7 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_execution_fill",
-        column: "created_at",
-        value: DefaultValue::StatementTimestamp,
-    },
-    ColumnDefaultSpec {
-        table: "quant_execution_fee_measurement",
+        table: "quant_clob_trade_observation",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
@@ -711,12 +736,12 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_position",
+        table: "quant_strategy_position_lot",
         column: "opened_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_position",
+        table: "quant_strategy_position_lot",
         column: "updated_at",
         value: DefaultValue::StatementTimestamp,
     },
@@ -1132,8 +1157,10 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     },
     ColumnDefaultSpec {
         table: "system_runtime_control",
-        column: "quant_runtime_mode",
-        value: DefaultValue::PostgresLiteral("'report_only'::qp_quant_runtime_mode"),
+        column: "entry_authorization_policy",
+        value: DefaultValue::PostgresLiteral(
+            "'operator_approval_required'::qp_entry_authorization_policy",
+        ),
     },
     ColumnDefaultSpec {
         table: "system_runtime_control",

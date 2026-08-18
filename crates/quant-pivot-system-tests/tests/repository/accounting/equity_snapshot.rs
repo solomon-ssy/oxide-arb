@@ -7,8 +7,11 @@ use quant_pivot_models::{
     types::{AccountSnapshotId, EquitySnapshotId, Usd},
 };
 use quant_pivot_repository::{
-    postgres::{PgEquitySnapshotRepository, PgExecutionSubmissionRepository, PgPositionRepository},
-    traits::{EquitySnapshotRepository, PositionRepository},
+    postgres::{
+        PgEquitySnapshotRepository, PgExecutionSubmissionRepository,
+        PgStrategyPositionLotRepository,
+    },
+    traits::{EquitySnapshotRepository, StrategyPositionLotRepository},
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
@@ -130,7 +133,7 @@ pub async fn drawdown_pct_hwm_hwm() {
 pub async fn realized_pnl_matches_sum() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let positions = PgPositionRepository::new(db.clone());
+    let positions = PgStrategyPositionLotRepository::new(db.clone());
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
     let ids = seed_report_fixture(&db).await;

@@ -13,7 +13,7 @@ use quant_pivot_models::{
             DomainEventEnvelope, DomainEventPayload, DomainEventType, SettlementRedeemConfirmed,
         },
         quant::{
-            PositionExit, PositionInfo,
+            PositionExit, StrategyPositionLot,
             settlement::{
                 ConfirmSettlementRedeem, NewSettlementRedeemLot, RequireSettlementReconciliation,
                 SettlementChainSubmissionInfo, SettlementRedeemInfo, SettlementRedeemLotWrite,
@@ -41,7 +41,7 @@ const PUSD_SCALE: u64 = 1_000_000;
 pub fn build_settlement_confirmation(
     redeem: &SettlementRedeemInfo,
     submission: &SettlementChainSubmissionInfo,
-    mut positions: Vec<PositionInfo>,
+    mut positions: Vec<StrategyPositionLot>,
     mut inventory: Vec<SettlementInventoryLotInfo>,
     confirmation: VerifiedSettlementConfirmation,
     confirmed_at: DateTime<Utc>,
@@ -51,16 +51,16 @@ pub fn build_settlement_confirmation(
         return Err(invariant("settlement has no open strategy lots"));
     }
     positions.sort_by(|left, right| {
-        left.order_intent_id
+        left.strategy_position_lot_id
             .as_uuid()
             .as_bytes()
-            .cmp(right.order_intent_id.as_uuid().as_bytes())
+            .cmp(right.strategy_position_lot_id.as_uuid().as_bytes())
     });
     inventory.sort_by(|left, right| {
-        left.position_id
+        left.strategy_position_lot_id
             .as_uuid()
             .as_bytes()
-            .cmp(right.position_id.as_uuid().as_bytes())
+            .cmp(right.strategy_position_lot_id.as_uuid().as_bytes())
     });
     validate_positions(redeem, &positions, &inventory)?;
     let before = redeem
@@ -152,7 +152,7 @@ pub fn settlement_reconciliation_command(
 
 fn validate_positions(
     redeem: &SettlementRedeemInfo,
-    positions: &[PositionInfo],
+    positions: &[StrategyPositionLot],
     inventory: &[SettlementInventoryLotInfo],
 ) -> QuantResult<()> {
     if inventory.is_empty() || positions.len() != inventory.len() {
@@ -183,8 +183,8 @@ fn validate_positions(
             || lot.inventory_digest != redeem.inventory_digest
             || lot.contributor_lots_digest != redeem.contributor_lots_digest
             || lot.execution_account_id != redeem.execution_account_id
-            || lot.position_id != position.position_id
-            || lot.order_intent_id != position.order_intent_id
+            || lot.strategy_position_lot_id != position.strategy_position_lot_id
+            || Some(lot.order_intent_id) != position.order_intent_id
             || lot.token_id != position.token_id
             || lot.side != position.side
             || lot.shares != position.shares
@@ -200,12 +200,12 @@ fn validate_positions(
 }
 
 fn require_side_balance(
-    positions: &[PositionInfo],
+    positions: &[StrategyPositionLot],
     side: OutcomeSide,
     expected_token: &TokenId,
     expected_raw: Decimal,
 ) -> QuantResult<()> {
-    let side_positions: Vec<&PositionInfo> = positions
+    let side_positions: Vec<&StrategyPositionLot> = positions
         .iter()
         .filter(|position| position.side == side)
         .collect();
@@ -232,13 +232,13 @@ fn require_side_balance(
 
 fn allocate_side(
     redeem: &SettlementRedeemInfo,
-    positions: &[PositionInfo],
+    positions: &[StrategyPositionLot],
     side: OutcomeSide,
     side_balance_raw: Decimal,
     side_payout_raw: Decimal,
     confirmed_at: DateTime<Utc>,
 ) -> QuantResult<Vec<SettlementRedeemLotWrite>> {
-    let side_positions: Vec<&PositionInfo> = positions
+    let side_positions: Vec<&StrategyPositionLot> = positions
         .iter()
         .filter(|position| position.side == side)
         .collect();
@@ -279,8 +279,10 @@ fn allocate_side(
                 lot: NewSettlementRedeemLot {
                     settlement_redeem_lot_id: SettlementRedeemLotId::from_v7(),
                     settlement_redeem_id: redeem.settlement_redeem_id,
-                    position_id: position.position_id,
-                    order_intent_id: position.order_intent_id,
+                    strategy_position_lot_id: position.strategy_position_lot_id,
+                    order_intent_id: position.order_intent_id.ok_or_else(|| {
+                        invariant("recovery-origin lot has no settlement allocation")
+                    })?,
                     token_id: position.token_id.clone(),
                     side,
                     shares_redeemed: position.shares,

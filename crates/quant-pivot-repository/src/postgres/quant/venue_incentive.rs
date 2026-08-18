@@ -83,7 +83,7 @@ impl PgVenueIncentiveRepository {
         };
         timing_matches
             && existing.execution_account_id == event.execution_account_id
-            && existing.execution_fill_id == event.execution_fill_id
+            && existing.clob_trade_observation_id == event.clob_trade_observation_id
             && existing.market_id == event.market_id
             && existing.kind == event.kind
             && existing.stage == event.stage
@@ -490,7 +490,7 @@ impl VenueIncentiveRepository for PgVenueIncentiveRepository {
                 NewVenueIncentiveEvent {
                     venue_incentive_event_id: VenueIncentiveEventId::from_v7(),
                     execution_account_id: snapshot.scan.execution_account_id,
-                    execution_fill_id: None,
+                    clob_trade_observation_id: None,
                     market_id: prior.market_id,
                     kind: VenueIncentiveKind::MakerRebate,
                     stage: VenueIncentiveStage::VenueReportedAccrual,

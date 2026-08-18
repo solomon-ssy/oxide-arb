@@ -954,10 +954,9 @@ fn validation_error_parameters(error: &ConfigValidationError) -> BTreeMap<String
             ("field_high".to_owned(), (*field_high).to_owned()),
             ("value_high".to_owned(), value_high.to_string()),
         ]),
-        ConfigValidationError::MissingCredentials { mode, missing } => BTreeMap::from([
-            ("mode".to_owned(), mode.clone()),
-            ("missing".to_owned(), missing.join(", ")),
-        ]),
+        ConfigValidationError::MissingCredentials { missing } => {
+            BTreeMap::from([("missing".to_owned(), missing.join(", "))])
+        }
         ConfigValidationError::InvalidValue { detail, .. } => {
             BTreeMap::from([("detail".to_owned(), detail.clone())])
         }
@@ -1057,8 +1056,8 @@ fn new_snapshot(
         model_routing_revision_id: revisions.model_routing.ok_or_else(missing)?,
         report_schedule_revision_id: revisions.report_schedule.ok_or_else(missing)?,
         operations_policy_revision_id: revisions.operations_policy.ok_or_else(missing)?,
-        execution_automation_policy_revision_id: revisions
-            .execution_automation_policy
+        execution_authorization_policy_revision_id: revisions
+            .execution_authorization_policy
             .ok_or_else(missing)?,
         snapshot: snapshot_document,
         source,

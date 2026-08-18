@@ -1,17 +1,17 @@
-//! Runtime-mode transition preflight report DTOs.
+//! Entry-authorization transition preflight evidence.
 //!
-//! A [`PreflightReport`] is the read-only aggregate produced before an *upgrade*
-//! mode transition (`report_only -> semi_auto`, `semi_auto -> auto_execution`).
+//! An [`AuthorizationPreflightReport`] is the read-only aggregate produced
+//! before enabling policy-automatic authorization.
 //! It is fail-closed: the transition is only allowed when every **hard** check
 //! passes. Soft (informational) checks never block but are surfaced for audit.
 
 use serde::{Deserialize, Serialize};
 
-use crate::enums::quant::QuantRuntimeMode;
+use crate::enums::quant::EntryAuthorizationPolicy;
 
 /// One preflight check outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreflightCheck {
+pub struct AuthorizationPreflightCheck {
     /// Stable check identifier (e.g. `"credentials_loaded"`).
     pub name: String,
     /// Whether failing this check blocks the transition.
@@ -22,7 +22,7 @@ pub struct PreflightCheck {
     pub detail: String,
 }
 
-impl PreflightCheck {
+impl AuthorizationPreflightCheck {
     /// A hard (blocking) check.
     #[must_use]
     pub fn hard(name: &'static str, passed: bool, detail: impl Into<String>) -> Self {
@@ -48,17 +48,17 @@ impl PreflightCheck {
 
 /// Aggregate preflight outcome for a target mode upgrade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreflightReport {
-    pub target: QuantRuntimeMode,
-    pub checks: Vec<PreflightCheck>,
+pub struct AuthorizationPreflightReport {
+    pub target: EntryAuthorizationPolicy,
+    pub checks: Vec<AuthorizationPreflightCheck>,
     /// `true` when every hard check passed (the transition may proceed).
     pub passed: bool,
 }
 
-impl PreflightReport {
+impl AuthorizationPreflightReport {
     /// Build a report and derive `passed` from the hard checks.
     #[must_use]
-    pub fn new(target: QuantRuntimeMode, checks: Vec<PreflightCheck>) -> Self {
+    pub fn new(target: EntryAuthorizationPolicy, checks: Vec<AuthorizationPreflightCheck>) -> Self {
         let passed = checks
             .iter()
             .filter(|check| check.hard)
@@ -71,7 +71,7 @@ impl PreflightReport {
     }
 
     /// Comma-separated `name: detail` summary of the failed hard checks, used as
-    /// the `ExecutionError::ModePreflightDenied` reason.
+    /// the `ExecutionError::AuthorizationPreflightDenied` reason.
     #[must_use]
     pub fn summary(&self) -> String {
         let failed: Vec<String> = self
@@ -90,16 +90,16 @@ impl PreflightReport {
 
 #[cfg(test)]
 mod tests {
-    use super::{PreflightCheck, PreflightReport};
-    use crate::enums::quant::QuantRuntimeMode;
+    use super::{AuthorizationPreflightCheck, AuthorizationPreflightReport};
+    use crate::enums::quant::EntryAuthorizationPolicy;
 
     #[test]
     fn passed_requires_hard_checks() {
-        let report = PreflightReport::new(
-            QuantRuntimeMode::SemiAuto,
+        let report = AuthorizationPreflightReport::new(
+            EntryAuthorizationPolicy::OperatorApprovalRequired,
             vec![
-                PreflightCheck::hard("a", true, "ok"),
-                PreflightCheck::hard("b", true, "ok"),
+                AuthorizationPreflightCheck::hard("a", true, "ok"),
+                AuthorizationPreflightCheck::hard("b", true, "ok"),
             ],
         );
         assert!(report.passed);
@@ -107,11 +107,11 @@ mod tests {
 
     #[test]
     fn soft_failure_never_blocks() {
-        let report = PreflightReport::new(
-            QuantRuntimeMode::SemiAuto,
+        let report = AuthorizationPreflightReport::new(
+            EntryAuthorizationPolicy::OperatorApprovalRequired,
             vec![
-                PreflightCheck::hard("a", true, "ok"),
-                PreflightCheck::soft("b", false, "informational"),
+                AuthorizationPreflightCheck::hard("a", true, "ok"),
+                AuthorizationPreflightCheck::soft("b", false, "informational"),
             ],
         );
         assert!(report.passed, "soft failures must not block the transition");
@@ -119,11 +119,15 @@ mod tests {
 
     #[test]
     fn hard_failure_blocks_summarizes() {
-        let report = PreflightReport::new(
-            QuantRuntimeMode::AutoExecution,
+        let report = AuthorizationPreflightReport::new(
+            EntryAuthorizationPolicy::PolicyAutomatic,
             vec![
-                PreflightCheck::hard("kill_switch_closed", false, "state = execution_halted"),
-                PreflightCheck::soft("exit_monitor_healthy", true, "deferred"),
+                AuthorizationPreflightCheck::hard(
+                    "kill_switch_closed",
+                    false,
+                    "state = execution_halted",
+                ),
+                AuthorizationPreflightCheck::soft("exit_monitor_healthy", true, "deferred"),
             ],
         );
         assert!(!report.passed);

@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    enums::{common::MarketCategory, quant::QuantRuntimeMode},
+    enums::common::MarketCategory,
     types::{EventId, MarketId, TokenId},
 };
 
@@ -19,8 +19,6 @@ use crate::{
 pub struct TradeAnalyticsFilter {
     /// Half-open UTC execution window `[from, to)`.
     pub window: TimeWindow,
-    /// When `None`, all execution modes are included.
-    pub runtime_mode: Option<QuantRuntimeMode>,
 }
 
 /// A time window for domain reads and offline materialization.

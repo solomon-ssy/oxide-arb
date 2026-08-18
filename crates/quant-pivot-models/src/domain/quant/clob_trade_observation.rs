@@ -1,23 +1,23 @@
-//! Append-only authenticated execution-fill persistence contracts.
+//! Append-only authenticated CLOB trade observation contracts.
 
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    entities::quant_execution_fill,
+    entities::quant_clob_trade_observation,
     enums::{common::Side, execution::ExecutionOrderPhase, fee::FeeLiquidityRole},
     types::{
-        ContentHash, EvmTransactionHash, ExecutionAccountId, ExecutionFillId, ExecutionOrderId,
-        MarketId, OrderId, OrderIntentId, Price, Shares, TokenId, Usd, VenueTradeId,
+        Bps, ClobTradeObservationId, ContentHash, ExecutionAccountId, ExecutionOrderId, MarketId,
+        OrderId, OrderIntentId, Price, Shares, TokenId, Usd, VenueTradeId,
     },
 };
 
 /// Immutable authenticated fill fact.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "quant_execution_fill::Entity")]
-pub struct ExecutionFillInfo {
-    pub execution_fill_id: ExecutionFillId,
+#[sea_orm(entity = "quant_clob_trade_observation::Entity")]
+pub struct ClobTradeObservationInfo {
+    pub clob_trade_observation_id: ClobTradeObservationId,
     pub execution_order_id: ExecutionOrderId,
     pub order_intent_id: OrderIntentId,
     pub execution_account_id: ExecutionAccountId,
@@ -32,14 +32,16 @@ pub struct ExecutionFillInfo {
     pub shares: Shares,
     pub price: Price,
     pub principal_usd: Usd,
+    pub provisional_fee_usd: Usd,
+    pub provisional_fee_rate_bps: Bps,
     pub matched_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub evidence_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 }
 
-info_from_model!(ExecutionFillInfo, quant_execution_fill::Model, {
-    execution_fill_id,
+info_from_model!(ClobTradeObservationInfo, quant_clob_trade_observation::Model, {
+    clob_trade_observation_id,
     execution_order_id,
     order_intent_id,
     execution_account_id,
@@ -54,6 +56,8 @@ info_from_model!(ExecutionFillInfo, quant_execution_fill::Model, {
     shares,
     price,
     principal_usd,
+    provisional_fee_usd,
+    provisional_fee_rate_bps,
     matched_at,
     available_at,
     evidence_hash,
@@ -62,9 +66,9 @@ info_from_model!(ExecutionFillInfo, quant_execution_fill::Model, {
 
 /// Insert payload for one immutable authenticated fill fact.
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "quant_execution_fill::ActiveModel")]
-pub struct NewExecutionFill {
-    pub execution_fill_id: ExecutionFillId,
+#[sea_orm(active_model = "quant_clob_trade_observation::ActiveModel")]
+pub struct NewClobTradeObservation {
+    pub clob_trade_observation_id: ClobTradeObservationId,
     pub execution_order_id: ExecutionOrderId,
     pub order_intent_id: OrderIntentId,
     pub execution_account_id: ExecutionAccountId,
@@ -79,15 +83,9 @@ pub struct NewExecutionFill {
     pub shares: Shares,
     pub price: Price,
     pub principal_usd: Usd,
+    pub provisional_fee_usd: Usd,
+    pub provisional_fee_rate_bps: Bps,
     pub matched_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub evidence_hash: ContentHash,
-}
-
-/// Authenticated fill paired with the later, independently observed chain
-/// transaction identity required for exact fee settlement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingExecutionFeeSettlement {
-    pub fill: ExecutionFillInfo,
-    pub transaction_hash: EvmTransactionHash,
 }

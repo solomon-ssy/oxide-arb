@@ -137,7 +137,7 @@ fn recommendation_contract_hash(
                 invalid("execution-eligible Route serving contract has no Trade Policy".to_owned())
                     .into()
             }),
-        ServingAuthority::ReportOnlyWithLiveL2 => {
+        ServingAuthority::AnalysisOnlyWithLiveL2 => {
             if trade_policy.is_some() {
                 return Err(invalid(
                     "bootstrap Route must not bind an executable Trade Policy".to_owned(),

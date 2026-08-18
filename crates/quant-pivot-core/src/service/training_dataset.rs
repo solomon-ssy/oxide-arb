@@ -58,7 +58,8 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
     ExchangeHistoryRepository, MarketLinkageRepository, MarketRepository, ModelRegistryRepository,
-    PositionRepository, QuantFactReadRepository, TradePolicyRepository, TrainingDatasetRepository,
+    QuantFactReadRepository, StrategyPositionLotRepository, TradePolicyRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -453,7 +454,7 @@ pub struct TrainingDatasetServiceDeps {
     /// Training-dataset ledger repository.
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
     /// Position ledger for closed-lot `ExitDecision` sampling.
-    pub position_repo: Arc<dyn PositionRepository>,
+    pub position_repo: Arc<dyn StrategyPositionLotRepository>,
     /// Append-only point-in-time CLOB market parameters and fee schedules.
     pub clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     /// Frozen market → external-subject linkage ledger.
@@ -527,7 +528,7 @@ pub struct TrainingDatasetService {
     market_repo: Arc<dyn MarketRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
-    position_repo: Arc<dyn PositionRepository>,
+    position_repo: Arc<dyn StrategyPositionLotRepository>,
     clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     model_registry: Arc<dyn ModelRegistryRepository>,
@@ -2546,7 +2547,7 @@ impl TrainingDatasetService {
             decision_capture: Some(decision_capture),
             lot_context: Some(LotTrainingContext {
                 order_intent_id: input.sample.order_intent_id,
-                position_id: input.sample.position_id,
+                strategy_position_lot_id: input.sample.strategy_position_lot_id,
                 outcome_side: input.sample.outcome_side,
                 remaining_shares: remaining,
                 avg_price: input.lot.avg_price,
@@ -3688,7 +3689,7 @@ fn lot_cross_section_index(
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
                     "lot {} declares side {:?}, but catalog token {} resolves to {:?}",
-                    sample.position_id,
+                    sample.strategy_position_lot_id,
                     sample.outcome_side,
                     sample.token_id,
                     binding.feature_side()

@@ -9,13 +9,13 @@ use quant_pivot_models::enums::execution::AdmissionOutcome;
 use super::{
     AdmissionCheck, AdmissionDecision, AdmissionInput, ExecutionAdmissionEngine,
     checks::{
-        BookFreshnessCheck, CalibratedReturnModelCheck, CapitalBudgetCheck, CategoryExposureCheck,
-        CredentialReadinessCheck, DataQualityCheck, EntryConditionCheck, EventExposureCheck,
-        ExitMonitorReadinessCheck, IntentStateCheck, KillSwitchCheck, LiquidityDepthCheck,
-        ManualBlockCheck, MarketExposureCheck, MaxOpenIntentsCheck, MaxReservedCapitalCheck,
-        ModelRouteBindingCheck, RecommendationFreshnessCheck, ReportStatusCheck,
-        RiskEnvelopeHashCheck, RuntimeModeCheck, SettlementRecoveryCheck, SlippageCheck,
-        VenueGuardCheck, VenueMetadataCheck,
+        AuthorizationPolicyCheck, BookFreshnessCheck, CalibratedReturnModelCheck,
+        CapitalBudgetCheck, CategoryExposureCheck, CredentialReadinessCheck, DataQualityCheck,
+        EntryConditionCheck, EventExposureCheck, ExitMonitorReadinessCheck, IntentStateCheck,
+        KillSwitchCheck, LiquidityDepthCheck, ManualBlockCheck, MarketExposureCheck,
+        MaxOpenIntentsCheck, MaxReservedCapitalCheck, ModelRouteBindingCheck,
+        RecommendationFreshnessCheck, ReportStatusCheck, RiskEnvelopeHashCheck,
+        SettlementRecoveryCheck, SlippageCheck, VenueGuardCheck, VenueMetadataCheck,
     },
 };
 use crate::observability::metrics_hub::MetricsHub;
@@ -39,7 +39,7 @@ impl DefaultAdmissionEngine {
             Box::new(IntentStateCheck),
             Box::new(RecommendationFreshnessCheck),
             Box::new(ReportStatusCheck),
-            Box::new(RuntimeModeCheck),
+            Box::new(AuthorizationPolicyCheck),
             Box::new(SettlementRecoveryCheck),
             Box::new(ModelRouteBindingCheck),
             Box::new(DataQualityCheck),

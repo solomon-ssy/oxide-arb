@@ -50,7 +50,7 @@ pub mod trade_policy_evidence;
 pub mod training;
 pub mod venue_fill;
 
-pub use account::{AccountPositions, ExposureBreakdown, PositionSnapshot};
+pub use account::{AccountPositions, ExposureBreakdown, VenuePositionSnapshot};
 pub use book_snapshot_ref::{BookSnapshotRef, BookSnapshotRefParseError, BookSnapshotSource};
 pub use catalog::CatalogMarketIds;
 pub use clob_market_info::{
@@ -95,9 +95,9 @@ pub use entry_condition::{
     WeatherDailyTemperatureInput, WeatherObservationDayClosedOutsideBand,
 };
 pub use execution_payload::{
-    EntryMakerRebateTerms, EntryOrderSpec, ExitPolicySpec, ExitReinferenceObservation,
-    ExitReinferenceVerdictKind, NextScaleOutProjection, OrderAmount, PendingScaleOut,
-    PreparedFeeSchedule, PreparedVenueOrder, ScaleOutState, VenueOrderAmount,
+    AuthorizationEvidence, EntryMakerRebateTerms, EntryOrderSpec, ExitPolicySpec,
+    ExitReinferenceObservation, ExitReinferenceVerdictKind, NextScaleOutProjection, OrderAmount,
+    PendingScaleOut, PreparedFeeSchedule, PreparedVenueOrder, ScaleOutState, VenueOrderAmount,
 };
 pub use feature::{
     CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, DomainFeatureSlice,
@@ -107,28 +107,28 @@ pub use feature::{
     SelectorParityEvidence,
 };
 pub use ids::{
+    AccountChainExecutionId, AccountPauseSubmissionId, AccountRecoveryIncidentId,
     AccountSnapshotId, AttributionArtifactId, AuditEventId, BacktestPathSetId, BacktestReportId,
     BasisAlertId, CalibrationArtifactId, CalibrationArtifactPublicationId,
     CandidateRecipePlanArtifactId, CapitalAllocationId, CatalogEventChangeId, CatalogEventObjectId,
     CatalogMarketChangeId, CatalogMarketObjectId, CatalogSyncBatchId, CatalogSyncRejectionId,
-    ClobMarketInfoVersionId, CorrelationId, DecisionPolicySnapshotId, DiagnosticCode,
-    DomainEventId, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId, DriftReportId,
-    EconomicTierId, EntryConditionArtifactId, EntryConditionAuditId,
+    ClobMarketInfoVersionId, ClobTradeObservationId, CorrelationId, DecisionPolicySnapshotId,
+    DiagnosticCode, DomainEventId, DomainInstrumentKey, DomainSourceExpectationId, DomainSourceId,
+    DriftReportId, EconomicTierId, EntryConditionArtifactId, EntryConditionAuditId,
     EntryConditionEvaluationOutboxId, EntryConditionInstanceId, EquitySnapshotId, EventId,
-    ExecutionAccountId, ExecutionFeeMeasurementId, ExecutionFillId, ExecutionOrderId,
-    ExecutionTradeRefId, ExecutionTransactionRefId, FactorDefinitionId, FactorValueId,
-    FeatureParityCandidateId, FeatureParityEventId, FeatureParityRunId, FeatureParityStateId,
-    FeatureParitySubjectId, FeatureVectorId, FeedbackAttributionManifestId,
-    FeedbackComparisonArtifactId, FeedbackCoordinatorFaultId, FeedbackCoverageArtifactId,
-    FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackDriftArtifactId, FeedbackEvaluationUseId,
-    FeedbackLearningStageArtifactId, FeedbackRecipeTemplateId, FeedbackShadowArtifactId,
-    FeedbackStageEventId, FeedbackTriggerEventId, FeedbackTruthFreezeArtifactId,
-    FeedbackValidationArtifactId, FreshBootRunEventId, FreshBootRunId, HistoryFitSealId,
-    HistoryServingHeadSealId, MarketId, MarketLinkageId, MarketSelectionId, MenuId,
-    ModelCandidateManifestId, ModelComparisonReportId, ModelGovernanceAuditId, ModelRunId,
-    ModelSpecId, ModelVersionId, OperationAction, OperationLogId, OrderId, OrderIntentId,
-    PolicyActivationId, PolicyApprovalId, PolicyRevisionId, PortfolioPlanId,
-    PortfolioScenarioArtifactId, PortfolioScenarioModelArtifactId, PositionId,
+    ExecutionAccountId, ExecutionOrderId, ExecutionTradeRefId, ExecutionTransactionRefId,
+    FactorDefinitionId, FactorValueId, FeatureParityCandidateId, FeatureParityEventId,
+    FeatureParityRunId, FeatureParityStateId, FeatureParitySubjectId, FeatureVectorId,
+    FeedbackAttributionManifestId, FeedbackComparisonArtifactId, FeedbackCoordinatorFaultId,
+    FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackDecisionArtifactId,
+    FeedbackDriftArtifactId, FeedbackEvaluationUseId, FeedbackLearningStageArtifactId,
+    FeedbackRecipeTemplateId, FeedbackShadowArtifactId, FeedbackStageEventId,
+    FeedbackTriggerEventId, FeedbackTruthFreezeArtifactId, FeedbackValidationArtifactId,
+    FreshBootRunEventId, FreshBootRunId, HistoryFitSealId, HistoryServingHeadSealId, MarketId,
+    MarketLinkageId, MarketSelectionId, MenuId, ModelCandidateManifestId, ModelComparisonReportId,
+    ModelGovernanceAuditId, ModelRunId, ModelSpecId, ModelVersionId, OperationAction,
+    OperationLogId, OrderId, OrderIntentId, PolicyActivationId, PolicyApprovalId, PolicyRevisionId,
+    PortfolioPlanId, PortfolioScenarioArtifactId, PortfolioScenarioModelArtifactId,
     PreproductionResetNonce, ProfileArtifactId, PromotionPermitId, RecommendationId,
     RecommendationReportId, ReconciliationId, ReportDataQualitySnapshotId, ReportRouteRunId,
     ReportRunId, ReportScheduleGapId, ReportScheduleId, ResearchJobId, ResearchProfileId,
@@ -136,9 +136,9 @@ pub use ids::{
     RoleId, RuntimeControlTransitionId, SettlementAuthorizationId, SettlementChainSubmissionId,
     SettlementExternalCursorId, SettlementGovernedActionId, SettlementInventoryLotId,
     SettlementRedeemId, SettlementRedeemLotId, ShadowBindingArtifactId, ShadowComparisonId,
-    SignalCandidateId, SourceSliceId, TokenId, TradePolicyArtifactId, TradePolicyGovernanceAuditId,
-    TradePolicyTrialAttemptId, TradePolicyValidationRunId, TrainingDatasetId, TrainingExampleId,
-    UserId, VenueIncentiveEventId, VenueTradeId, WorkerId,
+    SignalCandidateId, SourceSliceId, StrategyPositionLotId, TokenId, TradePolicyArtifactId,
+    TradePolicyGovernanceAuditId, TradePolicyTrialAttemptId, TradePolicyValidationRunId,
+    TrainingDatasetId, TrainingExampleId, UserId, VenueIncentiveEventId, VenueTradeId, WorkerId,
 };
 pub use maker_rebate::{
     MakerRebateDelayBasis, MakerRebateObjectiveStatus, MakerRebateObjectiveZeroReason,

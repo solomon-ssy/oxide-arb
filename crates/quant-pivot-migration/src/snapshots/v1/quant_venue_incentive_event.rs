@@ -11,7 +11,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub venue_incentive_event_id: Uuid,
     pub execution_account_id: Uuid,
-    pub execution_fill_id: Option<Uuid>,
+    pub clob_trade_observation_id: Option<Uuid>,
     #[sea_orm(column_type = "Text", nullable)]
     pub market_id: Option<String>,
     pub kind: QpVenueIncentiveKind,
@@ -41,12 +41,13 @@ pub struct Model {
     pub quant_execution_account: BelongsTo<super::quant_execution_account::Entity>,
     #[sea_orm(
         belongs_to,
-        from = "execution_fill_id",
-        to = "execution_fill_id",
+        from = "clob_trade_observation_id",
+        to = "clob_trade_observation_id",
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
-    pub quant_execution_fill: BelongsTo<Option<super::quant_execution_fill::Entity>>,
+    pub quant_clob_trade_observation:
+        BelongsTo<Option<super::quant_clob_trade_observation::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -76,6 +76,8 @@ pub enum TaskId {
     OperationLogWriter,
 
     // ── Execution ─────────────────────────────────────────────────────
+    /// Recovery-only worker: turns dangling submissions into reconciliation work.
+    ExecutionRecovery,
     /// Auto-execution worker: pulls `ApprovedByPolicy` intents and submits them.
     ExecutionDispatcher,
     /// Evaluates durable recommendation condition instances in all runtime modes.
@@ -151,7 +153,7 @@ pub enum TaskId {
     FeedbackCoordinator,
     /// Materializes due feedback cycles from `PostgreSQL` scheduler leases.
     FeedbackScheduler,
-    /// Captures signed `ClickHouse` retention and `ReportOnly` latency evidence.
+    /// Captures signed `ClickHouse` retention and analysis latency evidence.
     ResearchReadinessEvidenceWorker,
     /// Idempotently enqueues the frozen daily 24-hour full parity replay.
     FeatureParityScheduler,
@@ -191,7 +193,8 @@ impl TaskId {
             | Self::RiskMetricsRefresh
             | Self::DataQualityRefresh
             | Self::RuntimeControlSync => TaskKind::HealthMonitor,
-            Self::ExecutionDispatcher
+            Self::ExecutionRecovery
+            | Self::ExecutionDispatcher
             | Self::EntryConditionWorker
             | Self::ExecutionBreakerTick
             | Self::ReconciliationWorker

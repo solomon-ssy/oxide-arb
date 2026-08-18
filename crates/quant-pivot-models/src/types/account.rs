@@ -23,7 +23,7 @@ use crate::{
 /// is [`MarketCategory::Other`] for positions held in markets not tracked by the
 /// local registry — such positions still count toward equity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PositionSnapshot {
+pub struct VenuePositionSnapshot {
     /// CLOB outcome token id.
     pub token_id: TokenId,
     /// Owning market (Polymarket `condition_id`).
@@ -49,7 +49,7 @@ pub struct PositionSnapshot {
 /// Net USD exposure aggregated by market, event, and category.
 ///
 /// The planner uses this as the starting point for `exposure_after` projections
-/// and cap-room checks. Built from [`PositionSnapshot`]s via
+/// and cap-room checks. Built from [`VenuePositionSnapshot`]s via
 /// [`ExposureBreakdown::from_positions`].
 #[derive(
     Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult,
@@ -70,7 +70,7 @@ impl ExposureBreakdown {
     /// Every position contributes to `per_market` and `per_category`; only
     /// positions with a mapped `event_id` contribute to `per_event`.
     #[must_use]
-    pub fn from_positions(positions: &[PositionSnapshot]) -> Self {
+    pub fn from_positions(positions: &[VenuePositionSnapshot]) -> Self {
         let mut per_market: BTreeMap<MarketId, Usd> = BTreeMap::new();
         let mut per_event: BTreeMap<EventId, Usd> = BTreeMap::new();
         let mut per_category: BTreeMap<MarketCategory, Usd> = BTreeMap::new();
@@ -92,4 +92,4 @@ impl ExposureBreakdown {
 /// JSONB column wrapper for the held positions of an account snapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(transparent)]
-pub struct AccountPositions(pub Vec<PositionSnapshot>);
+pub struct AccountPositions(pub Vec<VenuePositionSnapshot>);

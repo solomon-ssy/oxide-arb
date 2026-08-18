@@ -4,6 +4,7 @@ mod config_contract;
 mod enum_catalog;
 mod exchange_history_smoke;
 mod function_design;
+mod implementation_ledger;
 mod performance;
 mod public_read_smoke;
 

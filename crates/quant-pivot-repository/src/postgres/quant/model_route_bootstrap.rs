@@ -44,7 +44,9 @@ use quant_pivot_models::{
         system_runtime_control::Entity as RuntimeControlEntity,
     },
     enums::{
-        quant::{CalibrationKind, ModelGovernanceAction, QuantRuntimeMode, TrainingDatasetStatus},
+        quant::{
+            CalibrationKind, EntryAuthorizationPolicy, ModelGovernanceAction, TrainingDatasetStatus,
+        },
         rbac::{Operation, ResourceType},
         runtime_config::{
             CheckOutcome, ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActivationKind,
@@ -164,8 +166,8 @@ impl PgModelRouteBootstrapRepository {
             .ok_or_else(|| {
                 StorageError::not_found("system_runtime_control", SYSTEM_RUNTIME_CONTROL_ID)
             })?;
-        if runtime.quant_runtime_mode != QuantRuntimeMode::ReportOnly
-            || runtime.quant_runtime_mode != preflight.current_runtime_mode()
+        if runtime.entry_authorization_policy != EntryAuthorizationPolicy::OperatorApprovalRequired
+            || runtime.entry_authorization_policy != preflight.current_entry_authorization_policy()
             || runtime.revision != preflight.expected_runtime_revision()
         {
             return Err(Self::conflict(
@@ -487,9 +489,9 @@ impl PgModelRouteBootstrapRepository {
                 revisions.operations_policy,
                 ConfigResourceKind::OperationsPolicy,
             )?,
-            execution_automation_policy_revision_id: required(
-                revisions.execution_automation_policy,
-                ConfigResourceKind::ExecutionAutomationPolicy,
+            execution_authorization_policy_revision_id: required(
+                revisions.execution_authorization_policy,
+                ConfigResourceKind::ExecutionAuthorizationPolicy,
             )?,
             snapshot: document,
             source: DecisionPolicySnapshotSource::Activation,

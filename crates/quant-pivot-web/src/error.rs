@@ -216,8 +216,7 @@ impl From<ExecutionError> for WebError {
             | ExecutionError::OutcomeReconciliationSource { .. } => {
                 Self::ServiceUnavailable(error.to_string())
             }
-            ExecutionError::ReportOnlyMode
-            | ExecutionError::ModePreflightDenied { .. }
+            ExecutionError::AuthorizationPreflightDenied { .. }
             | ExecutionError::KillSwitchBlocks { .. }
             | ExecutionError::RecommendationExpired { .. }
             | ExecutionError::NotSubmittable { .. }
@@ -225,9 +224,11 @@ impl From<ExecutionError> for WebError {
             | ExecutionError::AdmissionDenied { .. }
             | ExecutionError::ApprovalInvalidated { .. }
             | ExecutionError::ReconciliationUnresolvable { .. }
+            | ExecutionError::AccountChainProjection { .. }
             | ExecutionError::ReconciliationNotResolvable { .. }
-            | ExecutionError::SettlementRecoveryUnavailable { .. }
-            | ExecutionError::ModeTransitionForbidden { .. } => Self::Conflict(error.to_string()),
+            | ExecutionError::SettlementRecoveryUnavailable { .. } => {
+                Self::Conflict(error.to_string())
+            }
             ExecutionError::ReconciliationResolveInvalid { .. } => {
                 Self::BadRequest(error.to_string())
             }

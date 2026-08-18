@@ -16,7 +16,7 @@ use crate::{
     entities::{policy_activation, policy_approval, policy_profile_artifact, policy_revision},
     enums::{
         execution::KillSwitchState,
-        quant::QuantRuntimeMode,
+        quant::EntryAuthorizationPolicy,
         runtime_config::{
             ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActivationKind,
             PolicyActorKind, PolicyApprovalDecision, PolicyRevisionStatus, ProfileArtifactKind,
@@ -37,7 +37,7 @@ use crate::{
 /// Overall system status reported by the health endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStatus {
-    pub quant_runtime_mode: QuantRuntimeMode,
+    pub entry_authorization_policy: EntryAuthorizationPolicy,
     pub uptime_secs: u64,
     pub active_markets: u32,
     /// Market-catalog warmup state; report generation is gated until `Ready`.
@@ -135,9 +135,9 @@ impl SystemStatus {
     /// catalog + market-data + uptime) is built by
     /// [`RuntimeControlPort::system_status`](crate::domain::ports::RuntimeControlPort::system_status).
     #[must_use]
-    pub fn bootstrap(quant_runtime_mode: QuantRuntimeMode) -> Self {
+    pub fn bootstrap(entry_authorization_policy: EntryAuthorizationPolicy) -> Self {
         Self {
-            quant_runtime_mode,
+            entry_authorization_policy,
             uptime_secs: 0,
             active_markets: 0,
             catalog: CatalogState::Warming,
@@ -165,8 +165,8 @@ impl SystemStatus {
                 unresolvable_count: 0,
                 kill_switch_requires_ack: false,
                 kill_switch_state: KillSwitchState::Closed,
-                quant_runtime_mode,
-                auto_execution_blocked: false,
+                entry_authorization_policy,
+                policy_automatic_blocked: false,
                 next_steps: Vec::new(),
             },
             checked_at: Utc::now(),
@@ -321,7 +321,7 @@ pub struct DecisionPolicySnapshotInfo {
     pub model_routing_revision_id: PolicyRevisionId,
     pub report_schedule_revision_id: PolicyRevisionId,
     pub operations_policy_revision_id: PolicyRevisionId,
-    pub execution_automation_policy_revision_id: PolicyRevisionId,
+    pub execution_authorization_policy_revision_id: PolicyRevisionId,
     pub source: DecisionPolicySnapshotSource,
     pub created_by_kind: PolicyActorKind,
     pub created_by_user_id: Option<UserId>,
@@ -345,7 +345,7 @@ pub struct DecisionPolicySnapshotOptionInfo {
     pub model_routing_revision_id: PolicyRevisionId,
     pub report_schedule_revision_id: PolicyRevisionId,
     pub operations_policy_revision_id: PolicyRevisionId,
-    pub execution_automation_policy_revision_id: PolicyRevisionId,
+    pub execution_authorization_policy_revision_id: PolicyRevisionId,
     pub source: DecisionPolicySnapshotSource,
     pub created_at: DateTime<Utc>,
 }
@@ -361,7 +361,7 @@ pub struct NewDecisionPolicySnapshot {
     pub model_routing_revision_id: PolicyRevisionId,
     pub report_schedule_revision_id: PolicyRevisionId,
     pub operations_policy_revision_id: PolicyRevisionId,
-    pub execution_automation_policy_revision_id: PolicyRevisionId,
+    pub execution_authorization_policy_revision_id: PolicyRevisionId,
     pub source: DecisionPolicySnapshotSource,
     pub created_by_kind: PolicyActorKind,
     pub created_by_user_id: Option<UserId>,

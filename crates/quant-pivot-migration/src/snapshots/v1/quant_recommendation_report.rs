@@ -2,9 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{
-    QpAccountSource, QpQuantRuntimeMode, QpRecommendationReportStatus, QpReportKind,
-};
+use super::sea_orm_active_enums::{QpAccountSource, QpRecommendationReportStatus, QpReportKind};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -16,8 +14,6 @@ pub struct Model {
     pub report_run_id: Uuid,
     pub report_kind: QpReportKind,
     pub decision_at: DateTimeWithTimeZone,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
-    pub runtime_mode: QpQuantRuntimeMode,
     pub decision_policy_snapshot_id: Uuid,
     pub market_selection_id: Uuid,
     pub portfolio_plan_id: Uuid,

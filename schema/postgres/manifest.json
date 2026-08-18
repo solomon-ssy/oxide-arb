@@ -1098,7 +1098,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "execution_automation_policy_revision_id",
+      "name": "execution_authorization_policy_revision_id",
       "nullable": false,
       "ordinal": 9,
       "storage": "p",
@@ -3308,6 +3308,1007 @@
       "default": null,
       "generated": "",
       "identity": "",
+      "name": "account_chain_execution_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_account_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "role",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "qp_account_chain_execution_role"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "chain_id",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "protocol_version",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "integer"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "exchange_address",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "block_number",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "block_hash",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "transaction_hash",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "transaction_index",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "log_index",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "order_id",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "maker_address",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "taker_address",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "order_side",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "qp_side"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "order_token_id",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "maker_amount_raw",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "taker_amount_raw",
+      "nullable": false,
+      "ordinal": 18,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "account_side",
+      "nullable": true,
+      "ordinal": 19,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "qp_side"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "account_token_id",
+      "nullable": true,
+      "ordinal": 20,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "shares",
+      "nullable": true,
+      "ordinal": 21,
+      "storage": "m",
+      "table": "quant_account_chain_execution",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "principal_usd",
+      "nullable": true,
+      "ordinal": 22,
+      "storage": "m",
+      "table": "quant_account_chain_execution",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "exact_fee_usd",
+      "nullable": true,
+      "ordinal": 23,
+      "storage": "m",
+      "table": "quant_account_chain_execution",
+      "type": "numeric"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "builder_code",
+      "nullable": true,
+      "ordinal": 24,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "metadata",
+      "nullable": true,
+      "ordinal": 25,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_event_hash",
+      "nullable": false,
+      "ordinal": 26,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "availability_policy_hash",
+      "nullable": false,
+      "ordinal": 27,
+      "storage": "x",
+      "table": "quant_account_chain_execution",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "observed_at",
+      "nullable": false,
+      "ordinal": 28,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "available_at",
+      "nullable": false,
+      "ordinal": 29,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 30,
+      "storage": "p",
+      "table": "quant_account_chain_execution",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "account_chain_execution_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_account_execution_association",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "kind",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_account_execution_association",
+      "type": "qp_account_execution_association_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_order_id",
+      "nullable": true,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_account_execution_association",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "recovery_incident_id",
+      "nullable": true,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_account_execution_association",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_account_execution_association",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "associated_at",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_account_execution_association",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_account_execution_association",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "account_pause_submission_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "recovery_incident_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "exchange_address",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "state",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "qp_account_pause_submission_state"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "kind",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "qp_settlement_submission_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "requested_block",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "interval_blocks",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "effective_block",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "prepared_block_number",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "prepared_block_hash",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "prepared_nonce",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "gas_limit",
+      "nullable": true,
+      "ordinal": 12,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "calldata_hash",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "deployment_digest",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "signed_envelope",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "bytea"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "signed_envelope_hash",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "transaction_hash",
+      "nullable": true,
+      "ordinal": 17,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "relayer_transaction_id",
+      "nullable": true,
+      "ordinal": 18,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "confirmation_block_number",
+      "nullable": true,
+      "ordinal": 19,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "confirmation_block_hash",
+      "nullable": true,
+      "ordinal": 20,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "confirmation_transaction_hash",
+      "nullable": true,
+      "ordinal": 21,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "confirmation_log_index",
+      "nullable": true,
+      "ordinal": 22,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "failure_detail",
+      "nullable": true,
+      "ordinal": 23,
+      "storage": "x",
+      "table": "quant_account_pause_submission",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "dispatched_at",
+      "nullable": true,
+      "ordinal": 24,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "confirmed_at",
+      "nullable": true,
+      "ordinal": 25,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 26,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 27,
+      "storage": "p",
+      "table": "quant_account_pause_submission",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "account_recovery_incident_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_account_recovery_incident",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_account_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_account_recovery_incident",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "kind",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_account_recovery_incident",
+      "type": "qp_account_recovery_incident_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "status",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_account_recovery_incident",
+      "type": "qp_account_recovery_incident_status"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "trigger_chain_execution_id",
+      "nullable": true,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_account_recovery_incident",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "reason",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_account_recovery_incident",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "opened_at",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_account_recovery_incident",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "seal_hash",
+      "nullable": true,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_account_recovery_incident",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "sealed_by",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_account_recovery_incident",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "sealed_at",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_account_recovery_incident",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "revision",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_account_recovery_incident",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_account_recovery_incident",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_account_recovery_incident",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
       "name": "account_snapshot_id",
       "nullable": false,
       "ordinal": 1,
@@ -4730,6 +5731,279 @@
       "ordinal": 12,
       "storage": "p",
       "table": "quant_capital_allocation",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "clob_trade_observation_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_clob_trade_observation",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_order_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_clob_trade_observation",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "order_intent_id",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_clob_trade_observation",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_account_id",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_clob_trade_observation",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "venue_trade_id",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_clob_trade_observation",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "venue_bucket_index",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_clob_trade_observation",
+      "type": "integer"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "venue_order_id",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_clob_trade_observation",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "order_phase",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_clob_trade_observation",
+      "type": "qp_execution_order_phase"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "market_id",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_clob_trade_observation",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "token_id",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_clob_trade_observation",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "side",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_clob_trade_observation",
+      "type": "qp_side"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "liquidity_role",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_clob_trade_observation",
+      "type": "qp_fee_liquidity_role"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "shares",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "m",
+      "table": "quant_clob_trade_observation",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "price",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "m",
+      "table": "quant_clob_trade_observation",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "principal_usd",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "m",
+      "table": "quant_clob_trade_observation",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "provisional_fee_usd",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "m",
+      "table": "quant_clob_trade_observation",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "provisional_fee_rate_bps",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "m",
+      "table": "quant_clob_trade_observation",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "matched_at",
+      "nullable": false,
+      "ordinal": 18,
+      "storage": "p",
+      "table": "quant_clob_trade_observation",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "available_at",
+      "nullable": false,
+      "ordinal": 19,
+      "storage": "p",
+      "table": "quant_clob_trade_observation",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": false,
+      "ordinal": 20,
+      "storage": "x",
+      "table": "quant_clob_trade_observation",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 21,
+      "storage": "p",
+      "table": "quant_clob_trade_observation",
       "type": "timestamp with time zone"
     },
     {
@@ -7221,7 +8495,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "position_id",
+      "name": "strategy_position_lot_id",
       "nullable": true,
       "ordinal": 5,
       "storage": "p",
@@ -7273,22 +8547,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "runtime_mode",
-      "nullable": false,
-      "ordinal": 9,
-      "storage": "p",
-      "table": "quant_execution_attempt_outcome",
-      "type": "qp_quant_runtime_mode"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
       "name": "terminal_state",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 9,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "qp_execution_attempt_terminal_state"
@@ -7301,7 +8562,7 @@
       "identity": "",
       "name": "no_fill_reason",
       "nullable": true,
-      "ordinal": 11,
+      "ordinal": 10,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "qp_execution_attempt_no_fill_reason"
@@ -7314,7 +8575,7 @@
       "identity": "",
       "name": "entry_order_state",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 11,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "qp_execution_order_state"
@@ -7327,7 +8588,7 @@
       "identity": "",
       "name": "requested_shares",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 12,
       "storage": "m",
       "table": "quant_execution_attempt_outcome",
       "type": "numeric(38,18)"
@@ -7340,7 +8601,7 @@
       "identity": "",
       "name": "filled_shares",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 13,
       "storage": "m",
       "table": "quant_execution_attempt_outcome",
       "type": "numeric(38,18)"
@@ -7353,7 +8614,7 @@
       "identity": "",
       "name": "entry_avg_price",
       "nullable": true,
-      "ordinal": 15,
+      "ordinal": 14,
       "storage": "m",
       "table": "quant_execution_attempt_outcome",
       "type": "numeric(20,18)"
@@ -7366,7 +8627,7 @@
       "identity": "",
       "name": "entry_fee_usd",
       "nullable": true,
-      "ordinal": 16,
+      "ordinal": 15,
       "storage": "m",
       "table": "quant_execution_attempt_outcome",
       "type": "numeric(28,8)"
@@ -7379,7 +8640,7 @@
       "identity": "",
       "name": "entry_filled_at",
       "nullable": true,
-      "ordinal": 17,
+      "ordinal": 16,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "timestamp with time zone"
@@ -7392,7 +8653,7 @@
       "identity": "",
       "name": "position_terminal_state",
       "nullable": true,
-      "ordinal": 18,
+      "ordinal": 17,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "qp_position_ledger_state"
@@ -7405,7 +8666,7 @@
       "identity": "",
       "name": "exit_reason",
       "nullable": true,
-      "ordinal": 19,
+      "ordinal": 18,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "qp_exit_reason"
@@ -7418,7 +8679,7 @@
       "identity": "",
       "name": "exit_filled_shares",
       "nullable": true,
-      "ordinal": 20,
+      "ordinal": 19,
       "storage": "m",
       "table": "quant_execution_attempt_outcome",
       "type": "numeric(38,18)"
@@ -7431,7 +8692,7 @@
       "identity": "",
       "name": "exit_avg_price",
       "nullable": true,
-      "ordinal": 21,
+      "ordinal": 20,
       "storage": "m",
       "table": "quant_execution_attempt_outcome",
       "type": "numeric(20,18)"
@@ -7444,7 +8705,7 @@
       "identity": "",
       "name": "exit_fee_usd",
       "nullable": true,
-      "ordinal": 22,
+      "ordinal": 21,
       "storage": "m",
       "table": "quant_execution_attempt_outcome",
       "type": "numeric(28,8)"
@@ -7457,7 +8718,7 @@
       "identity": "",
       "name": "exit_at",
       "nullable": true,
-      "ordinal": 23,
+      "ordinal": 22,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "timestamp with time zone"
@@ -7470,7 +8731,7 @@
       "identity": "",
       "name": "settlement_payout_usd",
       "nullable": true,
-      "ordinal": 24,
+      "ordinal": 23,
       "storage": "m",
       "table": "quant_execution_attempt_outcome",
       "type": "numeric(28,8)"
@@ -7483,7 +8744,7 @@
       "identity": "",
       "name": "realized_pnl_usd",
       "nullable": true,
-      "ordinal": 25,
+      "ordinal": 24,
       "storage": "m",
       "table": "quant_execution_attempt_outcome",
       "type": "numeric(28,8)"
@@ -7496,7 +8757,7 @@
       "identity": "",
       "name": "terminal_at",
       "nullable": false,
-      "ordinal": 26,
+      "ordinal": 25,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "timestamp with time zone"
@@ -7509,7 +8770,7 @@
       "identity": "",
       "name": "source_observed_at",
       "nullable": false,
-      "ordinal": 27,
+      "ordinal": 26,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "timestamp with time zone"
@@ -7522,7 +8783,7 @@
       "identity": "",
       "name": "available_at",
       "nullable": false,
-      "ordinal": 28,
+      "ordinal": 27,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "timestamp with time zone"
@@ -7535,7 +8796,7 @@
       "identity": "",
       "name": "source_checkpoint_hash",
       "nullable": false,
-      "ordinal": 29,
+      "ordinal": 28,
       "storage": "x",
       "table": "quant_execution_attempt_outcome",
       "type": "character varying"
@@ -7548,7 +8809,7 @@
       "identity": "",
       "name": "execution_fact_hash",
       "nullable": false,
-      "ordinal": 30,
+      "ordinal": 29,
       "storage": "x",
       "table": "quant_execution_attempt_outcome",
       "type": "character varying"
@@ -7561,7 +8822,7 @@
       "identity": "",
       "name": "execution_fact_schema_version",
       "nullable": false,
-      "ordinal": 31,
+      "ordinal": 30,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "integer"
@@ -7574,7 +8835,7 @@
       "identity": "",
       "name": "outcome_hash",
       "nullable": false,
-      "ordinal": 32,
+      "ordinal": 31,
       "storage": "x",
       "table": "quant_execution_attempt_outcome",
       "type": "character varying"
@@ -7587,7 +8848,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 33,
+      "ordinal": 32,
       "storage": "p",
       "table": "quant_execution_attempt_outcome",
       "type": "timestamp with time zone"
@@ -7733,448 +8994,6 @@
       "ordinal": 11,
       "storage": "p",
       "table": "quant_execution_attempt_reconciliation_task",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "execution_fee_measurement_id",
-      "nullable": false,
-      "ordinal": 1,
-      "storage": "p",
-      "table": "quant_execution_fee_measurement",
-      "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "execution_fill_id",
-      "nullable": false,
-      "ordinal": 2,
-      "storage": "p",
-      "table": "quant_execution_fee_measurement",
-      "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "stage",
-      "nullable": false,
-      "ordinal": 3,
-      "storage": "p",
-      "table": "quant_execution_fee_measurement",
-      "type": "qp_fee_measurement_stage"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "fee_usd",
-      "nullable": false,
-      "ordinal": 4,
-      "storage": "m",
-      "table": "quant_execution_fee_measurement",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "fee_rate_bps",
-      "nullable": true,
-      "ordinal": 5,
-      "storage": "m",
-      "table": "quant_execution_fee_measurement",
-      "type": "numeric"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "source_identity",
-      "nullable": false,
-      "ordinal": 6,
-      "storage": "x",
-      "table": "quant_execution_fee_measurement",
-      "type": "text"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "chain_id",
-      "nullable": true,
-      "ordinal": 7,
-      "storage": "p",
-      "table": "quant_execution_fee_measurement",
-      "type": "bigint"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "protocol_version",
-      "nullable": true,
-      "ordinal": 8,
-      "storage": "p",
-      "table": "quant_execution_fee_measurement",
-      "type": "integer"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "exchange_address",
-      "nullable": true,
-      "ordinal": 9,
-      "storage": "x",
-      "table": "quant_execution_fee_measurement",
-      "type": "text"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "transaction_hash",
-      "nullable": true,
-      "ordinal": 10,
-      "storage": "x",
-      "table": "quant_execution_fee_measurement",
-      "type": "text"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "log_index",
-      "nullable": true,
-      "ordinal": 11,
-      "storage": "p",
-      "table": "quant_execution_fee_measurement",
-      "type": "bigint"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "observed_at",
-      "nullable": false,
-      "ordinal": 12,
-      "storage": "p",
-      "table": "quant_execution_fee_measurement",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "available_at",
-      "nullable": false,
-      "ordinal": 13,
-      "storage": "p",
-      "table": "quant_execution_fee_measurement",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "evidence_hash",
-      "nullable": false,
-      "ordinal": 14,
-      "storage": "x",
-      "table": "quant_execution_fee_measurement",
-      "type": "text"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": "statement_timestamp()",
-      "generated": "",
-      "identity": "",
-      "name": "created_at",
-      "nullable": false,
-      "ordinal": 15,
-      "storage": "p",
-      "table": "quant_execution_fee_measurement",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "execution_fill_id",
-      "nullable": false,
-      "ordinal": 1,
-      "storage": "p",
-      "table": "quant_execution_fill",
-      "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "execution_order_id",
-      "nullable": false,
-      "ordinal": 2,
-      "storage": "p",
-      "table": "quant_execution_fill",
-      "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "order_intent_id",
-      "nullable": false,
-      "ordinal": 3,
-      "storage": "p",
-      "table": "quant_execution_fill",
-      "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "execution_account_id",
-      "nullable": false,
-      "ordinal": 4,
-      "storage": "p",
-      "table": "quant_execution_fill",
-      "type": "uuid"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "venue_trade_id",
-      "nullable": false,
-      "ordinal": 5,
-      "storage": "x",
-      "table": "quant_execution_fill",
-      "type": "text"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "venue_bucket_index",
-      "nullable": false,
-      "ordinal": 6,
-      "storage": "p",
-      "table": "quant_execution_fill",
-      "type": "integer"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "venue_order_id",
-      "nullable": false,
-      "ordinal": 7,
-      "storage": "x",
-      "table": "quant_execution_fill",
-      "type": "text"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "order_phase",
-      "nullable": false,
-      "ordinal": 8,
-      "storage": "p",
-      "table": "quant_execution_fill",
-      "type": "qp_execution_order_phase"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "market_id",
-      "nullable": false,
-      "ordinal": 9,
-      "storage": "x",
-      "table": "quant_execution_fill",
-      "type": "text"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "token_id",
-      "nullable": false,
-      "ordinal": 10,
-      "storage": "x",
-      "table": "quant_execution_fill",
-      "type": "text"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "side",
-      "nullable": false,
-      "ordinal": 11,
-      "storage": "p",
-      "table": "quant_execution_fill",
-      "type": "qp_side"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "liquidity_role",
-      "nullable": false,
-      "ordinal": 12,
-      "storage": "p",
-      "table": "quant_execution_fill",
-      "type": "qp_fee_liquidity_role"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "shares",
-      "nullable": false,
-      "ordinal": 13,
-      "storage": "m",
-      "table": "quant_execution_fill",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "price",
-      "nullable": false,
-      "ordinal": 14,
-      "storage": "m",
-      "table": "quant_execution_fill",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "principal_usd",
-      "nullable": false,
-      "ordinal": 15,
-      "storage": "m",
-      "table": "quant_execution_fill",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "matched_at",
-      "nullable": false,
-      "ordinal": 16,
-      "storage": "p",
-      "table": "quant_execution_fill",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "available_at",
-      "nullable": false,
-      "ordinal": 17,
-      "storage": "p",
-      "table": "quant_execution_fill",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "evidence_hash",
-      "nullable": false,
-      "ordinal": 18,
-      "storage": "x",
-      "table": "quant_execution_fill",
-      "type": "text"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": "statement_timestamp()",
-      "generated": "",
-      "identity": "",
-      "name": "created_at",
-      "nullable": false,
-      "ordinal": 19,
-      "storage": "p",
-      "table": "quant_execution_fill",
       "type": "timestamp with time zone"
     },
     {
@@ -11303,12 +12122,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "allowed_runtime_modes",
+      "name": "maximum_execution_authority",
       "nullable": false,
       "ordinal": 21,
-      "storage": "x",
+      "storage": "p",
       "table": "quant_feedback_promotion_permit",
-      "type": "qp_quant_runtime_mode[]"
+      "type": "qp_execution_authority_ceiling"
     },
     {
       "collation": "default",
@@ -15645,22 +16464,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "runtime_mode",
-      "nullable": false,
-      "ordinal": 4,
-      "storage": "p",
-      "table": "quant_order_intent",
-      "type": "qp_quant_runtime_mode"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
       "name": "decision_policy_snapshot_id",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 4,
       "storage": "p",
       "table": "quant_order_intent",
       "type": "uuid"
@@ -15673,7 +16479,7 @@
       "identity": "",
       "name": "model_version_id",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 5,
       "storage": "p",
       "table": "quant_order_intent",
       "type": "uuid"
@@ -15686,7 +16492,7 @@
       "identity": "",
       "name": "research_profile_artifact_id",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 6,
       "storage": "x",
       "table": "quant_order_intent",
       "type": "text"
@@ -15697,22 +16503,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "intent_kind",
-      "nullable": false,
-      "ordinal": 8,
-      "storage": "p",
-      "table": "quant_order_intent",
-      "type": "qp_order_intent_kind"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
       "name": "status",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 7,
       "storage": "p",
       "table": "quant_order_intent",
       "type": "qp_order_intent_status"
@@ -15723,12 +16516,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "approval_status",
-      "nullable": false,
-      "ordinal": 10,
+      "name": "authorization_kind",
+      "nullable": true,
+      "ordinal": 8,
       "storage": "p",
       "table": "quant_order_intent",
-      "type": "qp_approval_status"
+      "type": "qp_authorization_kind"
     },
     {
       "collation": null,
@@ -15736,64 +16529,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "approved_by",
+      "name": "authorization_evidence",
       "nullable": true,
-      "ordinal": 11,
-      "storage": "p",
-      "table": "quant_order_intent",
-      "type": "uuid"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "approval_reason",
-      "nullable": true,
-      "ordinal": 12,
+      "ordinal": 9,
       "storage": "x",
       "table": "quant_order_intent",
-      "type": "text"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "approved_at",
-      "nullable": true,
-      "ordinal": 13,
-      "storage": "p",
-      "table": "quant_order_intent",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "policy_id",
-      "nullable": true,
-      "ordinal": 14,
-      "storage": "x",
-      "table": "quant_order_intent",
-      "type": "text"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "policy_hash",
-      "nullable": true,
-      "ordinal": 15,
-      "storage": "x",
-      "table": "quant_order_intent",
-      "type": "text"
+      "type": "jsonb"
     },
     {
       "collation": "default",
@@ -15803,7 +16544,7 @@
       "identity": "",
       "name": "status_reason",
       "nullable": true,
-      "ordinal": 16,
+      "ordinal": 10,
       "storage": "x",
       "table": "quant_order_intent",
       "type": "text"
@@ -15816,7 +16557,7 @@
       "identity": "",
       "name": "admission_trace_ref",
       "nullable": true,
-      "ordinal": 17,
+      "ordinal": 11,
       "storage": "x",
       "table": "quant_order_intent",
       "type": "text"
@@ -15829,7 +16570,7 @@
       "identity": "",
       "name": "condition_instance_id",
       "nullable": false,
-      "ordinal": 18,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_order_intent",
       "type": "uuid"
@@ -15842,7 +16583,7 @@
       "identity": "",
       "name": "entry_order_json",
       "nullable": false,
-      "ordinal": 19,
+      "ordinal": 13,
       "storage": "x",
       "table": "quant_order_intent",
       "type": "jsonb"
@@ -15855,7 +16596,7 @@
       "identity": "",
       "name": "exit_policy_json",
       "nullable": false,
-      "ordinal": 20,
+      "ordinal": 14,
       "storage": "x",
       "table": "quant_order_intent",
       "type": "jsonb"
@@ -15868,7 +16609,7 @@
       "identity": "",
       "name": "risk_envelope_hash",
       "nullable": false,
-      "ordinal": 21,
+      "ordinal": 15,
       "storage": "x",
       "table": "quant_order_intent",
       "type": "text"
@@ -15881,7 +16622,7 @@
       "identity": "",
       "name": "expires_at",
       "nullable": false,
-      "ordinal": 22,
+      "ordinal": 16,
       "storage": "p",
       "table": "quant_order_intent",
       "type": "timestamp with time zone"
@@ -15894,7 +16635,7 @@
       "identity": "",
       "name": "exit_state",
       "nullable": false,
-      "ordinal": 23,
+      "ordinal": 17,
       "storage": "p",
       "table": "quant_order_intent",
       "type": "qp_exit_state"
@@ -15907,7 +16648,7 @@
       "identity": "",
       "name": "exit_reason",
       "nullable": true,
-      "ordinal": 24,
+      "ordinal": 18,
       "storage": "p",
       "table": "quant_order_intent",
       "type": "qp_exit_reason"
@@ -15920,7 +16661,7 @@
       "identity": "",
       "name": "next_check_at",
       "nullable": true,
-      "ordinal": 25,
+      "ordinal": 19,
       "storage": "p",
       "table": "quant_order_intent",
       "type": "timestamp with time zone"
@@ -15933,7 +16674,7 @@
       "identity": "",
       "name": "peak_mark_price",
       "nullable": true,
-      "ordinal": 26,
+      "ordinal": 20,
       "storage": "m",
       "table": "quant_order_intent",
       "type": "numeric"
@@ -15946,7 +16687,7 @@
       "identity": "",
       "name": "last_signal_recheck_at",
       "nullable": true,
-      "ordinal": 27,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_order_intent",
       "type": "timestamp with time zone"
@@ -15959,7 +16700,7 @@
       "identity": "",
       "name": "latest_reinference_json",
       "nullable": true,
-      "ordinal": 28,
+      "ordinal": 22,
       "storage": "x",
       "table": "quant_order_intent",
       "type": "jsonb"
@@ -15972,7 +16713,7 @@
       "identity": "",
       "name": "scale_out_state",
       "nullable": false,
-      "ordinal": 29,
+      "ordinal": 23,
       "storage": "x",
       "table": "quant_order_intent",
       "type": "jsonb"
@@ -15985,7 +16726,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 30,
+      "ordinal": 24,
       "storage": "p",
       "table": "quant_order_intent",
       "type": "timestamp with time zone"
@@ -15998,7 +16739,7 @@
       "identity": "",
       "name": "updated_at",
       "nullable": false,
-      "ordinal": 31,
+      "ordinal": 25,
       "storage": "p",
       "table": "quant_order_intent",
       "type": "timestamp with time zone"
@@ -16170,227 +16911,6 @@
       "ordinal": 13,
       "storage": "p",
       "table": "quant_portfolio_plan",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "position_id",
-      "nullable": false,
-      "ordinal": 1,
-      "storage": "p",
-      "table": "quant_position",
-      "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "order_intent_id",
-      "nullable": false,
-      "ordinal": 2,
-      "storage": "p",
-      "table": "quant_position",
-      "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "execution_account_id",
-      "nullable": false,
-      "ordinal": 3,
-      "storage": "p",
-      "table": "quant_position",
-      "type": "uuid"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "token_id",
-      "nullable": false,
-      "ordinal": 4,
-      "storage": "x",
-      "table": "quant_position",
-      "type": "text"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "market_id",
-      "nullable": false,
-      "ordinal": 5,
-      "storage": "x",
-      "table": "quant_position",
-      "type": "text"
-    },
-    {
-      "collation": "default",
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "event_id",
-      "nullable": true,
-      "ordinal": 6,
-      "storage": "x",
-      "table": "quant_position",
-      "type": "text"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "category",
-      "nullable": false,
-      "ordinal": 7,
-      "storage": "p",
-      "table": "quant_position",
-      "type": "qp_market_category"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "side",
-      "nullable": false,
-      "ordinal": 8,
-      "storage": "p",
-      "table": "quant_position",
-      "type": "qp_outcome_side"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "state",
-      "nullable": false,
-      "ordinal": 9,
-      "storage": "p",
-      "table": "quant_position",
-      "type": "qp_position_ledger_state"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "shares",
-      "nullable": false,
-      "ordinal": 10,
-      "storage": "m",
-      "table": "quant_position",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "avg_price",
-      "nullable": false,
-      "ordinal": 11,
-      "storage": "m",
-      "table": "quant_position",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "cost_usd",
-      "nullable": false,
-      "ordinal": 12,
-      "storage": "m",
-      "table": "quant_position",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "realized_pnl_usd",
-      "nullable": false,
-      "ordinal": 13,
-      "storage": "m",
-      "table": "quant_position",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "source",
-      "nullable": false,
-      "ordinal": 14,
-      "storage": "p",
-      "table": "quant_position",
-      "type": "qp_account_source"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": "statement_timestamp()",
-      "generated": "",
-      "identity": "",
-      "name": "opened_at",
-      "nullable": false,
-      "ordinal": 15,
-      "storage": "p",
-      "table": "quant_position",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": "statement_timestamp()",
-      "generated": "",
-      "identity": "",
-      "name": "updated_at",
-      "nullable": false,
-      "ordinal": 16,
-      "storage": "p",
-      "table": "quant_position",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "closed_at",
-      "nullable": true,
-      "ordinal": 17,
-      "storage": "p",
-      "table": "quant_position",
       "type": "timestamp with time zone"
     },
     {
@@ -17101,22 +17621,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "runtime_mode",
-      "nullable": false,
-      "ordinal": 5,
-      "storage": "p",
-      "table": "quant_recommendation_report",
-      "type": "qp_quant_runtime_mode"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
       "name": "decision_policy_snapshot_id",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 5,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -17129,7 +17636,7 @@
       "identity": "",
       "name": "market_selection_id",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 6,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -17142,7 +17649,7 @@
       "identity": "",
       "name": "portfolio_plan_id",
       "nullable": false,
-      "ordinal": 8,
+      "ordinal": 7,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -17155,7 +17662,7 @@
       "identity": "",
       "name": "represented_routes_json",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 8,
       "storage": "x",
       "table": "quant_recommendation_report",
       "type": "jsonb"
@@ -17168,7 +17675,7 @@
       "identity": "",
       "name": "scenario_artifact_id",
       "nullable": true,
-      "ordinal": 10,
+      "ordinal": 9,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -17181,7 +17688,7 @@
       "identity": "",
       "name": "scenario_artifact_hash",
       "nullable": true,
-      "ordinal": 11,
+      "ordinal": 10,
       "storage": "x",
       "table": "quant_recommendation_report",
       "type": "character varying"
@@ -17194,7 +17701,7 @@
       "identity": "",
       "name": "top_n",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 11,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "integer"
@@ -17207,7 +17714,7 @@
       "identity": "",
       "name": "status",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "qp_recommendation_report_status"
@@ -17220,7 +17727,7 @@
       "identity": "",
       "name": "account_source",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 13,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "qp_account_source"
@@ -17233,7 +17740,7 @@
       "identity": "",
       "name": "capital_base_usd",
       "nullable": false,
-      "ordinal": 15,
+      "ordinal": 14,
       "storage": "m",
       "table": "quant_recommendation_report",
       "type": "numeric"
@@ -17246,7 +17753,7 @@
       "identity": "",
       "name": "account_snapshot_ref",
       "nullable": false,
-      "ordinal": 16,
+      "ordinal": 15,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -17259,7 +17766,7 @@
       "identity": "",
       "name": "equity_snapshot_ref",
       "nullable": false,
-      "ordinal": 17,
+      "ordinal": 16,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -17272,7 +17779,7 @@
       "identity": "",
       "name": "data_quality_snapshot_ref",
       "nullable": false,
-      "ordinal": 18,
+      "ordinal": 17,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -17285,7 +17792,7 @@
       "identity": "",
       "name": "summary_json",
       "nullable": false,
-      "ordinal": 19,
+      "ordinal": 18,
       "storage": "x",
       "table": "quant_recommendation_report",
       "type": "jsonb"
@@ -17298,7 +17805,7 @@
       "identity": "",
       "name": "published_at",
       "nullable": true,
-      "ordinal": 20,
+      "ordinal": 19,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -17311,7 +17818,7 @@
       "identity": "",
       "name": "successor_report_id",
       "nullable": true,
-      "ordinal": 21,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "uuid"
@@ -17324,7 +17831,7 @@
       "identity": "",
       "name": "superseded_at",
       "nullable": true,
-      "ordinal": 22,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -17337,7 +17844,7 @@
       "identity": "",
       "name": "obsoleted_at",
       "nullable": true,
-      "ordinal": 23,
+      "ordinal": 22,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -17350,7 +17857,7 @@
       "identity": "",
       "name": "valid_until",
       "nullable": true,
-      "ordinal": 24,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -17363,7 +17870,7 @@
       "identity": "",
       "name": "revoked_at",
       "nullable": true,
-      "ordinal": 25,
+      "ordinal": 24,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -17376,7 +17883,7 @@
       "identity": "",
       "name": "expired_at",
       "nullable": true,
-      "ordinal": 26,
+      "ordinal": 25,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -17389,7 +17896,7 @@
       "identity": "",
       "name": "status_reason",
       "nullable": true,
-      "ordinal": 27,
+      "ordinal": 26,
       "storage": "x",
       "table": "quant_recommendation_report",
       "type": "character varying"
@@ -17402,7 +17909,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 28,
+      "ordinal": 27,
       "storage": "p",
       "table": "quant_recommendation_report",
       "type": "timestamp with time zone"
@@ -17720,58 +18227,6 @@
       "type": "numeric"
     },
     {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "expected_fee_usd",
-      "nullable": true,
-      "ordinal": 11,
-      "storage": "m",
-      "table": "quant_reconciliation",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "derived_fee_usd",
-      "nullable": true,
-      "ordinal": 12,
-      "storage": "m",
-      "table": "quant_reconciliation",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "settled_fee_usd",
-      "nullable": true,
-      "ordinal": 13,
-      "storage": "m",
-      "table": "quant_reconciliation",
-      "type": "numeric"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "fee_delta_usd",
-      "nullable": true,
-      "ordinal": 14,
-      "storage": "m",
-      "table": "quant_reconciliation",
-      "type": "numeric"
-    },
-    {
       "collation": "default",
       "compression": "",
       "default": null,
@@ -17779,7 +18234,7 @@
       "identity": "",
       "name": "resolved_by",
       "nullable": true,
-      "ordinal": 15,
+      "ordinal": 11,
       "storage": "x",
       "table": "quant_reconciliation",
       "type": "text"
@@ -17792,7 +18247,7 @@
       "identity": "",
       "name": "resolved_at",
       "nullable": true,
-      "ordinal": 16,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_reconciliation",
       "type": "timestamp with time zone"
@@ -17805,7 +18260,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 17,
+      "ordinal": 13,
       "storage": "p",
       "table": "quant_reconciliation",
       "type": "timestamp with time zone"
@@ -17818,7 +18273,7 @@
       "identity": "",
       "name": "updated_at",
       "nullable": false,
-      "ordinal": 18,
+      "ordinal": 14,
       "storage": "p",
       "table": "quant_reconciliation",
       "type": "timestamp with time zone"
@@ -21508,7 +21963,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "position_id",
+      "name": "strategy_position_lot_id",
       "nullable": false,
       "ordinal": 6,
       "storage": "p",
@@ -22223,7 +22678,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "position_id",
+      "name": "strategy_position_lot_id",
       "nullable": false,
       "ordinal": 3,
       "storage": "p",
@@ -22852,6 +23307,253 @@
       "ordinal": 21,
       "storage": "p",
       "table": "quant_source_slice",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "strategy_position_lot_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "origin_kind",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
+      "type": "qp_strategy_position_origin_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "order_intent_id",
+      "nullable": true,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "recovery_incident_id",
+      "nullable": true,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_account_id",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "token_id",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_strategy_position_lot",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "market_id",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_strategy_position_lot",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "event_id",
+      "nullable": true,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_strategy_position_lot",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "category",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
+      "type": "qp_market_category"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "side",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
+      "type": "qp_outcome_side"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "state",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
+      "type": "qp_position_ledger_state"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "shares",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "m",
+      "table": "quant_strategy_position_lot",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "avg_price",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "m",
+      "table": "quant_strategy_position_lot",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "cost_usd",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "m",
+      "table": "quant_strategy_position_lot",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "realized_pnl_usd",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "m",
+      "table": "quant_strategy_position_lot",
+      "type": "numeric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
+      "type": "qp_account_source"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "opened_at",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 18,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "closed_at",
+      "nullable": true,
+      "ordinal": 19,
+      "storage": "p",
+      "table": "quant_strategy_position_lot",
       "type": "timestamp with time zone"
     },
     {
@@ -24199,7 +24901,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "execution_fill_id",
+      "name": "clob_trade_observation_id",
       "nullable": true,
       "ordinal": 3,
       "storage": "p",
@@ -25327,15 +26029,15 @@
     {
       "collation": null,
       "compression": "",
-      "default": "'report_only'::qp_quant_runtime_mode",
+      "default": "'operator_approval_required'::qp_entry_authorization_policy",
       "generated": "",
       "identity": "",
-      "name": "quant_runtime_mode",
+      "name": "entry_authorization_policy",
       "nullable": false,
       "ordinal": 2,
       "storage": "p",
       "table": "system_runtime_control",
-      "type": "qp_quant_runtime_mode"
+      "type": "qp_entry_authorization_policy"
     },
     {
       "collation": null,
@@ -25486,12 +26188,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "from_quant_runtime_mode",
+      "name": "from_entry_authorization_policy",
       "nullable": false,
       "ordinal": 4,
       "storage": "p",
       "table": "system_runtime_control_transition",
-      "type": "qp_quant_runtime_mode"
+      "type": "qp_entry_authorization_policy"
     },
     {
       "collation": null,
@@ -25499,12 +26201,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "to_quant_runtime_mode",
+      "name": "to_entry_authorization_policy",
       "nullable": false,
       "ordinal": 5,
       "storage": "p",
       "table": "system_runtime_control_transition",
-      "type": "qp_quant_runtime_mode"
+      "type": "qp_entry_authorization_policy"
     },
     {
       "collation": null,
@@ -26498,6 +27200,150 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((observed_at <= available_at) AND (account_side IS NOT NULL) AND (account_token_id IS NOT NULL) AND (shares > (0)::numeric) AND (principal_usd >= (0)::numeric) AND (exact_fee_usd >= (0)::numeric)))",
+      "initially_deferred": false,
+      "name": "ck_quant_account_chain_execution_economics",
+      "table": "quant_account_chain_execution",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((chain_id = 137) AND (protocol_version = 2) AND (block_number >= 0) AND (transaction_index >= 0) AND (log_index >= 0) AND (exchange_address ~ '^0x[0-9a-f]{40}$'::text) AND (block_hash ~ '^0x[0-9a-f]{64}$'::text) AND (transaction_hash ~ '^0x[0-9a-f]{64}$'::text) AND (maker_address ~ '^0x[0-9a-f]{40}$'::text) AND (taker_address ~ '^0x[0-9a-f]{40}$'::text) AND (char_length(order_id) >= 1) AND (char_length(order_id) <= 256) AND (char_length(order_token_id) >= 1) AND (maker_amount_raw ~ '^[0-9]+$'::text) AND (taker_amount_raw ~ '^[0-9]+$'::text) AND (source_event_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (availability_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_account_chain_execution_identity",
+      "table": "quant_account_chain_execution",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_account_chain_execution-execution_account_id",
+      "table": "quant_account_chain_execution",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (account_chain_execution_id)",
+      "initially_deferred": false,
+      "name": "quant_account_chain_execution_pkey",
+      "table": "quant_account_chain_execution",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((kind = 'system_order'::qp_account_execution_association_kind) AND (execution_order_id IS NOT NULL) AND (recovery_incident_id IS NULL)) OR ((kind = ANY (ARRAY['recovery_incident'::qp_account_execution_association_kind, 'opening_inventory'::qp_account_execution_association_kind])) AND (execution_order_id IS NULL) AND (recovery_incident_id IS NOT NULL)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_account_execution_association_owner",
+      "table": "quant_account_execution_association",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (account_chain_execution_id) REFERENCES quant_account_chain_execution(account_chain_execution_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_account_execution_association-account_chain_execution_",
+      "table": "quant_account_execution_association",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_order_id) REFERENCES quant_execution_order(execution_order_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_account_execution_association-execution_order_id",
+      "table": "quant_account_execution_association",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recovery_incident_id) REFERENCES quant_account_recovery_incident(account_recovery_incident_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_account_execution_association-recovery_incident_id",
+      "table": "quant_account_execution_association",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (account_chain_execution_id)",
+      "initially_deferred": false,
+      "name": "quant_account_execution_association_pkey",
+      "table": "quant_account_execution_association",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((exchange_address ~ '^0x[0-9a-f]{40}$'::text) AND (requested_block >= 0) AND (interval_blocks >= 0) AND (effective_block = (requested_block + interval_blocks)) AND (prepared_block_number >= 0) AND (prepared_block_hash ~ '^0x[0-9a-f]{64}$'::text) AND (calldata_hash ~ '^0x[0-9a-f]{64}$'::text) AND (deployment_digest ~ '^blake3:[0-9a-f]{64}$'::text) AND (octet_length(signed_envelope) > 0) AND (signed_envelope_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((kind = 'direct_eoa'::qp_settlement_submission_kind) AND (transaction_hash IS NOT NULL) AND (relayer_transaction_id IS NULL) AND (gas_limit IS NOT NULL)) OR ((kind = 'relayer'::qp_settlement_submission_kind) AND (transaction_hash IS NULL))) AND (((confirmation_block_number IS NULL) AND (confirmation_block_hash IS NULL) AND (confirmation_transaction_hash IS NULL) AND (confirmation_log_index IS NULL)) OR ((confirmation_block_number >= 0) AND (confirmation_block_hash ~ '^0x[0-9a-f]{64}$'::text) AND (confirmation_transaction_hash ~ '^0x[0-9a-f]{64}$'::text) AND (confirmation_log_index >= 0))) AND (((state = 'prepared'::qp_account_pause_submission_state) AND (dispatched_at IS NULL) AND (confirmed_at IS NULL) AND (confirmation_block_number IS NULL)) OR ((state = ANY (ARRAY['dispatched'::qp_account_pause_submission_state, 'ambiguous'::qp_account_pause_submission_state])) AND (dispatched_at IS NOT NULL) AND (confirmed_at IS NULL) AND (confirmation_block_number IS NULL)) OR ((state = 'confirmed'::qp_account_pause_submission_state) AND (dispatched_at IS NOT NULL) AND (confirmed_at IS NOT NULL) AND (confirmation_block_number IS NOT NULL)) OR ((state = 'failed'::qp_account_pause_submission_state) AND (failure_detail IS NOT NULL)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_account_pause_submission_contract",
+      "table": "quant_account_pause_submission",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recovery_incident_id) REFERENCES quant_account_recovery_incident(account_recovery_incident_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_account_pause_submission-recovery_incident_id",
+      "table": "quant_account_pause_submission",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (account_pause_submission_id)",
+      "initially_deferred": false,
+      "name": "quant_account_pause_submission_pkey",
+      "table": "quant_account_pause_submission",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((octet_length(reason) >= 1) AND (octet_length(reason) <= 2048) AND (reason = btrim(reason)) AND (reason !~ '[[:cntrl:]]'::text) AND (revision >= 0) AND (opened_at <= created_at) AND (created_at <= updated_at) AND (((status = ANY (ARRAY['open'::qp_account_recovery_incident_status, 'reconciling'::qp_account_recovery_incident_status])) AND (seal_hash IS NULL) AND (sealed_by IS NULL) AND (sealed_at IS NULL)) OR ((status = 'sealed'::qp_account_recovery_incident_status) AND (seal_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (sealed_by IS NOT NULL) AND (sealed_at IS NOT NULL) AND (opened_at <= sealed_at)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_account_recovery_incident_lifecycle",
+      "table": "quant_account_recovery_incident",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_account_recovery_incident-execution_account_id",
+      "table": "quant_account_recovery_incident",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (trigger_chain_execution_id) REFERENCES quant_account_chain_execution(account_chain_execution_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_account_recovery_incident-trigger_chain_execution_id",
+      "table": "quant_account_recovery_incident",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (account_recovery_incident_id)",
+      "initially_deferred": false,
+      "name": "quant_account_recovery_incident_pkey",
+      "table": "quant_account_recovery_incident",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
       "initially_deferred": false,
       "name": "fk-quant_account_snapshot-execution_account_id",
@@ -26782,6 +27628,60 @@
       "name": "quant_capital_allocation_pkey",
       "table": "quant_capital_allocation",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((char_length(venue_trade_id) >= 1) AND (char_length(venue_trade_id) <= 256) AND (venue_bucket_index >= 0) AND (char_length(venue_order_id) >= 1) AND (char_length(venue_order_id) <= 256) AND (shares > (0)::numeric) AND (price > (0)::numeric) AND (price <= (1)::numeric) AND (principal_usd = round((shares * price), 28)) AND (provisional_fee_usd >= (0)::numeric) AND (provisional_fee_rate_bps >= (0)::numeric) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= matched_at)))",
+      "initially_deferred": false,
+      "name": "ck_quant_clob_trade_observation_economics",
+      "table": "quant_clob_trade_observation",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_clob_trade_observation-execution_account_id",
+      "table": "quant_clob_trade_observation",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_order_id) REFERENCES quant_execution_order(execution_order_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_clob_trade_observation-execution_order_id",
+      "table": "quant_clob_trade_observation",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (order_intent_id) REFERENCES quant_order_intent(order_intent_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_clob_trade_observation-order_intent_id",
+      "table": "quant_clob_trade_observation",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (clob_trade_observation_id)",
+      "initially_deferred": false,
+      "name": "quant_clob_trade_observation_pkey",
+      "table": "quant_clob_trade_observation",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (venue_trade_id)",
+      "initially_deferred": false,
+      "name": "quant_clob_trade_observation_venue_trade_id_key",
+      "table": "quant_clob_trade_observation",
+      "type": "u",
       "validated": true
     },
     {
@@ -27092,7 +27992,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((char_length(market_id) > 0) AND (char_length(token_id) > 0) AND (runtime_mode = ANY (ARRAY['semi_auto'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode])) AND (requested_shares > (0)::numeric) AND (filled_shares >= (0)::numeric) AND (filled_shares <= requested_shares) AND ((entry_avg_price IS NULL) OR ((entry_avg_price >= (0)::numeric) AND (entry_avg_price <= (1)::numeric))) AND ((exit_avg_price IS NULL) OR ((exit_avg_price >= (0)::numeric) AND (exit_avg_price <= (1)::numeric))) AND ((entry_fee_usd IS NULL) OR (entry_fee_usd >= (0)::numeric)) AND ((exit_fee_usd IS NULL) OR (exit_fee_usd >= (0)::numeric)) AND ((settlement_payout_usd IS NULL) OR (settlement_payout_usd >= (0)::numeric)) AND (terminal_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (execution_fact_schema_version > 0) AND ((source_checkpoint_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((execution_fact_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((outcome_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND (((terminal_state = 'unfilled'::qp_execution_attempt_terminal_state) AND (filled_shares = (0)::numeric) AND (no_fill_reason IS NOT NULL) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state])) AND (position_id IS NULL) AND (entry_avg_price IS NULL) AND (entry_filled_at IS NULL) AND (position_terminal_state IS NULL) AND (exit_reason IS NULL) AND (exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL) AND (settlement_payout_usd IS NULL) AND (realized_pnl_usd IS NULL)) OR ((terminal_state = ANY (ARRAY['partially_filled'::qp_execution_attempt_terminal_state, 'fully_filled'::qp_execution_attempt_terminal_state])) AND (no_fill_reason IS NULL) AND (position_id IS NOT NULL) AND (entry_avg_price IS NOT NULL) AND (entry_filled_at IS NOT NULL) AND (entry_filled_at <= terminal_at) AND (position_terminal_state = ANY (ARRAY['closed'::qp_position_ledger_state, 'settled'::qp_position_ledger_state])) AND (realized_pnl_usd IS NOT NULL) AND (((terminal_state = 'partially_filled'::qp_execution_attempt_terminal_state) AND (filled_shares > (0)::numeric) AND (filled_shares < requested_shares) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state]))) OR ((terminal_state = 'fully_filled'::qp_execution_attempt_terminal_state) AND (filled_shares = requested_shares) AND (entry_order_state = 'filled'::qp_execution_order_state))) AND (((position_terminal_state = 'closed'::qp_position_ledger_state) AND (exit_reason IS NOT NULL) AND (exit_reason <> 'resolution_redeem'::qp_exit_reason) AND (exit_filled_shares = filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at = terminal_at) AND (settlement_payout_usd IS NULL)) OR ((position_terminal_state = 'settled'::qp_position_ledger_state) AND (exit_reason = 'resolution_redeem'::qp_exit_reason) AND (settlement_payout_usd IS NOT NULL) AND (((exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL)) OR ((exit_filled_shares > (0)::numeric) AND (exit_filled_shares < filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at IS NOT NULL) AND (exit_at <= terminal_at)))))))))",
+      "definition": "CHECK (((char_length(market_id) > 0) AND (char_length(token_id) > 0) AND (requested_shares > (0)::numeric) AND (filled_shares >= (0)::numeric) AND (filled_shares <= requested_shares) AND ((entry_avg_price IS NULL) OR ((entry_avg_price >= (0)::numeric) AND (entry_avg_price <= (1)::numeric))) AND ((exit_avg_price IS NULL) OR ((exit_avg_price >= (0)::numeric) AND (exit_avg_price <= (1)::numeric))) AND ((entry_fee_usd IS NULL) OR (entry_fee_usd >= (0)::numeric)) AND ((exit_fee_usd IS NULL) OR (exit_fee_usd >= (0)::numeric)) AND ((settlement_payout_usd IS NULL) OR (settlement_payout_usd >= (0)::numeric)) AND (terminal_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (execution_fact_schema_version > 0) AND ((source_checkpoint_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((execution_fact_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((outcome_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND (((terminal_state = 'unfilled'::qp_execution_attempt_terminal_state) AND (filled_shares = (0)::numeric) AND (no_fill_reason IS NOT NULL) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state])) AND (strategy_position_lot_id IS NULL) AND (entry_avg_price IS NULL) AND (entry_filled_at IS NULL) AND (position_terminal_state IS NULL) AND (exit_reason IS NULL) AND (exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL) AND (settlement_payout_usd IS NULL) AND (realized_pnl_usd IS NULL)) OR ((terminal_state = ANY (ARRAY['partially_filled'::qp_execution_attempt_terminal_state, 'fully_filled'::qp_execution_attempt_terminal_state])) AND (no_fill_reason IS NULL) AND (strategy_position_lot_id IS NOT NULL) AND (entry_avg_price IS NOT NULL) AND (entry_filled_at IS NOT NULL) AND (entry_filled_at <= terminal_at) AND (position_terminal_state = ANY (ARRAY['closed'::qp_position_ledger_state, 'settled'::qp_position_ledger_state])) AND (realized_pnl_usd IS NOT NULL) AND (((terminal_state = 'partially_filled'::qp_execution_attempt_terminal_state) AND (filled_shares > (0)::numeric) AND (filled_shares < requested_shares) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state]))) OR ((terminal_state = 'fully_filled'::qp_execution_attempt_terminal_state) AND (filled_shares = requested_shares) AND (entry_order_state = 'filled'::qp_execution_order_state))) AND (((position_terminal_state = 'closed'::qp_position_ledger_state) AND (exit_reason IS NOT NULL) AND (exit_reason <> 'resolution_redeem'::qp_exit_reason) AND (exit_filled_shares = filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at = terminal_at) AND (settlement_payout_usd IS NULL)) OR ((position_terminal_state = 'settled'::qp_position_ledger_state) AND (exit_reason = 'resolution_redeem'::qp_exit_reason) AND (settlement_payout_usd IS NOT NULL) AND (((exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL)) OR ((exit_filled_shares > (0)::numeric) AND (exit_filled_shares < filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at IS NOT NULL) AND (exit_at <= terminal_at)))))))))",
       "initially_deferred": false,
       "name": "ck_quant_execution_attempt_outcome_contract",
       "table": "quant_execution_attempt_outcome",
@@ -27128,18 +28028,18 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (position_id) REFERENCES quant_position(position_id)",
+      "definition": "FOREIGN KEY (recommendation_id) REFERENCES quant_recommendation(recommendation_id)",
       "initially_deferred": false,
-      "name": "fk-quant_execution_attempt_outcome-position_id",
+      "name": "fk-quant_execution_attempt_outcome-recommendation_id",
       "table": "quant_execution_attempt_outcome",
       "type": "f",
       "validated": true
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (recommendation_id) REFERENCES quant_recommendation(recommendation_id)",
+      "definition": "FOREIGN KEY (strategy_position_lot_id) REFERENCES quant_strategy_position_lot(strategy_position_lot_id)",
       "initially_deferred": false,
-      "name": "fk-quant_execution_attempt_outcome-recommendation_id",
+      "name": "fk-quant_execution_attempt_outcome-strategy_position_lot_id",
       "table": "quant_execution_attempt_outcome",
       "type": "f",
       "validated": true
@@ -27164,7 +28064,7 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (order_intent_id, recommendation_id, execution_account_id, runtime_mode) REFERENCES quant_order_intent(order_intent_id, recommendation_id, execution_account_id, runtime_mode)",
+      "definition": "FOREIGN KEY (order_intent_id, recommendation_id, execution_account_id) REFERENCES quant_order_intent(order_intent_id, recommendation_id, execution_account_id)",
       "initially_deferred": false,
       "name": "fk_quant_execution_attempt_outcome_intent_lineage",
       "table": "quant_execution_attempt_outcome",
@@ -27173,7 +28073,7 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (position_id, order_intent_id, execution_account_id, market_id, token_id) REFERENCES quant_position(position_id, order_intent_id, execution_account_id, market_id, token_id)",
+      "definition": "FOREIGN KEY (strategy_position_lot_id, order_intent_id, execution_account_id, market_id, token_id) REFERENCES quant_strategy_position_lot(strategy_position_lot_id, order_intent_id, execution_account_id, market_id, token_id)",
       "initially_deferred": false,
       "name": "fk_quant_execution_attempt_outcome_position_lineage",
       "table": "quant_execution_attempt_outcome",
@@ -27227,7 +28127,7 @@
     },
     {
       "deferrable": false,
-      "definition": "UNIQUE (position_id)",
+      "definition": "UNIQUE (strategy_position_lot_id)",
       "initially_deferred": false,
       "name": "uq_quant_execution_attempt_outcome_position",
       "table": "quant_execution_attempt_outcome",
@@ -27259,87 +28159,6 @@
       "name": "quant_execution_attempt_reconciliation_task_pkey",
       "table": "quant_execution_attempt_reconciliation_task",
       "type": "p",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "CHECK (((fee_usd >= (0)::numeric) AND ((char_length(source_identity) >= 1) AND (char_length(source_identity) <= 512)) AND ((fee_rate_bps IS NULL) OR (fee_rate_bps >= (0)::numeric)) AND ((exchange_address IS NULL) OR (exchange_address ~ '^0x[0-9a-f]{40}$'::text)) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= observed_at) AND (((stage = 'on_chain_settled'::qp_fee_measurement_stage) AND (chain_id > 0) AND (protocol_version = 2) AND (exchange_address IS NOT NULL) AND (transaction_hash IS NOT NULL) AND (log_index >= 0)) OR ((stage <> 'on_chain_settled'::qp_fee_measurement_stage) AND (chain_id IS NULL) AND (protocol_version IS NULL) AND (exchange_address IS NULL) AND (log_index IS NULL)))))",
-      "initially_deferred": false,
-      "name": "ck_quant_execution_fee_measurement_evidence",
-      "table": "quant_execution_fee_measurement",
-      "type": "c",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "FOREIGN KEY (execution_fill_id) REFERENCES quant_execution_fill(execution_fill_id)",
-      "initially_deferred": false,
-      "name": "fk-quant_execution_fee_measurement-execution_fill_id",
-      "table": "quant_execution_fee_measurement",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "PRIMARY KEY (execution_fee_measurement_id)",
-      "initially_deferred": false,
-      "name": "quant_execution_fee_measurement_pkey",
-      "table": "quant_execution_fee_measurement",
-      "type": "p",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "CHECK (((char_length(venue_trade_id) >= 1) AND (char_length(venue_trade_id) <= 256) AND (venue_bucket_index >= 0) AND (char_length(venue_order_id) >= 1) AND (char_length(venue_order_id) <= 256) AND (shares > (0)::numeric) AND (price > (0)::numeric) AND (price <= (1)::numeric) AND (principal_usd = round((shares * price), 28)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= matched_at)))",
-      "initially_deferred": false,
-      "name": "ck_quant_execution_fill_economics",
-      "table": "quant_execution_fill",
-      "type": "c",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
-      "initially_deferred": false,
-      "name": "fk-quant_execution_fill-execution_account_id",
-      "table": "quant_execution_fill",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "FOREIGN KEY (execution_order_id) REFERENCES quant_execution_order(execution_order_id)",
-      "initially_deferred": false,
-      "name": "fk-quant_execution_fill-execution_order_id",
-      "table": "quant_execution_fill",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "FOREIGN KEY (order_intent_id) REFERENCES quant_order_intent(order_intent_id)",
-      "initially_deferred": false,
-      "name": "fk-quant_execution_fill-order_intent_id",
-      "table": "quant_execution_fill",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "PRIMARY KEY (execution_fill_id)",
-      "initially_deferred": false,
-      "name": "quant_execution_fill_pkey",
-      "table": "quant_execution_fill",
-      "type": "p",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "UNIQUE (venue_trade_id)",
-      "initially_deferred": false,
-      "name": "quant_execution_fill_venue_trade_id_key",
-      "table": "quant_execution_fill",
-      "type": "u",
       "validated": true
     },
     {
@@ -28082,7 +28901,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((octet_length(idempotency_key) >= 8) AND (octet_length(idempotency_key) <= 128) AND (idempotency_key ~ '^[!-~]+$'::text) AND (scope_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (issuance_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(profile_ref) = 'object'::text) AND (profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text]) AND ((profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb) AND ((profile_ref ->> 'id'::text) ~ '^[a-z0-9_]+$'::text) AND (((profile_ref ->> 'version'::text))::bigint > 0) AND ((profile_ref ->> 'content_hash'::text) = profile_hash) AND (research_profile_artifact_id = ((((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || profile_hash)) AND (((category = 'crypto'::qp_market_category) AND ((profile_ref ->> 'id'::text) = 'crypto_price_15m'::text)) OR ((category = 'weather'::qp_market_category) AND ((profile_ref ->> 'id'::text) = 'weather_forecast_24h'::text))) AND (expected_policy_generation > 0) AND (expected_runtime_control_revision >= 0) AND (profile_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (expected_snapshot_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (candidate_model_version_id <> champion_model_version_id) AND (candidate_manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (promotion_gate_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (non_route_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (serving_constraints_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (preflight_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((allowed_runtime_modes = ARRAY['report_only'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['semi_auto'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['auto_execution'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['report_only'::qp_quant_runtime_mode, 'semi_auto'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['report_only'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['semi_auto'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['report_only'::qp_quant_runtime_mode, 'semi_auto'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode])) AND (octet_length(issued_by_username) >= 1) AND (octet_length(issued_by_username) <= 256) AND (issued_by_username = btrim(issued_by_username)) AND (issued_by_username !~ '[[:cntrl:]]'::text) AND (issued_by_role ~ '^[a-z0-9_]{1,64}$'::text) AND (octet_length(issuance_reason) >= 1) AND (octet_length(issuance_reason) <= 2048) AND (issuance_reason = btrim(issuance_reason)) AND (issuance_reason !~ '[[:cntrl:]]'::text) AND (expires_at > issued_at) AND (((revoked_by_user_id IS NULL) AND (revoked_by_username IS NULL) AND (revoked_by_role IS NULL) AND (revocation_reason IS NULL) AND (revoked_at IS NULL) AND (revision = 0) AND (updated_at = issued_at)) OR ((revoked_by_user_id IS NOT NULL) AND (revoked_by_username IS NOT NULL) AND (octet_length(revoked_by_username) >= 1) AND (octet_length(revoked_by_username) <= 256) AND (revoked_by_username = btrim(revoked_by_username)) AND (revoked_by_username !~ '[[:cntrl:]]'::text) AND (revoked_by_role ~ '^[a-z0-9_]{1,64}$'::text) AND (revocation_reason IS NOT NULL) AND (octet_length(revocation_reason) >= 1) AND (octet_length(revocation_reason) <= 2048) AND (revocation_reason = btrim(revocation_reason)) AND (revocation_reason !~ '[[:cntrl:]]'::text) AND (revoked_at >= issued_at) AND (revision = 1) AND (updated_at = revoked_at)))))",
+      "definition": "CHECK (((octet_length(idempotency_key) >= 8) AND (octet_length(idempotency_key) <= 128) AND (idempotency_key ~ '^[!-~]+$'::text) AND (scope_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (issuance_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(profile_ref) = 'object'::text) AND (profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text]) AND ((profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb) AND ((profile_ref ->> 'id'::text) ~ '^[a-z0-9_]+$'::text) AND (((profile_ref ->> 'version'::text))::bigint > 0) AND ((profile_ref ->> 'content_hash'::text) = profile_hash) AND (research_profile_artifact_id = ((((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || profile_hash)) AND (((category = 'crypto'::qp_market_category) AND ((profile_ref ->> 'id'::text) = 'crypto_price_15m'::text)) OR ((category = 'weather'::qp_market_category) AND ((profile_ref ->> 'id'::text) = 'weather_forecast_24h'::text))) AND (expected_policy_generation > 0) AND (expected_runtime_control_revision >= 0) AND (profile_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (expected_snapshot_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (candidate_model_version_id <> champion_model_version_id) AND (candidate_manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (promotion_gate_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (non_route_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (serving_constraints_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (preflight_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (octet_length(issued_by_username) >= 1) AND (octet_length(issued_by_username) <= 256) AND (issued_by_username = btrim(issued_by_username)) AND (issued_by_username !~ '[[:cntrl:]]'::text) AND (issued_by_role ~ '^[a-z0-9_]{1,64}$'::text) AND (octet_length(issuance_reason) >= 1) AND (octet_length(issuance_reason) <= 2048) AND (issuance_reason = btrim(issuance_reason)) AND (issuance_reason !~ '[[:cntrl:]]'::text) AND (expires_at > issued_at) AND (((revoked_by_user_id IS NULL) AND (revoked_by_username IS NULL) AND (revoked_by_role IS NULL) AND (revocation_reason IS NULL) AND (revoked_at IS NULL) AND (revision = 0) AND (updated_at = issued_at)) OR ((revoked_by_user_id IS NOT NULL) AND (revoked_by_username IS NOT NULL) AND (octet_length(revoked_by_username) >= 1) AND (octet_length(revoked_by_username) <= 256) AND (revoked_by_username = btrim(revoked_by_username)) AND (revoked_by_username !~ '[[:cntrl:]]'::text) AND (revoked_by_role ~ '^[a-z0-9_]{1,64}$'::text) AND (revocation_reason IS NOT NULL) AND (octet_length(revocation_reason) >= 1) AND (octet_length(revocation_reason) <= 2048) AND (revocation_reason = btrim(revocation_reason)) AND (revocation_reason !~ '[[:cntrl:]]'::text) AND (revoked_at >= issued_at) AND (revision = 1) AND (updated_at = revoked_at)))))",
       "initially_deferred": false,
       "name": "ck_quant_feedback_promotion_permit",
       "table": "quant_feedback_promotion_permit",
@@ -29522,6 +30341,33 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK ((((authorization_kind IS NULL) = (authorization_evidence IS NULL)) AND ((status <> ALL (ARRAY['pending_authorization'::qp_order_intent_status, 'authorization_rejected'::qp_order_intent_status])) OR (authorization_evidence IS NULL)) AND ((status <> ALL (ARRAY['authorized'::qp_order_intent_status, 'admission_pending'::qp_order_intent_status, 'admission_rejected'::qp_order_intent_status, 'submitted'::qp_order_intent_status, 'partially_filled'::qp_order_intent_status, 'filled'::qp_order_intent_status, 'failed'::qp_order_intent_status])) OR (authorization_evidence IS NOT NULL))))",
+      "initially_deferred": false,
+      "name": "ck_quant_order_intent_authorization_lifecycle",
+      "table": "quant_order_intent",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((authorization_kind IS DISTINCT FROM 'operator_approval'::qp_authorization_kind) OR ((jsonb_typeof(authorization_evidence) = 'object'::text) AND ((authorization_evidence ->> 'kind'::text) = 'operator_approval'::text) AND (((authorization_evidence ->> 'authorized_at'::text))::timestamp with time zone < expires_at) AND (authorization_evidence ?& ARRAY['kind'::text, 'operator_id'::text, 'reason'::text, 'authorized_at'::text]) AND ((authorization_evidence - ARRAY['kind'::text, 'operator_id'::text, 'reason'::text, 'authorized_at'::text]) = '{}'::jsonb) AND (((authorization_evidence ->> 'operator_id'::text))::uuid IS NOT NULL) AND (octet_length((authorization_evidence ->> 'reason'::text)) >= 1) AND (octet_length((authorization_evidence ->> 'reason'::text)) <= 2048) AND ((authorization_evidence ->> 'reason'::text) = btrim((authorization_evidence ->> 'reason'::text))) AND ((authorization_evidence ->> 'reason'::text) !~ '[[:cntrl:]]'::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_order_intent_operator_evidence",
+      "table": "quant_order_intent",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((authorization_kind IS DISTINCT FROM 'active_policy'::qp_authorization_kind) OR ((jsonb_typeof(authorization_evidence) = 'object'::text) AND ((authorization_evidence ->> 'kind'::text) = 'active_policy'::text) AND (((authorization_evidence ->> 'authorized_at'::text))::timestamp with time zone < expires_at) AND (authorization_evidence ?& ARRAY['kind'::text, 'decision_policy_snapshot_id'::text, 'policy_hash'::text, 'authorized_at'::text]) AND ((authorization_evidence - ARRAY['kind'::text, 'decision_policy_snapshot_id'::text, 'policy_hash'::text, 'authorized_at'::text]) = '{}'::jsonb) AND (((authorization_evidence ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((authorization_evidence ->> 'policy_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_order_intent_policy_evidence",
+      "table": "quant_order_intent",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (condition_instance_id) REFERENCES quant_entry_condition_instance(condition_instance_id)",
       "initially_deferred": false,
       "name": "fk-quant_order_intent-condition_instance_id",
@@ -29594,7 +30440,7 @@
     },
     {
       "deferrable": false,
-      "definition": "UNIQUE (order_intent_id, recommendation_id, execution_account_id, runtime_mode)",
+      "definition": "UNIQUE (order_intent_id, recommendation_id, execution_account_id)",
       "initially_deferred": false,
       "name": "uq_quant_order_intent_execution_outcome_lineage",
       "table": "quant_order_intent",
@@ -29653,78 +30499,6 @@
       "name": "quant_portfolio_plan_pkey",
       "table": "quant_portfolio_plan",
       "type": "p",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "FOREIGN KEY (event_id) REFERENCES event(event_id)",
-      "initially_deferred": false,
-      "name": "fk-quant_position-event_id",
-      "table": "quant_position",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
-      "initially_deferred": false,
-      "name": "fk-quant_position-execution_account_id",
-      "table": "quant_position",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "FOREIGN KEY (market_id) REFERENCES market(market_id)",
-      "initially_deferred": false,
-      "name": "fk-quant_position-market_id",
-      "table": "quant_position",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "FOREIGN KEY (order_intent_id) REFERENCES quant_order_intent(order_intent_id)",
-      "initially_deferred": false,
-      "name": "fk-quant_position-order_intent_id",
-      "table": "quant_position",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "FOREIGN KEY (order_intent_id, execution_account_id) REFERENCES quant_order_intent(order_intent_id, execution_account_id)",
-      "initially_deferred": false,
-      "name": "fk_quant_position_intent_account",
-      "table": "quant_position",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "PRIMARY KEY (position_id)",
-      "initially_deferred": false,
-      "name": "quant_position_pkey",
-      "table": "quant_position",
-      "type": "p",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "UNIQUE (position_id, order_intent_id, execution_account_id, market_id, token_id)",
-      "initially_deferred": false,
-      "name": "uq_quant_position_execution_outcome_lineage",
-      "table": "quant_position",
-      "type": "u",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "UNIQUE (position_id, order_intent_id, execution_account_id)",
-      "initially_deferred": false,
-      "name": "uq_quant_position_inventory_lineage",
-      "table": "quant_position",
-      "type": "u",
       "validated": true
     },
     {
@@ -31304,18 +32078,18 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (position_id) REFERENCES quant_position(position_id)",
+      "definition": "FOREIGN KEY (settlement_redeem_id) REFERENCES quant_settlement_redeem(settlement_redeem_id)",
       "initially_deferred": false,
-      "name": "fk-quant_settlement_inventory_lot-position_id",
+      "name": "fk-quant_settlement_inventory_lot-settlement_redeem_id",
       "table": "quant_settlement_inventory_lot",
       "type": "f",
       "validated": true
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (settlement_redeem_id) REFERENCES quant_settlement_redeem(settlement_redeem_id)",
+      "definition": "FOREIGN KEY (strategy_position_lot_id) REFERENCES quant_strategy_position_lot(strategy_position_lot_id)",
       "initially_deferred": false,
-      "name": "fk-quant_settlement_inventory_lot-settlement_redeem_id",
+      "name": "fk-quant_settlement_inventory_lot-strategy_position_lot_id",
       "table": "quant_settlement_inventory_lot",
       "type": "f",
       "validated": true
@@ -31340,7 +32114,7 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (position_id, order_intent_id, execution_account_id) REFERENCES quant_position(position_id, order_intent_id, execution_account_id)",
+      "definition": "FOREIGN KEY (strategy_position_lot_id, order_intent_id, execution_account_id) REFERENCES quant_strategy_position_lot(strategy_position_lot_id, order_intent_id, execution_account_id)",
       "initially_deferred": false,
       "name": "fk_quant_settlement_inventory_position_lineage",
       "table": "quant_settlement_inventory_lot",
@@ -31448,18 +32222,18 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (position_id) REFERENCES quant_position(position_id)",
+      "definition": "FOREIGN KEY (settlement_redeem_id) REFERENCES quant_settlement_redeem(settlement_redeem_id)",
       "initially_deferred": false,
-      "name": "fk-quant_settlement_redeem_lot-position_id",
+      "name": "fk-quant_settlement_redeem_lot-settlement_redeem_id",
       "table": "quant_settlement_redeem_lot",
       "type": "f",
       "validated": true
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (settlement_redeem_id) REFERENCES quant_settlement_redeem(settlement_redeem_id)",
+      "definition": "FOREIGN KEY (strategy_position_lot_id) REFERENCES quant_strategy_position_lot(strategy_position_lot_id)",
       "initially_deferred": false,
-      "name": "fk-quant_settlement_redeem_lot-settlement_redeem_id",
+      "name": "fk-quant_settlement_redeem_lot-strategy_position_lot_id",
       "table": "quant_settlement_redeem_lot",
       "type": "f",
       "validated": true
@@ -31561,6 +32335,96 @@
       "name": "quant_source_slice_pkey",
       "table": "quant_source_slice",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((origin_kind = 'system_intent'::qp_strategy_position_origin_kind) AND (order_intent_id IS NOT NULL) AND (recovery_incident_id IS NULL)) OR ((origin_kind = ANY (ARRAY['account_recovery_incident'::qp_strategy_position_origin_kind, 'opening_inventory'::qp_strategy_position_origin_kind])) AND (order_intent_id IS NULL) AND (recovery_incident_id IS NOT NULL))))",
+      "initially_deferred": false,
+      "name": "ck_quant_strategy_position_lot_origin",
+      "table": "quant_strategy_position_lot",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (event_id) REFERENCES event(event_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_strategy_position_lot-event_id",
+      "table": "quant_strategy_position_lot",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_strategy_position_lot-execution_account_id",
+      "table": "quant_strategy_position_lot",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (market_id) REFERENCES market(market_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_strategy_position_lot-market_id",
+      "table": "quant_strategy_position_lot",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (order_intent_id) REFERENCES quant_order_intent(order_intent_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_strategy_position_lot-order_intent_id",
+      "table": "quant_strategy_position_lot",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recovery_incident_id) REFERENCES quant_account_recovery_incident(account_recovery_incident_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_strategy_position_lot-recovery_incident_id",
+      "table": "quant_strategy_position_lot",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (order_intent_id, execution_account_id) REFERENCES quant_order_intent(order_intent_id, execution_account_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_strategy_position_lot_intent_account",
+      "table": "quant_strategy_position_lot",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (strategy_position_lot_id)",
+      "initially_deferred": false,
+      "name": "quant_strategy_position_lot_pkey",
+      "table": "quant_strategy_position_lot",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (strategy_position_lot_id, order_intent_id, execution_account_id, market_id, token_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_strategy_position_lot_execution_outcome_lineage",
+      "table": "quant_strategy_position_lot",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (strategy_position_lot_id, order_intent_id, execution_account_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_strategy_position_lot_inventory_lineage",
+      "table": "quant_strategy_position_lot",
+      "type": "u",
       "validated": true
     },
     {
@@ -31817,7 +32681,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((amount_usd >= (0)::numeric) AND ((char_length(source_partition) >= 1) AND (char_length(source_partition) <= 512)) AND ((char_length(source_identity) >= 1) AND (char_length(source_identity) <= 600)) AND ((source_terms_hash IS NULL) OR (source_terms_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= observed_at) AND (((stage = 'estimated_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NOT NULL) AND (market_id IS NOT NULL) AND (source_terms_hash IS NOT NULL)) OR ((stage = 'venue_reported_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NULL) AND (market_id IS NOT NULL) AND (source_terms_hash IS NULL)) OR ((stage = 'wallet_credited'::qp_venue_incentive_stage) AND (execution_fill_id IS NULL) AND (source_terms_hash IS NULL)))))",
+      "definition": "CHECK (((amount_usd >= (0)::numeric) AND ((char_length(source_partition) >= 1) AND (char_length(source_partition) <= 512)) AND ((char_length(source_identity) >= 1) AND (char_length(source_identity) <= 600)) AND ((source_terms_hash IS NULL) OR (source_terms_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= observed_at) AND (((stage = 'estimated_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (clob_trade_observation_id IS NOT NULL) AND (market_id IS NOT NULL) AND (source_terms_hash IS NOT NULL)) OR ((stage = 'venue_reported_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (clob_trade_observation_id IS NULL) AND (market_id IS NOT NULL) AND (source_terms_hash IS NULL)) OR ((stage = 'wallet_credited'::qp_venue_incentive_stage) AND (clob_trade_observation_id IS NULL) AND (source_terms_hash IS NULL)))))",
       "initially_deferred": false,
       "name": "ck_quant_venue_incentive_event_evidence",
       "table": "quant_venue_incentive_event",
@@ -31826,18 +32690,18 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
+      "definition": "FOREIGN KEY (clob_trade_observation_id) REFERENCES quant_clob_trade_observation(clob_trade_observation_id)",
       "initially_deferred": false,
-      "name": "fk-quant_venue_incentive_event-execution_account_id",
+      "name": "fk-quant_venue_incentive_event-clob_trade_observation_id",
       "table": "quant_venue_incentive_event",
       "type": "f",
       "validated": true
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (execution_fill_id) REFERENCES quant_execution_fill(execution_fill_id)",
+      "definition": "FOREIGN KEY (execution_account_id) REFERENCES quant_execution_account(execution_account_id)",
       "initially_deferred": false,
-      "name": "fk-quant_venue_incentive_event-execution_fill_id",
+      "name": "fk-quant_venue_incentive_event-execution_account_id",
       "table": "quant_venue_incentive_event",
       "type": "f",
       "validated": true
@@ -32107,19 +32971,52 @@
   "enums": [
     {
       "labels": [
-        "polymarket"
+        "maker",
+        "taker",
+        "self_match"
       ],
-      "name": "qp_account_source"
+      "name": "qp_account_chain_execution_role"
     },
     {
       "labels": [
-        "not_required",
-        "pending",
-        "approved",
-        "rejected",
-        "expired"
+        "system_order",
+        "recovery_incident",
+        "opening_inventory"
       ],
-      "name": "qp_approval_status"
+      "name": "qp_account_execution_association_kind"
+    },
+    {
+      "labels": [
+        "prepared",
+        "dispatched",
+        "ambiguous",
+        "confirmed",
+        "failed"
+      ],
+      "name": "qp_account_pause_submission_state"
+    },
+    {
+      "labels": [
+        "unknown_external_execution",
+        "break_glass_restart",
+        "opening_inventory",
+        "account_mismatch"
+      ],
+      "name": "qp_account_recovery_incident_kind"
+    },
+    {
+      "labels": [
+        "open",
+        "reconciling",
+        "sealed"
+      ],
+      "name": "qp_account_recovery_incident_status"
+    },
+    {
+      "labels": [
+        "polymarket"
+      ],
+      "name": "qp_account_source"
     },
     {
       "labels": [
@@ -32139,6 +33036,13 @@
         "shadow"
       ],
       "name": "qp_attribution_cohort"
+    },
+    {
+      "labels": [
+        "operator_approval",
+        "active_policy"
+      ],
+      "name": "qp_authorization_kind"
     },
     {
       "labels": [
@@ -32234,7 +33138,7 @@
         "model_routing",
         "report_schedule",
         "operations_policy",
-        "execution_automation_policy"
+        "execution_authorization_policy"
       ],
       "name": "qp_config_resource_kind"
     },
@@ -32291,6 +33195,13 @@
         "unsupported"
       ],
       "name": "qp_domain_source_expectation_status"
+    },
+    {
+      "labels": [
+        "operator_approval_required",
+        "policy_automatic"
+      ],
+      "name": "qp_entry_authorization_policy"
     },
     {
       "labels": [
@@ -32388,6 +33299,14 @@
         "fully_filled"
       ],
       "name": "qp_execution_attempt_terminal_state"
+    },
+    {
+      "labels": [
+        "analysis_only",
+        "operator_approval",
+        "policy_automatic"
+      ],
+      "name": "qp_execution_authority_ceiling"
     },
     {
       "labels": [
@@ -32548,14 +33467,6 @@
         "maker"
       ],
       "name": "qp_fee_liquidity_role"
-    },
-    {
-      "labels": [
-        "prepared_expected",
-        "authenticated_trade_derived",
-        "on_chain_settled"
-      ],
-      "name": "qp_fee_measurement_stage"
     },
     {
       "labels": [
@@ -32958,22 +33869,14 @@
     },
     {
       "labels": [
-        "buy"
-      ],
-      "name": "qp_order_intent_kind"
-    },
-    {
-      "labels": [
-        "draft",
-        "pending_approval",
-        "approved",
-        "approved_by_policy",
+        "pending_authorization",
+        "authorized",
         "admission_pending",
         "admission_rejected",
         "submitted",
         "partially_filled",
         "filled",
-        "rejected",
+        "authorization_rejected",
         "cancelled",
         "failed",
         "expired",
@@ -33065,14 +33968,6 @@
         "research_method"
       ],
       "name": "qp_profile_artifact_kind"
-    },
-    {
-      "labels": [
-        "report_only",
-        "semi_auto",
-        "auto_execution"
-      ],
-      "name": "qp_quant_runtime_mode"
     },
     {
       "labels": [
@@ -33181,7 +34076,7 @@
     {
       "labels": [
         "research_only",
-        "semi_auto_candidate"
+        "execution_candidate"
       ],
       "name": "qp_research_evaluation_track"
     },
@@ -33461,8 +34356,8 @@
       "labels": [
         "disabled",
         "governed_canary",
-        "semi_auto",
-        "auto"
+        "operator_approval",
+        "policy_automatic"
       ],
       "name": "qp_settlement_write_policy"
     },
@@ -33489,6 +34384,14 @@
         "failed"
       ],
       "name": "qp_source_slice_status"
+    },
+    {
+      "labels": [
+        "system_intent",
+        "account_recovery_incident",
+        "opening_inventory"
+      ],
+      "name": "qp_strategy_position_origin_kind"
     },
     {
       "labels": [
@@ -34915,6 +35818,202 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_account_chain_execution",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_chain_execution",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_chain_execution",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_chain_execution",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_chain_execution",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_chain_execution",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_chain_execution",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_execution_association",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_execution_association",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_execution_association",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_execution_association",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_execution_association",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_execution_association",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_execution_association",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_pause_submission",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_pause_submission",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_pause_submission",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_pause_submission",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_pause_submission",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_pause_submission",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_pause_submission",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_incident",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_incident",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_incident",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_incident",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_incident",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_incident",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_account_recovery_incident",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_account_snapshot",
       "privilege": "DELETE"
     },
@@ -35301,6 +36400,55 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_capital_allocation",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_clob_trade_observation",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_clob_trade_observation",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_clob_trade_observation",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_clob_trade_observation",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_clob_trade_observation",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_clob_trade_observation",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_clob_trade_observation",
       "privilege": "UPDATE"
     },
     {
@@ -36134,104 +37282,6 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_execution_attempt_reconciliation_task",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fee_measurement",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fee_measurement",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fee_measurement",
-      "privilege": "REFERENCES"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fee_measurement",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fee_measurement",
-      "privilege": "TRIGGER"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fee_measurement",
-      "privilege": "TRUNCATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fee_measurement",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fill",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fill",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fill",
-      "privilege": "REFERENCES"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fill",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fill",
-      "privilege": "TRIGGER"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fill",
-      "privilege": "TRUNCATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_execution_fill",
       "privilege": "UPDATE"
     },
     {
@@ -38149,55 +39199,6 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_position",
-      "privilege": "DELETE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_position",
-      "privilege": "INSERT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_position",
-      "privilege": "REFERENCES"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_position",
-      "privilege": "SELECT"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_position",
-      "privilege": "TRIGGER"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_position",
-      "privilege": "TRUNCATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
-      "object_name": "quant_position",
-      "privilege": "UPDATE"
-    },
-    {
-      "grantable": "NO",
-      "grantee": "$schema_owner",
-      "object_kind": "table",
       "object_name": "quant_recommendation",
       "privilege": "DELETE"
     },
@@ -39515,6 +40516,55 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_source_slice",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_strategy_position_lot",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_strategy_position_lot",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_strategy_position_lot",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_strategy_position_lot",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_strategy_position_lot",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_strategy_position_lot",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_strategy_position_lot",
       "privilege": "UPDATE"
     },
     {
@@ -41200,6 +42250,86 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_account_chain_execution_cursor ON public.quant_account_chain_execution USING btree (execution_account_id, block_number DESC, transaction_index DESC, log_index DESC)",
+      "method": "btree",
+      "name": "idx_quant_account_chain_execution_cursor",
+      "primary": false,
+      "ready": true,
+      "table": "quant_account_chain_execution",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_account_chain_execution_pkey ON public.quant_account_chain_execution USING btree (account_chain_execution_id)",
+      "method": "btree",
+      "name": "quant_account_chain_execution_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_account_chain_execution",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_account_chain_execution_source ON public.quant_account_chain_execution USING btree (execution_account_id, source_event_hash)",
+      "method": "btree",
+      "name": "uq_quant_account_chain_execution_source",
+      "primary": false,
+      "ready": true,
+      "table": "quant_account_chain_execution",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_account_execution_association_pkey ON public.quant_account_execution_association USING btree (account_chain_execution_id)",
+      "method": "btree",
+      "name": "quant_account_execution_association_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_account_execution_association",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_account_pause_submission_pkey ON public.quant_account_pause_submission USING btree (account_pause_submission_id)",
+      "method": "btree",
+      "name": "quant_account_pause_submission_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_account_pause_submission",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_account_pause_incident_exchange ON public.quant_account_pause_submission USING btree (recovery_incident_id, exchange_address)",
+      "method": "btree",
+      "name": "uq_quant_account_pause_incident_exchange",
+      "primary": false,
+      "ready": true,
+      "table": "quant_account_pause_submission",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_account_recovery_incident_pkey ON public.quant_account_recovery_incident USING btree (account_recovery_incident_id)",
+      "method": "btree",
+      "name": "quant_account_recovery_incident_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_account_recovery_incident",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_account_recovery_incident_active ON public.quant_account_recovery_incident USING btree (execution_account_id) WHERE (status <> 'sealed'::qp_account_recovery_incident_status)",
+      "method": "btree",
+      "name": "uq_quant_account_recovery_incident_active",
+      "primary": false,
+      "ready": true,
+      "table": "quant_account_recovery_incident",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_account_snapshot_as_of ON public.quant_account_snapshot USING btree (as_of DESC)",
       "method": "btree",
       "name": "idx_quant_account_snapshot_as_of",
@@ -41446,6 +42576,46 @@
       "primary": false,
       "ready": true,
       "table": "quant_capital_allocation",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_clob_trade_observation_account ON public.quant_clob_trade_observation USING btree (execution_account_id, matched_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_clob_trade_observation_account",
+      "primary": false,
+      "ready": true,
+      "table": "quant_clob_trade_observation",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_clob_trade_observation_order ON public.quant_clob_trade_observation USING btree (execution_order_id, matched_at)",
+      "method": "btree",
+      "name": "idx_quant_clob_trade_observation_order",
+      "primary": false,
+      "ready": true,
+      "table": "quant_clob_trade_observation",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_clob_trade_observation_pkey ON public.quant_clob_trade_observation USING btree (clob_trade_observation_id)",
+      "method": "btree",
+      "name": "quant_clob_trade_observation_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_clob_trade_observation",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_clob_trade_observation_venue_trade_id_key ON public.quant_clob_trade_observation USING btree (venue_trade_id)",
+      "method": "btree",
+      "name": "quant_clob_trade_observation_venue_trade_id_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_clob_trade_observation",
       "unique": true,
       "valid": true
     },
@@ -41910,7 +43080,7 @@
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX uq_quant_execution_attempt_outcome_position ON public.quant_execution_attempt_outcome USING btree (position_id)",
+      "definition": "CREATE UNIQUE INDEX uq_quant_execution_attempt_outcome_position ON public.quant_execution_attempt_outcome USING btree (strategy_position_lot_id)",
       "method": "btree",
       "name": "uq_quant_execution_attempt_outcome_position",
       "primary": false,
@@ -41936,66 +43106,6 @@
       "primary": true,
       "ready": true,
       "table": "quant_execution_attempt_reconciliation_task",
-      "unique": true,
-      "valid": true
-    },
-    {
-      "definition": "CREATE UNIQUE INDEX quant_execution_fee_measurement_pkey ON public.quant_execution_fee_measurement USING btree (execution_fee_measurement_id)",
-      "method": "btree",
-      "name": "quant_execution_fee_measurement_pkey",
-      "primary": true,
-      "ready": true,
-      "table": "quant_execution_fee_measurement",
-      "unique": true,
-      "valid": true
-    },
-    {
-      "definition": "CREATE UNIQUE INDEX uq_quant_execution_fee_measurement_stage ON public.quant_execution_fee_measurement USING btree (execution_fill_id, stage)",
-      "method": "btree",
-      "name": "uq_quant_execution_fee_measurement_stage",
-      "primary": false,
-      "ready": true,
-      "table": "quant_execution_fee_measurement",
-      "unique": true,
-      "valid": true
-    },
-    {
-      "definition": "CREATE INDEX idx_quant_execution_fill_account ON public.quant_execution_fill USING btree (execution_account_id, matched_at DESC)",
-      "method": "btree",
-      "name": "idx_quant_execution_fill_account",
-      "primary": false,
-      "ready": true,
-      "table": "quant_execution_fill",
-      "unique": false,
-      "valid": true
-    },
-    {
-      "definition": "CREATE INDEX idx_quant_execution_fill_order ON public.quant_execution_fill USING btree (execution_order_id, matched_at)",
-      "method": "btree",
-      "name": "idx_quant_execution_fill_order",
-      "primary": false,
-      "ready": true,
-      "table": "quant_execution_fill",
-      "unique": false,
-      "valid": true
-    },
-    {
-      "definition": "CREATE UNIQUE INDEX quant_execution_fill_pkey ON public.quant_execution_fill USING btree (execution_fill_id)",
-      "method": "btree",
-      "name": "quant_execution_fill_pkey",
-      "primary": true,
-      "ready": true,
-      "table": "quant_execution_fill",
-      "unique": true,
-      "valid": true
-    },
-    {
-      "definition": "CREATE UNIQUE INDEX quant_execution_fill_venue_trade_id_key ON public.quant_execution_fill USING btree (venue_trade_id)",
-      "method": "btree",
-      "name": "quant_execution_fill_venue_trade_id_key",
-      "primary": false,
-      "ready": true,
-      "table": "quant_execution_fill",
       "unique": true,
       "valid": true
     },
@@ -43480,7 +44590,7 @@
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX uq_quant_order_intent_execution_outcome_lineage ON public.quant_order_intent USING btree (order_intent_id, recommendation_id, execution_account_id, runtime_mode)",
+      "definition": "CREATE UNIQUE INDEX uq_quant_order_intent_execution_outcome_lineage ON public.quant_order_intent USING btree (order_intent_id, recommendation_id, execution_account_id)",
       "method": "btree",
       "name": "uq_quant_order_intent_execution_outcome_lineage",
       "primary": false,
@@ -43516,76 +44626,6 @@
       "primary": true,
       "ready": true,
       "table": "quant_portfolio_plan",
-      "unique": true,
-      "valid": true
-    },
-    {
-      "definition": "CREATE INDEX idx_quant_position_account_market_state ON public.quant_position USING btree (execution_account_id, market_id, state)",
-      "method": "btree",
-      "name": "idx_quant_position_account_market_state",
-      "primary": false,
-      "ready": true,
-      "table": "quant_position",
-      "unique": false,
-      "valid": true
-    },
-    {
-      "definition": "CREATE INDEX idx_quant_position_state ON public.quant_position USING btree (state)",
-      "method": "btree",
-      "name": "idx_quant_position_state",
-      "primary": false,
-      "ready": true,
-      "table": "quant_position",
-      "unique": false,
-      "valid": true
-    },
-    {
-      "definition": "CREATE INDEX idx_quant_position_token ON public.quant_position USING btree (token_id)",
-      "method": "btree",
-      "name": "idx_quant_position_token",
-      "primary": false,
-      "ready": true,
-      "table": "quant_position",
-      "unique": false,
-      "valid": true
-    },
-    {
-      "definition": "CREATE UNIQUE INDEX quant_position_pkey ON public.quant_position USING btree (position_id)",
-      "method": "btree",
-      "name": "quant_position_pkey",
-      "primary": true,
-      "ready": true,
-      "table": "quant_position",
-      "unique": true,
-      "valid": true
-    },
-    {
-      "definition": "CREATE UNIQUE INDEX uq_quant_position_execution_outcome_lineage ON public.quant_position USING btree (position_id, order_intent_id, execution_account_id, market_id, token_id)",
-      "method": "btree",
-      "name": "uq_quant_position_execution_outcome_lineage",
-      "primary": false,
-      "ready": true,
-      "table": "quant_position",
-      "unique": true,
-      "valid": true
-    },
-    {
-      "definition": "CREATE UNIQUE INDEX uq_quant_position_intent_account ON public.quant_position USING btree (order_intent_id, execution_account_id)",
-      "method": "btree",
-      "name": "uq_quant_position_intent_account",
-      "primary": false,
-      "ready": true,
-      "table": "quant_position",
-      "unique": true,
-      "valid": true
-    },
-    {
-      "definition": "CREATE UNIQUE INDEX uq_quant_position_inventory_lineage ON public.quant_position USING btree (position_id, order_intent_id, execution_account_id)",
-      "method": "btree",
-      "name": "uq_quant_position_inventory_lineage",
-      "primary": false,
-      "ready": true,
-      "table": "quant_position",
       "unique": true,
       "valid": true
     },
@@ -44470,7 +45510,7 @@
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX uq_quant_settlement_inventory_digest_position ON public.quant_settlement_inventory_lot USING btree (settlement_redeem_id, inventory_digest, position_id)",
+      "definition": "CREATE UNIQUE INDEX uq_quant_settlement_inventory_digest_position ON public.quant_settlement_inventory_lot USING btree (settlement_redeem_id, inventory_digest, strategy_position_lot_id)",
       "method": "btree",
       "name": "uq_quant_settlement_inventory_digest_position",
       "primary": false,
@@ -44540,7 +45580,7 @@
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX uq_quant_settlement_redeem_lot_position ON public.quant_settlement_redeem_lot USING btree (position_id)",
+      "definition": "CREATE UNIQUE INDEX uq_quant_settlement_redeem_lot_position ON public.quant_settlement_redeem_lot USING btree (strategy_position_lot_id)",
       "method": "btree",
       "name": "uq_quant_settlement_redeem_lot_position",
       "primary": false,
@@ -44616,6 +45656,86 @@
       "primary": false,
       "ready": true,
       "table": "quant_source_slice",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_strategy_position_lot_account_market_state ON public.quant_strategy_position_lot USING btree (execution_account_id, market_id, state)",
+      "method": "btree",
+      "name": "idx_quant_strategy_position_lot_account_market_state",
+      "primary": false,
+      "ready": true,
+      "table": "quant_strategy_position_lot",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_strategy_position_lot_state ON public.quant_strategy_position_lot USING btree (state)",
+      "method": "btree",
+      "name": "idx_quant_strategy_position_lot_state",
+      "primary": false,
+      "ready": true,
+      "table": "quant_strategy_position_lot",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_strategy_position_lot_token ON public.quant_strategy_position_lot USING btree (token_id)",
+      "method": "btree",
+      "name": "idx_quant_strategy_position_lot_token",
+      "primary": false,
+      "ready": true,
+      "table": "quant_strategy_position_lot",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_strategy_position_lot_pkey ON public.quant_strategy_position_lot USING btree (strategy_position_lot_id)",
+      "method": "btree",
+      "name": "quant_strategy_position_lot_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_strategy_position_lot",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_strategy_position_lot_execution_outcome_lineage ON public.quant_strategy_position_lot USING btree (strategy_position_lot_id, order_intent_id, execution_account_id, market_id, token_id)",
+      "method": "btree",
+      "name": "uq_quant_strategy_position_lot_execution_outcome_lineage",
+      "primary": false,
+      "ready": true,
+      "table": "quant_strategy_position_lot",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_strategy_position_lot_intent_account ON public.quant_strategy_position_lot USING btree (order_intent_id, execution_account_id) WHERE (origin_kind = 'system_intent'::qp_strategy_position_origin_kind)",
+      "method": "btree",
+      "name": "uq_quant_strategy_position_lot_intent_account",
+      "primary": false,
+      "ready": true,
+      "table": "quant_strategy_position_lot",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_strategy_position_lot_inventory_lineage ON public.quant_strategy_position_lot USING btree (strategy_position_lot_id, order_intent_id, execution_account_id)",
+      "method": "btree",
+      "name": "uq_quant_strategy_position_lot_inventory_lineage",
+      "primary": false,
+      "ready": true,
+      "table": "quant_strategy_position_lot",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_strategy_position_lot_recovery_token ON public.quant_strategy_position_lot USING btree (recovery_incident_id, token_id) WHERE (origin_kind = ANY (ARRAY['account_recovery_incident'::qp_strategy_position_origin_kind, 'opening_inventory'::qp_strategy_position_origin_kind]))",
+      "method": "btree",
+      "name": "uq_quant_strategy_position_lot_recovery_token",
+      "primary": false,
+      "ready": true,
+      "table": "quant_strategy_position_lot",
       "unique": true,
       "valid": true
     },
@@ -45248,6 +46368,34 @@
     },
     {
       "kind": "r",
+      "name": "quant_account_chain_execution",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_account_execution_association",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_account_pause_submission",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_account_recovery_incident",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_account_snapshot",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -45298,6 +46446,13 @@
     {
       "kind": "r",
       "name": "quant_capital_allocation",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_clob_trade_observation",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -45417,20 +46572,6 @@
     {
       "kind": "r",
       "name": "quant_execution_attempt_reconciliation_task",
-      "owner": "$schema_owner",
-      "rls_enabled": false,
-      "rls_forced": false
-    },
-    {
-      "kind": "r",
-      "name": "quant_execution_fee_measurement",
-      "owner": "$schema_owner",
-      "rls_enabled": false,
-      "rls_forced": false
-    },
-    {
-      "kind": "r",
-      "name": "quant_execution_fill",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -45710,13 +46851,6 @@
     },
     {
       "kind": "r",
-      "name": "quant_position",
-      "owner": "$schema_owner",
-      "rls_enabled": false,
-      "rls_forced": false
-    },
-    {
-      "kind": "r",
       "name": "quant_recommendation",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -45900,6 +47034,13 @@
     {
       "kind": "r",
       "name": "quant_source_slice",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_strategy_position_lot",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -46143,6 +47284,30 @@
       "table": "policy_profile_artifact"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_account_chain_execution_append_only BEFORE DELETE OR UPDATE ON public.quant_account_chain_execution FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_account_chain_execution_append_only",
+      "table": "quant_account_chain_execution"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_account_execution_association_append_only BEFORE DELETE OR UPDATE ON public.quant_account_execution_association FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_account_execution_association_append_only",
+      "table": "quant_account_execution_association"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_account_pause_submission_updated_at BEFORE UPDATE ON public.quant_account_pause_submission FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
+      "enabled": "O",
+      "name": "trg_quant_account_pause_submission_updated_at",
+      "table": "quant_account_pause_submission"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_account_recovery_incident_updated_at BEFORE UPDATE ON public.quant_account_recovery_incident FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
+      "enabled": "O",
+      "name": "trg_quant_account_recovery_incident_updated_at",
+      "table": "quant_account_recovery_incident"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_attribution_artifact_append_only BEFORE DELETE OR UPDATE ON public.quant_attribution_artifact FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_attribution_artifact_append_only",
@@ -46177,6 +47342,12 @@
       "enabled": "O",
       "name": "trg_quant_capital_allocation_updated_at",
       "table": "quant_capital_allocation"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_clob_trade_observation_append_only BEFORE DELETE OR UPDATE ON public.quant_clob_trade_observation FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_clob_trade_observation_append_only",
+      "table": "quant_clob_trade_observation"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_crypto_price_projection_updated_at BEFORE UPDATE ON public.quant_crypto_price_projection FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
@@ -46267,18 +47438,6 @@
       "enabled": "O",
       "name": "trg_quant_execution_attempt_task_updated_at",
       "table": "quant_execution_attempt_reconciliation_task"
-    },
-    {
-      "definition": "CREATE TRIGGER trg_quant_execution_fee_measurement_append_only BEFORE DELETE OR UPDATE ON public.quant_execution_fee_measurement FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
-      "enabled": "O",
-      "name": "trg_quant_execution_fee_measurement_append_only",
-      "table": "quant_execution_fee_measurement"
-    },
-    {
-      "definition": "CREATE TRIGGER trg_quant_execution_fill_append_only BEFORE DELETE OR UPDATE ON public.quant_execution_fill FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
-      "enabled": "O",
-      "name": "trg_quant_execution_fill_append_only",
-      "table": "quant_execution_fill"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_execution_order_updated_at BEFORE UPDATE ON public.quant_execution_order FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
@@ -46479,12 +47638,6 @@
       "table": "quant_order_intent"
     },
     {
-      "definition": "CREATE TRIGGER trg_quant_position_updated_at BEFORE UPDATE ON public.quant_position FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
-      "enabled": "O",
-      "name": "trg_quant_position_updated_at",
-      "table": "quant_position"
-    },
-    {
       "definition": "CREATE TRIGGER trg_quant_execution_rollup_append_only BEFORE DELETE OR UPDATE ON public.quant_recommendation_execution_rollup FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_execution_rollup_append_only",
@@ -46597,6 +47750,12 @@
       "enabled": "O",
       "name": "trg_quant_source_slice_lifecycle_guard",
       "table": "quant_source_slice"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_strategy_position_lot_updated_at BEFORE UPDATE ON public.quant_strategy_position_lot FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
+      "enabled": "O",
+      "name": "trg_quant_strategy_position_lot_updated_at",
+      "table": "quant_strategy_position_lot"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_trade_policy_artifact_updated_at BEFORE UPDATE ON public.quant_trade_policy_artifact FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",

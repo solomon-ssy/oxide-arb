@@ -215,7 +215,7 @@ impl FreshBootOrchestrator {
             .filter(|profile| {
                 matches!(
                     profile.spec.serving_authority,
-                    ServingAuthority::ReportOnlyWithLiveL2
+                    ServingAuthority::AnalysisOnlyWithLiveL2
                 )
             })
         {

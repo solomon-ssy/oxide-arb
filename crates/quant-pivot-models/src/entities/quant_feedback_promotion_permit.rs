@@ -8,7 +8,7 @@ use super::{
     quant_model_version, research_profile_artifact, user,
 };
 use crate::{
-    enums::{common::MarketCategory, quant::QuantRuntimeMode},
+    enums::{common::MarketCategory, quant::ExecutionAuthorityCeiling},
     types::{
         ContentHash, DecisionPolicySnapshotId, FeedbackCycleId, ModelCandidateManifestId,
         ModelVersionId, PolicyBundleGeneration, PolicyIdempotencyKey, PromotionPermitId,
@@ -43,8 +43,7 @@ pub struct Model {
     pub candidate_manifest_id: ModelCandidateManifestId,
     pub candidate_manifest_hash: ContentHash,
     pub promotion_gate_hash: ContentHash,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode[]")"#)]
-    pub allowed_runtime_modes: Vec<QuantRuntimeMode>,
+    pub maximum_execution_authority: ExecutionAuthorityCeiling,
     pub non_route_policy_hash: ContentHash,
     pub serving_constraints_hash: ContentHash,
     pub preflight_hash: ContentHash,

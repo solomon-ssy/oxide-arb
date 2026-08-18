@@ -143,7 +143,7 @@ struct GovernanceAuditIdentity<'a> {
 }
 
 /// A shared gate evaluation: the report plus the shadow summary, which is
-/// present only for shadow-gated intents (`RouteActivation` / `AutoExecution`) and
+/// present only for shadow-gated intents (`RouteActivation` / `PolicyAutomatic`) and
 /// feeds route-promotion shadow-overlap evidence.
 ///
 struct GateEvaluation {
@@ -453,7 +453,7 @@ impl ModelGovernancePort for ModelGovernanceService {
         let gate_intent = match intent {
             GatePreviewIntent::Candidate => GateIntent::Candidate,
             GatePreviewIntent::RouteActivation => GateIntent::RouteActivation,
-            GatePreviewIntent::AutoExecution => GateIntent::AutoExecution,
+            GatePreviewIntent::PolicyAutomatic => GateIntent::PolicyAutomatic,
         };
         let backtest_evidence =
             backtest_report_id.map_or(GateBacktestEvidence::Latest, GateBacktestEvidence::Exact);

@@ -3,6 +3,8 @@
 //! This module owns admission, dispatch, reconciliation, exit monitoring, and
 //! their production boundaries.
 
+pub mod account_chain_projector;
+pub mod account_pause;
 pub mod admission;
 pub mod breaker;
 pub mod dispatch_wake;
@@ -13,10 +15,8 @@ pub mod execution_order_lifecycle;
 pub mod exit_dispatcher;
 pub mod exit_monitor;
 pub mod exit_monitor_service;
-pub mod fee_settlement;
 pub mod intent_lifecycle;
 pub mod intent_service;
-pub mod mode_gate;
 pub mod order_client;
 pub mod outcome_reconciliation;
 pub mod reconciliation;
@@ -34,6 +34,10 @@ mod settlement_timing;
 pub mod terms_drift_wake;
 pub mod trade_policy_guard;
 
+pub use account_chain_projector::{
+    AccountChainExecutionProjector, AccountChainExecutionProjectorDeps,
+};
+pub use account_pause::AccountPauseCoordinator;
 pub use admission::{
     AdmissionCheck, AdmissionCheckTrace, AdmissionDecision, AdmissionExposureState, AdmissionInput,
     AdmissionInputBuilder, AdmissionInputBuilderDeps, AdmissionModelState, AdmissionSeams,
@@ -59,10 +63,8 @@ pub use exit_monitor::{
     ExitSignalVerdict,
 };
 pub use exit_monitor_service::{ExitMonitorService, ExitMonitorServiceDeps};
-pub use fee_settlement::OnChainFeeSettlementService;
 pub use intent_lifecycle::IntentLifecyclePublisher;
 pub use intent_service::{CoreOrderIntentService, IntentTerminalEventSink, OrderIntentServiceDeps};
-pub use mode_gate::{DefaultRuntimeModeGate, IntentPolicyDecision, RuntimeModeGate};
 pub use order_client::{
     ClobOrderClient, PolymarketOrderClient, VenueCancelResult, VenueOrder, VenueOutcome,
     VenueSubmitResult,

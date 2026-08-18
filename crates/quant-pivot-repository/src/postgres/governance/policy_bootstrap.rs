@@ -254,9 +254,9 @@ pub async fn ensure_default_policy_bundle(
             &snapshot,
             ConfigResourceKind::OperationsPolicy,
         )?,
-        execution_automation_policy_revision_id: required_revision(
+        execution_authorization_policy_revision_id: required_revision(
             &snapshot,
-            ConfigResourceKind::ExecutionAutomationPolicy,
+            ConfigResourceKind::ExecutionAuthorizationPolicy,
         )?,
         source: DecisionPolicySnapshotSource::Bootstrap,
         created_by_kind: PolicyActorKind::System,

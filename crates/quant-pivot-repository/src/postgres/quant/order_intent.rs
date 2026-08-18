@@ -18,7 +18,7 @@ use quant_pivot_models::{
         governance::NewOperationLog,
         pagination::{PageWindow, Paginated},
         quant::{
-            ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOrderIntent,
+            ApproveOrderIntentOutcome, AuthorizeOrderIntent, NewCapitalAllocation, NewOrderIntent,
             OrderIntentInfo, RecommendationInfo, RecommendationReportInfo,
         },
     },
@@ -38,7 +38,7 @@ use quant_pivot_models::{
     enums::{
         execution::{ApprovalInvalidation, CapitalAllocationState},
         operation_log::OperationCategory,
-        quant::{ApprovalStatus, OrderIntentStatus, RecommendationStatus},
+        quant::{AuthorizationKind, OrderIntentStatus, RecommendationStatus},
         rbac::ResourceType,
     },
     types::{
@@ -69,10 +69,9 @@ use crate::{
 };
 
 /// Statuses a TTL sweep may expire.
-const EXPIRABLE_STATUSES: [OrderIntentStatus; 3] = [
-    OrderIntentStatus::PendingApproval,
-    OrderIntentStatus::Approved,
-    OrderIntentStatus::ApprovedByPolicy,
+const EXPIRABLE_STATUSES: [OrderIntentStatus; 2] = [
+    OrderIntentStatus::PendingAuthorization,
+    OrderIntentStatus::Authorized,
 ];
 
 /// Singleton row id for `system_runtime_control`.
@@ -188,14 +187,20 @@ impl OrderIntentRepository for PgOrderIntentRepository {
     async fn approve(
         &self,
         intent_id: &OrderIntentId,
-        approval: ApproveOrderIntent,
+        authorization: AuthorizeOrderIntent,
         entry_override: Option<EntryOrderSpec>,
         allocated_override: Option<Usd>,
         now: DateTime<Utc>,
     ) -> Result<ApproveOrderIntentOutcome, StorageError> {
+        if authorization.evidence.kind() != AuthorizationKind::OperatorApproval {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_ORDER_INTENT),
+                "operator approval requires operator authorization evidence",
+            ));
+        }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let row = Self::lock_terminal_graph(&txn, intent_id).await?;
-        if row.status != OrderIntentStatus::PendingApproval {
+        if row.status != OrderIntentStatus::PendingAuthorization {
             return Err(StorageError::state_conflict(
                 QUANT_ORDER_INTENT,
                 Some(intent_id),
@@ -238,7 +243,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             &txn,
             intent_id,
             row,
-            approval,
+            authorization,
             entry_override,
             allocated_override,
         )
@@ -256,11 +261,14 @@ impl OrderIntentRepository for PgOrderIntentRepository {
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let row = Self::lock_terminal_graph(&txn, intent_id).await?;
-        validate_intent_transition(row.status, OrderIntentStatus::Rejected, intent_id)?;
+        validate_intent_transition(
+            row.status,
+            OrderIntentStatus::AuthorizationRejected,
+            intent_id,
+        )?;
         let before_info: OrderIntentInfo = row.clone().into();
         let mut active = row.into_active_model();
-        active.status = ActiveValue::Set(OrderIntentStatus::Rejected);
-        active.approval_status = ActiveValue::Set(ApprovalStatus::Rejected);
+        active.status = ActiveValue::Set(OrderIntentStatus::AuthorizationRejected);
         active.status_reason = ActiveValue::Set(Some(reason.clone()));
         let intent_model = active.update(&txn).await.map_err(StorageError::from)?;
         invalidate_for_intent_terminal(
@@ -508,14 +516,30 @@ fn validate_intent_allocation(
 ) -> Result<(), StorageError> {
     if !matches!(
         intent.status,
-        OrderIntentStatus::PendingApproval | OrderIntentStatus::ApprovedByPolicy
+        OrderIntentStatus::PendingAuthorization | OrderIntentStatus::Authorized
     ) {
         return Err(StorageError::invariant_violation(
             Some(QUANT_ORDER_INTENT),
             format!(
-                "order intent must be created as pending_approval or approved_by_policy, got {}",
+                "order intent must be created as pending_authorization or authorized, got {}",
                 intent.status.as_str()
             ),
+        ));
+    }
+    let authorization_valid = match intent.status {
+        OrderIntentStatus::PendingAuthorization => {
+            intent.authorization_kind.is_none() && intent.authorization_evidence.is_none()
+        }
+        OrderIntentStatus::Authorized => intent
+            .authorization_evidence
+            .as_ref()
+            .is_some_and(|evidence| Some(evidence.kind()) == intent.authorization_kind),
+        _ => false,
+    };
+    if !authorization_valid {
+        return Err(StorageError::invariant_violation(
+            Some(QUANT_ORDER_INTENT),
+            "new order intent authorization evidence is inconsistent with its status",
         ));
     }
     if allocation.order_intent_id != intent.order_intent_id {
@@ -566,10 +590,9 @@ fn page_condition(query: &OrderIntentListQuery) -> Condition {
         .add_option(status_filter)
         .add_option(
             query
-                .approval_status
-                .map(|approval| Column::ApprovalStatus.eq(approval)),
+                .authorization_kind
+                .map(|kind| Column::AuthorizationKind.eq(kind)),
         )
-        .add_option(query.runtime_mode.map(|mode| Column::RuntimeMode.eq(mode)))
         .add_option(
             query
                 .recommendation_id
@@ -673,16 +696,14 @@ impl PgOrderIntentRepository {
         db: &impl ConnectionTrait,
         intent_id: &OrderIntentId,
         row: Model,
-        approval: ApproveOrderIntent,
+        authorization: AuthorizeOrderIntent,
         entry_override: Option<EntryOrderSpec>,
         allocated_override: Option<Usd>,
     ) -> Result<Model, StorageError> {
         let mut active = row.into_active_model();
-        active.status = ActiveValue::Set(OrderIntentStatus::Approved);
-        active.approval_status = ActiveValue::Set(ApprovalStatus::Approved);
-        active.approved_by = ActiveValue::Set(Some(approval.approved_by));
-        active.approval_reason = ActiveValue::Set(Some(approval.approval_reason));
-        active.approved_at = ActiveValue::Set(Some(approval.approved_at));
+        active.status = ActiveValue::Set(OrderIntentStatus::Authorized);
+        active.authorization_kind = ActiveValue::Set(Some(authorization.evidence.kind()));
+        active.authorization_evidence = ActiveValue::Set(Some(authorization.evidence));
         if let Some(entry) = entry_override {
             active.entry_order_json = ActiveValue::Set(entry);
         }
@@ -938,28 +959,24 @@ pub fn validate_intent_transition(
     let valid = matches!(
         (current, next),
         (
-            OrderIntentStatus::Draft,
-            OrderIntentStatus::PendingApproval | OrderIntentStatus::ApprovedByPolicy,
-        ) | (
-            OrderIntentStatus::PendingApproval,
-            OrderIntentStatus::Approved
-                | OrderIntentStatus::Rejected
+            OrderIntentStatus::PendingAuthorization,
+            OrderIntentStatus::Authorized
+                | OrderIntentStatus::AuthorizationRejected
                 | OrderIntentStatus::Cancelled
                 | OrderIntentStatus::Expired
                 | OrderIntentStatus::Invalidated,
         ) | (
-            OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy,
+            OrderIntentStatus::Authorized,
             OrderIntentStatus::AdmissionPending
                 | OrderIntentStatus::AdmissionRejected
                 | OrderIntentStatus::Cancelled
                 | OrderIntentStatus::Expired
                 | OrderIntentStatus::Invalidated,
         ) | (
-            // `AdmissionPending -> Approved/ApprovedByPolicy` releases the claim
+            // `AdmissionPending -> Authorized` releases the claim
             // on a transient admission defer so the dispatcher retries.
             OrderIntentStatus::AdmissionPending,
-            OrderIntentStatus::Approved
-                | OrderIntentStatus::ApprovedByPolicy
+            OrderIntentStatus::Authorized
                 | OrderIntentStatus::Submitted
                 | OrderIntentStatus::AdmissionRejected
                 | OrderIntentStatus::Invalidated,

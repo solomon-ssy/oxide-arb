@@ -352,7 +352,7 @@ impl Default for QuantWorkersConfig {
 
 /// Venue account read configuration (`[quant.account]`).
 ///
-/// `report_only` is **not** dry-run: report sizing is built on the real venue
+/// `production account reads` is **not** dry-run: report sizing is built on the real venue
 /// account. The funder address is required for keyless Data API position reads;
 /// reports fail closed without it. auto-redeem is EOA-only, so
 /// money-moving settlement redemption additionally requires this address to

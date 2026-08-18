@@ -20,7 +20,7 @@ pub fn fixture_profile_ref() -> ResearchProfileRef {
         .expect("research profiles")
         .into_iter()
         .find(|profile| {
-            profile.spec.activation_eligibility == ResearchEvaluationTrack::SemiAutoCandidate
+            profile.spec.activation_eligibility == ResearchEvaluationTrack::ExecutionCandidate
         })
         .expect("weather profile")
         .profile_ref

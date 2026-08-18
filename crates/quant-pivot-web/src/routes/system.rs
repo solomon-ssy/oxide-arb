@@ -11,8 +11,8 @@ use quant_pivot_models::{
             ActionEligibilityDecision, ActionEligibilityView, CapabilityView,
             ExecutionRecoveryView, FreshBootProfileProgressView, FreshBootProgressView,
             FreshBootRunDetailView, FreshBootRunEventView, FreshBootRunProgressView,
-            RetryFreshBootRunRequest, SetKillSwitchRequest, SupersedeFreshBootRunRequest,
-            SwitchQuantModeRequest, SwitchSettlementWritePolicyRequest, SystemStatusView,
+            RetryFreshBootRunRequest, SetEntryAuthorizationPolicyRequest, SetKillSwitchRequest,
+            SupersedeFreshBootRunRequest, SwitchSettlementWritePolicyRequest, SystemStatusView,
             system::{
                 ExchangeHistoryQuarantinePageView, ExchangeHistoryQuarantineQuery,
                 ExchangeHistoryQuarantineView, FreshBootCapabilitySummary,
@@ -22,7 +22,7 @@ use quant_pivot_models::{
             ExchangeHistoryFrontier, ExchangeHistoryFrontierProgress, ExchangeHistoryQuarantineRead,
         },
         governance::{HealthReport, KillSwitchView, RuntimeControlSnapshot},
-        ports::{QuantModeTransitionReport, SetKillSwitchCommand},
+        ports::{EntryAuthorizationTransitionReport, SetKillSwitchCommand},
         quant::{FreshBootRunContract, SupersedeFreshBootRun},
     },
     enums::{
@@ -110,9 +110,9 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         ),
         spec(
             Method::POST,
-            "/system/runtime-controls/quant-mode",
+            "/system/runtime-controls/entry-authorization-policy",
             Rule::ActingRoleGoverned(ResourceType::System, Operation::SwitchMode),
-            switch_quant_mode,
+            switch_entry_authorization_policy,
         ),
         spec(
             Method::POST,
@@ -467,25 +467,28 @@ pub async fn runtime_controls(
     Ok(WebResponse::ok(state.control.snapshot()))
 }
 
-pub async fn switch_quant_mode(
+pub async fn switch_entry_authorization_policy(
     state: Data<AppState>,
     actor: AuthedActor,
     _acting_role: ActingRole,
     op_ctx: OperationCtx,
-    body: ValidatedJson<SwitchQuantModeRequest>,
-) -> Result<WebResponse<QuantModeTransitionReport>, WebError> {
+    body: ValidatedJson<SetEntryAuthorizationPolicyRequest>,
+) -> Result<WebResponse<EntryAuthorizationTransitionReport>, WebError> {
     let body = body.into_inner();
     let before_hash = canonical_state_hash(&state.control.snapshot())?;
-    op_ctx.set_action(OperationCategory::System, "system.switch_quant_mode");
+    op_ctx.set_action(
+        OperationCategory::System,
+        "system.switch_entry_authorization_policy",
+    );
     op_ctx.set_detail(serde_json::json!({
-        "target_mode": body.mode.as_str(),
+        "target_policy": body.policy.as_str(),
         "reason": &body.reason,
         "expected_revision": body.expected_revision,
     }))?;
     let report = state
         .control
-        .switch_quant_mode(
-            body.mode,
+        .switch_entry_authorization_policy(
+            body.policy,
             body.expected_revision,
             &actor.claims.username,
             &body.reason,

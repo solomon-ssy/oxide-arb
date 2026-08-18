@@ -7,8 +7,8 @@ use quant_pivot_models::{
         common::OrderType,
         execution::AdmissionCheckId,
         quant::{
-            EntryConditionState, FillRequirement, OrderIntentStatus, QuantRuntimeMode,
-            RecommendationReportStatus,
+            AuthorizationKind, EntryAuthorizationPolicy, EntryConditionState, FillRequirement,
+            OrderIntentStatus, RecommendationReportStatus,
         },
     },
     types::{Bps, OrderAmount, Usd},
@@ -32,10 +32,7 @@ impl AdmissionCheck for IntentStateCheck {
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
         let intent = &input.intent;
-        if !matches!(
-            intent.status,
-            OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
-        ) {
+        if !matches!(intent.status, OrderIntentStatus::Authorized) {
             return AdmissionCheckTrace::deny(
                 self.id(),
                 format!(
@@ -106,39 +103,49 @@ impl AdmissionCheck for ReportStatusCheck {
 }
 
 // 4 ──────────────────────────────────────────────────────────────────────────
-/// Runtime mode allows execution and matches the intent's approval provenance.
-pub(super) struct RuntimeModeCheck;
+/// Runtime policy matches the intent's authorization provenance.
+pub(super) struct AuthorizationPolicyCheck;
 
-impl AdmissionCheck for RuntimeModeCheck {
+impl AdmissionCheck for AuthorizationPolicyCheck {
     fn id(&self) -> AdmissionCheckId {
-        AdmissionCheckId::RuntimeMode
+        AdmissionCheckId::AuthorizationPolicy
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
-        match input.mode {
-            QuantRuntimeMode::ReportOnly => {
-                AdmissionCheckTrace::deny(self.id(), "report-only mode forbids submission")
-            }
-            QuantRuntimeMode::SemiAuto => {
-                if input.intent.status == OrderIntentStatus::Approved {
-                    AdmissionCheckTrace::pass(self.id(), "semi-auto with operator-approved intent")
+        match input.authorization_policy {
+            EntryAuthorizationPolicy::OperatorApprovalRequired => {
+                if input.intent.status == OrderIntentStatus::Authorized
+                    && input.intent.authorization_kind == Some(AuthorizationKind::OperatorApproval)
+                    && input
+                        .intent
+                        .authorization_evidence
+                        .as_ref()
+                        .is_some_and(|evidence| {
+                            evidence.kind() == AuthorizationKind::OperatorApproval
+                        })
+                {
+                    AdmissionCheckTrace::pass(self.id(), "operator-authorized intent")
                 } else {
                     AdmissionCheckTrace::deny(
                         self.id(),
-                        "semi-auto requires an operator-approved intent",
+                        "operator policy requires an operator-authorized intent",
                     )
                 }
             }
-            QuantRuntimeMode::AutoExecution => {
-                if input.intent.status == OrderIntentStatus::ApprovedByPolicy {
-                    AdmissionCheckTrace::pass(
-                        self.id(),
-                        "auto-execution with policy-approved intent",
-                    )
+            EntryAuthorizationPolicy::PolicyAutomatic => {
+                if input.intent.status == OrderIntentStatus::Authorized
+                    && input.intent.authorization_kind == Some(AuthorizationKind::ActivePolicy)
+                    && input
+                        .intent
+                        .authorization_evidence
+                        .as_ref()
+                        .is_some_and(|evidence| evidence.kind() == AuthorizationKind::ActivePolicy)
+                {
+                    AdmissionCheckTrace::pass(self.id(), "active policy authorized intent")
                 } else {
                     AdmissionCheckTrace::deny(
                         self.id(),
-                        "auto-execution requires a policy-approved intent",
+                        "policy-automatic authorization requires active-policy evidence",
                     )
                 }
             }
@@ -735,7 +742,9 @@ impl AdmissionCheck for KillSwitchCheck {
                 ),
             );
         }
-        if input.mode == QuantRuntimeMode::AutoExecution && input.exposure.has_blocking_inflight {
+        if input.authorization_policy == EntryAuthorizationPolicy::PolicyAutomatic
+            && input.exposure.has_blocking_inflight
+        {
             return AdmissionCheckTrace::deny(
                 self.id(),
                 "blocking in-flight exposure (ambiguous/unresolvable) blocks auto execution",

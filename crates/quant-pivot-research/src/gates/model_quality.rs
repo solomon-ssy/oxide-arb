@@ -9,7 +9,7 @@
 //! Gates split into **hard** (any failure ⇒ the model may not advance) and
 //! **soft** (recorded as warnings, never blocking). The intent
 //! ([`GateIntent`]) selects which hard gates apply: a `RouteActivation` adds
-//! shadow-stability, and an `AutoExecution`
+//! shadow-stability, and an `PolicyAutomatic`
 //! evaluation additionally requires liquidity-exit feasibility.
 //!
 //! The resulting [`QualityGateReport`] is content-addressed and sealed into the
@@ -296,7 +296,7 @@ pub struct QualityGateInput {
     /// resolved through the **same deep check**
     /// (`resolve_return_model_calibration`) the report builder, admission,
     /// and intent creation share — never a shallow enum-tag read. Buy-family
-    /// `RouteActivation`/`AutoExecution` intents hard-gate on this; exit scorers and
+    /// `RouteActivation`/`PolicyAutomatic` intents hard-gate on this; exit scorers and
     /// other intents ignore it (they have no `ReturnModelSpec` concept).
     pub return_model_calibrated: bool,
 }
@@ -1025,7 +1025,7 @@ fn evaluate_explanation_gate(input: &QualityGateInput, ledger: &mut GateLedger) 
     }
 }
 
-/// Hard gate: `RouteActivation` / `AutoExecution` intents on a Buy
+/// Hard gate: `RouteActivation` / `PolicyAutomatic` intents on a Buy
 /// model require a `Calibrated` return model. `uncalibrated` (`Heuristic`)
 /// artifacts are bootstrap-only and must never reach publish or
 /// auto-execution — fail-closed, never a silent downgrade to the heuristic
@@ -1035,7 +1035,7 @@ fn evaluate_calibration_gate(input: &QualityGateInput, is_exit: bool, ledger: &m
     let applies = !is_exit
         && matches!(
             input.intent,
-            GateIntent::RouteActivation | GateIntent::AutoExecution
+            GateIntent::RouteActivation | GateIntent::PolicyAutomatic
         );
     if !applies {
         let detail = if is_exit {
@@ -1497,8 +1497,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_execution_requires_feasibility() {
-        let mut input = passing_input(GateIntent::AutoExecution);
+    fn policy_automatic_requires_feasibility() {
+        let mut input = passing_input(GateIntent::PolicyAutomatic);
         input.backtest.as_mut().unwrap().liquidity_feasibility = Probability::new(dec!(0.10));
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)

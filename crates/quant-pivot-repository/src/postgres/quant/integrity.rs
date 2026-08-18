@@ -335,8 +335,8 @@ fn verify_policy(policy: &DecisionPolicySnapshotModel) -> Result<(), StorageErro
             policy.operations_policy_revision_id,
         ),
         (
-            ConfigResourceKind::ExecutionAutomationPolicy,
-            policy.execution_automation_policy_revision_id,
+            ConfigResourceKind::ExecutionAuthorizationPolicy,
+            policy.execution_authorization_policy_revision_id,
         ),
     ];
     if expected != policy.snapshot_hash

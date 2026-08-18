@@ -96,7 +96,7 @@ pub fn active_observation_count(outcomes: &[LotOutcome], period_secs: u64) -> us
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
-    use quant_pivot_models::types::PositionId;
+    use quant_pivot_models::types::StrategyPositionLotId;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
@@ -109,7 +109,7 @@ mod tests {
 
     fn outcome(as_of: DateTime<Utc>, return_value: Decimal) -> LotOutcome {
         LotOutcome {
-            position_id: PositionId::from_v7(),
+            strategy_position_lot_id: StrategyPositionLotId::from_v7(),
             decision_at: as_of,
             return_value,
             cumulative_exit_pct: Decimal::ONE,

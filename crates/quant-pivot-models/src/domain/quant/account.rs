@@ -17,7 +17,7 @@ use crate::{
     enums::quant::AccountSource,
     types::{
         AccountPositions, AccountSnapshotId, EquitySnapshotId, ExecutionAccountId,
-        ExposureBreakdown, PositionSnapshot, Usd,
+        ExposureBreakdown, Usd, VenuePositionSnapshot,
     },
 };
 
@@ -65,7 +65,7 @@ pub struct LiveAccountSnapshot {
     pub capital_base_usd: Usd,
     pub available_usd: Usd,
     pub reserved_usd: Usd,
-    pub positions: Vec<PositionSnapshot>,
+    pub positions: Vec<VenuePositionSnapshot>,
     pub exposures: ExposureBreakdown,
 }
 
@@ -78,7 +78,7 @@ impl LiveAccountSnapshot {
         capital_base_usd: Usd,
         available_usd: Usd,
         reserved_usd: Usd,
-        positions: Vec<PositionSnapshot>,
+        positions: Vec<VenuePositionSnapshot>,
     ) -> Self {
         Self {
             as_of,

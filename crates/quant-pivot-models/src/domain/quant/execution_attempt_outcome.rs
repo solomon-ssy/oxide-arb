@@ -11,15 +11,13 @@ use crate::{
     entities::quant_execution_attempt_outcome,
     enums::{
         execution::{ExitReason, PositionLedgerState},
-        quant::{
-            ExecutionAttemptNoFillReason, ExecutionAttemptTerminalState, ExecutionOrderState,
-            QuantRuntimeMode,
-        },
+        quant::{ExecutionAttemptNoFillReason, ExecutionAttemptTerminalState, ExecutionOrderState},
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, PositionId,
-        Price, RecommendationId, ReconciliationId, SchemaVersion, Shares, TokenId, Usd,
+        ContentHash, ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, Price,
+        RecommendationId, ReconciliationId, SchemaVersion, Shares, StrategyPositionLotId, TokenId,
+        Usd,
     },
 };
 
@@ -35,11 +33,10 @@ pub struct NewExecutionAttemptOutcome {
     pub order_intent_id: OrderIntentId,
     pub entry_execution_order_id: ExecutionOrderId,
     pub entry_reconciliation_id: ReconciliationId,
-    pub position_id: Option<PositionId>,
+    pub strategy_position_lot_id: Option<StrategyPositionLotId>,
     pub execution_account_id: ExecutionAccountId,
     pub market_id: MarketId,
     pub token_id: TokenId,
-    pub runtime_mode: QuantRuntimeMode,
     pub terminal_state: ExecutionAttemptTerminalState,
     pub no_fill_reason: Option<ExecutionAttemptNoFillReason>,
     pub entry_order_state: ExecutionOrderState,
@@ -87,7 +84,7 @@ impl NewExecutionAttemptOutcome {
 
     /// Exact fill ratio derived from canonical share facts.
     pub fn fill_ratio(&self) -> Result<Decimal, ExecutionAttemptOutcomeContractError> {
-        Decimal::try_from(ExecutionFill {
+        Decimal::try_from(ClobTradeObservation {
             requested: self.requested_shares,
             filled: self.filled_shares,
         })
@@ -102,11 +99,10 @@ pub struct ExecutionAttemptOutcomeInfo {
     pub order_intent_id: OrderIntentId,
     pub entry_execution_order_id: ExecutionOrderId,
     pub entry_reconciliation_id: ReconciliationId,
-    pub position_id: Option<PositionId>,
+    pub strategy_position_lot_id: Option<StrategyPositionLotId>,
     pub execution_account_id: ExecutionAccountId,
     pub market_id: MarketId,
     pub token_id: TokenId,
-    pub runtime_mode: QuantRuntimeMode,
     pub terminal_state: ExecutionAttemptTerminalState,
     pub no_fill_reason: Option<ExecutionAttemptNoFillReason>,
     pub entry_order_state: ExecutionOrderState,
@@ -162,11 +158,10 @@ impl ExecutionAttemptOutcomeInfo {
             && self.order_intent_id == candidate.order_intent_id
             && self.entry_execution_order_id == candidate.entry_execution_order_id
             && self.entry_reconciliation_id == candidate.entry_reconciliation_id
-            && self.position_id == candidate.position_id
+            && self.strategy_position_lot_id == candidate.strategy_position_lot_id
             && self.execution_account_id == candidate.execution_account_id
             && self.market_id == candidate.market_id
             && self.token_id == candidate.token_id
-            && self.runtime_mode == candidate.runtime_mode
             && self.terminal_state == candidate.terminal_state
             && self.no_fill_reason == candidate.no_fill_reason
             && self.entry_order_state == candidate.entry_order_state
@@ -191,7 +186,7 @@ impl ExecutionAttemptOutcomeInfo {
 
     /// Exact fill ratio derived from canonical share facts.
     pub fn fill_ratio(&self) -> Result<Decimal, ExecutionAttemptOutcomeContractError> {
-        Decimal::try_from(ExecutionFill {
+        Decimal::try_from(ClobTradeObservation {
             requested: self.requested_shares,
             filled: self.filled_shares,
         })
@@ -206,11 +201,10 @@ info_from_model!(
         order_intent_id,
         entry_execution_order_id,
         entry_reconciliation_id,
-        position_id,
+        strategy_position_lot_id,
         execution_account_id,
         market_id,
         token_id,
-        runtime_mode,
         terminal_state,
         no_fill_reason,
         entry_order_state,
@@ -243,8 +237,6 @@ info_from_model!(
 pub enum ExecutionAttemptOutcomeContractError {
     #[error("market_id and token_id must both be non-empty")]
     EmptyIdentity,
-    #[error("ReportOnly and other non-submitting modes cannot produce an execution outcome")]
-    ExecutionNotAuthorized,
     #[error("execution timeline is invalid")]
     InvalidTimeline,
     #[error("requested shares must be positive, got {actual}")]
@@ -288,11 +280,10 @@ struct ExecutionOutcomeHashInput<'a> {
     order_intent_id: OrderIntentId,
     entry_execution_order_id: ExecutionOrderId,
     entry_reconciliation_id: ReconciliationId,
-    position_id: Option<PositionId>,
+    strategy_position_lot_id: Option<StrategyPositionLotId>,
     execution_account_id: ExecutionAccountId,
     market_id: &'a MarketId,
     token_id: &'a TokenId,
-    runtime_mode: QuantRuntimeMode,
     terminal_state: ExecutionAttemptTerminalState,
     no_fill_reason: Option<ExecutionAttemptNoFillReason>,
     entry_order_state: ExecutionOrderState,
@@ -329,11 +320,10 @@ impl<'a> ExecutionOutcomeHashInput<'a> {
             order_intent_id: outcome.order_intent_id,
             entry_execution_order_id: outcome.entry_execution_order_id,
             entry_reconciliation_id: outcome.entry_reconciliation_id,
-            position_id: outcome.position_id,
+            strategy_position_lot_id: outcome.strategy_position_lot_id,
             execution_account_id: outcome.execution_account_id,
             market_id: &outcome.market_id,
             token_id: &outcome.token_id,
-            runtime_mode: outcome.runtime_mode,
             terminal_state: outcome.terminal_state,
             no_fill_reason: outcome.no_fill_reason,
             entry_order_state: outcome.entry_order_state,
@@ -366,11 +356,10 @@ impl<'a> ExecutionOutcomeHashInput<'a> {
             order_intent_id: outcome.order_intent_id,
             entry_execution_order_id: outcome.entry_execution_order_id,
             entry_reconciliation_id: outcome.entry_reconciliation_id,
-            position_id: outcome.position_id,
+            strategy_position_lot_id: outcome.strategy_position_lot_id,
             execution_account_id: outcome.execution_account_id,
             market_id: &outcome.market_id,
             token_id: &outcome.token_id,
-            runtime_mode: outcome.runtime_mode,
             terminal_state: outcome.terminal_state,
             no_fill_reason: outcome.no_fill_reason,
             entry_order_state: outcome.entry_order_state,
@@ -403,9 +392,6 @@ fn validate_fields(
 ) -> Result<(), ExecutionAttemptOutcomeContractError> {
     if outcome.market_id.as_str().trim().is_empty() || outcome.token_id.as_str().trim().is_empty() {
         return Err(ExecutionAttemptOutcomeContractError::EmptyIdentity);
-    }
-    if !outcome.runtime_mode.allows_order_submission() {
-        return Err(ExecutionAttemptOutcomeContractError::ExecutionNotAuthorized);
     }
     SchemaVersion::try_new(outcome.execution_fact_schema_version.get())?;
     if outcome.terminal_at > outcome.source_observed_at
@@ -484,7 +470,7 @@ const fn validate_unfilled(
             },
         );
     }
-    if outcome.position_id.is_some()
+    if outcome.strategy_position_lot_id.is_some()
         || outcome.entry_avg_price.is_some()
         || outcome.entry_filled_at.is_some()
         || outcome.position_terminal_state.is_some()
@@ -505,7 +491,7 @@ fn validate_filled(
     outcome: &ExecutionOutcomeHashInput<'_>,
 ) -> Result<(), ExecutionAttemptOutcomeContractError> {
     if outcome.no_fill_reason.is_some()
-        || outcome.position_id.is_none()
+        || outcome.strategy_position_lot_id.is_none()
         || outcome.entry_avg_price.is_none()
         || outcome.entry_filled_at.is_none()
         || outcome.position_terminal_state.is_none()
@@ -594,15 +580,15 @@ const fn validate_non_negative(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ExecutionFill {
+struct ClobTradeObservation {
     requested: Shares,
     filled: Shares,
 }
 
-impl TryFrom<ExecutionFill> for Decimal {
+impl TryFrom<ClobTradeObservation> for Decimal {
     type Error = ExecutionAttemptOutcomeContractError;
 
-    fn try_from(fill: ExecutionFill) -> Result<Self, Self::Error> {
+    fn try_from(fill: ClobTradeObservation) -> Result<Self, Self::Error> {
         if !fill.requested.is_positive() {
             return Err(
                 ExecutionAttemptOutcomeContractError::InvalidRequestedShares {

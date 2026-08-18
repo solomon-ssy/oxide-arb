@@ -152,7 +152,7 @@ impl AppContext {
     }
 
     /// Approve→submit wake signal shared by the intent service (producer) and the
-    /// `auto_execution` dispatcher worker (consumer).
+    /// Authorized-intent dispatcher worker (consumer).
     pub fn execution_wake(&self) -> DispatchWake {
         self.execution.dispatch_wake.clone()
     }

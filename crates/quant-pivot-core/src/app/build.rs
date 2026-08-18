@@ -71,7 +71,7 @@ impl AppContext {
         .await?;
         // One authenticated CLOB client (single L1+L2 identity) shared by the
         // account (collateral reads) and execution (order writes) bundles. Fails
-        // closed at boot if the private key is missing or auth fails — report_only
+        // closed at boot if the private key is missing or authorization fails
         // is not dry-run, so the real venue must be reachable.
         let keystore = Keystore::from_config(&deploy.keys)?;
         let signer = keystore.signer_arc();

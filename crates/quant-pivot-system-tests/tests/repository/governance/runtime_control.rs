@@ -7,7 +7,8 @@ use quant_pivot_models::{
         Column as RuntimeControlTransitionColumn, Entity as RuntimeControlTransitionEntity,
     },
     enums::{
-        execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
+        execution::KillSwitchState, quant::EntryAuthorizationPolicy,
+        settlement::SettlementWritePolicy,
     },
 };
 use quant_pivot_repository::{
@@ -23,7 +24,10 @@ pub async fn singleton_cas_atomic_rejects() {
 
     let initial = repository.load().await.expect("load fresh-boot controls");
     assert_eq!(initial.revision, 0);
-    assert_eq!(initial.quant_runtime_mode, QuantRuntimeMode::ReportOnly);
+    assert_eq!(
+        initial.entry_authorization_policy,
+        EntryAuthorizationPolicy::OperatorApprovalRequired
+    );
     assert_eq!(
         initial.settlement_write_policy,
         SettlementWritePolicy::Disabled
@@ -31,10 +35,10 @@ pub async fn singleton_cas_atomic_rejects() {
     assert_eq!(initial.kill_switch_state, KillSwitchState::Closed);
     assert!(!initial.kill_switch_requires_ack);
 
-    let semi_auto = repository
+    let operator_policy = repository
         .compare_and_set(RuntimeControlUpdate {
             expected_revision: initial.revision,
-            quant_runtime_mode: Some(QuantRuntimeMode::SemiAuto),
+            entry_authorization_policy: Some(EntryAuthorizationPolicy::OperatorApprovalRequired),
             settlement_write_policy: None,
             kill_switch_state: None,
             kill_switch_requires_ack: None,
@@ -43,13 +47,16 @@ pub async fn singleton_cas_atomic_rejects() {
         })
         .await
         .expect("transition quant mode");
-    assert_eq!(semi_auto.revision, 1);
-    assert_eq!(semi_auto.quant_runtime_mode, QuantRuntimeMode::SemiAuto);
+    assert_eq!(operator_policy.revision, 1);
+    assert_eq!(
+        operator_policy.entry_authorization_policy,
+        EntryAuthorizationPolicy::OperatorApprovalRequired
+    );
 
     let idempotent = repository
         .compare_and_set(RuntimeControlUpdate {
-            expected_revision: semi_auto.revision,
-            quant_runtime_mode: Some(QuantRuntimeMode::SemiAuto),
+            expected_revision: operator_policy.revision,
+            entry_authorization_policy: Some(EntryAuthorizationPolicy::OperatorApprovalRequired),
             settlement_write_policy: None,
             kill_switch_state: None,
             kill_switch_requires_ack: None,
@@ -58,13 +65,13 @@ pub async fn singleton_cas_atomic_rejects() {
         })
         .await
         .expect("idempotent retry");
-    assert_eq!(idempotent.revision, semi_auto.revision);
+    assert_eq!(idempotent.revision, operator_policy.revision);
 
     let malformed = repository
         .compare_and_set(RuntimeControlUpdate {
-            expected_revision: semi_auto.revision,
-            quant_runtime_mode: Some(QuantRuntimeMode::AutoExecution),
-            settlement_write_policy: Some(SettlementWritePolicy::Auto),
+            expected_revision: operator_policy.revision,
+            entry_authorization_policy: Some(EntryAuthorizationPolicy::PolicyAutomatic),
+            settlement_write_policy: Some(SettlementWritePolicy::PolicyAutomatic),
             kill_switch_state: None,
             kill_switch_requires_ack: None,
             actor: "runtime-admin".to_owned(),
@@ -79,7 +86,7 @@ pub async fn singleton_cas_atomic_rejects() {
     let stale = repository
         .compare_and_set(RuntimeControlUpdate {
             expected_revision: initial.revision,
-            quant_runtime_mode: None,
+            entry_authorization_policy: None,
             settlement_write_policy: Some(SettlementWritePolicy::GovernedCanary),
             kill_switch_state: None,
             kill_switch_requires_ack: None,
@@ -93,8 +100,8 @@ pub async fn singleton_cas_atomic_rejects() {
     let right = PgRuntimeControlRepository::new(db.clone());
     let (policy_result, halt_result) = tokio::join!(
         left.compare_and_set(RuntimeControlUpdate {
-            expected_revision: semi_auto.revision,
-            quant_runtime_mode: None,
+            expected_revision: operator_policy.revision,
+            entry_authorization_policy: None,
             settlement_write_policy: Some(SettlementWritePolicy::GovernedCanary),
             kill_switch_state: None,
             kill_switch_requires_ack: None,
@@ -102,8 +109,8 @@ pub async fn singleton_cas_atomic_rejects() {
             reason: "enable governed canary".to_owned(),
         }),
         right.compare_and_set(RuntimeControlUpdate {
-            expected_revision: semi_auto.revision,
-            quant_runtime_mode: None,
+            expected_revision: operator_policy.revision,
+            entry_authorization_policy: None,
             settlement_write_policy: None,
             kill_switch_state: Some(KillSwitchState::ExecutionHalted),
             kill_switch_requires_ack: Some(true),

@@ -13,10 +13,15 @@
 > 范围：仅限 Polymarket 的 quant-pivot，彻底替换当前 Endgame arbitrage 系统
 >
 > 兼容策略：零兼容。删除旧 Endgame、DryRun/Paper/Live、旧 runtime-config shape、旧命名和 re-export。
+>
+> **Phase 12 clean break**：`report_only / semi_auto / auto_execution` 及整个
+> `QuantRuntimeMode` 轴正在由 [`phase-12/README.md`](phase-12/README.md) 破坏式取代。
+> Phase 12 是执行授权、账户单写者、break-glass 恢复和快速经济反馈的唯一 current owner；
+> 下列早期 Phase 文档中的 runtime-mode 文字在完成迁移前仅用于 deletion inventory。
 
 ## 0. 决策摘要
 
-`quant-pivot` 必须从事件驱动的 Endgame arbitrage bot 重构为 Polymarket-only 的量化系统 `quant-pivot`。新系统的核心产物是周期性 TopN 量化建议报告；在受治理的运行模式下，系统可以停留在报告层，也可以等待人工确认后执行，或在严格风控下自动执行。
+`quant-pivot` 必须从事件驱动的 Endgame arbitrage bot 重构为 Polymarket-only 的量化系统 `quant-pivot`。新系统的核心产物是周期性 TopN 量化建议报告；报告始终可生成，入场权限由 recommendation ceiling、逐 intent 授权、kill switch 与账户恢复状态共同决定。
 
 旧产品闭环是：
 
@@ -29,7 +34,7 @@ book update -> endgame detection -> risk gate -> FOK order -> post-trade -> sett
 ```text
 Polymarket facts -> represented routes -> route-specific model/calibration/trade policy
  -> executable USD scenario tiers -> global robust portfolio plan
- -> TopN recommendation report -> report_only / semi_auto / auto_execution
+ -> TopN recommendation report -> analysis | operator authorization | policy automatic ceiling
 ```
 
 一份报告允许跨 category/Route。Category 只作为 filter、risk bucket 与解释维度；任一 represented Route
@@ -52,6 +57,7 @@ Polymarket facts -> represented routes -> route-specific model/calibration/trade
 11. [`08-cold-start-production-closeout.md`](08-cold-start-production-closeout.md)：冷启动、schema、catalog、bootstrap、parity、认证和 UI 的生产收尾契约与验收矩阵。
 12. [`08-extreme-performance-design.md`](08-extreme-performance-design.md)：数据面、统一 L2 ledger、订单簿和 WebSocket fanout 的极致性能设计。
 13. [`09-extreme-performance-ledger.md`](09-extreme-performance-ledger.md)：性能重构执行状态、决策和中断恢复台账。
+14. [`phase-12/README.md`](phase-12/README.md)：删除 runtime-mode、重建执行授权、账户单写者/break-glass 和快速经济反馈。
 
 **子phase实施目录（按 Phase 推进时读）：**
 
@@ -60,14 +66,14 @@ Polymarket facts -> represented routes -> route-specific model/calibration/trade
 - [`phase-05/README.md`](phase-05/README.md) — 执行/风险/治理 05.0–05.10
 - [`phase-06/README.md`](phase-06/README.md) — ML 扩展（退出信号、跨账户对账、ONNX/classical publish、attribution feedback、反事实归因；**闭合 Phase 5 延后 seam**）
 - [`phase-10/README.md`](phase-10/README.md) — 前端破坏式重构 10.0–10.6（概念规格：[`10-frontend-refactor.md`](10-frontend-refactor.md)）
+- [`phase-12/README.md`](phase-12/README.md) — 执行授权、账户恢复与快速经济反馈 clean break
 
 ## 2. 硬边界
 
 - 平台仍然只做 Polymarket。禁止引入通用 exchange、venue routing、多平台抽象。
 - 策略不再是 Endgame-only，也不再用“无风险套利”定义产品。
 - 核心产物是 `RecommendationReport`，不是 `ScoredOpportunity`。
-- 运行模式重建为 `report_only`、`semi_auto`、`auto_execution`。
-- `report_only` 是默认、最安全、最先上线的模式。
+- 不再存在统一运行模式；默认入场授权为逐 intent operator approval，报告生成与执行授权正交。
 - 旧 `ExecutionMode::DryRun`、`ExecutionMode::Paper`、`ExecutionMode::Live` 必须删除，不做 alias。
 - Runtime Config 只有六类 system-owned clean-install 资源；固定 schema discriminator 为 `1`，旧 JSON 路径不提供 parser、alias、converter 或 shim。
 - 旧 Endgame 文档只能作为删除盘点资料，不能作为活跃实现依据。

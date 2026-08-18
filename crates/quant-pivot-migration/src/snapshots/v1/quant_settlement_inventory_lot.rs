@@ -16,7 +16,7 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub contributor_lots_digest: String,
     pub execution_account_id: Uuid,
-    pub position_id: Uuid,
+    pub strategy_position_lot_id: Uuid,
     pub order_intent_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub token_id: String,
@@ -46,12 +46,12 @@ pub struct Model {
     pub quant_execution_account: BelongsTo<super::quant_execution_account::Entity>,
     #[sea_orm(
         belongs_to,
-        from = "position_id",
-        to = "position_id",
+        from = "strategy_position_lot_id",
+        to = "strategy_position_lot_id",
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
-    pub quant_position: BelongsTo<super::quant_position::Entity>,
+    pub quant_strategy_position_lot: BelongsTo<super::quant_strategy_position_lot::Entity>,
     #[sea_orm(
         belongs_to,
         from = "order_intent_id",

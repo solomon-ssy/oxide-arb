@@ -23,7 +23,7 @@ use quant_pivot_models::{
         },
     },
     enums::{
-        quant::QuantRuntimeMode,
+        quant::EntryAuthorizationPolicy,
         settlement::{SettlementFailureCode, SettlementSubmissionState, SettlementWritePolicy},
     },
     types::{
@@ -204,13 +204,16 @@ impl SettlementGovernedActionService {
         }
         matches!(
             (
-                controls.quant_runtime_mode,
+                controls.entry_authorization_policy,
                 controls.settlement_write_policy
             ),
             (
-                QuantRuntimeMode::SemiAuto,
-                SettlementWritePolicy::GovernedCanary | SettlementWritePolicy::SemiAuto
-            ) | (QuantRuntimeMode::AutoExecution, SettlementWritePolicy::Auto)
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
+                SettlementWritePolicy::GovernedCanary | SettlementWritePolicy::OperatorApproval
+            ) | (
+                EntryAuthorizationPolicy::PolicyAutomatic,
+                SettlementWritePolicy::PolicyAutomatic
+            )
         )
     }
 

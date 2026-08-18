@@ -108,7 +108,7 @@ pub fn plan_lot_timeline_samples(
         while as_of < lot.closed_at {
             samples.push(LotSamplePlan {
                 order_intent_id: lot.order_intent_id,
-                position_id: lot.position_id,
+                strategy_position_lot_id: lot.strategy_position_lot_id,
                 market_id: lot.market_id.clone(),
                 token_id: lot.token_id.clone(),
                 outcome_side: lot.outcome_side,
@@ -146,8 +146,8 @@ mod tests {
     use quant_pivot_models::{
         enums::quant::{DatasetPurpose, OutcomeSide},
         types::{
-            MarketId, ModelSpecId, OrderIntentId, PositionId, Price, SchemaVersion, Shares,
-            TokenId, TrainingSampleSources, Usd,
+            MarketId, ModelSpecId, OrderIntentId, Price, SchemaVersion, Shares,
+            StrategyPositionLotId, TokenId, TrainingSampleSources, Usd,
         },
     };
     use rust_decimal::Decimal;
@@ -205,7 +205,7 @@ mod tests {
         let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
         ExitTrainingLotRow {
             order_intent_id: OrderIntentId::from_v7(),
-            position_id: PositionId::from_v7(),
+            strategy_position_lot_id: StrategyPositionLotId::from_v7(),
             market_id: MarketId::new("0xmkt"),
             token_id: TokenId::new("token-1"),
             outcome_side: OutcomeSide::Yes,

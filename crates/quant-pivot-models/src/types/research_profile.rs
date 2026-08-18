@@ -308,7 +308,7 @@ crate::pg_enum! {
     /// Evaluation track requested by a fit. It never activates execution by itself.
     pub enum ResearchEvaluationTrack {
         ResearchOnly => "research_only",
-        SemiAutoCandidate => "semi_auto_candidate",
+        ExecutionCandidate => "execution_candidate",
     }
 }
 
@@ -382,7 +382,7 @@ impl ResearchAvailabilityPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ServingAuthority {
-    ReportOnlyWithLiveL2,
+    AnalysisOnlyWithLiveL2,
     ExecutionEligible,
 }
 
@@ -779,7 +779,7 @@ impl ResearchProfileSpec {
             }
         }
         match self.serving_authority {
-            ServingAuthority::ReportOnlyWithLiveL2 if self.policy_fitter.is_some() => {
+            ServingAuthority::AnalysisOnlyWithLiveL2 if self.policy_fitter.is_some() => {
                 return Err("bootstrap profiles cannot carry a policy fitter".to_owned());
             }
             ServingAuthority::ExecutionEligible
@@ -797,7 +797,7 @@ impl ResearchProfileSpec {
             {
                 return Err("non-Weather execution profile cannot carry a policy fitter".to_owned());
             }
-            ServingAuthority::ReportOnlyWithLiveL2 | ServingAuthority::ExecutionEligible => {}
+            ServingAuthority::AnalysisOnlyWithLiveL2 | ServingAuthority::ExecutionEligible => {}
         }
         if self.category != self.cohort_contract.category() {
             return Err("research profile category does not match its cohort contract".to_owned());
@@ -811,14 +811,14 @@ impl ResearchProfileSpec {
         }
         if matches!(
             self.serving_authority,
-            ServingAuthority::ReportOnlyWithLiveL2
+            ServingAuthority::AnalysisOnlyWithLiveL2
         ) && self.feature_contract.requires_l2()
         {
             return Err("report-only bootstrap authority requires an L2-free contract".to_owned());
         }
         if matches!(
             self.serving_authority,
-            ServingAuthority::ReportOnlyWithLiveL2
+            ServingAuthority::AnalysisOnlyWithLiveL2
         ) && !matches!(
             self.availability_policy,
             ResearchAvailabilityPolicy::FinalizedBlockConfirmation { .. }
@@ -852,10 +852,11 @@ impl ResearchProfileSpec {
     pub const fn permits(&self, track: ResearchEvaluationTrack) -> bool {
         match (self.activation_eligibility, track) {
             (ResearchEvaluationTrack::ResearchOnly, ResearchEvaluationTrack::ResearchOnly)
-            | (ResearchEvaluationTrack::SemiAutoCandidate, _) => true,
-            (ResearchEvaluationTrack::ResearchOnly, ResearchEvaluationTrack::SemiAutoCandidate) => {
-                false
-            }
+            | (ResearchEvaluationTrack::ExecutionCandidate, _) => true,
+            (
+                ResearchEvaluationTrack::ResearchOnly,
+                ResearchEvaluationTrack::ExecutionCandidate,
+            ) => false,
         }
     }
 
@@ -993,7 +994,7 @@ impl ResearchProfileArtifact {
                 availability_policy: ResearchAvailabilityPolicy::IngestionObserved,
                 serving_authority: ServingAuthority::ExecutionEligible,
                 allowed_cash_budget_tiers: vec![Usd::new(Decimal::new(25, 0))],
-                activation_eligibility: ResearchEvaluationTrack::SemiAutoCandidate,
+                activation_eligibility: ResearchEvaluationTrack::ExecutionCandidate,
                 quality_gate: TradePolicyQualityGate::production(),
                 feedback_policy: production_feedback_policy(6 * 3_600, 50, 3 * SECONDS_PER_DAY),
             },
@@ -1023,7 +1024,7 @@ impl ResearchProfileArtifact {
                 availability_policy: ResearchAvailabilityPolicy::IngestionObserved,
                 serving_authority: ServingAuthority::ExecutionEligible,
                 allowed_cash_budget_tiers: vec![Usd::new(Decimal::new(25, 0))],
-                activation_eligibility: ResearchEvaluationTrack::SemiAutoCandidate,
+                activation_eligibility: ResearchEvaluationTrack::ExecutionCandidate,
                 quality_gate: TradePolicyQualityGate::production(),
                 feedback_policy: production_feedback_policy(
                     SECONDS_PER_DAY,
@@ -1057,7 +1058,7 @@ impl ResearchProfileArtifact {
                 availability_policy: ResearchAvailabilityPolicy::FinalizedBlockConfirmation {
                     confirmation_blocks: 12,
                 },
-                serving_authority: ServingAuthority::ReportOnlyWithLiveL2,
+                serving_authority: ServingAuthority::AnalysisOnlyWithLiveL2,
                 allowed_cash_budget_tiers: vec![Usd::new(Decimal::new(25, 0))],
                 activation_eligibility: ResearchEvaluationTrack::ResearchOnly,
                 quality_gate: TradePolicyQualityGate::production(),
@@ -1093,7 +1094,7 @@ impl ResearchProfileArtifact {
                 availability_policy: ResearchAvailabilityPolicy::FinalizedBlockConfirmation {
                     confirmation_blocks: 12,
                 },
-                serving_authority: ServingAuthority::ReportOnlyWithLiveL2,
+                serving_authority: ServingAuthority::AnalysisOnlyWithLiveL2,
                 allowed_cash_budget_tiers: vec![Usd::new(Decimal::new(25, 0))],
                 activation_eligibility: ResearchEvaluationTrack::ResearchOnly,
                 quality_gate: TradePolicyQualityGate::production(),
@@ -1125,7 +1126,7 @@ impl ResearchProfileArtifact {
                 availability_policy: ResearchAvailabilityPolicy::FinalizedBlockConfirmation {
                     confirmation_blocks: 12,
                 },
-                serving_authority: ServingAuthority::ReportOnlyWithLiveL2,
+                serving_authority: ServingAuthority::AnalysisOnlyWithLiveL2,
                 allowed_cash_budget_tiers: vec![Usd::new(Decimal::new(25, 0))],
                 activation_eligibility: ResearchEvaluationTrack::ResearchOnly,
                 quality_gate: TradePolicyQualityGate::production(),
@@ -1321,12 +1322,12 @@ mod tests {
         assert!(
             weather
                 .spec
-                .permits(ResearchEvaluationTrack::SemiAutoCandidate)
+                .permits(ResearchEvaluationTrack::ExecutionCandidate)
         );
         assert!(
             crypto
                 .spec
-                .permits(ResearchEvaluationTrack::SemiAutoCandidate)
+                .permits(ResearchEvaluationTrack::ExecutionCandidate)
         );
         assert_eq!(
             weather
@@ -1339,7 +1340,7 @@ mod tests {
         assert!(
             !pooled
                 .spec
-                .permits(ResearchEvaluationTrack::SemiAutoCandidate)
+                .permits(ResearchEvaluationTrack::ExecutionCandidate)
         );
         assert_eq!(weather.spec.required_days().expect("required days"), 100);
         assert_eq!(minimum_raw_retention_days().expect("retention"), 200);
@@ -1355,7 +1356,7 @@ mod tests {
                 .expect("bootstrap profile");
             assert_eq!(
                 bootstrap.spec.serving_authority,
-                ServingAuthority::ReportOnlyWithLiveL2
+                ServingAuthority::AnalysisOnlyWithLiveL2
             );
             assert!(!bootstrap.required_sources_contains(ResearchProfileDataSource::ClobL2));
             assert!(

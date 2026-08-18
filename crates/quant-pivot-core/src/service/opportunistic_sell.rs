@@ -21,10 +21,10 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::{ChDecimal64, ChPrice, ChProbability, QuantExitSignalEvaluationEventRow},
     config::FinalizedExchangeHistoryConfig,
-    domain::quant::{OrderIntentInfo, PositionInfo},
+    domain::quant::{OrderIntentInfo, StrategyPositionLot},
     enums::{
         clickhouse::{ChExitSignalEvaluatorKind, ChExitSignalVerdict},
-        quant::QuantRuntimeMode,
+        quant::AuthorizationKind,
     },
     types::{ModelVersionId, OutcomeTokenBinding, Price},
 };
@@ -71,7 +71,7 @@ pub trait OpportunisticSellScorer: Send + Sync {
     async fn score(
         &self,
         intent: &OrderIntentInfo,
-        lot: &PositionInfo,
+        lot: &StrategyPositionLot,
         mark_price: Option<Price>,
         now: DateTime<Utc>,
     ) -> QuantResult<Option<SellScore>>;
@@ -112,7 +112,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
     async fn score(
         &self,
         intent: &OrderIntentInfo,
-        lot: &PositionInfo,
+        lot: &StrategyPositionLot,
         mark_price: Option<Price>,
         now: DateTime<Utc>,
     ) -> QuantResult<Option<SellScore>> {
@@ -332,9 +332,9 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
             self.metrics.inc_opportunistic_sell_eval("disabled");
             return ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds);
         }
-        // Opportunistic exits are auto-submitted advisory scale-outs; a human owns
-        // the exit for non-auto-execution intents.
-        if ctx.intent.runtime_mode != QuantRuntimeMode::AutoExecution {
+        // Opportunistic exits are auto-submitted advisory scale-outs; a human
+        // owns the exit for operator-authorized intents.
+        if ctx.intent.authorization_kind != Some(AuthorizationKind::ActivePolicy) {
             self.metrics.inc_opportunistic_sell_eval("skipped_non_auto");
             return ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds);
         }
@@ -424,8 +424,8 @@ fn audit_row(
     let now_ms = ctx.now.timestamp_millis();
     QuantExitSignalEvaluationEventRow {
         event_time: now_ms,
-        order_intent_id: ctx.lot.order_intent_id,
-        position_id: ctx.lot.position_id,
+        order_intent_id: ctx.intent.order_intent_id,
+        strategy_position_lot_id: ctx.lot.strategy_position_lot_id,
         market_id: ctx.lot.market_id.clone(),
         token_id: ctx.lot.token_id.clone(),
         evaluator_kind: ChExitSignalEvaluatorKind::Opportunistic,

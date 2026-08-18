@@ -38,7 +38,7 @@ wire_enum! {
         ModelEvaluationClaim => "model_evaluation_claim",
         FutureReportRunReconcile => "future_report_run_reconcile",
         OperationalAdmission => "operational_admission",
-        ExecutionAutomationAdmission => "execution_automation_policy_admission",
+        ExecutionAuthorizationAdmission => "execution_authorization_admission",
     }
 }
 
@@ -68,7 +68,6 @@ wire_enum! {
         ReportScheduler => "report_scheduler",
         WorkerAdmission => "worker_admission",
         AlertDispatcher => "alert_dispatcher",
-        RuntimeModeGate => "runtime_mode_gate",
     }
 }
 
@@ -139,7 +138,7 @@ pg_enum! {
         ModelRouting => "model_routing",
         ReportSchedule => "report_schedule",
         OperationsPolicy => "operations_policy",
-        ExecutionAutomationPolicy => "execution_automation_policy",
+        ExecutionAuthorizationPolicy => "execution_authorization_policy",
     }
 }
 
@@ -151,7 +150,7 @@ impl ConfigResourceKind {
         Self::ModelRouting,
         Self::ReportSchedule,
         Self::OperationsPolicy,
-        Self::ExecutionAutomationPolicy,
+        Self::ExecutionAuthorizationPolicy,
     ];
 }
 

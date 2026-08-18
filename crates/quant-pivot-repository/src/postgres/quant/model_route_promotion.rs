@@ -214,9 +214,11 @@ impl PgModelRoutePromotionRepository {
             .ok_or_else(|| {
                 StorageError::not_found("system_runtime_control", SYSTEM_RUNTIME_CONTROL_ID)
             })?;
-        if runtime.quant_runtime_mode != preflight.current_runtime_mode()
+        if runtime.entry_authorization_policy != preflight.current_entry_authorization_policy()
             || runtime.revision != preflight.runtime_control_revision()
-            || !preflight.scope().allows_mode(runtime.quant_runtime_mode)
+            || !preflight
+                .scope()
+                .allows_authorization_policy(runtime.entry_authorization_policy)
         {
             return Err(Self::conflict(
                 "runtime mode or runtime-control revision changed before promotion",
@@ -549,9 +551,9 @@ impl PgModelRoutePromotionRepository {
                 revisions.operations_policy,
                 ConfigResourceKind::OperationsPolicy,
             )?,
-            execution_automation_policy_revision_id: required(
-                revisions.execution_automation_policy,
-                ConfigResourceKind::ExecutionAutomationPolicy,
+            execution_authorization_policy_revision_id: required(
+                revisions.execution_authorization_policy,
+                ConfigResourceKind::ExecutionAuthorizationPolicy,
             )?,
             snapshot: document,
             source: DecisionPolicySnapshotSource::Activation,

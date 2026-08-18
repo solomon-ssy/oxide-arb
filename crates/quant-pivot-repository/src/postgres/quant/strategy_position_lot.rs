@@ -1,4 +1,4 @@
-//! Postgres-backed position ledger repository.
+//! Postgres-backed strategy position-lot repository.
 //!
 //! Each row is **one lot per filled entry intent** (`order_intent_id` is the
 //! lot's natural unique key). `apply_fill` weighted-averages only the fills of
@@ -11,15 +11,15 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{
     StorageError,
-    entity::{QUANT_ORDER_INTENT, QUANT_POSITION},
+    entity::{QUANT_ORDER_INTENT, QUANT_STRATEGY_POSITION_LOT},
 };
 use quant_pivot_models::{
     domain::{
         api::{PositionListQuery, PositionSummary},
         pagination::{PageWindow, Paginated},
         quant::{
-            CumulativePositionFill, ExitTrainingLotRow, LotExitEventRow, NewPosition, PositionExit,
-            PositionExitReconciliation, PositionFill, PositionInfo,
+            CumulativePositionFill, ExitTrainingLotRow, LotExitEventRow, NewStrategyPositionLot,
+            PositionExit, PositionExitReconciliation, PositionFill, StrategyPositionLot,
         },
     },
     entities::{
@@ -30,15 +30,17 @@ use quant_pivot_models::{
             Column as QuantOrderIntentColumn, Entity as QuantOrderIntentEntity,
             Model as QuantOrderIntentModel,
         },
-        quant_position::{Column, Entity},
+        quant_strategy_position_lot::{Column, Entity},
     },
     enums::{
-        execution::{ExecutionOrderPhase, ExitReason, PositionLedgerState},
+        execution::{
+            ExecutionOrderPhase, ExitReason, PositionLedgerState, StrategyPositionOriginKind,
+        },
         quant::ExecutionOrderState,
     },
     types::{
-        ExecutionAccountId, MarketId, OrderIntentId, PositionId, Price, RecommendationId, Shares,
-        TokenId, Usd,
+        ExecutionAccountId, MarketId, OrderIntentId, Price, RecommendationId, Shares,
+        StrategyPositionLotId, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -51,7 +53,7 @@ use sea_orm::{
 use crate::{
     batch::chunk_for_in_clause,
     postgres::query::{group_by_key, map_by_key, paginate_mapped},
-    traits::PositionRepository,
+    traits::StrategyPositionLotRepository,
 };
 
 /// Position-lot states still considered "open" (subject to exit monitoring).
@@ -64,11 +66,11 @@ const CLOSED_STATES: [PositionLedgerState; 2] =
 const DEFAULT_HOLD_HORIZON_SECS: u64 = 86_400;
 
 /// Postgres-backed current-position ledger repository.
-pub struct PgPositionRepository {
+pub struct PgStrategyPositionLotRepository {
     db: DatabaseConnection,
 }
 
-impl PgPositionRepository {
+impl PgStrategyPositionLotRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
@@ -80,8 +82,28 @@ struct RealizedPnlSum {
 }
 
 #[async_trait::async_trait]
-impl PositionRepository for PgPositionRepository {
-    async fn apply_fill(&self, fill: PositionFill) -> Result<PositionInfo, StorageError> {
+impl StrategyPositionLotRepository for PgStrategyPositionLotRepository {
+    async fn create_recovery_lot(
+        &self,
+        lot: NewStrategyPositionLot,
+    ) -> Result<StrategyPositionLot, StorageError> {
+        if lot.origin_kind == StrategyPositionOriginKind::SystemIntent
+            || lot.order_intent_id.is_some()
+            || lot.recovery_incident_id.is_none()
+        {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_STRATEGY_POSITION_LOT),
+                "recovery lot requires a recovery/opening origin and no order intent",
+            ));
+        }
+        Entity::insert(lot.into_active_model())
+            .exec_with_returning(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(Into::into)
+    }
+
+    async fn apply_fill(&self, fill: PositionFill) -> Result<StrategyPositionLot, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let info = Self::apply_fill(&txn, fill).await?;
         txn.commit().await.map_err(StorageError::from)?;
@@ -92,7 +114,7 @@ impl PositionRepository for PgPositionRepository {
         &self,
         order_intent_id: &OrderIntentId,
         exit: PositionExit,
-    ) -> Result<PositionInfo, StorageError> {
+    ) -> Result<StrategyPositionLot, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let info = Self::apply_exit(&txn, order_intent_id, exit).await?;
         txn.commit().await.map_err(StorageError::from)?;
@@ -102,7 +124,7 @@ impl PositionRepository for PgPositionRepository {
     async fn find_by_intent(
         &self,
         order_intent_id: &OrderIntentId,
-    ) -> Result<Option<PositionInfo>, StorageError> {
+    ) -> Result<Option<StrategyPositionLot>, StorageError> {
         Entity::find()
             .filter(Column::OrderIntentId.eq(*order_intent_id))
             .one(&self.db)
@@ -113,11 +135,11 @@ impl PositionRepository for PgPositionRepository {
 
     async fn find_by_id(
         &self,
-        position_id: &PositionId,
+        strategy_position_lot_id: &StrategyPositionLotId,
     ) -> Result<Option<PositionSummary>, StorageError> {
         // N:1 join projects `recommendation_id` in one round-trip (same shape
         // as the page path's batch enrich, without a second query).
-        let Some((position, intent)) = Entity::find_by_id(*position_id)
+        let Some((position, intent)) = Entity::find_by_id(*strategy_position_lot_id)
             .find_also_related(QuantOrderIntentEntity)
             .one(&self.db)
             .await
@@ -125,10 +147,8 @@ impl PositionRepository for PgPositionRepository {
         else {
             return Ok(None);
         };
-        let intent = intent
-            .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, position.order_intent_id))?;
         Ok(Some(PositionSummary {
-            recommendation_id: intent.recommendation_id,
+            recommendation_id: intent.map(|intent| intent.recommendation_id),
             position: position.into(),
         }))
     }
@@ -137,7 +157,7 @@ impl PositionRepository for PgPositionRepository {
         &self,
         query: PositionListQuery,
     ) -> Result<Paginated<PositionSummary>, StorageError> {
-        let page: Paginated<PositionInfo> = paginate_mapped(
+        let page: Paginated<StrategyPositionLot> = paginate_mapped(
             Entity::find()
                 .filter(page_condition(&query))
                 .order_by_desc(Column::OpenedAt),
@@ -148,17 +168,16 @@ impl PositionRepository for PgPositionRepository {
         .await?;
         let recommendations = Self::recommendation_ids_for(
             &self.db,
-            page.items.iter().map(|position| position.order_intent_id),
+            page.items
+                .iter()
+                .filter_map(|position| position.order_intent_id),
         )
         .await?;
         let mut summaries = Vec::with_capacity(page.items.len());
         for position in page.items {
-            let recommendation_id = recommendations
-                .get(&position.order_intent_id)
-                .copied()
-                .ok_or_else(|| {
-                    StorageError::not_found(QUANT_ORDER_INTENT, position.order_intent_id)
-                })?;
+            let recommendation_id = position
+                .order_intent_id
+                .and_then(|intent_id| recommendations.get(&intent_id).copied());
             summaries.push(PositionSummary {
                 position,
                 recommendation_id,
@@ -167,7 +186,7 @@ impl PositionRepository for PgPositionRepository {
         Ok(Paginated::new(summaries, page.total, page.page, page.size))
     }
 
-    async fn find_open_lots(&self) -> Result<Vec<PositionInfo>, StorageError> {
+    async fn find_open_lots(&self) -> Result<Vec<StrategyPositionLot>, StorageError> {
         Entity::find()
             .filter(Column::State.is_in(OPEN_STATES))
             .all(&self.db)
@@ -179,7 +198,7 @@ impl PositionRepository for PgPositionRepository {
     async fn find_lots_by_token(
         &self,
         token_id: &TokenId,
-    ) -> Result<Vec<PositionInfo>, StorageError> {
+    ) -> Result<Vec<StrategyPositionLot>, StorageError> {
         Entity::find()
             .filter(Column::TokenId.eq(token_id.clone()))
             .all(&self.db)
@@ -192,7 +211,7 @@ impl PositionRepository for PgPositionRepository {
         &self,
         market_id: &MarketId,
         execution_account_id: &ExecutionAccountId,
-    ) -> Result<Vec<PositionInfo>, StorageError> {
+    ) -> Result<Vec<StrategyPositionLot>, StorageError> {
         Entity::find()
             .filter(Column::MarketId.eq(market_id.clone()))
             .filter(Column::ExecutionAccountId.eq(*execution_account_id))
@@ -232,22 +251,26 @@ impl PositionRepository for PgPositionRepository {
             .await
             .map_err(StorageError::from)?;
 
-        let intent_ids: Vec<OrderIntentId> = rows.iter().map(|row| row.order_intent_id).collect();
+        let intent_ids: Vec<OrderIntentId> =
+            rows.iter().filter_map(|row| row.order_intent_id).collect();
         let intents = Self::intents_by_id(&self.db, &intent_ids).await?;
         let orders_by_intent = Self::orders_by_intent_id(&self.db, &intent_ids).await?;
 
         let mut lots = Vec::with_capacity(rows.len());
         for row in rows {
-            let position = PositionInfo::from(row);
+            let position = StrategyPositionLot::from(row);
             let Some(closed_at) = position.closed_at else {
                 continue;
             };
-            let Some(intent) = intents.get(&position.order_intent_id) else {
+            let Some(order_intent_id) = position.order_intent_id else {
+                continue;
+            };
+            let Some(intent) = intents.get(&order_intent_id) else {
                 continue;
             };
             let empty = [];
             let orders = orders_by_intent
-                .get(&position.order_intent_id)
+                .get(&order_intent_id)
                 .map_or(empty.as_slice(), Vec::as_slice);
             let Some(entry_shares) = resolve_entry_shares(intent, orders) else {
                 continue;
@@ -261,8 +284,8 @@ impl PositionRepository for PgPositionRepository {
             let total_net_proceeds =
                 Usd::new((entry_cost + position.realized_pnl_usd.inner()).max(Decimal::ZERO));
             lots.push(ExitTrainingLotRow {
-                order_intent_id: position.order_intent_id,
-                position_id: position.position_id,
+                order_intent_id,
+                strategy_position_lot_id: position.strategy_position_lot_id,
                 market_id: position.market_id,
                 token_id: position.token_id,
                 outcome_side: position.side,
@@ -283,7 +306,7 @@ impl PositionRepository for PgPositionRepository {
     }
 }
 
-impl PgPositionRepository {
+impl PgStrategyPositionLotRepository {
     /// Upsert the per-intent position lot from a fill (weighted-average cost over
     /// the *same* intent's fills), on the caller's connection — usable inside the
     /// execution-submission transaction so the position ledger and capital
@@ -291,10 +314,10 @@ impl PgPositionRepository {
     pub async fn apply_fill(
         db: &impl ConnectionTrait,
         fill: PositionFill,
-    ) -> Result<PositionInfo, StorageError> {
+    ) -> Result<StrategyPositionLot, StorageError> {
         if !fill.shares.is_positive() || fill.cost_usd.is_negative() {
             return Err(StorageError::invariant_violation(
-                Some(QUANT_POSITION),
+                Some(QUANT_STRATEGY_POSITION_LOT),
                 "position fill must have positive shares and non-negative cost",
             ));
         }
@@ -305,7 +328,7 @@ impl PgPositionRepository {
             .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, fill.order_intent_id))?;
         if intent.execution_account_id != fill.execution_account_id {
             return Err(StorageError::invariant_violation(
-                Some(QUANT_POSITION),
+                Some(QUANT_STRATEGY_POSITION_LOT),
                 format!(
                     "position fill execution account does not match intent {}",
                     fill.order_intent_id
@@ -326,9 +349,11 @@ impl PgPositionRepository {
             // later fill switches the same lot to fee-inclusive average cost.
             let avg_price = price_from_cost(fill.cost_usd, fill.shares)?;
             return Entity::insert(
-                NewPosition {
-                    position_id: PositionId::from_v7(),
-                    order_intent_id: fill.order_intent_id,
+                NewStrategyPositionLot {
+                    strategy_position_lot_id: StrategyPositionLotId::from_v7(),
+                    origin_kind: StrategyPositionOriginKind::SystemIntent,
+                    order_intent_id: Some(fill.order_intent_id),
+                    recovery_incident_id: None,
                     execution_account_id: fill.execution_account_id,
                     token_id: fill.token_id,
                     market_id: fill.market_id,
@@ -354,14 +379,14 @@ impl PgPositionRepository {
 
         if row.state == PositionLedgerState::Closed || row.state == PositionLedgerState::Settled {
             return Err(StorageError::state_conflict(
-                QUANT_POSITION,
-                Some(&row.order_intent_id),
+                QUANT_STRATEGY_POSITION_LOT,
+                Some(&row.strategy_position_lot_id),
                 "cannot apply fill to closed position lot",
             ));
         }
         if row.execution_account_id != fill.execution_account_id {
             return Err(StorageError::invariant_violation(
-                Some(QUANT_POSITION),
+                Some(QUANT_STRATEGY_POSITION_LOT),
                 format!(
                     "position fill execution account mismatch for intent {}",
                     fill.order_intent_id
@@ -394,10 +419,10 @@ impl PgPositionRepository {
     pub async fn reconcile_fill(
         db: &impl ConnectionTrait,
         fill: CumulativePositionFill,
-    ) -> Result<PositionInfo, StorageError> {
+    ) -> Result<StrategyPositionLot, StorageError> {
         if !fill.cumulative_shares.is_positive() || fill.cumulative_cost_usd.is_negative() {
             return Err(StorageError::invariant_violation(
-                Some(QUANT_POSITION),
+                Some(QUANT_STRATEGY_POSITION_LOT),
                 "cumulative position fill must have positive shares and non-negative cost",
             ));
         }
@@ -436,7 +461,7 @@ impl PgPositionRepository {
             || row.side != fill.side
         {
             return Err(StorageError::invariant_violation(
-                Some(QUANT_POSITION),
+                Some(QUANT_STRATEGY_POSITION_LOT),
                 format!(
                     "cumulative fill identity differs from position lot for intent {}",
                     fill.order_intent_id
@@ -448,15 +473,15 @@ impl PgPositionRepository {
             PositionLedgerState::Closed | PositionLedgerState::Settled
         ) {
             return Err(StorageError::state_conflict(
-                QUANT_POSITION,
-                Some(&row.order_intent_id),
+                QUANT_STRATEGY_POSITION_LOT,
+                Some(&row.strategy_position_lot_id),
                 "cannot reconcile fill into closed position lot",
             ));
         }
         if fill.cumulative_shares < row.shares || fill.cumulative_cost_usd < row.cost_usd {
             return Err(StorageError::state_conflict(
-                QUANT_POSITION,
-                Some(&row.order_intent_id),
+                QUANT_STRATEGY_POSITION_LOT,
+                Some(&row.strategy_position_lot_id),
                 format!(
                     "cumulative fill regressed: shares {} -> {}, cost {} -> {}",
                     row.shares, fill.cumulative_shares, row.cost_usd, fill.cumulative_cost_usd
@@ -483,7 +508,7 @@ impl PgPositionRepository {
     }
 }
 
-impl PgPositionRepository {
+impl PgStrategyPositionLotRepository {
     /// Reduce or close the per-intent position lot from an exit fill, on the
     /// caller's connection. Average-cost: a partial exit leaves `avg_price`
     /// unchanged (the realized cost basis of the remaining shares is preserved);
@@ -492,10 +517,10 @@ impl PgPositionRepository {
         db: &impl ConnectionTrait,
         order_intent_id: &OrderIntentId,
         exit: PositionExit,
-    ) -> Result<PositionInfo, StorageError> {
+    ) -> Result<StrategyPositionLot, StorageError> {
         if !exit.shares.is_positive() {
             return Err(StorageError::invariant_violation(
-                Some(QUANT_POSITION),
+                Some(QUANT_STRATEGY_POSITION_LOT),
                 "position exit must have positive shares",
             ));
         }
@@ -507,12 +532,15 @@ impl PgPositionRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(StorageError::not_found(QUANT_POSITION, order_intent_id));
+            return Err(StorageError::not_found(
+                QUANT_STRATEGY_POSITION_LOT,
+                order_intent_id,
+            ));
         };
 
         if exit.shares > row.shares {
             return Err(StorageError::invariant_violation(
-                Some(QUANT_POSITION),
+                Some(QUANT_STRATEGY_POSITION_LOT),
                 format!(
                     "exit shares exceed position shares for intent {order_intent_id}: {} > {}",
                     exit.shares, row.shares
@@ -564,7 +592,7 @@ impl PgPositionRepository {
         db: &impl ConnectionTrait,
         order_intent_id: &OrderIntentId,
         adjustment: PositionExitReconciliation,
-    ) -> Result<PositionInfo, StorageError> {
+    ) -> Result<StrategyPositionLot, StorageError> {
         let Some(row) = Entity::find()
             .filter(Column::OrderIntentId.eq(*order_intent_id))
             .lock_exclusive()
@@ -572,11 +600,14 @@ impl PgPositionRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(StorageError::not_found(QUANT_POSITION, order_intent_id));
+            return Err(StorageError::not_found(
+                QUANT_STRATEGY_POSITION_LOT,
+                order_intent_id,
+            ));
         };
         if adjustment.shares_delta > row.shares {
             return Err(StorageError::invariant_violation(
-                Some(QUANT_POSITION),
+                Some(QUANT_STRATEGY_POSITION_LOT),
                 format!(
                     "reconciled exit delta exceeds remaining shares for intent {order_intent_id}: {} > {}",
                     adjustment.shares_delta, row.shares
@@ -592,7 +623,7 @@ impl PgPositionRepository {
         ) && adjustment.shares_delta.is_positive()
         {
             return Err(StorageError::state_conflict(
-                QUANT_POSITION,
+                QUANT_STRATEGY_POSITION_LOT,
                 Some(order_intent_id),
                 "cannot apply an additional exit fill to a closed position lot",
             ));
@@ -638,7 +669,7 @@ impl PgPositionRepository {
     }
 }
 
-impl PgPositionRepository {
+impl PgStrategyPositionLotRepository {
     /// Mark a lot `Open -> Closing` as an exit order is written ahead (idempotent:
     /// an already-`Closing` lot is left untouched; a terminal lot is a conflict).
     pub async fn mark_closing(
@@ -651,7 +682,10 @@ impl PgPositionRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(StorageError::not_found(QUANT_POSITION, order_intent_id));
+            return Err(StorageError::not_found(
+                QUANT_STRATEGY_POSITION_LOT,
+                order_intent_id,
+            ));
         };
         match row.state {
             PositionLedgerState::Closing => Ok(()),
@@ -662,7 +696,7 @@ impl PgPositionRepository {
                 Ok(())
             }
             other => Err(StorageError::state_conflict(
-                QUANT_POSITION,
+                QUANT_STRATEGY_POSITION_LOT,
                 Some(order_intent_id),
                 format!("cannot mark exit-closing from {}", other.as_str()),
             )),
@@ -670,7 +704,7 @@ impl PgPositionRepository {
     }
 }
 
-impl PgPositionRepository {
+impl PgStrategyPositionLotRepository {
     /// Revert a lot `Closing -> Open` after a failed / cancelled exit attempt so it
     /// is re-monitored (idempotent: a non-`Closing` lot is left untouched).
     pub async fn revert_lot_to_open(
@@ -697,14 +731,14 @@ impl PgPositionRepository {
 fn price_from_cost(cost_usd: Usd, shares: Shares) -> Result<Price, StorageError> {
     if shares.is_zero() {
         return Err(StorageError::invariant_violation(
-            Some(QUANT_POSITION),
+            Some(QUANT_STRATEGY_POSITION_LOT),
             "cannot compute average price from zero shares",
         ));
     }
     let price = cost_usd.inner() / shares.inner();
     if price < Decimal::ZERO {
         return Err(StorageError::invariant_violation(
-            Some(QUANT_POSITION),
+            Some(QUANT_STRATEGY_POSITION_LOT),
             "computed average price is negative",
         ));
     }
@@ -728,7 +762,7 @@ fn resolve_entry_shares(intent: &QuantOrderIntentModel, orders: &[Model]) -> Opt
     filled_entry_order(orders).map(|order| order.shares)
 }
 
-fn resolve_entry_avg_price(position: &PositionInfo, orders: &[Model]) -> Price {
+fn resolve_entry_avg_price(position: &StrategyPositionLot, orders: &[Model]) -> Price {
     if !position.avg_price.is_zero() {
         return position.avg_price;
     }
@@ -764,7 +798,7 @@ struct IntentRecommendationRow {
     recommendation_id: RecommendationId,
 }
 
-impl PgPositionRepository {
+impl PgStrategyPositionLotRepository {
     /// Resolve `order_intent_id -> recommendation_id` for a page of lots in one
     /// query, so the read view can deep-link a lot to its recommendation without an
     /// N+1 lookup per row.
@@ -796,7 +830,7 @@ impl PgPositionRepository {
     }
 }
 
-impl PgPositionRepository {
+impl PgStrategyPositionLotRepository {
     async fn intents_by_id(
         db: &impl ConnectionTrait,
         ids: &[OrderIntentId],
@@ -817,7 +851,7 @@ impl PgPositionRepository {
     }
 }
 
-impl PgPositionRepository {
+impl PgStrategyPositionLotRepository {
     async fn orders_by_intent_id(
         db: &impl ConnectionTrait,
         ids: &[OrderIntentId],

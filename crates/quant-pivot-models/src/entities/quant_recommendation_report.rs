@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     domain::quant::RepresentedRouteSet,
-    enums::quant::{AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
+    enums::quant::{AccountSource, RecommendationReportStatus, ReportKind},
     types::{
         AccountSnapshotId, ContentHash, DecisionPolicySnapshotId, EquitySnapshotId,
         MarketSelectionId, PortfolioPlanId, PortfolioScenarioArtifactId, RecommendationReportId,
@@ -28,8 +28,6 @@ pub struct Model {
     pub report_run_id: ReportRunId,
     pub report_kind: ReportKind,
     pub decision_at: DateTime<Utc>,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
-    pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub market_selection_id: MarketSelectionId,
     pub portfolio_plan_id: PortfolioPlanId,

@@ -64,17 +64,17 @@ use quant_pivot_models::{
             FeedbackRecipeTemplateInput, FeedbackRecipeTrainingSpec,
         },
         quant::{
-            AttributionSubject, ExecutionAttemptDerivation, ExecutionAttemptOutcomeInfo,
-            ExecutionAttemptSourceGraph, FeedbackCycleInfo, FeedbackCycleKey,
-            FeedbackCycleKeyInput, FeedbackStageEventInfo, FeedbackStageEventInput, LinkageOutcome,
-            LinkageSourceMetadata, LinkageUnresolvedReason, MarketLinkageDerivation,
-            MarketSelectionModel, ModelSpecInfo, ModelVersionInfo, NewAttributionArtifact,
-            NewFeedbackCycle, NewFeedbackStageEvent, NewMarketLinkage, NewPosition,
-            NewRecommendation, NewRecommendationExecutionRollup,
+            AccountExecutionFeeFact, AttributionSubject, ExecutionAttemptDerivation,
+            ExecutionAttemptOutcomeInfo, ExecutionAttemptSourceGraph, FeedbackCycleInfo,
+            FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackStageEventInfo,
+            FeedbackStageEventInput, LinkageOutcome, LinkageSourceMetadata,
+            LinkageUnresolvedReason, MarketLinkageDerivation, MarketSelectionModel, ModelSpecInfo,
+            ModelVersionInfo, NewAttributionArtifact, NewFeedbackCycle, NewFeedbackStageEvent,
+            NewMarketLinkage, NewRecommendation, NewRecommendationExecutionRollup,
             NewRecommendationExecutionRollupAttempt, NewRecommendationResolutionOutcome,
-            NewReportTransaction, PortfolioScenarioModelArtifact, PortfolioScenarioVisibility,
-            RepresentedRouteSet, ResearchJobInfo, ShadowObservationQuery,
-            report_parity_evidence_hash, report_parity_generation_hash,
+            NewReportTransaction, NewStrategyPositionLot, PortfolioScenarioModelArtifact,
+            PortfolioScenarioVisibility, RepresentedRouteSet, ResearchJobInfo,
+            ShadowObservationQuery, report_parity_evidence_hash, report_parity_generation_hash,
         },
     },
     entities::{
@@ -109,7 +109,6 @@ use quant_pivot_models::{
             Model as ShadowBindingModel,
         },
         quant_order_intent::Entity as OrderIntentEntity,
-        quant_position::{Entity as PositionEntity, Model as PositionModel},
         quant_recommendation_execution_rollup::{
             ActiveModel as ExecutionRollupActiveModel, Entity as ExecutionRollupEntity,
         },
@@ -125,6 +124,7 @@ use quant_pivot_models::{
         quant_shadow_comparison::{
             Column as ShadowComparisonColumn, Entity as ShadowComparisonEntity,
         },
+        quant_strategy_position_lot::{Entity as PositionEntity, Model as PositionModel},
         user::{Column as UserColumn, Entity as UserEntity},
     },
     enums::{
@@ -139,18 +139,18 @@ use quant_pivot_models::{
         common::{CategorySet, MarketCategory, TickSize},
         domain::{DomainFamily, DomainMetric, LinkageStatus, ResolverTier},
         execution::{
-            CapitalAllocationState, ExitReason, ExitState, PositionLedgerState, VenueOrderStatus,
+            CapitalAllocationState, ExitReason, ExitState, PositionLedgerState,
+            StrategyPositionOriginKind, VenueOrderStatus,
         },
         market::{EventStatus, MarketStatus},
         model::ModelFamily,
         quant::{
-            AccountSource, ApprovalStatus, AttributionArtifactKind, AttributionCohort,
-            CalibrationMethod, DownsideSource, EmptyReportReason, ExecutionOrderState,
+            AccountSource, AttributionArtifactKind, AttributionCohort, CalibrationMethod,
+            DownsideSource, EmptyReportReason, ExecutionAuthorityCeiling, ExecutionOrderState,
             FeedbackDecision, FeedbackDriftMetric, FeedbackEvaluationMode,
             FeedbackRecipeTemplateStatus, FeedbackStage, FeedbackStageEventKind,
-            FeedbackTriggerFamily, OrderIntentStatus, OutcomeSide, QuantRuntimeMode,
-            RecommendationStatus, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
-            ShadowBindingStatus,
+            FeedbackTriggerFamily, OrderIntentStatus, OutcomeSide, RecommendationStatus,
+            ResearchJobKind, ResearchJobResultKind, ResearchJobStatus, ShadowBindingStatus,
         },
     },
     hashing::CanonicalDigest,
@@ -159,19 +159,19 @@ use quant_pivot_models::{
         ResearchValidationConfig, SelectionConfig,
     },
     types::{
-        ArtifactUri, BookSnapshotRef, BookSnapshotSource, Bps, CatalogDecisionRef,
-        CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId, CatalogMarketIds,
-        CatalogMarketObjectId, CatalogSyncBatchId, ClobFeeDetails, ClobMarketInfoVersion,
-        ClobMarketInfoVersionId, ClobTokenDescriptor, ContentHash, DecisionCaptureEvidence,
-        DecisionPolicySnapshotId, EligibilitySummary, EventId, EvmBlockHash, EvmTransactionHash,
-        ExternalJsonDocument, FactorBreakdownEntry, FeatureVectorId, FeedbackCycleId,
-        FeedbackRecipeTemplateId, FinalizedExecutionEvidence, MarketId, MarketLinkageId,
-        ModelCandidateManifestId, ModelVersionId, OrderId, OrderIntentId, PayoutRatio, PositionId,
-        Price, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason, ReportFunnelStage,
-        ResearchJobId, ResearchProfileArtifact, ResolverVersion, RoleCode, ScaleOutState,
-        SchemaVersion, ShadowComparisonId, Shares, TokenId, Usd, UsdHours,
-        stable_name::FeatureName,
+        AccountChainExecutionId, ArtifactUri, BookSnapshotRef, BookSnapshotSource, Bps,
+        CatalogDecisionRef, CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId,
+        CatalogMarketIds, CatalogMarketObjectId, CatalogSyncBatchId, ClobFeeDetails,
+        ClobMarketInfoVersion, ClobMarketInfoVersionId, ClobTokenDescriptor, ContentHash,
+        DecisionCaptureEvidence, DecisionPolicySnapshotId, EligibilitySummary, EventId,
+        EvmBlockHash, EvmTransactionHash, ExternalJsonDocument, FactorBreakdownEntry,
+        FeatureVectorId, FeedbackCycleId, FeedbackRecipeTemplateId, FinalizedExecutionEvidence,
+        MarketId, MarketLinkageId, ModelCandidateManifestId, ModelVersionId, OrderId,
+        OrderIntentId, PayoutRatio, Price, Probability, RecommendationFactorBreakdown,
+        RecommendationId, RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason,
+        ReportFunnelStage, ResearchJobId, ResearchProfileArtifact, ResolverVersion, RoleCode,
+        ScaleOutState, SchemaVersion, ShadowComparisonId, Shares, StrategyPositionLotId, TokenId,
+        Usd, UsdHours, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::{
@@ -640,23 +640,14 @@ impl ReportBuildOptions {
                 .or_default() += sizing.hard_reserved_cash_usd;
             *route_allocation.entry(recommendation.route).or_default() +=
                 sizing.hard_reserved_cash_usd;
-            if recommendation
-                .execution_eligibility
-                .is_eligible(QuantRuntimeMode::ReportOnly)
-            {
-                eligibility.eligible_report_only += 1;
-            }
-            if recommendation
-                .execution_eligibility
-                .is_eligible(QuantRuntimeMode::SemiAuto)
-            {
-                eligibility.eligible_semi_auto += 1;
-            }
-            if recommendation
-                .execution_eligibility
-                .is_eligible(QuantRuntimeMode::AutoExecution)
-            {
-                eligibility.eligible_auto_execution += 1;
+            match recommendation.execution_eligibility.ceiling {
+                ExecutionAuthorityCeiling::AnalysisOnly => eligibility.analysis_only += 1,
+                ExecutionAuthorityCeiling::OperatorApproval => {
+                    eligibility.operator_approval += 1;
+                }
+                ExecutionAuthorityCeiling::PolicyAutomatic => {
+                    eligibility.policy_automatic += 1;
+                }
             }
         }
         let is_empty = published_count == 0;
@@ -2177,9 +2168,11 @@ impl ClosedPositionSeed<'_> {
     async fn insert(self, transaction: &DatabaseTransaction) -> Result<PositionModel> {
         let proceeds_usd = self.entry_shares * Price::new(self.exit_price);
         let realized_pnl_usd = proceeds_usd - self.entry_cost_usd;
-        let mut active = NewPosition {
-            position_id: PositionId::from_v7(),
-            order_intent_id: self.intent_id,
+        let mut active = NewStrategyPositionLot {
+            strategy_position_lot_id: StrategyPositionLotId::from_v7(),
+            origin_kind: StrategyPositionOriginKind::SystemIntent,
+            order_intent_id: Some(self.intent_id),
+            recovery_incident_id: None,
             execution_account_id: self.ids.execution_account,
             token_id: self.token_id.clone(),
             market_id: self.market_id.clone(),
@@ -3019,7 +3012,6 @@ impl PreparedCohort {
             .context("closure source set is unexpectedly empty")?
             .source_id;
         let mut options = ReportBuildOptions::published_single(&ids);
-        options.runtime_mode = QuantRuntimeMode::AutoExecution;
         options.account_capital_usd = Some(context.account_capital_usd);
         let recommendations = build_cohort_recommendations(
             &sources,
@@ -3145,14 +3137,11 @@ async fn seed_execution_attempt(
     let mut intent = new_order_intent(
         intent_id,
         ids,
-        OrderIntentStatus::ApprovedByPolicy,
-        ApprovalStatus::NotRequired,
-        QuantRuntimeMode::AutoExecution,
-        None,
+        OrderIntentStatus::Authorized,
+        Some(approved_at),
     );
     intent.recommendation_id = recommendation_id;
     intent.condition_instance_id = condition.condition_instance_id;
-    intent.approved_at = Some(approved_at);
     intent.expires_at = terminal_at + Duration::hours(1);
     intent.entry_order_json.token_id = token_id.clone();
     intent.entry_order_json.valid_until = terminal_at + Duration::hours(1);
@@ -3258,6 +3247,26 @@ async fn seed_execution_attempt(
     .insert(&transaction)
     .await?;
 
+    let account_execution_fees = [
+        (&entry_reconciliation_model, &entry_model),
+        (&exit_reconciliation_model, &exit_model),
+    ]
+    .into_iter()
+    .map(|(reconciliation, order)| {
+        let source_event_hash =
+            CanonicalDigest::content_hash_json(&reconciliation.execution_order_id)
+                .expect("closure fee source hash");
+        AccountExecutionFeeFact {
+            account_chain_execution_id: AccountChainExecutionId::from_content_hash(
+                &source_event_hash,
+            ),
+            execution_order_id: reconciliation.execution_order_id,
+            exact_fee_usd: order.prepared_order_json.expected_fee,
+            source_event_hash,
+            available_at: reconciliation.updated_at,
+        }
+    })
+    .collect();
     let graph = ExecutionAttemptSourceGraph {
         recommendation_id,
         market_id,
@@ -3268,6 +3277,7 @@ async fn seed_execution_attempt(
             entry_reconciliation_model.into(),
             exit_reconciliation_model.into(),
         ],
+        account_execution_fees,
         position: Some(position_model.into()),
         settlement_lot: None,
     };

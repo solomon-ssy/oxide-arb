@@ -554,7 +554,7 @@ impl VenueIncentiveReconciliationService {
         Ok(NewVenueIncentiveEvent {
             venue_incentive_event_id: VenueIncentiveEventId::from_v7(),
             execution_account_id: self.execution_account_id,
-            execution_fill_id: None,
+            clob_trade_observation_id: None,
             market_id: Some(award.market_id.clone()),
             kind: VenueIncentiveKind::MakerRebate,
             stage: VenueIncentiveStage::VenueReportedAccrual,
@@ -601,7 +601,7 @@ impl VenueIncentiveReconciliationService {
         Ok(NewVenueIncentiveEvent {
             venue_incentive_event_id: VenueIncentiveEventId::from_v7(),
             execution_account_id: self.execution_account_id,
-            execution_fill_id: None,
+            clob_trade_observation_id: None,
             market_id: credit.market_id.clone(),
             kind,
             stage: VenueIncentiveStage::WalletCredited,

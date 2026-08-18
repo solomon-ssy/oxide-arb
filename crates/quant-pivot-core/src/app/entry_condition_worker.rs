@@ -25,7 +25,7 @@ use crate::execution::{
 };
 
 impl AppContext {
-    /// Register the condition evaluator in every runtime mode. `ReportOnly` uses
+    /// Register the condition evaluator under every authorization policy. Analysis-only recommendations use
     /// the same durable shadow instances and never signs or submits orders.
     pub fn register_entry_condition_worker(&self, runner: &mut AppRunner) {
         let conditions =

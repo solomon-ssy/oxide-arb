@@ -6,7 +6,6 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, feedback::FeedbackError};
 use quant_pivot_models::{
     domain::{
-        governance::RuntimeControlInfo,
         ports::{
             BootstrapQualityGateEvidence, BootstrapQualityGateInput, CandidateQualityGateEvidence,
             ModelGovernancePort,
@@ -20,9 +19,7 @@ use quant_pivot_models::{
             RouteContractHash, TrainingDatasetInfo,
         },
     },
-    enums::{
-        model::ServingEligibility, quant::QuantRuntimeMode, runtime_config::ConfigResourceKind,
-    },
+    enums::{model::ServingEligibility, runtime_config::ConfigResourceKind},
     runtime_config::{ActivePolicyBundle, BuyModelRoute, PortfolioScenarioModelArtifactBinding},
     types::{ModelVersionId, ServingAuthority, backtest::CpcvFoldValidationRegime},
 };
@@ -117,7 +114,7 @@ impl ModelRouteBootstrapService {
             .current_runtime()
             .await
             .map_err(Self::route_error)?;
-        Self::validate_report_controls(&bundle, &runtime)?;
+        Self::validate_report_controls(&bundle)?;
         let model = self
             .deps
             .route_evidence
@@ -229,7 +226,7 @@ impl ModelRouteBootstrapService {
                 expected_snapshot_hash: bundle.snapshot_hash,
                 expected_model_routing_revision_id,
                 expected_runtime_control_revision: runtime.revision,
-                current_runtime_mode: runtime.quant_runtime_mode,
+                current_entry_authorization_policy: runtime.entry_authorization_policy,
                 non_route_policy_hash: projection.non_route_policy_hash(),
                 evaluated_at,
             })?;
@@ -239,15 +236,7 @@ impl ModelRouteBootstrapService {
         })
     }
 
-    fn validate_report_controls(
-        bundle: &ActivePolicyBundle,
-        runtime: &RuntimeControlInfo,
-    ) -> QuantResult<()> {
-        if runtime.quant_runtime_mode != QuantRuntimeMode::ReportOnly {
-            return Err(Self::invalid(
-                "first-route bootstrap is allowed only in ReportOnly",
-            ));
-        }
+    fn validate_report_controls(bundle: &ActivePolicyBundle) -> QuantResult<()> {
         if !bundle.snapshot.recommendation.reports.ad_hoc_report_enabled {
             return Err(Self::invalid(
                 "first-route bootstrap requires governed ad-hoc reports to be enabled",
@@ -308,7 +297,7 @@ impl ModelRouteBootstrapService {
             .resolve_builtin_research_profile()
             .map_err(Self::invalid)?;
         let required_regime = match profile.spec.serving_authority {
-            ServingAuthority::ReportOnlyWithLiveL2 => CpcvFoldValidationRegime::PredictiveUtility,
+            ServingAuthority::AnalysisOnlyWithLiveL2 => CpcvFoldValidationRegime::PredictiveUtility,
             ServingAuthority::ExecutionEligible => CpcvFoldValidationRegime::PortfolioEconomics,
         };
         let fit_seal = self
@@ -331,10 +320,10 @@ impl ModelRouteBootstrapService {
         }
         .validate()?;
         let validation_evidence = match profile.spec.serving_authority {
-            ServingAuthority::ReportOnlyWithLiveL2 => {
+            ServingAuthority::AnalysisOnlyWithLiveL2 => {
                 if fold_regime != CpcvFoldValidationRegime::PredictiveUtility {
                     return Err(Self::invalid(
-                        "ReportOnlyWithLiveL2 bootstrap requires predictive CPCV evidence",
+                        "AnalysisOnlyWithLiveL2 bootstrap requires predictive CPCV evidence",
                     ));
                 }
                 ModelBootstrapValidationEvidence::PredictiveCpcv {
@@ -441,7 +430,7 @@ impl ModelRouteBootstrapService {
                 )));
             }
             let contract = PromotedRouteContract::from_version(route, &route_model)?;
-            if contract.serving_authority != ServingAuthority::ReportOnlyWithLiveL2 {
+            if contract.serving_authority != ServingAuthority::AnalysisOnlyWithLiveL2 {
                 return Err(Self::invalid(
                     "bootstrap reference scenario cannot mix execution-eligible and L2-free Routes",
                 ));

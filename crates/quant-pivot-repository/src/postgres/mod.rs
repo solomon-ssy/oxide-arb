@@ -28,6 +28,7 @@ pub use governance::{
     runtime_config, runtime_control,
 };
 pub use quant::{
+    PgAccountChainExecutionRepository, PgAccountPauseRepository, PgAccountRecoveryRepository,
     PgAccountSnapshotRepository, PgAttributionArtifactRepository, PgBacktestPathSetRepository,
     PgBacktestReportRepository, PgBasisAlertRepository, PgCalibrationArtifactRepository,
     PgCapitalAllocationRepository, PgDomainProjectionRepository, PgDomainSourceCursorRepository,
@@ -40,14 +41,14 @@ pub use quant::{
     PgModelCandidateManifestRepository, PgModelComparisonReportRepository,
     PgModelGovernanceAuditRepository, PgModelRegistryRepository, PgModelRouteBootstrapRepository,
     PgModelRoutePromotionRepository, PgModelRouteShadowBindingRepository, PgModelRunRepository,
-    PgOrderIntentRepository, PgPortfolioPlanRepository, PgPositionRepository,
-    PgPromotionPermitRepository, PgRecommendationExecutionRollupRepository,
-    PgRecommendationReportRepository, PgRecommendationRepository,
-    PgRecommendationResolutionOutcomeRepository, PgReconciliationRepository, PgReportRunRepository,
-    PgResearchJobRepository, PgResearchReadinessEvidenceRepository, PgReservedCapitalRepository,
+    PgOrderIntentRepository, PgPortfolioPlanRepository, PgPromotionPermitRepository,
+    PgRecommendationExecutionRollupRepository, PgRecommendationReportRepository,
+    PgRecommendationRepository, PgRecommendationResolutionOutcomeRepository,
+    PgReconciliationRepository, PgReportRunRepository, PgResearchJobRepository,
+    PgResearchReadinessEvidenceRepository, PgReservedCapitalRepository,
     PgResolutionObservationRepository, PgRuntimeActivityRepository, PgShadowComparisonRepository,
-    PgSourceSliceRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
-    PgVenueIncentiveRepository,
+    PgSourceSliceRepository, PgStrategyPositionLotRepository, PgTradePolicyRepository,
+    PgTrainingDatasetRepository, PgVenueIncentiveRepository,
 };
 pub use rbac::{
     PgCasbinAdapter, PgMenuRepository, PgRoleMenuRepository, PgRolePermissionRepository,

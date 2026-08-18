@@ -10,7 +10,7 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     enums::quant::AccountSource,
-    types::{ExposureBreakdown, PositionSnapshot, Usd},
+    types::{ExposureBreakdown, Usd, VenuePositionSnapshot},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -36,7 +36,7 @@ pub struct AccountSnapshot {
     /// Capital reserved by pending intents at decision time.
     pub reserved_usd: Usd,
     /// Held positions marked to the venue price.
-    pub positions: Vec<PositionSnapshot>,
+    pub positions: Vec<VenuePositionSnapshot>,
     /// Net exposure aggregated from `positions`.
     pub exposures: ExposureBreakdown,
 }
@@ -51,7 +51,7 @@ impl AccountSnapshot {
         capital_base_usd: Usd,
         available_usd: Usd,
         reserved_usd: Usd,
-        positions: Vec<PositionSnapshot>,
+        positions: Vec<VenuePositionSnapshot>,
     ) -> Self {
         let exposures = ExposureBreakdown::from_positions(&positions);
         Self {

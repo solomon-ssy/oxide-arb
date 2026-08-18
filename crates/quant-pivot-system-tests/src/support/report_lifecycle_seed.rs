@@ -204,7 +204,6 @@ pub async fn seal_report_facts(
         notification: ReportFactNotificationV2 {
             kind: report.report_kind,
             status: report.status.as_str().to_owned(),
-            runtime_mode: report.runtime_mode,
             published_count: report.summary_json.published_recommendation_count,
             total_hard_reserved_cash_usd: report.summary_json.total_hard_reserved_cash_usd,
             top3: notification_top3,

@@ -562,7 +562,6 @@ fn notification_payload(bundle: &ReportFactBundleV2) -> ReportNotificationPayloa
         report_id: bundle.recommendation_report_id,
         kind: bundle.notification.kind,
         status: bundle.notification.status.clone(),
-        runtime_mode: bundle.notification.runtime_mode,
         published_count: bundle.notification.published_count,
         total_hard_reserved_cash_usd: bundle.notification.total_hard_reserved_cash_usd,
         top3: bundle

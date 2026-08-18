@@ -19,8 +19,8 @@ use quant_pivot_models::{
         common::{MarketCategory, TickSize},
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
-            EmptyReportReason, EntryConditionState, FillRequirement, IneligibilityReason,
-            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, ReportKind,
+            EmptyReportReason, EntryConditionState, ExecutionAuthorityCeiling, FillRequirement,
+            IneligibilityReason, RecommendationReportStatus, RecommendationStatus, ReportKind,
         },
         rbac::ResourceType,
     },
@@ -66,7 +66,6 @@ pub struct ComposeReportInput<'a> {
     pub published_at: DateTime<Utc>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config: &'a DecisionPolicySnapshot,
-    pub runtime_mode: QuantRuntimeMode,
     pub selection: &'a MarketSelectionSnapshot,
     pub account: &'a AccountSnapshot,
     pub account_snapshot: NewAccountSnapshot,
@@ -132,7 +131,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             if composed
                 .recommendation
                 .execution_eligibility
-                .is_eligible(QuantRuntimeMode::AutoExecution)
+                .allows_policy()
             {
                 auto_authorized_total += planned.tier.entry_execution.hard_reserved_cash_usd();
             }
@@ -157,7 +156,6 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             report_run_id: input.report_run_id,
             report_kind: ReportKind::TopN,
             decision_at: input.decision_at,
-            runtime_mode: input.runtime_mode,
             decision_policy_snapshot_id: input.decision_policy_snapshot_id,
             market_selection_id: input.selection.market_selection_id,
             portfolio_plan_id: input.portfolio_plan.portfolio_plan_id,
@@ -212,7 +210,6 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         })?;
         let notification = report_notification(
             &report_id,
-            input.runtime_mode,
             &summary,
             &recommendations,
             input.empty.as_ref().map(|empty| empty.reason),
@@ -481,13 +478,13 @@ fn compose_recommendation(
         PlannedRecommendationContract::Bootstrap { .. }
     );
     let auto_allowed = !bootstrap
-        && auto_execution_allowed(
+        && policy_automatic_allowed(
             planned.rank,
             sizing.hard_reserved_cash_usd,
             auto_authorized_before,
             input.runtime_config,
         );
-    let risk_envelope = risk_envelope(planned, input.runtime_config, auto_allowed)?;
+    let risk_envelope = risk_envelope(planned, input.runtime_config)?;
     let entry = immediate_entry_plan(planned, input.published_at, valid_until)?;
     let exit =
         recommendation_exit_plan(input.decision_at, capture.market_context.tick_size, planned)?;
@@ -791,7 +788,7 @@ fn recommendation_exit_plan(
                 reference_horizon_secs: *reference_horizon_secs,
                 manual_review_at: instant_plus_secs(as_of, *reference_horizon_secs)?,
                 settlement_value_is_terminal: true,
-                guidance: "ReportOnly bootstrap: reassess manually at the reference horizon or market settlement; no executable exit thresholds are authorized"
+                guidance: "Analysis-only bootstrap: reassess manually at the reference horizon or market settlement; no executable exit thresholds are authorized"
                     .to_owned(),
             },
         });
@@ -863,7 +860,6 @@ fn tick_aligned_price(value: Decimal, tick_size: TickSize) -> Price {
 fn risk_envelope(
     planned: &PlannedReportRecommendation,
     config: &DecisionPolicySnapshot,
-    auto_allowed: bool,
 ) -> QuantResult<RiskEnvelope> {
     let limits = &config.execution_risk.portfolio.exposure_limits;
     let tail = &config.execution_risk.portfolio.tail_risk;
@@ -897,20 +893,20 @@ fn risk_envelope(
         cvar_contribution_usd: input.cvar_contribution_usd,
         portfolio_cvar_cap_usd: input.portfolio_cvar_cap_usd,
         maximum_scenario_loss_cap_usd: input.maximum_scenario_loss_cap_usd,
-        requires_approval: !auto_allowed,
-        auto_execution_allowed: auto_allowed,
         risk_notes: Vec::new(),
         envelope_hash,
     })
 }
 
-fn auto_execution_allowed(
+fn policy_automatic_allowed(
     rank: u32,
     hard_reserved_cash_usd: Usd,
     already_authorized: Usd,
     config: &DecisionPolicySnapshot,
 ) -> bool {
-    let policy = &config.execution_automation_policy.auto_execution;
+    let policy = &config
+        .execution_authorization_policy
+        .policy_automatic_limits;
     rank <= policy.max_orders_per_report
         && already_authorized
             .inner()
@@ -925,25 +921,23 @@ fn execution_eligibility(
 ) -> ExecutionEligibility {
     if bootstrap {
         return ExecutionEligibility {
-            eligible_modes: vec![QuantRuntimeMode::ReportOnly],
-            ineligibility_reasons: vec![IneligibilityReason::ReportOnlyMode],
-            approval_required: true,
-            auto_policy_id: None,
+            ceiling: ExecutionAuthorityCeiling::AnalysisOnly,
+            blockers: Vec::new(),
+            policy_binding: None,
         };
     }
-    let mut eligible_modes = vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto];
-    if auto_allowed {
-        eligible_modes.push(QuantRuntimeMode::AutoExecution);
-    }
     ExecutionEligibility {
-        eligible_modes,
-        ineligibility_reasons: if auto_allowed {
+        ceiling: if auto_allowed {
+            ExecutionAuthorityCeiling::PolicyAutomatic
+        } else {
+            ExecutionAuthorityCeiling::OperatorApproval
+        },
+        blockers: if auto_allowed {
             Vec::new()
         } else {
             vec![IneligibilityReason::AutomationCapExceeded]
         },
-        approval_required: !auto_allowed,
-        auto_policy_id: auto_allowed.then(|| policy_snapshot_id.to_string()),
+        policy_binding: auto_allowed.then(|| policy_snapshot_id.to_string()),
     }
 }
 
@@ -1095,23 +1089,10 @@ fn rejection_summary(input: &ComposeReportInput<'_>) -> Vec<RejectionReasonCount
 fn eligibility_summary(recommendations: &[NewRecommendation]) -> EligibilitySummary {
     let mut summary = EligibilitySummary::default();
     for recommendation in recommendations {
-        if recommendation
-            .execution_eligibility
-            .is_eligible(QuantRuntimeMode::ReportOnly)
-        {
-            summary.eligible_report_only += 1;
-        }
-        if recommendation
-            .execution_eligibility
-            .is_eligible(QuantRuntimeMode::SemiAuto)
-        {
-            summary.eligible_semi_auto += 1;
-        }
-        if recommendation
-            .execution_eligibility
-            .is_eligible(QuantRuntimeMode::AutoExecution)
-        {
-            summary.eligible_auto_execution += 1;
+        match recommendation.execution_eligibility.ceiling {
+            ExecutionAuthorityCeiling::AnalysisOnly => summary.analysis_only += 1,
+            ExecutionAuthorityCeiling::OperatorApproval => summary.operator_approval += 1,
+            ExecutionAuthorityCeiling::PolicyAutomatic => summary.policy_automatic += 1,
         }
     }
     summary
@@ -1169,7 +1150,6 @@ fn recommendation_events(
 
 fn report_notification(
     report_id: &RecommendationReportId,
-    runtime_mode: QuantRuntimeMode,
     summary: &ReportSummary,
     recommendations: &[NewRecommendation],
     empty_reason: Option<EmptyReportReason>,
@@ -1178,7 +1158,6 @@ fn report_notification(
         report_id: *report_id,
         kind: ReportKind::TopN,
         status: RecommendationReportStatus::Published.to_string(),
-        runtime_mode,
         published_count: count_u32(recommendations.len(), "notification count")?,
         total_hard_reserved_cash_usd: summary.total_hard_reserved_cash_usd,
         top3: recommendations

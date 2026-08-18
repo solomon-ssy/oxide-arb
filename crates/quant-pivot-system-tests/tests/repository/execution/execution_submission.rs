@@ -14,7 +14,7 @@ use quant_pivot_models::{
     domain::{
         governance::NewOperationLog,
         quant::{
-            ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalReconcileSettlement,
+            ApproveOrderIntentOutcome, AuthorizeOrderIntent, CapitalReconcileSettlement,
             CapitalSettlement, CumulativePositionFill, ExecutionIdentityEnrichment,
             ExecutionIdentityRefs, ExecutionTradeObservation, ExitLedgerWrite,
             NewCapitalAllocation, NewExecutionOrder, NewFeatureParityState, NewMarketSelection,
@@ -34,48 +34,48 @@ use quant_pivot_models::{
     enums::{
         common::{MarketCategory, OrderType, Side},
         execution::{
-            CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, OrderIntentKind,
-            OrderTypeKind, PositionLedgerState, ReconciliationEvidenceKind, ReconciliationResult,
+            CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, OrderTypeKind,
+            PositionLedgerState, ReconciliationEvidenceKind, ReconciliationResult,
             VenueOrderStatus, VenueTradeStatus,
         },
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, EntryConditionState, ExecutionOrderState,
+            AccountSource, AuthorizationKind, EntryConditionState, ExecutionOrderState,
             ExitSettlementMode, FeatureParityLatchState, FeatureParityStateTransition,
-            OrderIntentStatus, OutcomeSide, QuantRuntimeMode, RecommendationReportStatus,
-            RecommendationStatus, RedeemPolicy, ReportFactDeliveryStatus, ReportKind,
-            ReportRunStatus, ReportRunTerminalReason, ReportTriggerKind,
+            OrderIntentStatus, OutcomeSide, RecommendationReportStatus, RecommendationStatus,
+            RedeemPolicy, ReportFactDeliveryStatus, ReportKind, ReportRunStatus,
+            ReportRunTerminalReason, ReportTriggerKind,
         },
         rbac::ResourceType,
     },
     types::{
-        AccountSnapshotId, Bps, CalibrationArtifactId, CapitalAllocationId, ContentHash,
-        DecisionPolicySnapshotId, EntryConditionInstanceId, EntryMakerRebateTerms, EntryOrderSpec,
-        EventId, EvmTransactionHash, ExecutionAccountId, ExecutionOrderId, ExitPolicySpec,
-        FeatureParityStateId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
-        OperationDetailDocument, OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId,
-        OrderIntentId, PendingScaleOut, PortfolioPlanId, Price, Probability, RecommendationId,
-        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId, ReportDataQualitySnapshotId, ReportRunId, ReportTriggerKey, RoleCode,
-        SelectionExclusionSummary, Shares, ThesisInvalidationPolicy, TokenId,
-        TradePolicyCohortProvenance, Usd, UserId, VenueOrderAmount, VenueTradeId, WorkerId,
-        factor::FactorServingPlane,
+        AccountSnapshotId, AuthorizationEvidence, Bps, CalibrationArtifactId, CapitalAllocationId,
+        ContentHash, DecisionPolicySnapshotId, EntryConditionInstanceId, EntryMakerRebateTerms,
+        EntryOrderSpec, EventId, EvmTransactionHash, ExecutionAccountId, ExecutionOrderId,
+        ExitPolicySpec, FeatureParityStateId, MarketId, MarketSelectionId, ModelRunId,
+        ModelVersionId, OperationDetailDocument, OperationLogId, OpportunisticExitPolicy,
+        OrderAmount, OrderId, OrderIntentId, PendingScaleOut, PortfolioPlanId, Price, Probability,
+        RecommendationId, RecommendationReportId, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId, ReportRunId,
+        ReportTriggerKey, RoleCode, SelectionExclusionSummary, Shares, ThesisInvalidationPolicy,
+        TokenId, TradePolicyCohortProvenance, Usd, UserId, VenueOrderAmount, VenueTradeId,
+        WorkerId, factor::FactorServingPlane,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgCapitalAllocationRepository, PgEntryConditionRepository, PgEventRepository,
         PgExecutionSubmissionRepository, PgMarketRepository, PgMarketSelectionRepository,
-        PgOrderIntentRepository, PgPolicyRepository, PgPositionRepository,
-        PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
-        PgReportRunRepository,
+        PgOrderIntentRepository, PgPolicyRepository, PgRecommendationReportRepository,
+        PgRecommendationRepository, PgReconciliationRepository, PgReportRunRepository,
+        PgStrategyPositionLotRepository,
     },
     traits::{
         CapitalAllocationRepository, EntryConditionRepository, EventRepository,
         ExecutionSubmissionRepository, MarketRepository, MarketSelectionRepository,
-        OrderIntentRepository, PolicyRepository, PositionRepository,
-        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-        ReportRunRepository,
+        OrderIntentRepository, PolicyRepository, RecommendationReportRepository,
+        RecommendationRepository, ReconciliationRepository, ReportRunRepository,
+        StrategyPositionLotRepository,
     },
 };
 use quant_pivot_system_tests::{
@@ -209,10 +209,12 @@ pub async fn concurrent_approval_one_truth() {
     let (first, second) = tokio::join!(
         first_repo.approve(
             &intent_id,
-            ApproveOrderIntent {
-                approved_by: UserId::from_v7(),
-                approval_reason: "first concurrent approval".to_owned(),
-                approved_at: now,
+            AuthorizeOrderIntent {
+                evidence: AuthorizationEvidence::OperatorApproval {
+                    operator_id: UserId::from_v7(),
+                    reason: "first concurrent approval".to_owned(),
+                    authorized_at: now,
+                },
             },
             Some(first_entry),
             Some(Usd::new(dec!(48))),
@@ -220,10 +222,12 @@ pub async fn concurrent_approval_one_truth() {
         ),
         second_repo.approve(
             &intent_id,
-            ApproveOrderIntent {
-                approved_by: UserId::from_v7(),
-                approval_reason: "second concurrent approval".to_owned(),
-                approved_at: now,
+            AuthorizeOrderIntent {
+                evidence: AuthorizationEvidence::OperatorApproval {
+                    operator_id: UserId::from_v7(),
+                    reason: "second concurrent approval".to_owned(),
+                    authorized_at: now,
+                },
             },
             Some(second_entry),
             Some(Usd::new(dec!(42))),
@@ -248,8 +252,11 @@ pub async fn concurrent_approval_one_truth() {
         .await
         .expect("load approved intent")
         .expect("approved intent");
-    assert_eq!(intent.status, OrderIntentStatus::Approved);
-    assert_eq!(intent.approval_status, ApprovalStatus::Approved);
+    assert_eq!(intent.status, OrderIntentStatus::Authorized);
+    assert_eq!(
+        intent.authorization_kind,
+        Some(AuthorizationKind::OperatorApproval)
+    );
     assert_eq!(intent.entry_order_json.amount, expected_amount);
 
     let capital = PgCapitalAllocationRepository::new(db.clone())
@@ -1082,7 +1089,7 @@ pub async fn revert_claim_restores_intent() {
         .revert_claim(&intent_id)
         .await
         .expect("revert claim");
-    assert_eq!(reverted.status, OrderIntentStatus::ApprovedByPolicy);
+    assert_eq!(reverted.status, OrderIntentStatus::Authorized);
 }
 
 pub async fn partial_fill_splits_locked() {
@@ -1155,7 +1162,7 @@ pub async fn position_upsert_weighted_cost() {
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
-    let position_repo = PgPositionRepository::new(db.clone());
+    let position_repo = PgStrategyPositionLotRepository::new(db.clone());
 
     // Two fills of the *same* entry intent merge into one lot (weighted average).
     let mut first = position_fill(&ids, &intent_id);
@@ -1241,7 +1248,7 @@ pub async fn full_fill_writes_position() {
     assert_eq!(capital.spent_usd, Usd::new(NOTIONAL));
     assert_eq!(capital.released_usd, Usd::ZERO);
 
-    let position = PgPositionRepository::new(db.clone())
+    let position = PgStrategyPositionLotRepository::new(db.clone())
         .find_by_intent(&intent_id)
         .await
         .expect("position")
@@ -1638,7 +1645,7 @@ pub async fn ambiguous_holds_capital_reconciliation() {
 
     // No position is written on an unconfirmed submission.
     assert!(
-        PgPositionRepository::new(db.clone())
+        PgStrategyPositionLotRepository::new(db.clone())
             .find_by_intent(&intent_id)
             .await
             .expect("position")
@@ -1812,18 +1819,12 @@ fn new_pending_intent_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> NewOrd
         order_intent_id,
         recommendation_id: ids.recommendation,
         execution_account_id: execution_pg_seed::fixture_execution_account().execution_account_id,
-        runtime_mode: QuantRuntimeMode::SemiAuto,
         decision_policy_snapshot_id: ids.decision_policy_snapshot,
         model_version_id: ids.model_version,
         research_profile_artifact_id: fixture_profile_ref().artifact_id(),
-        intent_kind: OrderIntentKind::Buy,
-        status: OrderIntentStatus::PendingApproval,
-        approval_status: ApprovalStatus::Pending,
-        approved_by: None,
-        approval_reason: None,
-        approved_at: None,
-        policy_id: None,
-        policy_hash: None,
+        status: OrderIntentStatus::PendingAuthorization,
+        authorization_kind: None,
+        authorization_evidence: None,
         status_reason: None,
         admission_trace_ref: None,
         condition_instance_id: ids.condition_instance,
@@ -1934,10 +1935,6 @@ fn pending_recon_row(eo: &ExecutionOrderId, intent: &OrderIntentId) -> NewReconc
         expected_cash_delta_usd: None,
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: None,
-        derived_fee_usd: None,
-        settled_fee_usd: None,
-        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     }
@@ -1978,10 +1975,6 @@ fn filled_write() -> ReconciliationLedgerWrite {
         expected_cash_delta_usd: None,
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: None,
-        derived_fee_usd: None,
-        settled_fee_usd: None,
-        fee_delta_usd: None,
         resolved_by: Some("system:reconciliation_worker".to_owned()),
         resolved_at: Some(Utc::now()),
     }
@@ -2010,7 +2003,7 @@ pub async fn reconcile_ambiguous_writes_position() {
     assert_eq!(capital.state, CapitalAllocationState::Spent);
     assert_eq!(capital.spent_usd, Usd::new(NOTIONAL));
 
-    let position = PgPositionRepository::new(db.clone())
+    let position = PgStrategyPositionLotRepository::new(db.clone())
         .find_by_intent(&intent_id)
         .await
         .expect("position")
@@ -2056,10 +2049,6 @@ pub async fn reconcile_ambiguous_not_capital() {
         expected_cash_delta_usd: None,
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: None,
-        derived_fee_usd: None,
-        settled_fee_usd: None,
-        fee_delta_usd: None,
         resolved_by: Some("system:reconciliation_worker".to_owned()),
         resolved_at: Some(Utc::now()),
     };
@@ -2077,7 +2066,7 @@ pub async fn reconcile_ambiguous_not_capital() {
     assert_eq!(capital.state, CapitalAllocationState::Released);
     assert_eq!(capital.released_usd, Usd::new(NOTIONAL));
     assert!(
-        PgPositionRepository::new(db.clone())
+        PgStrategyPositionLotRepository::new(db.clone())
             .find_by_intent(&intent_id)
             .await
             .expect("position")
@@ -2112,10 +2101,6 @@ pub async fn reconcile_unresolvable_impairs_ambiguous() {
         expected_cash_delta_usd: None,
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: None,
-        derived_fee_usd: None,
-        settled_fee_usd: None,
-        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     };
@@ -2178,10 +2163,6 @@ pub async fn reconcile_partial_writes_position() {
         expected_cash_delta_usd: None,
         venue_cash_delta_usd: Some(Usd::new(-PARTIAL_SPENT)),
         realized_pnl_usd: None,
-        expected_fee_usd: Some(Usd::new(PARTIAL_SPENT - PARTIAL_SHARES * dec!(0.6))),
-        derived_fee_usd: None,
-        settled_fee_usd: None,
-        fee_delta_usd: None,
         resolved_by: Some("system:reconciliation_worker".to_owned()),
         resolved_at: Some(Utc::now()),
     };
@@ -2218,7 +2199,7 @@ pub async fn reconcile_partial_writes_position() {
         "unfilled remainder must be released on partial reconciliation",
     );
 
-    let position = PgPositionRepository::new(db.clone())
+    let position = PgStrategyPositionLotRepository::new(db.clone())
         .find_by_intent(&intent_id)
         .await
         .expect("position")
@@ -2256,7 +2237,7 @@ pub async fn reconcile_correction_is_idempotent() {
         .expect("row");
     assert_eq!(capital.spent_usd, Usd::new(NOTIONAL));
 
-    let position = PgPositionRepository::new(db.clone())
+    let position = PgStrategyPositionLotRepository::new(db.clone())
         .find_by_intent(&intent_id)
         .await
         .expect("position")
@@ -2318,10 +2299,6 @@ pub async fn operator_resolve_impaired_capital() {
                 expected_cash_delta_usd: None,
                 venue_cash_delta_usd: None,
                 realized_pnl_usd: None,
-                expected_fee_usd: None,
-                derived_fee_usd: None,
-                settled_fee_usd: None,
-                fee_delta_usd: None,
                 resolved_by: None,
                 resolved_at: None,
             },
@@ -2452,10 +2429,6 @@ fn reconciliation_row(
         expected_cash_delta_usd: None,
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: None,
-        derived_fee_usd: None,
-        settled_fee_usd: None,
-        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     }
@@ -2473,18 +2446,16 @@ async fn seed_approved_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderInt
                 recommendation_id: ids.recommendation,
                 execution_account_id: execution_pg_seed::fixture_execution_account()
                     .execution_account_id,
-                runtime_mode: QuantRuntimeMode::AutoExecution,
                 decision_policy_snapshot_id: ids.decision_policy_snapshot,
                 model_version_id: ids.model_version,
                 research_profile_artifact_id: fixture_profile_ref().artifact_id(),
-                intent_kind: OrderIntentKind::Buy,
-                status: OrderIntentStatus::ApprovedByPolicy,
-                approval_status: ApprovalStatus::NotRequired,
-                approved_by: None,
-                approval_reason: Some("policy".to_owned()),
-                approved_at: Some(Utc::now()),
-                policy_id: Some("auto".to_owned()),
-                policy_hash: None,
+                status: OrderIntentStatus::Authorized,
+                authorization_kind: Some(AuthorizationKind::ActivePolicy),
+                authorization_evidence: Some(AuthorizationEvidence::ActivePolicy {
+                    decision_policy_snapshot_id: ids.decision_policy_snapshot,
+                    policy_hash: content_hash('f'),
+                    authorized_at: Utc::now(),
+                }),
                 status_reason: None,
                 admission_trace_ref: None,
                 condition_instance_id: ids.condition_instance,
@@ -3066,7 +3037,7 @@ pub async fn exit_full_releases_pnl() {
         )
         .await
         .expect("exit order");
-    let position = PgPositionRepository::new(db.clone())
+    let position = PgStrategyPositionLotRepository::new(db.clone())
         .find_by_intent(&intent_id)
         .await
         .expect("position")
@@ -3110,7 +3081,7 @@ pub async fn exit_full_releases_pnl() {
         .expect("row");
     assert_eq!(capital.state, CapitalAllocationState::Released);
 
-    let position = PgPositionRepository::new(db.clone())
+    let position = PgStrategyPositionLotRepository::new(db.clone())
         .find_by_intent(&intent_id)
         .await
         .expect("position")
@@ -3177,7 +3148,7 @@ pub async fn exit_partial_keeps_lot() {
         .expect("row");
     assert_eq!(capital.state, CapitalAllocationState::Spent);
 
-    let position = PgPositionRepository::new(db.clone())
+    let position = PgStrategyPositionLotRepository::new(db.clone())
         .find_by_intent(&intent_id)
         .await
         .expect("position")

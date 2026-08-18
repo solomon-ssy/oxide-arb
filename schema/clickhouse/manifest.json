@@ -4122,122 +4122,6 @@
       ]
     },
     {
-      "name": "quant_position_event",
-      "engine": "MergeTree",
-      "engine_full": "MergeTree ORDER BY (market_id, token_id, event_time, ingestion_time) SETTINGS index_granularity = 8192",
-      "partition_key": "",
-      "sorting_key": "market_id, token_id, event_time, ingestion_time",
-      "primary_key": "market_id, token_id, event_time, ingestion_time",
-      "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_position_event (`event_time` DateTime64(3, 'UTC'), `position_id` String, `order_intent_id` String, `market_id` String, `token_id` String, `event_kind` Enum8('submitted' = 1, 'submission_result' = 2, 'exit_submitted' = 3, 'exit_submission_result' = 4, 'reconciled' = 5, 'operator_resolved' = 6, 'unresolvable' = 7, 'settlement_redeem_confirmed' = 8, 'opened' = 9), `state` Enum8('open' = 1, 'closing' = 2, 'closed' = 3, 'settled' = 4), `side` Enum8('yes' = 1, 'no' = 2), `shares` Decimal(38, 18), `avg_price` Decimal(18, 8), `cost_usd` Decimal(38, 18), `realized_pnl_usd` Decimal(38, 18), `ingestion_time` DateTime64(3, 'UTC')) ENGINE = MergeTree ORDER BY (market_id, token_id, event_time, ingestion_time) SETTINGS index_granularity = 8192",
-      "columns": [
-        {
-          "position": 1,
-          "name": "event_time",
-          "column_type": "DateTime64(3, 'UTC')",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 2,
-          "name": "position_id",
-          "column_type": "String",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 3,
-          "name": "order_intent_id",
-          "column_type": "String",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 4,
-          "name": "market_id",
-          "column_type": "String",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 5,
-          "name": "token_id",
-          "column_type": "String",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 6,
-          "name": "event_kind",
-          "column_type": "Enum8('submitted' = 1, 'submission_result' = 2, 'exit_submitted' = 3, 'exit_submission_result' = 4, 'reconciled' = 5, 'operator_resolved' = 6, 'unresolvable' = 7, 'settlement_redeem_confirmed' = 8, 'opened' = 9)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 7,
-          "name": "state",
-          "column_type": "Enum8('open' = 1, 'closing' = 2, 'closed' = 3, 'settled' = 4)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 8,
-          "name": "side",
-          "column_type": "Enum8('yes' = 1, 'no' = 2)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 9,
-          "name": "shares",
-          "column_type": "Decimal(38, 18)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 10,
-          "name": "avg_price",
-          "column_type": "Decimal(18, 8)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 11,
-          "name": "cost_usd",
-          "column_type": "Decimal(38, 18)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 12,
-          "name": "realized_pnl_usd",
-          "column_type": "Decimal(38, 18)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 13,
-          "name": "ingestion_time",
-          "column_type": "DateTime64(3, 'UTC')",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        }
-      ]
-    },
-    {
       "name": "quant_report_market_funnel",
       "engine": "ReplacingMergeTree",
       "engine_full": "ReplacingMergeTree(ingestion_time) PARTITION BY toYYYYMM(event_time) ORDER BY (recommendation_report_id, market_id) SETTINGS index_granularity = 8192",
@@ -4783,6 +4667,138 @@
           "position": 13,
           "name": "rejection_reason",
           "column_type": "LowCardinality(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        }
+      ]
+    },
+    {
+      "name": "quant_strategy_position_lot_event",
+      "engine": "MergeTree",
+      "engine_full": "MergeTree ORDER BY (market_id, token_id, event_time, ingestion_time) SETTINGS index_granularity = 8192",
+      "partition_key": "",
+      "sorting_key": "market_id, token_id, event_time, ingestion_time",
+      "primary_key": "market_id, token_id, event_time, ingestion_time",
+      "sampling_key": "",
+      "create_table_query": "CREATE TABLE quant_strategy_position_lot_event (`event_time` DateTime64(3, 'UTC'), `strategy_position_lot_id` String, `origin_kind` Enum8('system_intent' = 1, 'account_recovery_incident' = 2, 'opening_inventory' = 3), `order_intent_id` Nullable(String), `recovery_incident_id` Nullable(String), `market_id` String, `token_id` String, `event_kind` Enum8('submitted' = 1, 'submission_result' = 2, 'exit_submitted' = 3, 'exit_submission_result' = 4, 'reconciled' = 5, 'operator_resolved' = 6, 'unresolvable' = 7, 'settlement_redeem_confirmed' = 8, 'opened' = 9), `state` Enum8('open' = 1, 'closing' = 2, 'closed' = 3, 'settled' = 4), `side` Enum8('yes' = 1, 'no' = 2), `shares` Decimal(38, 18), `avg_price` Decimal(18, 8), `cost_usd` Decimal(38, 18), `realized_pnl_usd` Decimal(38, 18), `ingestion_time` DateTime64(3, 'UTC')) ENGINE = MergeTree ORDER BY (market_id, token_id, event_time, ingestion_time) SETTINGS index_granularity = 8192",
+      "columns": [
+        {
+          "position": 1,
+          "name": "event_time",
+          "column_type": "DateTime64(3, 'UTC')",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 2,
+          "name": "strategy_position_lot_id",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 3,
+          "name": "origin_kind",
+          "column_type": "Enum8('system_intent' = 1, 'account_recovery_incident' = 2, 'opening_inventory' = 3)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 4,
+          "name": "order_intent_id",
+          "column_type": "Nullable(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 5,
+          "name": "recovery_incident_id",
+          "column_type": "Nullable(String)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 6,
+          "name": "market_id",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 7,
+          "name": "token_id",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 8,
+          "name": "event_kind",
+          "column_type": "Enum8('submitted' = 1, 'submission_result' = 2, 'exit_submitted' = 3, 'exit_submission_result' = 4, 'reconciled' = 5, 'operator_resolved' = 6, 'unresolvable' = 7, 'settlement_redeem_confirmed' = 8, 'opened' = 9)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 9,
+          "name": "state",
+          "column_type": "Enum8('open' = 1, 'closing' = 2, 'closed' = 3, 'settled' = 4)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 10,
+          "name": "side",
+          "column_type": "Enum8('yes' = 1, 'no' = 2)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 11,
+          "name": "shares",
+          "column_type": "Decimal(38, 18)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 12,
+          "name": "avg_price",
+          "column_type": "Decimal(18, 8)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 13,
+          "name": "cost_usd",
+          "column_type": "Decimal(38, 18)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 14,
+          "name": "realized_pnl_usd",
+          "column_type": "Decimal(38, 18)",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 15,
+          "name": "ingestion_time",
+          "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""

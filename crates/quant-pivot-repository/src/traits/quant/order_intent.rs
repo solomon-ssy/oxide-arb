@@ -6,7 +6,7 @@ use quant_pivot_models::{
         governance::NewOperationLog,
         pagination::Paginated,
         quant::{
-            ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOrderIntent,
+            ApproveOrderIntentOutcome, AuthorizeOrderIntent, NewCapitalAllocation, NewOrderIntent,
             OrderIntentInfo,
         },
     },
@@ -41,7 +41,7 @@ pub trait OrderIntentRepository: Send + Sync {
     async fn approve(
         &self,
         intent_id: &OrderIntentId,
-        approval: ApproveOrderIntent,
+        authorization: AuthorizeOrderIntent,
         entry_override: Option<EntryOrderSpec>,
         allocated_override: Option<Usd>,
         now: DateTime<Utc>,

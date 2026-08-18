@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::feedback::FeedbackError;
-use sea_orm::{ActiveValue, DeriveIntoActiveModel, DerivePartialModel, IntoActiveValue};
-use serde::{Deserialize, Serialize, Serializer};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel};
+use serde::{Deserialize, Serialize};
 
 use super::{
     model::ModelVersionInfo,
@@ -13,7 +13,7 @@ use crate::{
     enums::{
         common::MarketCategory,
         model::{ModelFamily, ServingEligibility},
-        quant::QuantRuntimeMode,
+        quant::{EntryAuthorizationPolicy, ExecutionAuthorityCeiling},
     },
     hashing::CanonicalDigest,
     runtime_config::{
@@ -48,34 +48,6 @@ const MAX_REASON_BYTES: usize = 2_048;
 const MAX_REASON_CODE_BYTES: usize = 128;
 const MAX_ROLE_BYTES: usize = 64;
 
-/// Canonically ordered, non-empty runtime-mode authority persisted as a
-/// native `PostgreSQL` enum array.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PromotionRuntimeModes(Vec<QuantRuntimeMode>);
-
-impl PromotionRuntimeModes {
-    fn try_new(modes: Vec<QuantRuntimeMode>) -> Result<Self, FeedbackError> {
-        validate_modes(&modes)?;
-        Ok(Self(modes))
-    }
-
-    fn as_slice(&self) -> &[QuantRuntimeMode] {
-        &self.0
-    }
-}
-
-impl Serialize for PromotionRuntimeModes {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
-    }
-}
-
-impl IntoActiveValue<Vec<QuantRuntimeMode>> for PromotionRuntimeModes {
-    fn into_active_value(self) -> ActiveValue<Vec<QuantRuntimeMode>> {
-        ActiveValue::Set(self.0)
-    }
-}
-
 /// Immutable, exact authority boundary of one promotion permit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, try_from = "PromotionPermitScopeDocument")]
@@ -95,7 +67,7 @@ pub struct PromotionPermitScope {
     candidate_manifest_id: ModelCandidateManifestId,
     candidate_manifest_hash: ContentHash,
     promotion_gate_hash: ContentHash,
-    allowed_runtime_modes: PromotionRuntimeModes,
+    maximum_execution_authority: ExecutionAuthorityCeiling,
     non_route_policy_hash: ContentHash,
     serving_constraints_hash: ContentHash,
     expires_at: DateTime<Utc>,
@@ -119,7 +91,7 @@ struct PromotionPermitScopeDocument {
     candidate_manifest_id: ModelCandidateManifestId,
     candidate_manifest_hash: ContentHash,
     promotion_gate_hash: ContentHash,
-    allowed_runtime_modes: Vec<QuantRuntimeMode>,
+    maximum_execution_authority: ExecutionAuthorityCeiling,
     non_route_policy_hash: ContentHash,
     serving_constraints_hash: ContentHash,
     expires_at: DateTime<Utc>,
@@ -142,7 +114,7 @@ pub struct PromotionPermitScopeInput {
     pub candidate_manifest_id: ModelCandidateManifestId,
     pub candidate_manifest_hash: ContentHash,
     pub promotion_gate_hash: ContentHash,
-    pub allowed_runtime_modes: Vec<QuantRuntimeMode>,
+    pub maximum_execution_authority: ExecutionAuthorityCeiling,
     pub non_route_policy_hash: ContentHash,
     pub serving_constraints_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
@@ -167,7 +139,7 @@ impl PromotionPermitScope {
             candidate_manifest_id: input.candidate_manifest_id,
             candidate_manifest_hash: input.candidate_manifest_hash,
             promotion_gate_hash: input.promotion_gate_hash,
-            allowed_runtime_modes: PromotionRuntimeModes::try_new(input.allowed_runtime_modes)?,
+            maximum_execution_authority: input.maximum_execution_authority,
             non_route_policy_hash: input.non_route_policy_hash,
             serving_constraints_hash: input.serving_constraints_hash,
             expires_at: input.expires_at,
@@ -238,7 +210,7 @@ impl PromotionPermitScope {
                 "candidate manifest ID does not match its content hash",
             ));
         }
-        validate_modes(&self.allowed_runtime_modes.0)
+        Ok(())
     }
 
     /// Domain-separated digest of every immutable route-authority field.
@@ -323,8 +295,8 @@ impl PromotionPermitScope {
     }
 
     #[must_use]
-    pub fn allowed_runtime_modes(&self) -> &[QuantRuntimeMode] {
-        self.allowed_runtime_modes.as_slice()
+    pub const fn maximum_execution_authority(&self) -> ExecutionAuthorityCeiling {
+        self.maximum_execution_authority
     }
 
     #[must_use]
@@ -354,8 +326,15 @@ impl PromotionPermitScope {
     }
 
     #[must_use]
-    pub fn allows_mode(&self, mode: QuantRuntimeMode) -> bool {
-        self.allowed_runtime_modes.0.contains(&mode)
+    pub const fn allows_authorization_policy(&self, policy: EntryAuthorizationPolicy) -> bool {
+        match policy {
+            EntryAuthorizationPolicy::OperatorApprovalRequired => {
+                self.maximum_execution_authority.allows_operator()
+            }
+            EntryAuthorizationPolicy::PolicyAutomatic => {
+                self.maximum_execution_authority.allows_policy()
+            }
+        }
     }
 
     /// Revalidate the exact champion artifact projection bound by this scope.
@@ -401,7 +380,7 @@ impl TryFrom<PromotionPermitScopeDocument> for PromotionPermitScope {
             candidate_manifest_id: document.candidate_manifest_id,
             candidate_manifest_hash: document.candidate_manifest_hash,
             promotion_gate_hash: document.promotion_gate_hash,
-            allowed_runtime_modes: PromotionRuntimeModes::try_new(document.allowed_runtime_modes)?,
+            maximum_execution_authority: document.maximum_execution_authority,
             non_route_policy_hash: document.non_route_policy_hash,
             serving_constraints_hash: document.serving_constraints_hash,
             expires_at: document.expires_at,
@@ -1064,7 +1043,7 @@ pub struct PromotionPreflight {
     shadow_contract_hash: ContentHash,
     candidate_recipe_hash: ContentHash,
     serving_constraints: PromotionServingConstraints,
-    current_runtime_mode: QuantRuntimeMode,
+    current_entry_authorization_policy: EntryAuthorizationPolicy,
     runtime_control_revision: i64,
 }
 
@@ -1087,7 +1066,7 @@ struct PromotionPreflightDocument {
     shadow_contract_hash: ContentHash,
     candidate_recipe_hash: ContentHash,
     serving_constraints: PromotionServingConstraints,
-    current_runtime_mode: QuantRuntimeMode,
+    current_entry_authorization_policy: EntryAuthorizationPolicy,
     runtime_control_revision: i64,
 }
 
@@ -1108,7 +1087,7 @@ struct PromotionPreflightPreimage<'a> {
     shadow_contract_hash: ContentHash,
     candidate_recipe_hash: ContentHash,
     serving_constraints: &'a PromotionServingConstraints,
-    current_runtime_mode: QuantRuntimeMode,
+    current_entry_authorization_policy: EntryAuthorizationPolicy,
     runtime_control_revision: i64,
 }
 
@@ -1127,7 +1106,7 @@ pub struct PromotionPreflightInput {
     pub shadow_contract_hash: ContentHash,
     pub candidate_recipe_hash: ContentHash,
     pub serving_constraints: PromotionServingConstraints,
-    pub current_runtime_mode: QuantRuntimeMode,
+    pub current_entry_authorization_policy: EntryAuthorizationPolicy,
     pub runtime_control_revision: i64,
 }
 
@@ -1150,7 +1129,7 @@ impl PromotionPreflight {
             shadow_contract_hash: input.shadow_contract_hash,
             candidate_recipe_hash: input.candidate_recipe_hash,
             serving_constraints: &input.serving_constraints,
-            current_runtime_mode: input.current_runtime_mode,
+            current_entry_authorization_policy: input.current_entry_authorization_policy,
             runtime_control_revision: input.runtime_control_revision,
         })?;
         let preflight = Self {
@@ -1170,7 +1149,7 @@ impl PromotionPreflight {
             shadow_contract_hash: input.shadow_contract_hash,
             candidate_recipe_hash: input.candidate_recipe_hash,
             serving_constraints: input.serving_constraints,
-            current_runtime_mode: input.current_runtime_mode,
+            current_entry_authorization_policy: input.current_entry_authorization_policy,
             runtime_control_revision: input.runtime_control_revision,
         };
         preflight.validate()?;
@@ -1194,7 +1173,9 @@ impl PromotionPreflight {
             || self.scope.candidate_manifest_hash()
                 != self.serving_constraints.candidate_manifest_hash()
             || self.scope.promotion_gate_hash() != self.serving_constraints.promotion_gate_hash()
-            || !self.scope.allows_mode(self.current_runtime_mode)
+            || !self
+                .scope
+                .allows_authorization_policy(self.current_entry_authorization_policy)
             || self.runtime_control_revision < 0
             || self.scope.expected_runtime_control_revision() != self.runtime_control_revision
             || FeedbackCycleId::from_idempotency_hash(&self.cycle_idempotency_hash)
@@ -1230,7 +1211,7 @@ impl PromotionPreflight {
             shadow_contract_hash: self.shadow_contract_hash,
             candidate_recipe_hash: self.candidate_recipe_hash,
             serving_constraints: &self.serving_constraints,
-            current_runtime_mode: self.current_runtime_mode,
+            current_entry_authorization_policy: self.current_entry_authorization_policy,
             runtime_control_revision: self.runtime_control_revision,
         }
     }
@@ -1317,8 +1298,8 @@ impl PromotionPreflight {
     }
 
     #[must_use]
-    pub const fn current_runtime_mode(&self) -> QuantRuntimeMode {
-        self.current_runtime_mode
+    pub const fn current_entry_authorization_policy(&self) -> EntryAuthorizationPolicy {
+        self.current_entry_authorization_policy
     }
 
     #[must_use]
@@ -1348,7 +1329,7 @@ impl TryFrom<PromotionPreflightDocument> for PromotionPreflight {
             shadow_contract_hash: document.shadow_contract_hash,
             candidate_recipe_hash: document.candidate_recipe_hash,
             serving_constraints: document.serving_constraints,
-            current_runtime_mode: document.current_runtime_mode,
+            current_entry_authorization_policy: document.current_entry_authorization_policy,
             runtime_control_revision: document.runtime_control_revision,
         };
         preflight.validate()?;
@@ -1815,8 +1796,7 @@ pub struct NewPromotionPermit {
     candidate_manifest_id: ModelCandidateManifestId,
     candidate_manifest_hash: ContentHash,
     promotion_gate_hash: ContentHash,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode[]")"#)]
-    allowed_runtime_modes: PromotionRuntimeModes,
+    maximum_execution_authority: ExecutionAuthorityCeiling,
     non_route_policy_hash: ContentHash,
     serving_constraints_hash: ContentHash,
     preflight_hash: ContentHash,
@@ -1878,7 +1858,7 @@ impl NewPromotionPermit {
             candidate_manifest_id: input.scope.candidate_manifest_id,
             candidate_manifest_hash: input.scope.candidate_manifest_hash,
             promotion_gate_hash: input.scope.promotion_gate_hash,
-            allowed_runtime_modes: input.scope.allowed_runtime_modes,
+            maximum_execution_authority: input.scope.maximum_execution_authority,
             non_route_policy_hash: input.scope.non_route_policy_hash,
             serving_constraints_hash: input.scope.serving_constraints_hash,
             preflight_hash: input.preflight_hash,
@@ -1923,7 +1903,7 @@ impl NewPromotionPermit {
             candidate_manifest_id: self.candidate_manifest_id,
             candidate_manifest_hash: self.candidate_manifest_hash,
             promotion_gate_hash: self.promotion_gate_hash,
-            allowed_runtime_modes: self.allowed_runtime_modes.clone(),
+            maximum_execution_authority: self.maximum_execution_authority,
             non_route_policy_hash: self.non_route_policy_hash,
             serving_constraints_hash: self.serving_constraints_hash,
             expires_at: self.expires_at,
@@ -2018,7 +1998,7 @@ pub struct PromotionPermitInfo {
     pub candidate_manifest_id: ModelCandidateManifestId,
     pub candidate_manifest_hash: ContentHash,
     pub promotion_gate_hash: ContentHash,
-    pub allowed_runtime_modes: Vec<QuantRuntimeMode>,
+    pub maximum_execution_authority: ExecutionAuthorityCeiling,
     pub non_route_policy_hash: ContentHash,
     pub serving_constraints_hash: ContentHash,
     pub preflight_hash: ContentHash,
@@ -2102,7 +2082,7 @@ impl PromotionPermitInfo {
             candidate_manifest_id: self.candidate_manifest_id,
             candidate_manifest_hash: self.candidate_manifest_hash,
             promotion_gate_hash: self.promotion_gate_hash,
-            allowed_runtime_modes: self.allowed_runtime_modes.clone(),
+            maximum_execution_authority: self.maximum_execution_authority,
             non_route_policy_hash: self.non_route_policy_hash,
             serving_constraints_hash: self.serving_constraints_hash,
             expires_at: self.expires_at,
@@ -2135,7 +2115,7 @@ impl PromotionPermitInfo {
             && self.candidate_manifest_id == expected.candidate_manifest_id
             && self.candidate_manifest_hash == expected.candidate_manifest_hash
             && self.promotion_gate_hash == expected.promotion_gate_hash
-            && self.allowed_runtime_modes == expected.allowed_runtime_modes.0
+            && self.maximum_execution_authority == expected.maximum_execution_authority
             && self.non_route_policy_hash == expected.non_route_policy_hash
             && self.serving_constraints_hash == expected.serving_constraints_hash
             && self.preflight_hash == expected.preflight_hash
@@ -2241,18 +2221,6 @@ impl PromotionPermitInfo {
     }
 }
 
-fn validate_modes(modes: &[QuantRuntimeMode]) -> Result<(), FeedbackError> {
-    if modes.is_empty()
-        || modes.len() > 3
-        || !modes.windows(2).all(|pair| pair[0].rank() < pair[1].rank())
-    {
-        return Err(invalid_permit(
-            "allowed runtime modes must be a non-empty, unique capability-ordered set",
-        ));
-    }
-    Ok(())
-}
-
 fn validate_actor(username: &str, role: &RoleCode, reason: &str) -> Result<(), FeedbackError> {
     if username.is_empty()
         || username.len() > MAX_ACTOR_BYTES
@@ -2318,7 +2286,11 @@ mod tests {
 
     use crate::{
         domain::quant::RepresentedRouteSet,
-        enums::{common::MarketCategory, model::ModelFamily, quant::QuantRuntimeMode},
+        enums::{
+            common::MarketCategory,
+            model::ModelFamily,
+            quant::{EntryAuthorizationPolicy, ExecutionAuthorityCeiling},
+        },
         runtime_config::{
             ActivePolicyBundle, BuyModelRoute, BuyRouteBinding, DecisionPolicySnapshot,
             ModelBinding, ModelBindingSource, PortfolioScenarioModelArtifactBinding,
@@ -2383,10 +2355,7 @@ mod tests {
                 ),
                 candidate_manifest_hash,
                 promotion_gate_hash: hash(31),
-                allowed_runtime_modes: vec![
-                    QuantRuntimeMode::ReportOnly,
-                    QuantRuntimeMode::SemiAuto,
-                ],
+                maximum_execution_authority: ExecutionAuthorityCeiling::OperatorApproval,
                 non_route_policy_hash: hash(3),
                 serving_constraints_hash: hash(4),
                 expires_at: Utc
@@ -2441,7 +2410,7 @@ mod tests {
                 candidate_manifest_id: scope.candidate_manifest_id(),
                 candidate_manifest_hash: scope.candidate_manifest_hash(),
                 promotion_gate_hash: scope.promotion_gate_hash(),
-                allowed_runtime_modes: scope.allowed_runtime_modes().to_vec(),
+                maximum_execution_authority: scope.maximum_execution_authority(),
                 non_route_policy_hash: scope.non_route_policy_hash(),
                 serving_constraints_hash: scope.serving_constraints_hash(),
                 preflight_hash: new.preflight_hash(),
@@ -2606,10 +2575,7 @@ mod tests {
                 candidate_manifest_id: constraints.candidate_manifest_id(),
                 candidate_manifest_hash: constraints.candidate_manifest_hash(),
                 promotion_gate_hash: constraints.promotion_gate_hash(),
-                allowed_runtime_modes: vec![
-                    QuantRuntimeMode::ReportOnly,
-                    QuantRuntimeMode::SemiAuto,
-                ],
+                maximum_execution_authority: ExecutionAuthorityCeiling::OperatorApproval,
                 non_route_policy_hash: projection.non_route_policy_hash(),
                 serving_constraints_hash: constraints
                     .constraints_hash()
@@ -2634,7 +2600,8 @@ mod tests {
                 shadow_contract_hash: hash(41),
                 candidate_recipe_hash: hash(42),
                 serving_constraints: constraints,
-                current_runtime_mode: QuantRuntimeMode::SemiAuto,
+                current_entry_authorization_policy:
+                    EntryAuthorizationPolicy::OperatorApprovalRequired,
                 runtime_control_revision: 7,
             })
             .expect("promotion preflight")
@@ -2652,8 +2619,10 @@ mod tests {
             scope.field_mask().expect("Crypto route field mask"),
             "model.buy_routes.crypto"
         );
-        assert!(scope.allows_mode(QuantRuntimeMode::SemiAuto));
-        assert!(!scope.allows_mode(QuantRuntimeMode::AutoExecution));
+        assert!(
+            scope.allows_authorization_policy(EntryAuthorizationPolicy::OperatorApprovalRequired)
+        );
+        assert!(!scope.allows_authorization_policy(EntryAuthorizationPolicy::PolicyAutomatic));
         let encoded = serde_json::to_vec(&scope).expect("serialize permit scope");
         let decoded =
             serde_json::from_slice::<PromotionPermitScope>(&encoded).expect("decode permit scope");
@@ -2664,7 +2633,7 @@ mod tests {
         );
 
         let mut duplicate = serde_json::to_value(&scope).expect("scope value");
-        duplicate["allowed_runtime_modes"] = serde_json::json!(["report_only", "report_only"]);
+        duplicate["maximum_execution_authority"] = serde_json::json!("unknown");
         assert!(serde_json::from_value::<PromotionPermitScope>(duplicate).is_err());
 
         let mut wrong_category = serde_json::to_value(&scope).expect("scope value");
@@ -2676,11 +2645,8 @@ mod tests {
     fn derives_insert_active_model() {
         let active = PermitFixture::new().permit().into_active_model();
         assert_eq!(
-            active.allowed_runtime_modes,
-            ActiveValue::Set(vec![
-                QuantRuntimeMode::ReportOnly,
-                QuantRuntimeMode::SemiAuto
-            ])
+            active.maximum_execution_authority,
+            ActiveValue::Set(ExecutionAuthorityCeiling::OperatorApproval)
         );
         assert_eq!(active.revoked_by_user_id, ActiveValue::NotSet);
         assert_eq!(active.revoked_by_username, ActiveValue::NotSet);
@@ -2843,9 +2809,9 @@ mod tests {
         assert_eq!(decoded, preflight);
         assert_eq!(decoded.preflight_hash(), preflight.preflight_hash());
 
-        let mut mode_drift = serde_json::to_value(&preflight).expect("preflight value");
-        mode_drift["current_runtime_mode"] = serde_json::json!("auto_execution");
-        assert!(serde_json::from_value::<PromotionPreflight>(mode_drift).is_err());
+        let mut policy_drift = serde_json::to_value(&preflight).expect("preflight value");
+        policy_drift["current_entry_authorization_policy"] = serde_json::json!("policy_automatic");
+        assert!(serde_json::from_value::<PromotionPreflight>(policy_drift).is_err());
 
         let mut artifact_drift = serde_json::to_value(&preflight).expect("preflight value");
         artifact_drift["decision_artifact_hash"] = serde_json::json!(hash(99));

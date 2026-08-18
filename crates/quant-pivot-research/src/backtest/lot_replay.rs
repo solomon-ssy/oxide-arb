@@ -41,7 +41,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::OutcomeSide,
-    types::{OutcomeTokenBinding, PositionId},
+    types::{OutcomeTokenBinding, StrategyPositionLotId},
 };
 use rust_decimal::Decimal;
 
@@ -62,7 +62,7 @@ fn remaining_eps() -> Decimal {
 #[derive(Debug, Clone)]
 pub struct LotDecisionSequence {
     /// The lot this sequence replays.
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     /// The lot's `ExitDecision` training examples, ascending `as_of`.
     pub decisions: Vec<TrainingExample>,
 }
@@ -71,7 +71,7 @@ pub struct LotDecisionSequence {
 #[derive(Debug, Clone)]
 pub struct LotOutcome {
     /// The lot this outcome replays.
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     /// First decision time (timeline / DSR period anchor).
     pub decision_at: DateTime<Utc>,
     /// This lot's contribution to the reconstructed path's return series (a
@@ -200,7 +200,7 @@ fn replay_lot(
     }
 
     Ok(LotOutcome {
-        position_id: sequence.position_id,
+        strategy_position_lot_id: sequence.strategy_position_lot_id,
         decision_at: first_as_of,
         return_value,
         cumulative_exit_pct: (simulated_sold / denominator)
@@ -217,7 +217,7 @@ impl LotDecisionSequence {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
                     "lot {} has an empty decision sequence — refuse to invent a zero return",
-                    self.position_id
+                    self.strategy_position_lot_id
                 ),
             }
             .into());
@@ -226,7 +226,7 @@ impl LotDecisionSequence {
             return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} first decision is missing lot_context; rebuild the ExitDecision dataset",
-                self.position_id
+                self.strategy_position_lot_id
             ),
         }
         .into());
@@ -236,7 +236,7 @@ impl LotDecisionSequence {
             return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} first decision has non-positive remaining_shares — refuse to invent a denominator",
-                self.position_id
+                self.strategy_position_lot_id
             ),
         }
         .into());
@@ -274,7 +274,7 @@ fn score_on_path_decision(args: &OnPathDecisionArgs<'_>) -> QuantResult<OnPathSt
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} decision at {} is missing lot_context; rebuild the ExitDecision dataset",
-                args.sequence.position_id,
+                args.sequence.strategy_position_lot_id,
                 args.decision.decision_at()
             ),
         }
@@ -288,7 +288,7 @@ fn score_on_path_decision(args: &OnPathDecisionArgs<'_>) -> QuantResult<OnPathSt
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} decision at {} is missing position_state; rebuild the ExitDecision dataset",
-                args.sequence.position_id,
+                args.sequence.strategy_position_lot_id,
                 args.decision.decision_at()
             ),
         }
@@ -298,7 +298,7 @@ fn score_on_path_decision(args: &OnPathDecisionArgs<'_>) -> QuantResult<OnPathSt
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} decision at {} has no label `{}` @ horizon {}s",
-                args.sequence.position_id,
+                args.sequence.strategy_position_lot_id,
                 args.decision.decision_at(),
                 args.label.name,
                 args.label.horizon_secs
@@ -320,7 +320,7 @@ fn score_on_path_decision(args: &OnPathDecisionArgs<'_>) -> QuantResult<OnPathSt
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: format!(
                     "lot {} decision at {} is missing outcome orientation",
-                    args.sequence.position_id,
+                    args.sequence.strategy_position_lot_id,
                     args.decision.decision_at()
                 ),
             })?;
@@ -332,7 +332,7 @@ fn score_on_path_decision(args: &OnPathDecisionArgs<'_>) -> QuantResult<OnPathSt
         .ok_or_else(|| ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} decision at {} has no binary secondary token",
-                args.sequence.position_id,
+                args.sequence.strategy_position_lot_id,
                 args.decision.decision_at()
             ),
         })?;
@@ -350,7 +350,7 @@ fn score_on_path_decision(args: &OnPathDecisionArgs<'_>) -> QuantResult<OnPathSt
     .map_err(|error| ResearchError::ValidationMethodology {
         detail: format!(
             "lot {} has an invalid outcome binding: {error}",
-            args.sequence.position_id
+            args.sequence.strategy_position_lot_id
         ),
     })?;
     let score = args.model.score(&SellScoreInput {
@@ -409,7 +409,7 @@ pub fn replay_lot_null_baseline(
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} has an empty decision sequence — refuse to invent a baseline return",
-                sequence.position_id
+                sequence.strategy_position_lot_id
             ),
         }
         .into());
@@ -418,14 +418,14 @@ pub fn replay_lot_null_baseline(
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} first decision is missing lot_context — refuse to invent a baseline",
-                sequence.position_id
+                sequence.strategy_position_lot_id
             ),
         }
         .into());
     }
     match baseline {
         SellNullBaseline::AlwaysHold => Ok(LotOutcome {
-            position_id: sequence.position_id,
+            strategy_position_lot_id: sequence.strategy_position_lot_id,
             decision_at: first.decision_at(),
             return_value: Decimal::ZERO,
             cumulative_exit_pct: Decimal::ZERO,
@@ -437,7 +437,7 @@ pub fn replay_lot_null_baseline(
                 return Err(ResearchError::ValidationMethodology {
                     detail: format!(
                         "lot {} first decision at {} has no label `{}` @ horizon {}s",
-                        sequence.position_id,
+                        sequence.strategy_position_lot_id,
                         first.decision_at(),
                         label.name,
                         label.horizon_secs
@@ -446,7 +446,7 @@ pub fn replay_lot_null_baseline(
                 .into());
             };
             Ok(LotOutcome {
-                position_id: sequence.position_id,
+                strategy_position_lot_id: sequence.strategy_position_lot_id,
                 decision_at: first.decision_at(),
                 return_value: realized / Decimal::from(10_000),
                 cumulative_exit_pct: Decimal::ONE,
@@ -483,8 +483,9 @@ mod tests {
             quant::{DataQualityStatus, OutcomeSide},
         },
         types::{
-            Bps, ContentHash, MarketId, ModelVersionId, OrderIntentId, PositionId, Price,
-            Probability, SchemaVersion, Shares, TokenId, TrainingExampleId, TrainingSampleSource,
+            Bps, ContentHash, MarketId, ModelVersionId, OrderIntentId, Price, Probability,
+            SchemaVersion, Shares, StrategyPositionLotId, TokenId, TrainingExampleId,
+            TrainingSampleSource,
         },
     };
     use rust_decimal::Decimal;
@@ -554,7 +555,7 @@ mod tests {
             decision_capture: None,
             lot_context: Some(LotTrainingContext {
                 order_intent_id: OrderIntentId::from_v7(),
-                position_id: PositionId::from_v7(),
+                strategy_position_lot_id: StrategyPositionLotId::from_v7(),
                 outcome_side: OutcomeSide::Yes,
                 remaining_shares: Shares::new(remaining),
                 avg_price: Price::new(dec!(0.5)),
@@ -629,15 +630,15 @@ mod tests {
 
     #[test]
     fn lot_replay_full_decisions() {
-        let position_id = PositionId::from_v7();
+        let strategy_position_lot_id = StrategyPositionLotId::from_v7();
         let mut d0 = decision(ts(0), dec!(-20), dec!(100));
         let mut d1 = decision(ts(60), dec!(100), dec!(100));
         let mut d2 = decision(ts(120), dec!(9999), dec!(100));
-        d0.lot_context.as_mut().unwrap().position_id = position_id;
-        d1.lot_context.as_mut().unwrap().position_id = position_id;
-        d2.lot_context.as_mut().unwrap().position_id = position_id;
+        d0.lot_context.as_mut().unwrap().strategy_position_lot_id = strategy_position_lot_id;
+        d1.lot_context.as_mut().unwrap().strategy_position_lot_id = strategy_position_lot_id;
+        d2.lot_context.as_mut().unwrap().strategy_position_lot_id = strategy_position_lot_id;
         let sequence = LotDecisionSequence {
-            position_id,
+            strategy_position_lot_id,
             decisions: vec![d0, d1, d2],
         };
         // First call holds; second fires at 100% cumulative → third must never be scored.
@@ -659,17 +660,17 @@ mod tests {
 
     #[test]
     fn lot_replay_partial_divergence() {
-        let position_id = PositionId::from_v7();
+        let strategy_position_lot_id = StrategyPositionLotId::from_v7();
         // History never sold — remaining stays 100. After a 50% simulated
         // exit, the next historical row still shows remaining=100 → diverge.
         let mut d0 = decision(ts(0), dec!(100), dec!(100));
         let mut d1 = decision(ts(60), dec!(200), dec!(100));
         let mut d2 = decision(ts(120), dec!(999), dec!(100));
-        d0.lot_context.as_mut().unwrap().position_id = position_id;
-        d1.lot_context.as_mut().unwrap().position_id = position_id;
-        d2.lot_context.as_mut().unwrap().position_id = position_id;
+        d0.lot_context.as_mut().unwrap().strategy_position_lot_id = strategy_position_lot_id;
+        d1.lot_context.as_mut().unwrap().strategy_position_lot_id = strategy_position_lot_id;
+        d2.lot_context.as_mut().unwrap().strategy_position_lot_id = strategy_position_lot_id;
         let sequence = LotDecisionSequence {
-            position_id,
+            strategy_position_lot_id,
             decisions: vec![d0, d1, d2],
         };
         let model = ScriptedScorer::new(vec![(dec!(120), dec!(0.5))]);
@@ -696,13 +697,13 @@ mod tests {
 
     #[test]
     fn lot_replay_never_exits() {
-        let position_id = PositionId::from_v7();
+        let strategy_position_lot_id = StrategyPositionLotId::from_v7();
         let mut d0 = decision(ts(0), dec!(-20), dec!(100));
         let mut d1 = decision(ts(60), dec!(-10), dec!(100));
-        d0.lot_context.as_mut().unwrap().position_id = position_id;
-        d1.lot_context.as_mut().unwrap().position_id = position_id;
+        d0.lot_context.as_mut().unwrap().strategy_position_lot_id = strategy_position_lot_id;
+        d1.lot_context.as_mut().unwrap().strategy_position_lot_id = strategy_position_lot_id;
         let sequence = LotDecisionSequence {
-            position_id,
+            strategy_position_lot_id,
             decisions: vec![d0, d1],
         };
         let model = ScriptedScorer::new(vec![(dec!(10), dec!(1)), (dec!(20), dec!(1))]);
@@ -723,13 +724,13 @@ mod tests {
 
     #[test]
     fn null_baseline_exit_label() {
-        let position_id = PositionId::from_v7();
+        let strategy_position_lot_id = StrategyPositionLotId::from_v7();
         let mut d0 = decision(ts(0), dec!(80), dec!(100));
         let mut d1 = decision(ts(60), dec!(200), dec!(100));
-        d0.lot_context.as_mut().unwrap().position_id = position_id;
-        d1.lot_context.as_mut().unwrap().position_id = position_id;
+        d0.lot_context.as_mut().unwrap().strategy_position_lot_id = strategy_position_lot_id;
+        d1.lot_context.as_mut().unwrap().strategy_position_lot_id = strategy_position_lot_id;
         let sequence = LotDecisionSequence {
-            position_id,
+            strategy_position_lot_id,
             decisions: vec![d0, d1],
         };
         let outcome = replay_lot_null_baseline(
@@ -744,11 +745,11 @@ mod tests {
 
     #[test]
     fn null_baseline_zero_alpha() {
-        let position_id = PositionId::from_v7();
+        let strategy_position_lot_id = StrategyPositionLotId::from_v7();
         let mut d0 = decision(ts(0), dec!(80), dec!(100));
-        d0.lot_context.as_mut().unwrap().position_id = position_id;
+        d0.lot_context.as_mut().unwrap().strategy_position_lot_id = strategy_position_lot_id;
         let sequence = LotDecisionSequence {
-            position_id,
+            strategy_position_lot_id,
             decisions: vec![d0],
         };
         let outcome = replay_lot_null_baseline(

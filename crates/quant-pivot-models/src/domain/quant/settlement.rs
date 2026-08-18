@@ -24,10 +24,10 @@ use crate::{
     hashing::CanonicalDigest,
     types::{
         ContentHash, EvmAddress, EvmBlockHash, EvmCalldataHash, EvmCodeHash, EvmTransactionHash,
-        EvmUint256, ExecutionAccountId, MarketId, OrderIntentId, PositionId, RelayerTransactionId,
+        EvmUint256, ExecutionAccountId, MarketId, OrderIntentId, RelayerTransactionId,
         SettlementAuthorizationId, SettlementChainSubmissionId, SettlementEvidenceVersion,
-        SettlementGovernedActionId, SettlementRedeemId, SettlementRedeemLotId, Shares, TokenId,
-        Usd, UserId, WorkerId,
+        SettlementGovernedActionId, SettlementRedeemId, SettlementRedeemLotId, Shares,
+        StrategyPositionLotId, TokenId, Usd, UserId, WorkerId,
         settlement_payload::{
             SettlementBalanceEvidence, SettlementChainReceiptEvidence, SettlementFailureHistory,
             SettlementPayoutVector, SettlementReadinessEvidence, SettlementReceiptEvidence,
@@ -252,7 +252,7 @@ pub struct NewSettlementChainSubmission {
     pub confirmed_at: Option<DateTime<Utc>>,
 }
 
-/// One immutable `SemiAuto` authorization attempt.
+/// One immutable operator-authorization attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::quant_settlement_authorization::Entity")]
 pub struct SettlementAuthorizationInfo {
@@ -321,7 +321,7 @@ pub struct SettlementWorkClaim {
     pub active_submission: Option<SettlementChainSubmissionInfo>,
 }
 
-/// Canonical, exact scope approved for one `SemiAuto` settlement batch.
+/// Canonical, exact scope approved for one operator-authorized settlement batch.
 ///
 /// The expiry and next attempt ordinal are signed into the digest, so approval
 /// cannot be reused after either time or lifecycle state advances. Canonical
@@ -358,7 +358,7 @@ impl SettlementAuthorizationScope {
     }
 }
 
-/// Transition a prepared `SemiAuto` case into `Pending` authorization.
+/// Transition a prepared operator-authorized case into `Pending` authorization.
 #[derive(Debug, Clone)]
 pub struct StageSettlementAuthorization {
     pub settlement_redeem_id: SettlementRedeemId,
@@ -442,7 +442,7 @@ pub struct RecordRelayerSettlementAcceptance {
 pub struct SettlementRedeemLotInfo {
     pub settlement_redeem_lot_id: SettlementRedeemLotId,
     pub settlement_redeem_id: SettlementRedeemId,
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub side: OutcomeSide,
@@ -457,7 +457,7 @@ info_from_model!(
     SettlementRedeemLotInfo,
     quant_settlement_redeem_lot::Model,
     {
-        settlement_redeem_lot_id, settlement_redeem_id, position_id,
+        settlement_redeem_lot_id, settlement_redeem_id, strategy_position_lot_id,
         order_intent_id, token_id, side, shares_redeemed, cost_basis_usd,
         payout_usd, realized_pnl_usd, created_at,
     }
@@ -469,7 +469,7 @@ info_from_model!(
 pub struct NewSettlementRedeemLot {
     pub settlement_redeem_lot_id: SettlementRedeemLotId,
     pub settlement_redeem_id: SettlementRedeemId,
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub side: OutcomeSide,

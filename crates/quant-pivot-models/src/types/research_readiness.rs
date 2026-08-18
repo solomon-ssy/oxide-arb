@@ -435,7 +435,7 @@ impl RetentionRunwayEvidenceV1 {
     }
 }
 
-/// Complete `ReportOnly` latency profile. Venue submit/ack/match/chain timings are
+/// Complete analysis-path latency profile. Venue submit/ack/match/chain timings are
 /// intentionally excluded; they belong to the later real-canary profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShadowLatencyProfileV1 {

@@ -1,5 +1,8 @@
 //! Quant-pivot repository traits.
 
+mod account_chain_execution;
+mod account_pause;
+mod account_recovery;
 mod account_snapshot;
 mod attribution_artifact;
 mod backtest_path_set;
@@ -39,7 +42,6 @@ mod model_route_promotion;
 mod model_route_shadow_binding;
 mod order_intent;
 mod portfolio_plan;
-mod position;
 mod promotion_permit;
 mod recommendation;
 mod recommendation_execution_rollup;
@@ -57,9 +59,13 @@ pub mod settlement_governance;
 pub mod settlement_redeem;
 mod shadow_comparison;
 mod source_slice;
+mod strategy_position_lot;
 mod trade_policy;
 mod venue_incentive;
 
+pub use account_chain_execution::AccountChainExecutionRepository;
+pub use account_pause::AccountPauseRepository;
+pub use account_recovery::AccountRecoveryRepository;
 pub use account_snapshot::AccountSnapshotRepository;
 pub use attribution_artifact::{AttributionArtifactRepository, AttributionArtifactWriteOutcome};
 pub use backtest_path_set::{BacktestPathSetRepository, CpcvPathSetCommit};
@@ -118,7 +124,6 @@ pub use model_route_shadow_binding::{
 };
 pub use order_intent::OrderIntentRepository;
 pub use portfolio_plan::PortfolioPlanRepository;
-pub use position::PositionRepository;
 pub use promotion_permit::{
     PromotionPermitIssueOutcome, PromotionPermitPage, PromotionPermitRepository,
     PromotionPermitRevokeOutcome,
@@ -140,5 +145,6 @@ pub use runtime_activity::RuntimeActivityRepository;
 pub use selection::MarketSelectionRepository;
 pub use shadow_comparison::{ShadowComparisonRepository, ShadowComparisonWriteOutcome};
 pub use source_slice::SourceSliceRepository;
+pub use strategy_position_lot::StrategyPositionLotRepository;
 pub use trade_policy::TradePolicyRepository;
 pub use venue_incentive::VenueIncentiveRepository;

@@ -8,3 +8,4 @@ pub mod external;
 pub mod relayer;
 pub mod resolution;
 mod typed;
+pub mod wallet_call;

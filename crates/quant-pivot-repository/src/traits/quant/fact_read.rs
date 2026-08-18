@@ -15,14 +15,14 @@ use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookLedgerReplayAnchor, BookMicrostructureRow, BookStreamSessionRow,
         CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
-        ExchangeEventRow, ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
-        MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
-        WeatherForecastFactRow, WeatherObservationFactRow,
+        ExchangeEventRow, ExchangeMatchRow, ExecutionParticipantFactRow, ExecutionParticipantRow,
+        MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow,
+        ReportMarketFunnelRow, WeatherForecastFactRow, WeatherObservationFactRow,
     },
-    domain::data_plane::HistorySealChunkRef,
+    domain::{data_plane::HistorySealChunkRef, quant::AccountChainEventCursor},
     types::{
-        ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
-        OrderId, RecommendationReportId, TokenId,
+        ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, EvmAddress,
+        MarketId, OrderId, RecommendationReportId, TokenId,
     },
 };
 use uuid::Uuid;
@@ -31,6 +31,30 @@ use uuid::Uuid;
 /// point-in-time historical state.
 #[async_trait::async_trait]
 pub trait QuantFactReadRepository: Send + Sync {
+    /// Accepted finalized V2 order events involving one configured account.
+    async fn account_order_filled_events(
+        &self,
+        _funder: &EvmAddress,
+        _cursor: Option<AccountChainEventCursor>,
+        _limit: u64,
+    ) -> Result<Vec<ExchangeEventRow>, StorageError> {
+        Err(StorageError::invariant_violation(
+            Some("quant_exchange_event"),
+            "fact reader does not implement account-scoped exchange projection",
+        ))
+    }
+
+    /// Accepted V2 aggregate matches for exact account-owned active order hashes.
+    async fn matches_for_taker_orders(
+        &self,
+        _order_ids: Vec<OrderId>,
+    ) -> Result<Vec<ExchangeMatchRow>, StorageError> {
+        Err(StorageError::invariant_violation(
+            Some("quant_exchange_match"),
+            "fact reader does not implement V2 taker-order match lookup",
+        ))
+    }
+
     /// Finalized V2 `OrderFilled` events for exact governed order hashes.
     /// Only events from active, accepted exchange-history chunks are returned.
     async fn order_filled_events(

@@ -16,7 +16,7 @@
 //! [`crate::backtest`] happens to group rows by same-`as_of` cross-section
 //! (mirroring the [`crate::model::trainer`] LTR query groups), but
 //! [`PurgedSplitter`] itself has no opinion on what a group represents. The
-//! Sell-side groups by lot (`position_id`) and reuses this module
+//! Sell-side groups by lot (`strategy_position_lot_id`) and reuses this module
 //! unmodified.
 
 use chrono::{DateTime, Duration, Utc};

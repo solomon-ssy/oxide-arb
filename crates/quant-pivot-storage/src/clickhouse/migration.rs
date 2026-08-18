@@ -145,7 +145,7 @@ const fn migrations() -> [MigrationSpec; 1] {
         name: "bootstrap",
         safety: ClickHouseMigrationSafety::OnlineMetadata,
         sources: BOOTSTRAP_SOURCES,
-        expected_checksum: "blake3:bda1ff3cc5be4b90ed2b5d4cb760664150268cbcb7338ee693395bc8ea8a3278",
+        expected_checksum: "blake3:c2e50f6527af7653e0c07a28ea4b9f99f8f25e9b0ad906c93738c1b8a6f4ba10",
         destructive_empty_tables: &[],
     }]
 }

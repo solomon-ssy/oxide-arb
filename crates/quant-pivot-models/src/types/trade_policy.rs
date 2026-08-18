@@ -1109,8 +1109,8 @@ impl TradePolicyExitTemplate {
 #[serde(rename_all = "snake_case")]
 pub enum VerticalActivationTarget {
     ResearchOnly,
-    SemiAuto,
-    AutoExecution,
+    OperatorApproval,
+    PolicyAutomatic,
 }
 
 /// Closed set of source-specific activation gates implemented by the two
@@ -1170,7 +1170,10 @@ impl VerticalGateEvidence {
         let live_days = (self.evidence_window_end - self.evidence_window_start).num_days();
         match (self.gate, target) {
             (_, VerticalActivationTarget::ResearchOnly) => false,
-            (VerticalGateKind::CryptoChainlinkResolution, VerticalActivationTarget::SemiAuto) => {
+            (
+                VerticalGateKind::CryptoChainlinkResolution,
+                VerticalActivationTarget::OperatorApproval,
+            ) => {
                 live_days >= 14
                     && self.sample_count >= 2_000
                     && self.availability >= Decimal::new(999, 3)
@@ -1179,7 +1182,7 @@ impl VerticalGateEvidence {
             }
             (
                 VerticalGateKind::CryptoChainlinkResolution,
-                VerticalActivationTarget::AutoExecution,
+                VerticalActivationTarget::PolicyAutomatic,
             ) => {
                 live_days >= 30
                     && self.sample_count >= 10_000
@@ -1187,7 +1190,10 @@ impl VerticalGateEvidence {
                     && self.unresolved_mismatch_count == 0
                     && self.gaps_recovered
             }
-            (VerticalGateKind::CryptoBinanceContinuity, VerticalActivationTarget::SemiAuto) => {
+            (
+                VerticalGateKind::CryptoBinanceContinuity,
+                VerticalActivationTarget::OperatorApproval,
+            ) => {
                 live_days >= 30
                     && self.sample_count >= 100_000
                     && self.unresolved_mismatch_count == 0
@@ -1195,14 +1201,14 @@ impl VerticalGateEvidence {
             }
             (
                 VerticalGateKind::CryptoBinanceContinuity,
-                VerticalActivationTarget::AutoExecution,
+                VerticalActivationTarget::PolicyAutomatic,
             ) => {
                 live_days >= 60
                     && self.sample_count >= 250_000
                     && self.unresolved_mismatch_count == 0
                     && self.gaps_recovered
             }
-            (VerticalGateKind::WeatherNoaaProxy, VerticalActivationTarget::SemiAuto) => {
+            (VerticalGateKind::WeatherNoaaProxy, VerticalActivationTarget::OperatorApproval) => {
                 self.sample_count >= 500
                     && self.distinct_subject_count >= 20
                     && self.distinct_local_dates >= 30
@@ -1216,7 +1222,7 @@ impl VerticalGateEvidence {
                     && self.availability >= Decimal::new(99, 2)
                     && self.gaps_recovered
             }
-            (VerticalGateKind::WeatherNoaaProxy, VerticalActivationTarget::AutoExecution) => {
+            (VerticalGateKind::WeatherNoaaProxy, VerticalActivationTarget::PolicyAutomatic) => {
                 self.sample_count >= 2_000
                     && self.distinct_subject_count >= 30
                     && self.distinct_local_dates >= 90
@@ -1696,7 +1702,7 @@ mod tests {
     fn absent_empty_cannot_publication() {
         let payload = TradePolicyArtifactPayload {
             format_version: TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
-            activation_target: VerticalActivationTarget::SemiAuto,
+            activation_target: VerticalActivationTarget::OperatorApproval,
             fit_contract: TradePolicyFitContract::test_fixture(),
             source_dataset_hash: hash('1'),
             feature_schema_hash: hash('2'),

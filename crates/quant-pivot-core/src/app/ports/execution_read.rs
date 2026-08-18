@@ -14,18 +14,21 @@ use quant_pivot_models::{
         },
         pagination::Paginated,
         ports::ExecutionReadPort,
-        quant::{ExecutionOrderInfo, PositionInfo, ReconciliationInfo},
+        quant::{ExecutionOrderInfo, ReconciliationInfo, StrategyPositionLot},
     },
-    types::{ExecutionOrderId, OrderIntentId, PositionId, ReconciliationId, SettlementRedeemId},
+    types::{
+        ExecutionOrderId, OrderIntentId, ReconciliationId, SettlementRedeemId,
+        StrategyPositionLotId,
+    },
 };
 use quant_pivot_repository::traits::{
-    ExecutionOrderRepository, PositionRepository, ReconciliationRepository,
+    ExecutionOrderRepository, ReconciliationRepository, StrategyPositionLotRepository,
     quant::settlement_redeem::SettlementRedeemRepository,
 };
 
 pub struct CoreExecutionReadPort {
     execution_orders: Arc<dyn ExecutionOrderRepository>,
-    positions: Arc<dyn PositionRepository>,
+    positions: Arc<dyn StrategyPositionLotRepository>,
     reconciliation: Arc<dyn ReconciliationRepository>,
     settlement_redeem: Arc<dyn SettlementRedeemRepository>,
 }
@@ -34,7 +37,7 @@ impl CoreExecutionReadPort {
     #[must_use]
     pub fn new(
         execution_orders: Arc<dyn ExecutionOrderRepository>,
-        positions: Arc<dyn PositionRepository>,
+        positions: Arc<dyn StrategyPositionLotRepository>,
         reconciliation: Arc<dyn ReconciliationRepository>,
         settlement_redeem: Arc<dyn SettlementRedeemRepository>,
     ) -> Self {
@@ -73,14 +76,17 @@ impl ExecutionReadPort for CoreExecutionReadPort {
         self.positions.page(query).await.map_err(Into::into)
     }
 
-    async fn get_position(&self, id: &PositionId) -> QuantResult<Option<PositionSummary>> {
+    async fn get_position(
+        &self,
+        id: &StrategyPositionLotId,
+    ) -> QuantResult<Option<PositionSummary>> {
         self.positions.find_by_id(id).await.map_err(Into::into)
     }
 
     async fn get_position_by_intent(
         &self,
         intent_id: &OrderIntentId,
-    ) -> QuantResult<Option<PositionInfo>> {
+    ) -> QuantResult<Option<StrategyPositionLot>> {
         self.positions
             .find_by_intent(intent_id)
             .await

@@ -30,9 +30,9 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
     ExchangeHistoryRepository, FactorRepository, FeatureRepository, MarketLinkageRepository,
-    MarketRepository, ModelRegistryRepository, PolicyRepository, PositionRepository,
-    QuantFactReadRepository, RecommendationReportRepository, ServingEvidenceRepository,
-    SourceSliceRepository, TradePolicyRepository, TrainingDatasetRepository,
+    MarketRepository, ModelRegistryRepository, PolicyRepository, QuantFactReadRepository,
+    RecommendationReportRepository, ServingEvidenceRepository, SourceSliceRepository,
+    StrategyPositionLotRepository, TradePolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, training::DatasetPlanRequest};
 use tokio::time::{Instant, sleep};
@@ -79,7 +79,7 @@ pub struct CoreTrainingDatasetPort {
     market_repo: Arc<dyn MarketRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
-    position_repo: Arc<dyn PositionRepository>,
+    position_repo: Arc<dyn StrategyPositionLotRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     model_registry: Arc<dyn ModelRegistryRepository>,
     trade_policy_repo: Arc<dyn TradePolicyRepository>,

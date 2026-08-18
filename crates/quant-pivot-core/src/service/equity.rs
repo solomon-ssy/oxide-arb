@@ -5,11 +5,13 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
-    domain::quant::{EquitySnapshotInfo, NewAccountSnapshot, NewEquitySnapshot, PositionInfo},
+    domain::quant::{
+        EquitySnapshotInfo, NewAccountSnapshot, NewEquitySnapshot, StrategyPositionLot,
+    },
     types::{AccountPositions, AccountSnapshotId, EquitySnapshotId, ExecutionAccountId, Usd},
 };
 use quant_pivot_repository::traits::{
-    EquitySnapshotRepository, PositionRepository, VenueIncentiveRepository,
+    EquitySnapshotRepository, StrategyPositionLotRepository, VenueIncentiveRepository,
 };
 use quant_pivot_research::portfolio::{AccountDrawdown, AccountSnapshot};
 
@@ -52,7 +54,7 @@ pub trait DrawdownProvider: Send + Sync {
 /// Repository-backed equity snapshot service.
 pub struct EquitySnapshotService {
     equity_snapshots: Arc<dyn EquitySnapshotRepository>,
-    positions: Arc<dyn PositionRepository>,
+    positions: Arc<dyn StrategyPositionLotRepository>,
     incentives: Arc<dyn VenueIncentiveRepository>,
     execution_account_id: ExecutionAccountId,
 }
@@ -61,7 +63,7 @@ impl EquitySnapshotService {
     #[must_use]
     pub const fn new(
         equity_snapshots: Arc<dyn EquitySnapshotRepository>,
-        positions: Arc<dyn PositionRepository>,
+        positions: Arc<dyn StrategyPositionLotRepository>,
         incentives: Arc<dyn VenueIncentiveRepository>,
         execution_account_id: ExecutionAccountId,
     ) -> Self {
@@ -181,7 +183,10 @@ impl DrawdownProvider for EquitySnapshotService {
     }
 }
 
-fn unrealized_pnl_usd(open_lots: &[PositionInfo], account: &AccountSnapshot) -> QuantResult<Usd> {
+fn unrealized_pnl_usd(
+    open_lots: &[StrategyPositionLot],
+    account: &AccountSnapshot,
+) -> QuantResult<Usd> {
     let marks = account
         .positions
         .iter()
@@ -194,7 +199,7 @@ fn unrealized_pnl_usd(open_lots: &[PositionInfo], account: &AccountSnapshot) -> 
                 stage: "equity_snapshot",
                 detail: format!(
                     "open strategy lot {} has no current venue mark for token {}",
-                    lot.position_id, lot.token_id
+                    lot.strategy_position_lot_id, lot.token_id
                 ),
             }
         })?;

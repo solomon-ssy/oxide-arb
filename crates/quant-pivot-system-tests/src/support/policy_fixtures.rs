@@ -75,9 +75,9 @@ impl TryFrom<PolicySnapshotFixture<'_>> for NewDecisionPolicySnapshot {
                 fixture.snapshot,
                 ConfigResourceKind::OperationsPolicy,
             ),
-            execution_automation_policy_revision_id: required_revision(
+            execution_authorization_policy_revision_id: required_revision(
                 fixture.snapshot,
-                ConfigResourceKind::ExecutionAutomationPolicy,
+                ConfigResourceKind::ExecutionAuthorizationPolicy,
             ),
             source: fixture.source,
             created_by_kind: PolicyActorKind::System,

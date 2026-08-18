@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use super::{
     ExecutionAttemptOutcomeInfo, ExecutionOrderInfo, NewExecutionAttemptOutcome, OrderIntentInfo,
-    PositionInfo, RecommendationResolutionOutcomeInfo, ReconciliationInfo,
+    RecommendationResolutionOutcomeInfo, ReconciliationInfo, StrategyPositionLot,
     settlement::SettlementRedeemLotInfo,
 };
 use crate::{
@@ -21,9 +21,9 @@ use crate::{
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price,
-        RecommendationId, ReconciliationId, SchemaVersion, SettlementRedeemLotId, Shares, TokenId,
-        Usd,
+        AccountChainExecutionId, ContentHash, ExecutionOrderId, MarketId, OrderIntentId, Price,
+        RecommendationId, ReconciliationId, SchemaVersion, SettlementRedeemLotId, Shares,
+        StrategyPositionLotId, TokenId, Usd,
     },
 };
 
@@ -40,8 +40,19 @@ pub struct ExecutionAttemptSourceGraph {
     pub intent: OrderIntentInfo,
     pub orders: Vec<ExecutionOrderInfo>,
     pub reconciliations: Vec<ReconciliationInfo>,
-    pub position: Option<PositionInfo>,
+    pub account_execution_fees: Vec<AccountExecutionFeeFact>,
+    pub position: Option<StrategyPositionLot>,
     pub settlement_lot: Option<SettlementRedeemLotInfo>,
+}
+
+/// Exact finalized fee bound through an append-only system-order association.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccountExecutionFeeFact {
+    pub account_chain_execution_id: AccountChainExecutionId,
+    pub execution_order_id: ExecutionOrderId,
+    pub exact_fee_usd: Usd,
+    pub source_event_hash: ContentHash,
+    pub available_at: DateTime<Utc>,
 }
 
 /// A source may be valid but not yet complete enough to seal a WORM outcome.
@@ -61,6 +72,7 @@ pub enum ExecutionAttemptDeferredReason {
     ExitReconciliationMissing,
     ExitReconciliationPending,
     ExitReconciliationUnresolvable,
+    AccountChainExecutionMissing,
     SettlementLotMissing,
 }
 
@@ -245,6 +257,9 @@ impl ExecutionAttemptSourceGraph {
         for reconciliation in &self.reconciliations {
             observed_at = observed_at.max(reconciliation.updated_at);
         }
+        for fee in &self.account_execution_fees {
+            observed_at = observed_at.max(fee.available_at);
+        }
         if let Some(position) = &self.position {
             observed_at = observed_at.max(position.updated_at);
         }
@@ -277,6 +292,12 @@ impl ExecutionAttemptSourceGraph {
                 reconciliation.created_at,
                 reconciliation.execution_order_id.as_uuid(),
                 reconciliation.reconciliation_id.as_uuid(),
+            )
+        });
+        self.account_execution_fees.sort_by_key(|fee| {
+            (
+                fee.execution_order_id.as_uuid(),
+                fee.account_chain_execution_id.as_uuid(),
             )
         });
         for orders in self.orders.windows(2) {
@@ -331,6 +352,16 @@ impl ExecutionAttemptSourceGraph {
             .find(|reconciliation| reconciliation.execution_order_id == execution_order_id)
     }
 
+    fn exact_fee(&self, execution_order_id: ExecutionOrderId) -> Option<Usd> {
+        let fees = self
+            .account_execution_fees
+            .iter()
+            .filter(|fee| fee.execution_order_id == execution_order_id)
+            .map(|fee| fee.exact_fee_usd)
+            .collect::<Vec<_>>();
+        (!fees.is_empty()).then(|| fees.into_iter().sum())
+    }
+
     fn derive_unfilled(
         &self,
         entry: &ExecutionOrderInfo,
@@ -363,18 +394,17 @@ impl ExecutionAttemptSourceGraph {
                 order_intent_id: self.intent.order_intent_id,
                 entry_execution_order_id: entry.execution_order_id,
                 entry_reconciliation_id: reconciliation.reconciliation_id,
-                position_id: None,
+                strategy_position_lot_id: None,
                 execution_account_id: self.intent.execution_account_id,
                 market_id: self.market_id.clone(),
                 token_id: self.token_id.clone(),
-                runtime_mode: self.intent.runtime_mode,
                 terminal_state: ExecutionAttemptTerminalState::Unfilled,
                 no_fill_reason: Some(no_fill_reason),
                 entry_order_state: entry.state,
                 requested_shares: entry.shares,
                 filled_shares,
                 entry_avg_price: None,
-                entry_fee_usd: reconciliation.settled_fee_usd,
+                entry_fee_usd: None,
                 entry_filled_at: None,
                 position_terminal_state: None,
                 exit_reason: None,
@@ -412,7 +442,7 @@ impl ExecutionAttemptSourceGraph {
                 ExecutionAttemptDeferredReason::PositionNotTerminal,
             ));
         }
-        validate_position_identity(self, position)?;
+        validate_lot_identity(self, position)?;
         let terminal_at = position.closed_at.ok_or(
             ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                 detail: "terminal position has no closed_at",
@@ -423,6 +453,11 @@ impl ExecutionAttemptSourceGraph {
                 detail: "filled entry reconciliation has no average price",
             },
         )?;
+        let Some(entry_fee_usd) = self.exact_fee(entry.execution_order_id) else {
+            return Ok(ExecutionAttemptDerivation::Deferred(
+                ExecutionAttemptDeferredReason::AccountChainExecutionMissing,
+            ));
+        };
         let exit_aggregate = match self.derive_exit_aggregate()? {
             ExitAggregateDerivation::Ready(aggregate) => aggregate,
             ExitAggregateDerivation::Deferred(reason) => {
@@ -449,37 +484,47 @@ impl ExecutionAttemptSourceGraph {
 
         let (source_checkpoint_hash, execution_fact_hash) = self.source_hashes()?;
         let has_exchange_exit = exit_aggregate.shares.is_positive();
+        let exit_fee_usd = if has_exchange_exit {
+            exit_aggregate.fee
+        } else {
+            Some(Usd::ZERO)
+        };
+        let Some(exit_fee_for_pnl) = exit_fee_usd else {
+            return Ok(ExecutionAttemptDerivation::Deferred(
+                ExecutionAttemptDeferredReason::AccountChainExecutionMissing,
+            ));
+        };
+        let exit_proceeds_usd = exit_aggregate.shares * exit_aggregate.avg_price - exit_fee_for_pnl;
+        let settlement_payout_usd = self.settlement_lot.as_ref().map(|lot| lot.payout_usd);
+        let terminal_proceeds_usd = exit_proceeds_usd + settlement_payout_usd.unwrap_or(Usd::ZERO);
+        let realized_pnl_usd =
+            terminal_proceeds_usd - (filled_shares * entry_avg_price + entry_fee_usd);
         Ok(ExecutionAttemptDerivation::Ready(Box::new(
             NewExecutionAttemptOutcome {
                 recommendation_id: self.recommendation_id,
                 order_intent_id: self.intent.order_intent_id,
                 entry_execution_order_id: entry.execution_order_id,
                 entry_reconciliation_id: entry_reconciliation.reconciliation_id,
-                position_id: Some(position.position_id),
+                strategy_position_lot_id: Some(position.strategy_position_lot_id),
                 execution_account_id: self.intent.execution_account_id,
                 market_id: self.market_id.clone(),
                 token_id: self.token_id.clone(),
-                runtime_mode: self.intent.runtime_mode,
                 terminal_state,
                 no_fill_reason: None,
                 entry_order_state: entry.state,
                 requested_shares: entry.shares,
                 filled_shares,
                 entry_avg_price: Some(entry_avg_price),
-                entry_fee_usd: entry_reconciliation.settled_fee_usd,
+                entry_fee_usd: Some(entry_fee_usd),
                 entry_filled_at: entry.filled_at,
                 position_terminal_state: Some(position.state),
                 exit_reason: self.intent.exit_reason,
                 exit_filled_shares: has_exchange_exit.then_some(exit_aggregate.shares),
                 exit_avg_price: has_exchange_exit.then_some(exit_aggregate.avg_price),
-                exit_fee_usd: if has_exchange_exit {
-                    exit_aggregate.fee
-                } else {
-                    None
-                },
+                exit_fee_usd: has_exchange_exit.then_some(exit_fee_for_pnl),
                 exit_at: has_exchange_exit.then_some(exit_aggregate.last_fill_at),
-                settlement_payout_usd: self.settlement_lot.as_ref().map(|lot| lot.payout_usd),
-                realized_pnl_usd: Some(position.realized_pnl_usd),
+                settlement_payout_usd,
+                realized_pnl_usd: Some(realized_pnl_usd),
                 terminal_at,
                 source_checkpoint_hash,
                 execution_fact_hash,
@@ -539,10 +584,12 @@ impl ExecutionAttemptSourceGraph {
                     }
                     shares += filled;
                     weighted_price += filled.inner() * avg_price.inner();
-                    fee = match (fee, reconciliation.settled_fee_usd) {
-                        (Some(total), Some(actual)) => Some(total + actual),
-                        _ => None,
+                    let Some(actual_fee) = self.exact_fee(order.execution_order_id) else {
+                        return Ok(ExitAggregateDerivation::Deferred(
+                            ExecutionAttemptDeferredReason::AccountChainExecutionMissing,
+                        ));
                     };
+                    fee = fee.map(|total| total + actual_fee);
                     last_fill_at =
                         Some(last_fill_at.map_or(resolved_at, |current: DateTime<Utc>| {
                             current.max(resolved_at)
@@ -569,7 +616,7 @@ impl ExecutionAttemptSourceGraph {
 
     fn settlement_shares(
         &self,
-        position: &PositionInfo,
+        position: &StrategyPositionLot,
     ) -> Result<Shares, ExecutionAttemptReconciliationError> {
         match position.state {
             PositionLedgerState::Settled => {
@@ -578,7 +625,7 @@ impl ExecutionAttemptSourceGraph {
                         detail: "settled position has no settlement lot",
                     },
                 )?;
-                if lot.position_id != position.position_id
+                if lot.strategy_position_lot_id != position.strategy_position_lot_id
                     || lot.order_intent_id != self.intent.order_intent_id
                     || lot.token_id != self.token_id
                 {
@@ -717,11 +764,11 @@ const fn deferred_reconciliation_reason(
     }
 }
 
-fn validate_position_identity(
+fn validate_lot_identity(
     graph: &ExecutionAttemptSourceGraph,
-    position: &PositionInfo,
+    position: &StrategyPositionLot,
 ) -> Result<(), ExecutionAttemptReconciliationError> {
-    if position.order_intent_id != graph.intent.order_intent_id
+    if position.order_intent_id != Some(graph.intent.order_intent_id)
         || position.execution_account_id != graph.intent.execution_account_id
         || position.market_id != graph.market_id
         || position.token_id != graph.token_id
@@ -776,7 +823,8 @@ struct SourceCheckpointView {
     intent_updated_at: DateTime<Utc>,
     orders: Vec<(ExecutionOrderId, DateTime<Utc>)>,
     reconciliations: Vec<(ReconciliationId, ExecutionOrderId, DateTime<Utc>)>,
-    position: Option<(PositionId, DateTime<Utc>)>,
+    account_execution_fees: Vec<(AccountChainExecutionId, ExecutionOrderId, DateTime<Utc>)>,
+    position: Option<(StrategyPositionLotId, DateTime<Utc>)>,
     settlement_lot: Option<(SettlementRedeemLotId, DateTime<Utc>)>,
 }
 
@@ -803,10 +851,21 @@ impl SourceCheckpointView {
                     )
                 })
                 .collect(),
+            account_execution_fees: graph
+                .account_execution_fees
+                .iter()
+                .map(|fee| {
+                    (
+                        fee.account_chain_execution_id,
+                        fee.execution_order_id,
+                        fee.available_at,
+                    )
+                })
+                .collect(),
             position: graph
                 .position
                 .as_ref()
-                .map(|position| (position.position_id, position.updated_at)),
+                .map(|position| (position.strategy_position_lot_id, position.updated_at)),
             settlement_lot: graph
                 .settlement_lot
                 .as_ref()
@@ -824,7 +883,8 @@ struct ExecutionFactGraphView<'a> {
     intent: &'a OrderIntentInfo,
     orders: &'a [ExecutionOrderInfo],
     reconciliations: &'a [ReconciliationInfo],
-    position: Option<&'a PositionInfo>,
+    account_execution_fees: &'a [AccountExecutionFeeFact],
+    position: Option<&'a StrategyPositionLot>,
     settlement_lot: Option<&'a SettlementRedeemLotInfo>,
 }
 
@@ -838,6 +898,7 @@ impl<'a> ExecutionFactGraphView<'a> {
             intent: &graph.intent,
             orders: graph.orders.as_slice(),
             reconciliations: graph.reconciliations.as_slice(),
+            account_execution_fees: graph.account_execution_fees.as_slice(),
             position: graph.position.as_ref(),
             settlement_lot: graph.settlement_lot.as_ref(),
         }

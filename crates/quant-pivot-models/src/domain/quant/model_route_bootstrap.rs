@@ -2,7 +2,7 @@
 //!
 //! Bootstrap is deliberately not a compatibility form of promotion. It may
 //! only fill one previously empty Pooled, Crypto, or Weather Buy route, runs under
-//! `ReportOnly`, and seals the complete model, validation, parity, policy, and
+//! operator-approval authorization, and seals the complete model, validation, parity, policy, and
 //! actor preimage into one content-addressed transaction record.
 
 use std::iter;
@@ -17,7 +17,7 @@ use super::{
 use crate::{
     enums::{
         model::{ModelFamily, ServingEligibility},
-        quant::QuantRuntimeMode,
+        quant::EntryAuthorizationPolicy,
         runtime_config::PolicyActorKind,
     },
     hashing::CanonicalDigest,
@@ -255,7 +255,7 @@ impl ModelBootstrapManifest {
         let evidence_matches_authority = matches!(
             (profile.spec.serving_authority, self.validation_evidence),
             (
-                ServingAuthority::ReportOnlyWithLiveL2,
+                ServingAuthority::AnalysisOnlyWithLiveL2,
                 ModelBootstrapValidationEvidence::PredictiveCpcv { .. }
             ) | (
                 ServingAuthority::ExecutionEligible,
@@ -709,7 +709,7 @@ pub struct ModelRouteBootstrapPreflight {
     expected_snapshot_hash: ContentHash,
     expected_model_routing_revision_id: PolicyRevisionId,
     expected_runtime_control_revision: i64,
-    current_runtime_mode: QuantRuntimeMode,
+    current_entry_authorization_policy: EntryAuthorizationPolicy,
     non_route_policy_hash: ContentHash,
     evaluated_at: DateTime<Utc>,
 }
@@ -723,7 +723,7 @@ struct BootstrapPreflightPreimage<'a> {
     expected_snapshot_hash: ContentHash,
     expected_model_routing_revision_id: PolicyRevisionId,
     expected_runtime_control_revision: i64,
-    current_runtime_mode: QuantRuntimeMode,
+    current_entry_authorization_policy: EntryAuthorizationPolicy,
     non_route_policy_hash: ContentHash,
     evaluated_at: DateTime<Utc>,
 }
@@ -736,7 +736,7 @@ pub struct ModelRouteBootstrapPreflightInput {
     pub expected_snapshot_hash: ContentHash,
     pub expected_model_routing_revision_id: PolicyRevisionId,
     pub expected_runtime_control_revision: i64,
-    pub current_runtime_mode: QuantRuntimeMode,
+    pub current_entry_authorization_policy: EntryAuthorizationPolicy,
     pub non_route_policy_hash: ContentHash,
     pub evaluated_at: DateTime<Utc>,
 }
@@ -751,7 +751,7 @@ impl ModelRouteBootstrapPreflight {
             expected_snapshot_hash: input.expected_snapshot_hash,
             expected_model_routing_revision_id: input.expected_model_routing_revision_id,
             expected_runtime_control_revision: input.expected_runtime_control_revision,
-            current_runtime_mode: input.current_runtime_mode,
+            current_entry_authorization_policy: input.current_entry_authorization_policy,
             non_route_policy_hash: input.non_route_policy_hash,
             evaluated_at: input.evaluated_at,
         })?;
@@ -764,7 +764,7 @@ impl ModelRouteBootstrapPreflight {
             expected_snapshot_hash: input.expected_snapshot_hash,
             expected_model_routing_revision_id: input.expected_model_routing_revision_id,
             expected_runtime_control_revision: input.expected_runtime_control_revision,
-            current_runtime_mode: input.current_runtime_mode,
+            current_entry_authorization_policy: input.current_entry_authorization_policy,
             non_route_policy_hash: input.non_route_policy_hash,
             evaluated_at: input.evaluated_at,
         };
@@ -778,7 +778,8 @@ impl ModelRouteBootstrapPreflight {
             && self.expected_snapshot_id
                 == DecisionPolicySnapshotId::from_content_hash(&self.expected_snapshot_hash)
             && self.expected_runtime_control_revision >= 0
-            && self.current_runtime_mode == QuantRuntimeMode::ReportOnly
+            && self.current_entry_authorization_policy
+                == EntryAuthorizationPolicy::OperatorApprovalRequired
             && self.evaluated_at == self.manifest.quality_gate_report().evaluated_at
             && self.preflight_hash == Self::derive_hash(&self.preimage())?;
         if !valid {
@@ -798,7 +799,7 @@ impl ModelRouteBootstrapPreflight {
             expected_snapshot_hash: self.expected_snapshot_hash,
             expected_model_routing_revision_id: self.expected_model_routing_revision_id,
             expected_runtime_control_revision: self.expected_runtime_control_revision,
-            current_runtime_mode: self.current_runtime_mode,
+            current_entry_authorization_policy: self.current_entry_authorization_policy,
             non_route_policy_hash: self.non_route_policy_hash,
             evaluated_at: self.evaluated_at,
         }
@@ -851,8 +852,8 @@ impl ModelRouteBootstrapPreflight {
     }
 
     #[must_use]
-    pub const fn current_runtime_mode(&self) -> QuantRuntimeMode {
-        self.current_runtime_mode
+    pub const fn current_entry_authorization_policy(&self) -> EntryAuthorizationPolicy {
+        self.current_entry_authorization_policy
     }
 
     #[must_use]

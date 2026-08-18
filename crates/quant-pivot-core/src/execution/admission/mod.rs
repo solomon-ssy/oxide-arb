@@ -43,7 +43,7 @@ use quant_pivot_models::{
     enums::{
         common::{OrderType, Side, TickSize},
         execution::{AdmissionCheckId, AdmissionOutcome, KillSwitchState},
-        quant::{FillRequirement, QuantRuntimeMode},
+        quant::{EntryAuthorizationPolicy, FillRequirement},
         settlement::SettlementWritePolicy,
     },
     hashing::CanonicalDigest,
@@ -160,8 +160,8 @@ pub struct AdmissionInput {
     pub recommendation: RecommendationInfo,
     /// Source report (governance status + config / model versions).
     pub report: RecommendationReportInfo,
-    /// Live governed runtime mode.
-    pub mode: QuantRuntimeMode,
+    /// Live governed entry-authorization policy.
+    pub authorization_policy: EntryAuthorizationPolicy,
     /// Live operational kill-switch state.
     pub kill_switch: KillSwitchState,
     /// Real venue account snapshot at decision time.

@@ -34,9 +34,6 @@ use quant_pivot_models::{
         quant_order_intent::{
             Column as IntentColumn, Entity as IntentEntity, Model as IntentModel,
         },
-        quant_position::{
-            Column as PositionColumn, Entity as PositionEntity, Model as PositionModel,
-        },
         quant_recommendation::{
             Column as RecommendationColumn, Entity as RecommendationEntity,
             Relation as RecommendationRelation,
@@ -47,6 +44,9 @@ use quant_pivot_models::{
         },
         quant_recommendation_execution_rollup_attempt::{
             ActiveModel as BindingActiveModel, Column as BindingColumn, Entity as BindingEntity,
+        },
+        quant_strategy_position_lot::{
+            Column as PositionColumn, Entity as PositionEntity, Model as PositionModel,
         },
     },
     enums::{
@@ -176,7 +176,7 @@ impl PgRecommendationExecutionRollupRepository {
             PositionEntity::find()
                 .filter(PositionColumn::OrderIntentId.is_in(intent_ids.iter().copied()))
                 .order_by_asc(PositionColumn::OpenedAt)
-                .order_by_asc(PositionColumn::PositionId)
+                .order_by_asc(PositionColumn::StrategyPositionLotId)
                 .lock_shared()
                 .all(transaction)
                 .await

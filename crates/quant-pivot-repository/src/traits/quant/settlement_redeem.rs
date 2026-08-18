@@ -182,7 +182,7 @@ pub trait SettlementRedeemRepository: Send + Sync {
     ) -> Result<SettlementRedeemInfo, StorageError>;
 
     /// Persist a signed envelope before any network dispatch. Approved
-    /// `SemiAuto` authorization is consumed in the same transaction.
+    /// Operator authorization is consumed in the same transaction.
     async fn persist_prepared_submission(
         &self,
         command: PersistPreparedSettlementSubmission,

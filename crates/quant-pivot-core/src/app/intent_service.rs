@@ -14,10 +14,7 @@ use quant_pivot_repository::traits::{
 use super::AppContext;
 use crate::{
     app::{task_id::TaskId, task_registry::AppRunner},
-    execution::{
-        CoreOrderIntentService, DefaultRuntimeModeGate, IntentTerminalEventSink,
-        OrderIntentServiceDeps, RuntimeModeGate,
-    },
+    execution::{CoreOrderIntentService, IntentTerminalEventSink, OrderIntentServiceDeps},
     infra::{deadline_scheduler, periodic_task::PeriodicTask},
     service::feature_integrity::RepositoryFeatureParityGate,
 };
@@ -32,10 +29,8 @@ impl AppContext {
     #[must_use]
     pub fn build_order_intent_service(&self) -> Arc<CoreOrderIntentService> {
         let repos = &self.infra.repos;
-        let mode_gate: Arc<dyn RuntimeModeGate> =
-            Arc::new(DefaultRuntimeModeGate::new(self.runtime_config()));
         Arc::new(CoreOrderIntentService::new(OrderIntentServiceDeps {
-            mode_gate,
+            authorization_config: self.runtime_config(),
             runtime_controls: self.runtime_controls(),
             recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
             reports: Arc::clone(&repos.recommendation_report)

@@ -33,10 +33,10 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     clickhouse::{ChPrice, ChProbability, QuantExitSignalEvaluationEventRow},
-    domain::quant::{OrderIntentInfo, PositionInfo},
+    domain::quant::{OrderIntentInfo, StrategyPositionLot},
     enums::{
         clickhouse::{ChExitSignalEvaluatorKind, ChExitSignalVerdict},
-        quant::QuantRuntimeMode,
+        quant::AuthorizationKind,
     },
     types::{
         Bps, ContentHash, ExitReinferenceObservation, ExitReinferenceVerdictKind, Price,
@@ -76,7 +76,7 @@ pub trait ExitSignalReinferer: Send + Sync {
     async fn reinfer(
         &self,
         intent: &OrderIntentInfo,
-        lot: &PositionInfo,
+        lot: &StrategyPositionLot,
         mark_price: Option<Price>,
         now: DateTime<Utc>,
     ) -> QuantResult<Option<FreshSignal>>;
@@ -121,8 +121,8 @@ impl<R> ReinferenceSignalEvaluator<R> {
         let ch_verdict: ChExitSignalVerdict = verdict.into();
         self.audit.write(QuantExitSignalEvaluationEventRow {
             event_time: now_ms,
-            order_intent_id: ctx.lot.order_intent_id,
-            position_id: ctx.lot.position_id,
+            order_intent_id: ctx.intent.order_intent_id,
+            strategy_position_lot_id: ctx.lot.strategy_position_lot_id,
             market_id: ctx.lot.market_id.clone(),
             token_id: ctx.lot.token_id.clone(),
             evaluator_kind: ChExitSignalEvaluatorKind::Reinference,
@@ -190,12 +190,12 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
 
         // Thesis-invalidation is a *forced* exit (ladder tier 5, fires even under
         // hold-to-resolution). It is only ever auto-submitted for intents entered
-        // under auto-execution — a human owns the exit for `SemiAuto` / report-only
-        // positions, so re-inference never force-closes them (fail-safe hold).
-        if ctx.intent.runtime_mode != QuantRuntimeMode::AutoExecution {
+        // under active-policy authorization; a human owns the exit for
+        // operator-authorized positions, so re-inference holds fail-safe.
+        if ctx.intent.authorization_kind != Some(AuthorizationKind::ActivePolicy) {
             self.metrics.inc_exit_signal_reinference("skipped_non_auto");
             return ExitSignalEvaluation::verdict(ExitSignalVerdict::Indeterminate {
-                detail: "thesis-invalidation forced exit applies to auto-execution intents only"
+                detail: "thesis-invalidation forced exit requires active-policy authorization"
                     .to_owned(),
             });
         }

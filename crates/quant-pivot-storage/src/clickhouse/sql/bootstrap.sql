@@ -477,10 +477,16 @@ ORDER BY (
         decision_at,
         ingestion_time
     ) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_position_event (
+CREATE TABLE IF NOT EXISTS quant_strategy_position_lot_event (
     `event_time` DateTime64(3, 'UTC'),
-    `position_id` String,
-    `order_intent_id` String,
+    `strategy_position_lot_id` String,
+    `origin_kind` Enum8(
+        'system_intent' = 1,
+        'account_recovery_incident' = 2,
+        'opening_inventory' = 3
+    ),
+    `order_intent_id` Nullable(String),
+    `recovery_incident_id` Nullable(String),
     `market_id` String,
     `token_id` String,
     `event_kind` Enum8(

@@ -24,8 +24,8 @@ pub enum GatePreviewIntent {
     /// Champion route-activation readiness (adds shadow overlap stability).
     #[default]
     RouteActivation,
-    /// Auto-execution readiness (adds liquidity-exit feasibility).
-    AutoExecution,
+    /// Policy-automatic readiness (adds liquidity-exit feasibility).
+    PolicyAutomatic,
 }
 
 /// Query for `GET /research/models/{id}/quality-gate`.
@@ -63,7 +63,7 @@ pub struct GateOutcomeView {
 /// Read-only quality-gate evaluation for one model version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QualityGateReportView {
-    /// Transition evaluated (`candidate`, `route_activation`, or `auto_execution`).
+    /// Transition evaluated (`candidate`, `route_activation`, or `policy_automatic`).
     pub intent: String,
     /// When the dry-run ran.
     pub evaluated_at: DateTime<Utc>,

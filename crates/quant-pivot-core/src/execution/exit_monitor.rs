@@ -35,7 +35,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_models::{
-    domain::quant::{OrderIntentInfo, PositionInfo},
+    domain::quant::{OrderIntentInfo, StrategyPositionLot},
     enums::{
         common::{OrderType, Side},
         execution::{ExitReason, KillSwitchState},
@@ -153,7 +153,7 @@ pub struct ExitSignalContext<'a> {
     /// The governed intent (carries the frozen entry thesis baselines).
     pub intent: &'a OrderIntentInfo,
     /// The open position lot being evaluated.
-    pub lot: &'a PositionInfo,
+    pub lot: &'a StrategyPositionLot,
     /// Current sell-side mark (best bid), when the book is readable.
     pub mark_price: Option<Price>,
     /// Evaluation time.
@@ -258,7 +258,7 @@ pub enum ExitDecision {
 /// by the caller so [`decide_exit`] is a pure function.
 pub struct ExitMonitorInput {
     /// The open position lot (price truth: `avg_price`, `shares`, `opened_at`).
-    pub lot: PositionInfo,
+    pub lot: StrategyPositionLot,
     /// The intent's frozen exit contract.
     pub exit_policy: ExitPolicySpec,
     /// Current sell-side mark (best bid); `None` when the book is unreadable.

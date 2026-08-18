@@ -12,7 +12,7 @@ use quant_pivot_models::{
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
-        quant::QuantRuntimeMode,
+        quant::EntryAuthorizationPolicy,
     },
 };
 
@@ -51,7 +51,7 @@ impl HealthAlertState {
         &self,
         report: &HealthReport,
         phase: &OperationalPhase,
-        quant_runtime_mode: QuantRuntimeMode,
+        entry_authorization_policy: EntryAuthorizationPolicy,
         alerts: &AlertDispatcher,
         nudge: &SystemStatusNudge,
     ) {
@@ -78,7 +78,8 @@ impl HealthAlertState {
         for (previous, current, check) in transitions {
             match (previous, current) {
                 (Some(ProbeOutcome::Healthy) | None, ProbeOutcome::Unhealthy) => {
-                    dispatch_unhealthy_alert(&check, phase, quant_runtime_mode, alerts).await;
+                    dispatch_unhealthy_alert(&check, phase, entry_authorization_policy, alerts)
+                        .await;
                 }
                 (Some(ProbeOutcome::Unhealthy), ProbeOutcome::Healthy) => {
                     dispatch_recovery_alert(&check.name, alerts).await;
@@ -97,12 +98,12 @@ impl HealthAlertState {
 async fn dispatch_unhealthy_alert(
     check: &SubsystemHealth,
     phase: &OperationalPhase,
-    quant_runtime_mode: QuantRuntimeMode,
+    entry_authorization_policy: EntryAuthorizationPolicy,
     alerts: &AlertDispatcher,
 ) {
     let detail = check.detail.as_deref().unwrap_or("subsystem unhealthy");
     let affects_trading = check.name == "websocket"
-        && quant_runtime_mode == QuantRuntimeMode::AutoExecution
+        && entry_authorization_policy == EntryAuthorizationPolicy::PolicyAutomatic
         && matches!(
             phase,
             OperationalPhase::Operational | OperationalPhase::Degraded { .. }
@@ -181,7 +182,7 @@ mod tests {
             HealthReport, OperationalPhase, SubsystemCheckStatus, SubsystemHealth,
             WS_MARKET_DATA_STALE_THRESHOLD_MS,
         },
-        enums::quant::QuantRuntimeMode,
+        enums::quant::EntryAuthorizationPolicy,
     };
 
     use super::{HealthAlertState, ProbeOutcome, evaluate_ws_probe, ws_probe_skipped};
@@ -239,7 +240,7 @@ mod tests {
             .on_report(
                 &report,
                 &OperationalPhase::Operational,
-                QuantRuntimeMode::ReportOnly,
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
                 &alerts,
                 &nudge,
             )

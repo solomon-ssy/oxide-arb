@@ -412,7 +412,6 @@ impl DefaultReportBuilder {
             published_at,
             decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
             runtime_config: &context.config,
-            runtime_mode: self.deps.runtime_controls.quant_runtime_mode(),
             selection: &selection,
             account: &account,
             account_snapshot: equity.account_snapshot,
@@ -825,7 +824,7 @@ impl DefaultReportBuilder {
                 )
                 .await?,
             ),
-            ServingAuthority::ReportOnlyWithLiveL2 => None,
+            ServingAuthority::AnalysisOnlyWithLiveL2 => None,
         };
         if policy
             .as_ref()
@@ -1248,7 +1247,7 @@ fn candidate_tiers(
                 market.market_id
             ),
         })?;
-    if route.contract.serving_authority == ServingAuthority::ReportOnlyWithLiveL2 {
+    if route.contract.serving_authority == ServingAuthority::AnalysisOnlyWithLiveL2 {
         return bootstrap_candidate_tiers(BootstrapTierInput {
             context,
             market,

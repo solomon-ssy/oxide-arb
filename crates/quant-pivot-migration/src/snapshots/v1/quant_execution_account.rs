@@ -26,18 +26,22 @@ pub struct Model {
     pub identity_digest: String,
     pub created_at: DateTimeWithTimeZone,
     #[sea_orm(has_many)]
+    pub quant_account_chain_executions: HasMany<super::quant_account_chain_execution::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_account_recovery_incidents: HasMany<super::quant_account_recovery_incident::Entity>,
+    #[sea_orm(has_many)]
     pub quant_account_snapshots: HasMany<super::quant_account_snapshot::Entity>,
     #[sea_orm(has_many)]
     pub quant_order_intents: HasMany<super::quant_order_intent::Entity>,
     #[sea_orm(has_many)]
-    pub quant_execution_fills: HasMany<super::quant_execution_fill::Entity>,
+    pub quant_clob_trade_observations: HasMany<super::quant_clob_trade_observation::Entity>,
     #[sea_orm(has_many)]
     pub quant_venue_incentive_events: HasMany<super::quant_venue_incentive_event::Entity>,
     #[sea_orm(has_many)]
     pub quant_venue_incentive_reconciliation_scans:
         HasMany<super::quant_venue_incentive_reconciliation_scan::Entity>,
     #[sea_orm(has_many)]
-    pub quant_positions: HasMany<super::quant_position::Entity>,
+    pub quant_strategy_position_lots: HasMany<super::quant_strategy_position_lot::Entity>,
     #[sea_orm(has_many)]
     pub quant_settlement_redeems: HasMany<super::quant_settlement_redeem::Entity>,
     #[sea_orm(has_many)]

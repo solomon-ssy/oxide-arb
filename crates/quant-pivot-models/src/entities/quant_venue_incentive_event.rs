@@ -3,11 +3,11 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::{quant_execution_account, quant_execution_fill};
+use super::{quant_clob_trade_observation, quant_execution_account};
 use crate::{
     enums::fee::{VenueIncentiveKind, VenueIncentiveStage},
     types::{
-        ContentHash, EvmTransactionHash, ExecutionAccountId, ExecutionFillId, MarketId, Usd,
+        ClobTradeObservationId, ContentHash, EvmTransactionHash, ExecutionAccountId, MarketId, Usd,
         VenueIncentiveEventId,
     },
 };
@@ -19,7 +19,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub venue_incentive_event_id: VenueIncentiveEventId,
     pub execution_account_id: ExecutionAccountId,
-    pub execution_fill_id: Option<ExecutionFillId>,
+    pub clob_trade_observation_id: Option<ClobTradeObservationId>,
     pub market_id: Option<MarketId>,
     pub kind: VenueIncentiveKind,
     pub stage: VenueIncentiveStage,
@@ -45,11 +45,11 @@ pub struct Model {
     pub execution_account: BelongsTo<quant_execution_account::Entity>,
     #[sea_orm(
         belongs_to,
-        relation_enum = "ExecutionFill",
-        from = "execution_fill_id",
-        to = "execution_fill_id"
+        relation_enum = "ClobTradeObservation",
+        from = "clob_trade_observation_id",
+        to = "clob_trade_observation_id"
     )]
-    pub execution_fill: BelongsTo<Option<quant_execution_fill::Entity>>,
+    pub clob_trade_observation: BelongsTo<Option<quant_clob_trade_observation::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

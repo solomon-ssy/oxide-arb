@@ -28,28 +28,28 @@ use quant_pivot_models::{
             RejectIntentCommand,
         },
         quant::{
-            ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOrderIntent,
+            ApproveOrderIntentOutcome, AuthorizeOrderIntent, NewCapitalAllocation, NewOrderIntent,
             OrderIntentInfo, RecommendationInfo, RecommendationReportInfo,
         },
         runtime::IntentEventKind,
     },
     enums::{
         common::{OrderType, Side},
-        execution::{CapitalAllocationState, OrderIntentKind},
+        execution::CapitalAllocationState,
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
-            ApprovalStatus, FillRequirement, OrderIntentStatus, QuantRuntimeMode,
+            AuthorizationKind, EntryAuthorizationPolicy, FillRequirement, OrderIntentStatus,
             RecommendationReportStatus, ReportFactDeliveryStatus,
         },
         rbac::ResourceType,
         settlement::SettlementRoute,
     },
     types::{
-        CapitalAllocationId, ContentHash, EntryConditionInstanceId, EntryMakerRebateTerms,
-        EntryOrderPolicy, EntryOrderSpec, ExecutionAccountId, ExitPolicySpec, ModelVersionId,
-        OperationDetailDocument, OperationLogId, OrderAmount, OrderIntentId, Price, Probability,
-        RecommendationExitPlan, RecommendationId, RecommendationReportId, ResearchProfileRef,
-        ServingAuthority, Usd,
+        AuthorizationEvidence, CapitalAllocationId, EntryConditionInstanceId,
+        EntryMakerRebateTerms, EntryOrderPolicy, EntryOrderSpec, ExecutionAccountId,
+        ExitPolicySpec, ModelVersionId, OperationDetailDocument, OperationLogId, OrderAmount,
+        OrderIntentId, Price, Probability, RecommendationExitPlan, RecommendationId,
+        RecommendationReportId, ResearchProfileRef, ServingAuthority, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -66,7 +66,6 @@ use crate::{
     execution::{
         dispatch_wake::DispatchWake,
         intent_lifecycle::IntentLifecyclePublisher,
-        mode_gate::{IntentPolicyDecision, RuntimeModeGate},
         settlement_recovery_admission::{
             SettlementRecoveryAdmission, SettlementRecoveryAdmissionPort,
             SettlementRecoveryAdmissionRequest, requires_automatic_settlement_recovery,
@@ -75,6 +74,7 @@ use crate::{
     },
     governance::{RuntimeControlsHandle, resolve_return_model_calibration},
     observability::metrics_hub::MetricsHub,
+    runtime_config::DecisionPolicyStore,
     service::feature_integrity::FeatureParityGatePort,
 };
 /// Post-commit event sink for terminally invalidated intents.
@@ -87,7 +87,7 @@ pub trait IntentTerminalEventSink: Send + Sync {
 
 /// Dependencies for [`CoreOrderIntentService`].
 pub struct OrderIntentServiceDeps {
-    pub mode_gate: Arc<dyn RuntimeModeGate>,
+    pub authorization_config: Arc<DecisionPolicyStore>,
     pub runtime_controls: RuntimeControlsHandle,
     pub recommendations: Arc<dyn RecommendationRepository>,
     pub reports: Arc<dyn RecommendationReportRepository>,
@@ -97,10 +97,10 @@ pub struct OrderIntentServiceDeps {
     pub metrics: Arc<MetricsHub>,
     /// Shared `quant.intent` lifecycle fan-out (bootstrap singleton).
     pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
-    /// Wake the dispatcher when an `ApprovedByPolicy` intent is created (auto).
+    /// Wake the dispatcher when an intent becomes authorized.
     pub dispatch_wake: DispatchWake,
     /// Model registry used to recheck calibration state when creating a
-    /// `SemiAuto` or `AutoExecution` intent.
+    /// governed order intent.
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     /// Governance source used to re-verify the frozen policy at intent creation.
     pub trade_policies: Arc<dyn TradePolicyRepository>,
@@ -119,7 +119,7 @@ pub struct OrderIntentServiceDeps {
 /// Governed order-intent service (implements the web [`OrderIntentPort`], the
 /// report terminal-event [`IntentTerminalEventSink`], and the sweep `expire_due`).
 pub struct CoreOrderIntentService {
-    mode_gate: Arc<dyn RuntimeModeGate>,
+    authorization_config: Arc<DecisionPolicyStore>,
     runtime_controls: RuntimeControlsHandle,
     recommendations: Arc<dyn RecommendationRepository>,
     reports: Arc<dyn RecommendationReportRepository>,
@@ -142,7 +142,7 @@ impl CoreOrderIntentService {
     #[must_use]
     pub fn new(deps: OrderIntentServiceDeps) -> Self {
         Self {
-            mode_gate: deps.mode_gate,
+            authorization_config: deps.authorization_config,
             runtime_controls: deps.runtime_controls,
             recommendations: deps.recommendations,
             reports: deps.reports,
@@ -166,7 +166,7 @@ impl CoreOrderIntentService {
     /// TOCTOU window between report generation and intent creation: a
     /// calibrator deactivated after a report was built must not let a stale,
     /// frozen `execution_eligibility` still create a capital-reserving
-    /// `SemiAuto`/`AutoExecution` intent. This uses the same deep
+    /// governed intent. This uses the same deep
     /// [`resolve_return_model_calibration`] check as publish, report, and
     /// admission. A free function (not `&self`) keeps the guard
     /// directly unit-testable against fakes for just its three dependencies.
@@ -235,19 +235,10 @@ impl CoreOrderIntentService {
         self.ensure_create_allowed(&rec, &report, &controls, now)
             .await?;
 
-        let mode = controls.quant_runtime_mode;
-        let profile_ref = if matches!(
-            mode,
-            QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution
-        ) {
-            let profile_ref = self.ensure_policy_executable(&rec).await?;
-            self.ensure_model_calibrated(&rec.evidence_refs.model_version_id)
-                .await?;
-            profile_ref
-        } else {
-            self.ensure_policy_executable(&rec).await?
-        };
-        let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
+        let authorization_policy = controls.entry_authorization_policy;
+        let profile_ref = self.ensure_policy_executable(&rec).await?;
+        self.ensure_model_calibrated(&rec.evidence_refs.model_version_id)
+            .await?;
         let entry = project_entry_order_spec(&rec, now)?;
         let exit = project_exit_policy_spec(&rec, entry.limit_price)?;
         if requires_automatic_settlement_recovery(&exit) {
@@ -262,7 +253,7 @@ impl CoreOrderIntentService {
                     SettlementRecoveryAdmissionRequest {
                         execution_account_id: account_snapshot.execution_account_id,
                         route,
-                        runtime_mode: mode,
+                        authorization_policy,
                         write_policy: controls.settlement_write_policy,
                     },
                     now,
@@ -270,7 +261,13 @@ impl CoreOrderIntentService {
                 .await?;
             (recovery).require_ready_settlement_recovery()?;
         }
-        let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
+        let resolved = resolve_policy(
+            authorization_policy,
+            &rec,
+            self.authorization_config.as_ref(),
+            now,
+            entry.valid_until,
+        )?;
         let condition = self
             .conditions
             .find_by_recommendation(&rec.recommendation_id)
@@ -282,7 +279,6 @@ impl CoreOrderIntentService {
             recommendation: &rec,
             report: &report,
             profile_ref,
-            mode,
             resolved,
             entry,
             exit,
@@ -295,14 +291,12 @@ impl CoreOrderIntentService {
             .create_with_allocation(new_intent, allocation)
             .await?;
         self.metrics
-            .inc_order_intent_created(intent.runtime_mode.as_str(), intent.intent_kind.as_str());
+            .inc_order_intent_created(authorization_label(&intent));
         self.lifecycle
             .publish(&intent, IntentEventKind::Created, now);
-        if intent.status == OrderIntentStatus::ApprovedByPolicy {
-            self.metrics.inc_order_intent_approved(
-                intent.runtime_mode.as_str(),
-                intent.intent_kind.as_str(),
-            );
+        if intent.status == OrderIntentStatus::Authorized {
+            self.metrics
+                .inc_order_intent_approved(authorization_label(&intent));
             self.dispatch_wake.wake();
         }
         Ok(intent)
@@ -384,37 +378,37 @@ impl CoreOrderIntentService {
         now: DateTime<Utc>,
     ) -> QuantResult<OrderIntentInfo> {
         let intent = self.load_intent(&command.order_intent_id).await?;
-        if intent.status != OrderIntentStatus::PendingApproval {
+        if intent.status != OrderIntentStatus::PendingAuthorization {
             return Err(ExecutionError::IntentDenied {
                 reason: format!(
-                    "intent {} is {} (only pending_approval can be approved)",
+                    "intent {} is {} (only pending_authorization can be approved)",
                     intent.order_intent_id,
                     intent.status.as_str()
                 ),
             }
             .into());
         }
-        if intent.runtime_mode == QuantRuntimeMode::SemiAuto {
-            let recommendation = self.load_recommendation(&intent.recommendation_id).await?;
-            self.ensure_report_facts_verified(&recommendation.recommendation_report_id)
-                .await?;
-            self.ensure_policy_executable(&recommendation).await?;
-            self.ensure_model_calibrated(&recommendation.evidence_refs.model_version_id)
-                .await?;
-        }
+        let recommendation = self.load_recommendation(&intent.recommendation_id).await?;
+        self.ensure_report_facts_verified(&recommendation.recommendation_report_id)
+            .await?;
+        self.ensure_policy_executable(&recommendation).await?;
+        self.ensure_model_calibrated(&recommendation.evidence_refs.model_version_id)
+            .await?;
 
         let (entry_override, allocated_override) =
             resolve_downscale(&command, &intent.entry_order_json)?;
-        let approval = ApproveOrderIntent {
-            approved_by: command.operator_id,
-            approval_reason: command.reason.clone(),
-            approved_at: now,
+        let authorization = AuthorizeOrderIntent {
+            evidence: AuthorizationEvidence::OperatorApproval {
+                operator_id: command.operator_id,
+                reason: command.reason.clone(),
+                authorized_at: now,
+            },
         };
         match self
             .intents
             .approve(
                 &intent.order_intent_id,
-                approval,
+                authorization,
                 entry_override,
                 allocated_override,
                 now,
@@ -422,10 +416,8 @@ impl CoreOrderIntentService {
             .await?
         {
             ApproveOrderIntentOutcome::Approved(approved) => {
-                self.metrics.inc_order_intent_approved(
-                    approved.runtime_mode.as_str(),
-                    approved.intent_kind.as_str(),
-                );
+                self.metrics
+                    .inc_order_intent_approved(authorization_label(&approved));
                 self.lifecycle
                     .publish(&approved, IntentEventKind::Approved, now);
                 // Approval is the operator's final authorization: it arms the
@@ -456,10 +448,8 @@ impl CoreOrderIntentService {
             .intents
             .reject(&command.order_intent_id, command.reason, now, log)
             .await?;
-        self.metrics.inc_order_intent_rejected(
-            rejected.runtime_mode.as_str(),
-            rejected.intent_kind.as_str(),
-        );
+        self.metrics
+            .inc_order_intent_rejected(authorization_label(&rejected));
         self.lifecycle
             .publish(&rejected, IntentEventKind::Rejected, now);
         Ok(rejected)
@@ -636,8 +626,7 @@ async fn recheck_return_model_calibrated(
     let resolved = resolve_return_model_calibration(calibration_loader.as_ref(), &artifact).await?;
     if resolved.is_none() {
         return Err(ExecutionError::IntentDenied {
-            reason: "return model is uncalibrated (heuristic) — SemiAuto/AutoExecution intent \
-                     creation is fail-closed"
+            reason: "return model is uncalibrated (heuristic); intent creation is fail-closed"
                 .to_owned(),
         }
         .into());
@@ -648,11 +637,8 @@ async fn recheck_return_model_calibrated(
 /// Resolved per-mode intent fields produced by the mode gate decision.
 struct ResolvedPolicy {
     status: OrderIntentStatus,
-    approval_status: ApprovalStatus,
-    approval_reason: Option<String>,
-    approved_at: Option<DateTime<Utc>>,
-    policy_id: Option<String>,
-    policy_hash: Option<ContentHash>,
+    authorization_kind: Option<AuthorizationKind>,
+    authorization_evidence: Option<AuthorizationEvidence>,
     expires_at: DateTime<Utc>,
 }
 
@@ -660,12 +646,18 @@ struct ComposeCreateRowsInput<'a> {
     recommendation: &'a RecommendationInfo,
     report: &'a RecommendationReportInfo,
     profile_ref: ResearchProfileRef,
-    mode: QuantRuntimeMode,
     resolved: ResolvedPolicy,
     entry: EntryOrderSpec,
     exit: ExitPolicySpec,
     condition_instance_id: EntryConditionInstanceId,
     execution_account_id: ExecutionAccountId,
+}
+
+fn authorization_label(intent: &OrderIntentInfo) -> &'static str {
+    match intent.authorization_kind {
+        Some(AuthorizationKind::ActivePolicy) => "active_policy",
+        Some(AuthorizationKind::OperatorApproval) | None => "operator_approval",
+    }
 }
 
 fn compose_create_rows(
@@ -675,7 +667,6 @@ fn compose_create_rows(
         recommendation: rec,
         report,
         profile_ref,
-        mode,
         resolved,
         entry,
         exit,
@@ -689,18 +680,12 @@ fn compose_create_rows(
         order_intent_id: intent_id,
         recommendation_id: rec.recommendation_id,
         execution_account_id,
-        runtime_mode: mode,
         decision_policy_snapshot_id: report.decision_policy_snapshot_id,
         model_version_id: rec.evidence_refs.model_version_id,
         research_profile_artifact_id: profile_ref.artifact_id(),
-        intent_kind: OrderIntentKind::Buy,
         status: resolved.status,
-        approval_status: resolved.approval_status,
-        approved_by: None,
-        approval_reason: resolved.approval_reason,
-        approved_at: resolved.approved_at,
-        policy_id: resolved.policy_id,
-        policy_hash: resolved.policy_hash,
+        authorization_kind: resolved.authorization_kind,
+        authorization_evidence: resolved.authorization_evidence,
         status_reason: None,
         admission_trace_ref: None,
         condition_instance_id,
@@ -724,16 +709,13 @@ fn compose_create_rows(
     (intent, allocation)
 }
 
-/// Map a mode-gate decision to the frozen intent fields, or the closing error.
-///
-/// `report_only` and `denied` never produce an intent. `semi_auto` expires at
-/// `min(now + approval_ttl, recommendation.valid_until, entry.valid_until)` so
-/// capital is not reserved past the recommendation or entry window. Auto policy
-/// intents expire at `min(entry.valid_until, recommendation.valid_until)`.
+/// Resolve the current runtime authorization policy against the immutable
+/// recommendation ceiling and active decision-policy identity.
 fn resolve_policy(
-    policy: IntentPolicyDecision,
+    authorization_policy: EntryAuthorizationPolicy,
+    recommendation: &RecommendationInfo,
+    config: &DecisionPolicyStore,
     now: DateTime<Utc>,
-    recommendation_valid_until: DateTime<Utc>,
     entry_valid_until: DateTime<Utc>,
 ) -> Result<ResolvedPolicy, ExecutionError> {
     let ensure_future_expiry =
@@ -746,14 +728,20 @@ fn resolve_policy(
             Ok(expires_at)
         };
 
-    match policy {
-        IntentPolicyDecision::ReportOnly => Err(ExecutionError::ReportOnlyMode),
-        IntentPolicyDecision::Denied { reason } => Err(ExecutionError::IntentDenied {
-            reason: reason.to_string(),
-        }),
-        IntentPolicyDecision::RequiresApproval { approval_ttl, .. } => {
-            let ttl_secs = i64::try_from(approval_ttl.as_secs()).map_err(|error| {
-                execution_time_conversion("approval_ttl_secs", &approval_ttl.as_secs(), &error)
+    match authorization_policy {
+        EntryAuthorizationPolicy::OperatorApprovalRequired => {
+            if !recommendation.execution_eligibility.allows_operator() {
+                return Err(ExecutionError::IntentDenied {
+                    reason: "recommendation is analysis-only and cannot create an operator-authorized intent"
+                        .to_owned(),
+                });
+            }
+            let approval_ttl_secs = config
+                .current()
+                .execution_authorization_policy
+                .operator_approval_ttl_secs;
+            let ttl_secs = i64::try_from(approval_ttl_secs).map_err(|error| {
+                execution_time_conversion("approval_ttl_secs", &approval_ttl_secs, &error)
             })?;
             let approval_deadline = now
                 .checked_add_signed(Duration::seconds(ttl_secs))
@@ -764,33 +752,59 @@ fn resolve_policy(
                 })?;
             let expires_at = ensure_future_expiry(
                 approval_deadline
-                    .min(recommendation_valid_until)
+                    .min(recommendation.valid_until)
                     .min(entry_valid_until),
             )?;
             Ok(ResolvedPolicy {
-                status: OrderIntentStatus::PendingApproval,
-                approval_status: ApprovalStatus::Pending,
-                approval_reason: None,
-                approved_at: None,
-                policy_id: None,
-                policy_hash: None,
+                status: OrderIntentStatus::PendingAuthorization,
+                authorization_kind: None,
+                authorization_evidence: None,
                 expires_at,
             })
         }
-        IntentPolicyDecision::ApprovedByPolicy {
-            policy_id,
-            policy_hash,
-            reason,
-        } => {
+        EntryAuthorizationPolicy::PolicyAutomatic => {
+            if !recommendation.execution_eligibility.allows_policy() {
+                return Err(ExecutionError::IntentDenied {
+                    reason: "recommendation does not permit policy-automatic execution".to_owned(),
+                });
+            }
+            let expected_policy_id = recommendation.evidence_refs.decision_policy_snapshot_id;
+            let expected_policy_text = expected_policy_id.to_string();
+            if recommendation
+                .execution_eligibility
+                .policy_binding
+                .as_deref()
+                != Some(expected_policy_text.as_str())
+            {
+                return Err(ExecutionError::IntentDenied {
+                    reason: "recommendation policy binding differs from its frozen decision policy"
+                        .to_owned(),
+                });
+            }
+            let active_bundle =
+                config
+                    .current_bundle()
+                    .ok_or_else(|| ExecutionError::IntentDenied {
+                        reason:
+                            "policy-automatic execution requires an active decision-policy bundle"
+                                .to_owned(),
+                    })?;
+            if active_bundle.decision_policy_snapshot_id != expected_policy_id {
+                return Err(ExecutionError::IntentDenied {
+                    reason: "active decision policy differs from the recommendation binding"
+                        .to_owned(),
+                });
+            }
             let expires_at =
-                ensure_future_expiry(entry_valid_until.min(recommendation_valid_until))?;
+                ensure_future_expiry(entry_valid_until.min(recommendation.valid_until))?;
             Ok(ResolvedPolicy {
-                status: OrderIntentStatus::ApprovedByPolicy,
-                approval_status: ApprovalStatus::NotRequired,
-                approval_reason: Some(reason),
-                approved_at: Some(now),
-                policy_id: Some(policy_id),
-                policy_hash,
+                status: OrderIntentStatus::Authorized,
+                authorization_kind: Some(AuthorizationKind::ActivePolicy),
+                authorization_evidence: Some(AuthorizationEvidence::ActivePolicy {
+                    decision_policy_snapshot_id: expected_policy_id,
+                    policy_hash: active_bundle.snapshot_hash,
+                    authorized_at: now,
+                }),
                 expires_at,
             })
         }
@@ -1036,8 +1050,6 @@ fn intent_operation_log(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration as StdDuration;
-
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_error::execution::ExecutionError;
     use quant_pivot_models::{
@@ -1046,17 +1058,19 @@ mod tests {
             common::{OrderType, Side},
             execution::ApprovalInvalidation,
             quant::{
-                ApprovalStatus, ExecutionWalletKind, FillRequirement, OrderIntentStatus,
-                OutcomeSide, RecommendationReportStatus, ReportKind,
+                AuthorizationKind, EntryAuthorizationPolicy, ExecutionAuthorityCeiling,
+                ExecutionWalletKind, FillRequirement, OrderIntentStatus, OutcomeSide,
+                RecommendationReportStatus, ReportKind,
             },
             settlement::SettlementRoute,
         },
+        runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
         types::{
             Bps, ContentHash, DecisionPolicySnapshotId, EntryMakerRebateTerms, EntryOrderPolicy,
             EntryOrderSpec, EntryPlan, EvmAddress, EvmBlockHash, ExitPlan,
-            MakerRebateObjectiveStatus, OrderAmount, OrderIntentId, Price, RecommendationExitPlan,
-            RecommendationId, RecommendationReportId, RiskEnvelope, RoleCode, Shares, SizingPlan,
-            TokenId, Usd, UserId,
+            MakerRebateObjectiveStatus, OrderAmount, OrderIntentId, PolicyBundleGeneration, Price,
+            RecommendationExitPlan, RecommendationId, RecommendationReportId, RiskEnvelope,
+            RoleCode, Shares, SizingPlan, TokenId, Usd, UserId,
         },
     };
     use rust_decimal_macros::dec;
@@ -1066,13 +1080,11 @@ mod tests {
         project_entry_order_spec, project_exit_policy_spec, resolve_downscale, resolve_policy,
     };
     use crate::{
-        execution::{
-            mode_gate::IntentPolicyDecision,
-            settlement_recovery_admission::{
-                SettlementRecoveryAdmission, SettlementRecoveryAdmissionBlockReason,
-                SettlementRecoveryAdmissionEvidence,
-            },
+        execution::settlement_recovery_admission::{
+            SettlementRecoveryAdmission, SettlementRecoveryAdmissionBlockReason,
+            SettlementRecoveryAdmissionEvidence,
         },
+        runtime_config::DecisionPolicyStore,
         test_fixtures::report_fixtures,
     };
 
@@ -1360,35 +1372,48 @@ mod tests {
         );
     }
 
-    #[test]
-    fn semi_auto_expires_until() {
-        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
-        let rec_valid_until = now + Duration::hours(1);
-        let entry_valid_until = now + Duration::hours(2);
-        let resolved = resolve_policy(
-            IntentPolicyDecision::RequiresApproval {
-                approval_ttl: StdDuration::from_hours(24),
-            },
-            now,
-            rec_valid_until,
-            entry_valid_until,
-        )
-        .expect("policy");
-        assert_eq!(resolved.status, OrderIntentStatus::PendingApproval);
-        assert_eq!(resolved.expires_at, rec_valid_until);
+    fn policy_store(approval_ttl_secs: u64) -> DecisionPolicyStore {
+        let mut snapshot = DecisionPolicySnapshot::default();
+        snapshot
+            .execution_authorization_policy
+            .operator_approval_ttl_secs = approval_ttl_secs;
+        DecisionPolicyStore::new(snapshot)
+    }
+
+    fn content_hash(seed: char) -> ContentHash {
+        ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
+            .expect("valid content hash")
     }
 
     #[test]
-    fn semi_auto_uses_recommendation() {
+    fn operator_expiry_recommendation_cap() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
-        let rec_valid_until = now + Duration::hours(24);
+        let mut recommendation = rec();
+        recommendation.valid_until = now + Duration::hours(1);
+        let entry_valid_until = now + Duration::hours(2);
+        let resolved = resolve_policy(
+            EntryAuthorizationPolicy::OperatorApprovalRequired,
+            &recommendation,
+            &policy_store(86_400),
+            now,
+            entry_valid_until,
+        )
+        .expect("policy");
+        assert_eq!(resolved.status, OrderIntentStatus::PendingAuthorization);
+        assert_eq!(resolved.expires_at, recommendation.valid_until);
+    }
+
+    #[test]
+    fn operator_expiry_approval_ttl() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let mut recommendation = rec();
+        recommendation.valid_until = now + Duration::hours(24);
         let entry_valid_until = now + Duration::hours(24);
         let resolved = resolve_policy(
-            IntentPolicyDecision::RequiresApproval {
-                approval_ttl: StdDuration::from_mins(15),
-            },
+            EntryAuthorizationPolicy::OperatorApprovalRequired,
+            &recommendation,
+            &policy_store(900),
             now,
-            rec_valid_until,
             entry_valid_until,
         )
         .expect("policy");
@@ -1396,15 +1421,16 @@ mod tests {
     }
 
     #[test]
-    fn semi_auto_rejects_ttl() {
+    fn operator_expiry_ttl_overflow() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let mut recommendation = rec();
+        recommendation.valid_until = now + Duration::hours(1);
         assert!(matches!(
             resolve_policy(
-                IntentPolicyDecision::RequiresApproval {
-                    approval_ttl: StdDuration::from_secs(u64::MAX),
-                },
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
+                &recommendation,
+                &policy_store(u64::MAX),
                 now,
-                now + Duration::hours(1),
                 now + Duration::hours(1),
             ),
             Err(ExecutionError::TimeConversion {
@@ -1428,16 +1454,16 @@ mod tests {
     }
 
     #[test]
-    fn semi_auto_capped_until() {
+    fn operator_expiry_entry_cap() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
-        let rec_valid_until = now + Duration::hours(24);
+        let mut recommendation = rec();
+        recommendation.valid_until = now + Duration::hours(24);
         let entry_valid_until = now + Duration::minutes(30);
         let resolved = resolve_policy(
-            IntentPolicyDecision::RequiresApproval {
-                approval_ttl: StdDuration::from_hours(24),
-            },
+            EntryAuthorizationPolicy::OperatorApprovalRequired,
+            &recommendation,
+            &policy_store(86_400),
             now,
-            rec_valid_until,
             entry_valid_until,
         )
         .expect("policy");
@@ -1447,13 +1473,14 @@ mod tests {
     #[test]
     fn resolve_policy_rejects_elapsed() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let mut recommendation = rec();
+        recommendation.valid_until = now - Duration::minutes(1);
         assert!(matches!(
             resolve_policy(
-                IntentPolicyDecision::RequiresApproval {
-                    approval_ttl: StdDuration::from_mins(15),
-                },
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
+                &recommendation,
+                &policy_store(900),
                 now,
-                now - Duration::minutes(1),
                 now - Duration::minutes(2),
             ),
             Err(ExecutionError::RecommendationExpired { .. })
@@ -1461,24 +1488,35 @@ mod tests {
     }
 
     #[test]
-    fn auto_policy_expires_until() {
+    fn active_policy_typed_evidence() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
-        let rec_valid_until = now + Duration::hours(1);
+        let mut recommendation = rec();
+        recommendation.valid_until = now + Duration::hours(1);
         let entry_valid_until = now + Duration::hours(2);
+        let policy_id = recommendation.evidence_refs.decision_policy_snapshot_id;
+        recommendation.execution_eligibility.ceiling = ExecutionAuthorityCeiling::PolicyAutomatic;
+        recommendation.execution_eligibility.policy_binding = Some(policy_id.to_string());
+        let policy_hash = content_hash('a');
+        let store = DecisionPolicyStore::new_active(ActivePolicyBundle::from_parts(
+            PolicyBundleGeneration::FIRST,
+            policy_id,
+            policy_hash,
+            DecisionPolicySnapshot::default(),
+        ));
         let resolved = resolve_policy(
-            IntentPolicyDecision::ApprovedByPolicy {
-                policy_id: "policy-1".to_owned(),
-                policy_hash: None,
-                reason: "ok".to_owned(),
-            },
+            EntryAuthorizationPolicy::PolicyAutomatic,
+            &recommendation,
+            &store,
             now,
-            rec_valid_until,
             entry_valid_until,
         )
         .expect("policy");
-        assert_eq!(resolved.status, OrderIntentStatus::ApprovedByPolicy);
-        assert_eq!(resolved.approval_status, ApprovalStatus::NotRequired);
-        assert_eq!(resolved.expires_at, rec_valid_until);
+        assert_eq!(resolved.status, OrderIntentStatus::Authorized);
+        assert_eq!(
+            resolved.authorization_kind,
+            Some(AuthorizationKind::ActivePolicy)
+        );
+        assert_eq!(resolved.expires_at, recommendation.valid_until);
     }
 
     #[test]
@@ -1539,7 +1577,7 @@ mod tests {
     // Closes the TOCTOU window between report generation and intent
     // creation — a calibrator deactivated after a report was built must not
     // let a stale `execution_eligibility` still create a capital-reserving
-    // `SemiAuto`/`AutoExecution` intent) ────────────────────────────────────
+    // governed intent) ─────────────────────────────────────────────────────
 
     mod calibration_recheck {
         use std::{
@@ -1750,7 +1788,7 @@ mod tests {
             .await;
             assert!(
                 result.is_err(),
-                "uncalibrated heuristic return model must block SemiAuto intent creation"
+                "uncalibrated heuristic return model must block intent creation"
             );
         }
 
@@ -1771,8 +1809,7 @@ mod tests {
             .await;
             assert!(
                 result.is_err(),
-                "an uncalibrated (heuristic) return model must deny SemiAuto/AutoExecution \
-                 intent creation, not silently allow it: {result:?}"
+                "an uncalibrated return model must deny intent creation: {result:?}"
             );
         }
 

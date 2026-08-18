@@ -6,7 +6,10 @@ use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     config::DeployConfig,
-    domain::{data_plane::ExchangeHistoryStage, ports::ResearchJobPort},
+    domain::{
+        data_plane::ExchangeHistoryStage, ports::ResearchJobPort,
+        quant::AccountRecoveryIncidentInfo,
+    },
 };
 use quant_pivot_repository::traits::{
     PolicyRepository, ResearchJobRepository, TrainingDatasetRepository,
@@ -18,17 +21,40 @@ use crate::app::{
     task_registry::AppRunner,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupExecutionScope {
+    EntryEnabled,
+    RecoveryOnly,
+}
+
+impl From<Option<&AccountRecoveryIncidentInfo>> for StartupExecutionScope {
+    fn from(active_recovery: Option<&AccountRecoveryIncidentInfo>) -> Self {
+        if active_recovery.is_some() {
+            Self::RecoveryOnly
+        } else {
+            Self::EntryEnabled
+        }
+    }
+}
+
 pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> QuantResult<()> {
     let shutdown = CancellationToken::new();
     let ctx = AppContext::build(deploy, shutdown.clone(), compute).await?;
 
+    // Recovery-only startup gate: finalized account executions are projected,
+    // associated, and any unknown external execution latches ExitOnly before
+    // an entry worker is registered.
+    while ctx.execution.account_chain_projector.project_pass().await? > 0 {}
+    let active_recovery = ctx
+        .execution
+        .account_chain_projector
+        .active_recovery()
+        .await?;
+
     // Crash recovery (in-flight orders → reconciliation) is owned by the
     // execution dispatcher worker, which runs it fail-closed as its first action
     // before any submission (see `register_execution_dispatcher`).
-    let mut runner = AppRunner::for_quant_mode(
-        shutdown.clone(),
-        ctx.runtime_controls().quant_runtime_mode(),
-    );
+    let mut runner = AppRunner::new(shutdown.clone());
     ctx.register_runtime_control_sync(&mut runner);
     // Historical projection is identity-strict. Complete the active + closed
     // Gamma baseline before the history worker can observe any chain log.
@@ -45,7 +71,18 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
     ctx.register_recommendation_deadline_scheduler(&mut runner);
     ctx.register_recommendation_expire_sweep(&mut runner);
     ctx.register_entry_condition_worker(&mut runner);
-    ctx.register_execution_dispatcher(&mut runner);
+    match StartupExecutionScope::from(active_recovery.as_ref()) {
+        StartupExecutionScope::EntryEnabled => ctx.register_execution_dispatcher(&mut runner),
+        StartupExecutionScope::RecoveryOnly => {
+            ctx.register_execution_recovery(&mut runner);
+            if let Some(incident) = active_recovery.as_ref() {
+                tracing::warn!(
+                    recovery_incident_id = %incident.account_recovery_incident_id,
+                    "recovery-only startup: entry submission worker is disabled until a governed restart",
+                );
+            }
+        }
+    }
     ctx.register_reconciliation_worker(&mut runner);
     ctx.register_settlement_workers(&mut runner);
     ctx.register_exit_monitor_worker(&mut runner);
@@ -78,7 +115,7 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
     ctx.register_fact_writer_tasks(&mut runner);
 
     tracing::info!(
-        mode = ?ctx.runtime_controls().quant_runtime_mode(),
+        mode = ?ctx.runtime_controls().entry_authorization_policy(),
         tasks = runner.registry_len(),
         "quant-pivot starting",
     );
@@ -89,4 +126,45 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
     drop(ctx);
     tracing::info!("shared Redis pool closed");
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use quant_pivot_models::{
+        domain::quant::AccountRecoveryIncidentInfo,
+        enums::execution::{AccountRecoveryIncidentKind, AccountRecoveryIncidentStatus},
+        types::{AccountRecoveryIncidentId, ExecutionAccountId},
+    };
+
+    use super::StartupExecutionScope;
+
+    #[test]
+    fn recovery_disables_entry_workers() {
+        let now = Utc::now();
+        let incident = AccountRecoveryIncidentInfo {
+            account_recovery_incident_id: AccountRecoveryIncidentId::from_v7(),
+            execution_account_id: ExecutionAccountId::from_v7(),
+            kind: AccountRecoveryIncidentKind::UnknownExternalExecution,
+            status: AccountRecoveryIncidentStatus::Open,
+            trigger_chain_execution_id: None,
+            reason: "test recovery".to_owned(),
+            opened_at: now,
+            seal_hash: None,
+            sealed_by: None,
+            sealed_at: None,
+            revision: 0,
+            created_at: now,
+            updated_at: now,
+        };
+
+        assert_eq!(
+            StartupExecutionScope::from(Some(&incident)),
+            StartupExecutionScope::RecoveryOnly,
+        );
+        assert_eq!(
+            StartupExecutionScope::from(None),
+            StartupExecutionScope::EntryEnabled,
+        );
+    }
 }

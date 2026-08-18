@@ -1773,11 +1773,6 @@ fn page_condition(query: &QuantReportListQuery) -> Condition {
         )
         .add_option(
             query
-                .runtime_mode
-                .map(|runtime_mode| QuantRecommendationReportColumn::RuntimeMode.eq(runtime_mode)),
-        )
-        .add_option(
-            query
                 .from
                 .map(|from| QuantRecommendationReportColumn::DecisionAt.gte(from)),
         )
@@ -1937,7 +1932,7 @@ mod tests {
     use quant_pivot_models::{
         domain::{api::QuantReportListQuery, pagination::PageRequest},
         entities::quant_recommendation_report::Entity,
-        enums::quant::{QuantRuntimeMode, RecommendationReportStatus, ReportKind},
+        enums::quant::{RecommendationReportStatus, ReportKind},
         runtime_config::BuyModelRoute,
     };
     use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
@@ -1950,7 +1945,6 @@ mod tests {
             route: Some(BuyModelRoute::Weather),
             kind: Some(ReportKind::TopN),
             status: Some(RecommendationReportStatus::Published),
-            runtime_mode: Some(QuantRuntimeMode::ReportOnly),
             from: None,
             to: None,
             page: PageRequest::default(),
@@ -1964,7 +1958,6 @@ mod tests {
         assert!(sql.contains(r#""quant_recommendation_report"."report_kind" ="#));
         assert!(sql.contains(r#""quant_recommendation_report"."status" ="#));
         assert!(sql.contains(r#""quant_recommendation_report"."represented_routes_json""#));
-        assert!(sql.contains(r#""quant_recommendation_report"."runtime_mode" ="#));
     }
 
     #[test]

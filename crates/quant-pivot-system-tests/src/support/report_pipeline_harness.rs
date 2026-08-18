@@ -129,17 +129,17 @@ use quant_pivot_repository::{
         PgExecutionAccountRepository, PgFactorRepository, PgFeatureParityRepository,
         PgFeatureRepository, PgMarketLinkageRepository, PgMarketRepository,
         PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgPolicyRepository, PgPositionRepository, PgRecommendationReportRepository,
-        PgRecommendationRepository, PgReportRunRepository, PgReservedCapitalRepository,
-        PgShadowComparisonRepository, PgTradePolicyRepository, PgVenueIncentiveRepository,
+        PgPolicyRepository, PgRecommendationReportRepository, PgRecommendationRepository,
+        PgReportRunRepository, PgReservedCapitalRepository, PgShadowComparisonRepository,
+        PgStrategyPositionLotRepository, PgTradePolicyRepository, PgVenueIncentiveRepository,
     },
     traits::{
         BasisAlertRepository, CalibrationArtifactRepository, EquitySnapshotRepository,
         EventRepository, ExecutionAccountRepository, FactorRepository, FeatureParityRepository,
         MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
-        ModelRegistryRepository, ModelRunRepository, PolicyRepository, PositionRepository,
-        QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
-        ReportRunRepository, ReservedCapitalRepository, TradePolicyRepository,
+        ModelRegistryRepository, ModelRunRepository, PolicyRepository, QuantFactReadRepository,
+        RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
+        ReservedCapitalRepository, StrategyPositionLotRepository, TradePolicyRepository,
         VenueIncentiveRepository,
     },
 };
@@ -1396,7 +1396,6 @@ fn fixture_new_report(report: &RecommendationReportInfo) -> NewRecommendationRep
         report_run_id: report.report_run_id,
         report_kind: report.report_kind,
         decision_at: report.decision_at,
-        runtime_mode: report.runtime_mode,
         decision_policy_snapshot_id: report.decision_policy_snapshot_id,
         market_selection_id: report.market_selection_id,
         portfolio_plan_id: report.portfolio_plan_id,
@@ -1870,7 +1869,8 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
         drawdown_provider: Arc::new(EquitySnapshotService::new(
             Arc::new(PgEquitySnapshotRepository::new(db.clone()))
                 as Arc<dyn EquitySnapshotRepository>,
-            Arc::new(PgPositionRepository::new(db.clone())) as Arc<dyn PositionRepository>,
+            Arc::new(PgStrategyPositionLotRepository::new(db.clone()))
+                as Arc<dyn StrategyPositionLotRepository>,
             Arc::new(PgVenueIncentiveRepository::new(db.clone()))
                 as Arc<dyn VenueIncentiveRepository>,
             harness_execution_account().execution_account_id,

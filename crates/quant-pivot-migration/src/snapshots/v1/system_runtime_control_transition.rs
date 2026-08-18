@@ -2,7 +2,9 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{QpKillSwitchState, QpQuantRuntimeMode, QpSettlementWritePolicy};
+use super::sea_orm_active_enums::{
+    QpEntryAuthorizationPolicy, QpKillSwitchState, QpSettlementWritePolicy,
+};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -12,10 +14,10 @@ pub struct Model {
     pub runtime_control_transition_id: Uuid,
     pub from_revision: i64,
     pub to_revision: i64,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
-    pub from_quant_runtime_mode: QpQuantRuntimeMode,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
-    pub to_quant_runtime_mode: QpQuantRuntimeMode,
+    #[sea_orm(column_type = r#"custom("qp_entry_authorization_policy")"#)]
+    pub from_entry_authorization_policy: QpEntryAuthorizationPolicy,
+    #[sea_orm(column_type = r#"custom("qp_entry_authorization_policy")"#)]
+    pub to_entry_authorization_policy: QpEntryAuthorizationPolicy,
     pub from_settlement_write_policy: QpSettlementWritePolicy,
     pub to_settlement_write_policy: QpSettlementWritePolicy,
     pub from_kill_switch_state: QpKillSwitchState,

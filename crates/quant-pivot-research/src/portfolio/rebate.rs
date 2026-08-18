@@ -274,7 +274,7 @@ mod tests {
         VenueIncentiveEventInfo {
             venue_incentive_event_id: VenueIncentiveEventId::from_v7(),
             execution_account_id: account,
-            execution_fill_id: None,
+            clob_trade_observation_id: None,
             market_id: None,
             kind: VenueIncentiveKind::MakerRebate,
             stage,

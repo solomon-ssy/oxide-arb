@@ -1,11 +1,10 @@
-//! Runtime mode handle and quant governance primitives.
+//! Runtime authorization and quant governance primitives.
 
 pub mod bias_table;
 pub mod calibration_loader;
+pub mod entry_authorization_preflight;
 pub mod execution_recovery;
 pub mod linkage;
-pub mod mode_preflight;
-pub mod mode_transition;
 pub mod model_governance;
 pub mod model_spec;
 pub mod operational_phase;
@@ -21,9 +20,10 @@ pub use bias_table::BiasTableApplicator;
 pub use calibration_loader::{
     CoreCalibrationArtifactLoader, model_score_content_hash, resolve_return_model_calibration,
 };
+pub use entry_authorization_preflight::{
+    AuthorizationPreflight, AuthorizationPreflightDeps, DefaultAuthorizationPreflight,
+};
 pub use linkage::{LinkageResolverDeps, LinkageResolverService};
-pub use mode_preflight::{DefaultModePreflight, ModePreflight, ModePreflightDeps};
-pub use mode_transition::{DefaultModeTransitionGate, ModeTransitionGate};
 pub use model_governance::{ModelGovernanceDeps, ModelGovernanceService};
 pub use model_spec::{ModelSpecDeps, ModelSpecService};
 pub use operational_phase::operational_phase_from_readiness;

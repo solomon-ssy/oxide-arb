@@ -119,9 +119,9 @@ use quant_pivot_models::{
     enums::{
         common::MarketCategory,
         quant::{
-            CalibrationMethod, DatasetPurpose, DownsideSource, FeedbackCycleStatus,
-            FeedbackDecision, FeedbackStage, FeedbackStageEventKind, ModelRunKind,
-            QuantRuntimeMode, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
+            CalibrationMethod, DatasetPurpose, DownsideSource, EntryAuthorizationPolicy,
+            FeedbackCycleStatus, FeedbackDecision, FeedbackStage, FeedbackStageEventKind,
+            ModelRunKind, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
             ShadowBindingStatus,
         },
         runtime_config::PolicyActivationKind,
@@ -578,7 +578,7 @@ fn expiring_preflight(
         candidate_manifest_id: original.candidate_manifest_id(),
         candidate_manifest_hash: original.candidate_manifest_hash(),
         promotion_gate_hash: original.promotion_gate_hash(),
-        allowed_runtime_modes: original.allowed_runtime_modes().to_vec(),
+        maximum_execution_authority: original.maximum_execution_authority(),
         non_route_policy_hash: original.non_route_policy_hash(),
         serving_constraints_hash: original.serving_constraints_hash(),
         expires_at,
@@ -598,7 +598,7 @@ fn expiring_preflight(
         shadow_contract_hash: preflight.shadow_contract_hash(),
         candidate_recipe_hash: preflight.candidate_recipe_hash(),
         serving_constraints: preflight.serving_constraints().clone(),
-        current_runtime_mode: preflight.current_runtime_mode(),
+        current_entry_authorization_policy: preflight.current_entry_authorization_policy(),
         runtime_control_revision: preflight.runtime_control_revision(),
     })
     .expect("seal short-lived P06 promotion preflight")
@@ -3431,8 +3431,8 @@ impl PermitEvidenceProbe<'_> {
             .await
             .expect("read promotion evidence runtime");
         assert_eq!(
-            self.runtime_controls.quant_runtime_mode(),
-            runtime.quant_runtime_mode
+            self.runtime_controls.entry_authorization_policy(),
+            runtime.entry_authorization_policy
         );
         let action_time = self
             .cycles
@@ -3459,12 +3459,16 @@ impl PermitEvidenceProbe<'_> {
             bindings: PermitBindingEvidence {
                 scope_exact: permit_scope == *self.preflight.scope(),
                 preflight_hash_exact: self.permit.preflight_hash == self.preflight.preflight_hash(),
-                runtime_mode_exact: runtime.quant_runtime_mode
-                    == self.preflight.current_runtime_mode()
-                    && self
-                        .permit
-                        .allowed_runtime_modes
-                        .contains(&runtime.quant_runtime_mode),
+                runtime_mode_exact: runtime.entry_authorization_policy
+                    == self.preflight.current_entry_authorization_policy()
+                    && match runtime.entry_authorization_policy {
+                        EntryAuthorizationPolicy::OperatorApprovalRequired => {
+                            self.permit.maximum_execution_authority.allows_operator()
+                        }
+                        EntryAuthorizationPolicy::PolicyAutomatic => {
+                            self.permit.maximum_execution_authority.allows_policy()
+                        }
+                    },
             },
         }
     }
@@ -4101,7 +4105,7 @@ impl PromotionHarness {
         }
     }
 
-    async fn change_mode(&self, mode: QuantRuntimeMode, reason: &str) {
+    async fn change_mode(&self, mode: EntryAuthorizationPolicy, reason: &str) {
         let current = self
             .runtime_repository
             .load()
@@ -4111,7 +4115,7 @@ impl PromotionHarness {
             .runtime_repository
             .compare_and_set(RuntimeControlUpdate {
                 expected_revision: current.revision,
-                quant_runtime_mode: Some(mode),
+                entry_authorization_policy: Some(mode),
                 settlement_write_policy: None,
                 kill_switch_state: None,
                 kill_switch_requires_ack: None,
@@ -4331,8 +4335,8 @@ impl AtomicPromotionCase {
             policy_before.snapshot.operations_policy
         );
         assert_eq!(
-            policy_after.snapshot.execution_automation_policy,
-            policy_before.snapshot.execution_automation_policy
+            policy_after.snapshot.execution_authorization_policy,
+            policy_before.snapshot.execution_authorization_policy
         );
         assert_eq!(
             policy_after.snapshot.profile_artifacts,
@@ -4720,13 +4724,13 @@ impl AtomicPromotionCase {
     async fn assert_mode_drift(&self) {
         self.harness
             .change_mode(
-                QuantRuntimeMode::SemiAuto,
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
                 "move outside P06 permit mode scope",
             )
             .await;
         assert_eq!(
-            self.harness.runtime_controls.quant_runtime_mode(),
-            QuantRuntimeMode::SemiAuto
+            self.harness.runtime_controls.entry_authorization_policy(),
+            EntryAuthorizationPolicy::OperatorApprovalRequired
         );
         let error = Box::pin(self.harness.service.activate(self.request.clone()))
             .await
@@ -4743,7 +4747,7 @@ impl AtomicPromotionCase {
     async fn assert_revision_cas(&self) {
         self.harness
             .change_mode(
-                QuantRuntimeMode::ReportOnly,
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
                 "restore mode while advancing P06 runtime revision",
             )
             .await;
@@ -4753,7 +4757,10 @@ impl AtomicPromotionCase {
             .load()
             .await
             .expect("load P06 runtime after revision advance");
-        assert_eq!(current.quant_runtime_mode, QuantRuntimeMode::ReportOnly);
+        assert_eq!(
+            current.entry_authorization_policy,
+            EntryAuthorizationPolicy::OperatorApprovalRequired
+        );
         assert!(current.revision > self.harness.initial_preflight.runtime_control_revision());
         let error = Box::pin(
             self.harness

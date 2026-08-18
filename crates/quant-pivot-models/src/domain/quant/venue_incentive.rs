@@ -11,7 +11,7 @@ use crate::{
     entities::{quant_venue_incentive_event, quant_venue_incentive_reconciliation_scan},
     enums::fee::{VenueIncentiveKind, VenueIncentiveReconciliationScanStatus, VenueIncentiveStage},
     types::{
-        ContentHash, EvmTransactionHash, ExecutionAccountId, ExecutionFillId, MarketId, Usd,
+        ClobTradeObservationId, ContentHash, EvmTransactionHash, ExecutionAccountId, MarketId, Usd,
         VenueIncentiveEventId, ids::VenueIncentiveReconciliationScanId,
     },
 };
@@ -21,7 +21,7 @@ use crate::{
 pub struct VenueIncentiveEventInfo {
     pub venue_incentive_event_id: VenueIncentiveEventId,
     pub execution_account_id: ExecutionAccountId,
-    pub execution_fill_id: Option<ExecutionFillId>,
+    pub clob_trade_observation_id: Option<ClobTradeObservationId>,
     pub market_id: Option<MarketId>,
     pub kind: VenueIncentiveKind,
     pub stage: VenueIncentiveStage,
@@ -43,7 +43,7 @@ info_from_model!(
     {
         venue_incentive_event_id,
         execution_account_id,
-        execution_fill_id,
+        clob_trade_observation_id,
         market_id,
         kind,
         stage,
@@ -65,7 +65,7 @@ info_from_model!(
 pub struct NewVenueIncentiveEvent {
     pub venue_incentive_event_id: VenueIncentiveEventId,
     pub execution_account_id: ExecutionAccountId,
-    pub execution_fill_id: Option<ExecutionFillId>,
+    pub clob_trade_observation_id: Option<ClobTradeObservationId>,
     pub market_id: Option<MarketId>,
     pub kind: VenueIncentiveKind,
     pub stage: VenueIncentiveStage,

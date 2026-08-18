@@ -76,7 +76,7 @@ pub struct InfraBundle {
     pub execution_event_writer: Arc<ExecutionEventWriter>,
     /// Capital-allocation ledger sink (`quant_capital_allocation_event`).
     pub capital_allocation_event_writer: Arc<CapitalAllocationEventWriter>,
-    /// Position-lot ledger sink (`quant_position_event`).
+    /// Position-lot ledger sink (`quant_strategy_position_lot_event`).
     pub position_event_writer: Arc<PositionEventWriter>,
     /// Exit-signal evaluation audit sink (`quant_exit_signal_evaluation_event`).
     pub exit_signal_evaluation_event_writer: Arc<ExitSignalEvaluationEventWriter>,
@@ -586,23 +586,23 @@ fn build_position_event_writer(
     let ch = &deploy.db.clickhouse;
     let capacity = ch.batch_size.saturating_mul(4).max(8_192);
     let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
-    let config = AsyncWriterConfig::new("quant_position_event")
+    let config = AsyncWriterConfig::new("quant_strategy_position_lot_event")
         .capacity(capacity)
         .batch_size(ch.batch_size)
         .flush_interval(flush_interval);
     let drops = metrics
         .async_writer_dropped
-        .with_label_values(&["quant_position_event"]);
+        .with_label_values(&["quant_strategy_position_lot_event"]);
     let stream = spawn_fact_stream::<QuantPositionEventRow>(
         queue,
         TaskId::PositionEventsWriter,
         Arc::new(ChFactWriter::new(
             Arc::clone(ch_pool),
             Arc::clone(write_manager),
-            "quant_position_event",
+            "quant_strategy_position_lot_event",
         )),
         drops,
-        metrics.async_writer_observability("quant_position_event"),
+        metrics.async_writer_observability("quant_strategy_position_lot_event"),
         config,
     );
     Arc::new(PositionEventWriter::new(stream))

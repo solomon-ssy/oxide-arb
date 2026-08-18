@@ -4,10 +4,10 @@ use crate::enums::{
     clickhouse::{
         ChCapitalAllocationState, ChExecutionSide, ChFactorDirection, ChFactorValueState,
         ChFeatureSourceKind, ChFeatureValueKind, ChNormalizationSource, ChOutcomeSide,
-        ChPositionLedgerState,
+        ChPositionLedgerState, ChStrategyPositionOriginKind,
     },
     common::Side,
-    execution::{CapitalAllocationState, PositionLedgerState},
+    execution::{CapitalAllocationState, PositionLedgerState, StrategyPositionOriginKind},
     factor::{FactorValueState, NormalizationSource},
     feature::{EvidenceSourceKind, FeatureValueKind},
     quant::{FactorDirection, OutcomeSide},
@@ -50,6 +50,16 @@ impl From<PositionLedgerState> for ChPositionLedgerState {
             PositionLedgerState::Closing => Self::Closing,
             PositionLedgerState::Closed => Self::Closed,
             PositionLedgerState::Settled => Self::Settled,
+        }
+    }
+}
+
+impl From<StrategyPositionOriginKind> for ChStrategyPositionOriginKind {
+    fn from(value: StrategyPositionOriginKind) -> Self {
+        match value {
+            StrategyPositionOriginKind::SystemIntent => Self::SystemIntent,
+            StrategyPositionOriginKind::AccountRecoveryIncident => Self::AccountRecoveryIncident,
+            StrategyPositionOriginKind::OpeningInventory => Self::OpeningInventory,
         }
     }
 }

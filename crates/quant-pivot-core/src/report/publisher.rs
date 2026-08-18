@@ -515,11 +515,8 @@ fn report_path(report: &RecommendationReportInfo) -> String {
 
 fn notification_body(report: &RecommendationReportInfo, n: &ReportNotificationPayload) -> String {
     let mut body = format!(
-        "status={} mode={} recommendations={} total_hard_reserved_cash_usd={}",
-        n.status,
-        n.runtime_mode.as_str(),
-        n.published_count,
-        n.total_hard_reserved_cash_usd,
+        "status={} recommendations={} total_hard_reserved_cash_usd={}",
+        n.status, n.published_count, n.total_hard_reserved_cash_usd,
     );
     if let Some(reason) = n.empty_reason {
         let _ = write!(body, " empty_reason={}", reason.as_str());
@@ -548,7 +545,7 @@ fn notification_body(report: &RecommendationReportInfo, n: &ReportNotificationPa
 #[cfg(test)]
 mod tests {
     use quant_pivot_models::{
-        enums::quant::{OutcomeSide, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
+        enums::quant::{OutcomeSide, RecommendationReportStatus, ReportKind},
         runtime_config::BuyModelRoute,
         types::{Bps, RecommendationReportId, Usd},
     };
@@ -558,7 +555,7 @@ mod tests {
     use crate::{report::NotificationRecommendation, test_fixtures::report_fixtures};
 
     #[test]
-    fn published_notification_contains_mode() {
+    fn published_notification_contains_economics() {
         let report = report_fixtures::report(
             RecommendationReportId::from_v7(),
             ReportKind::TopN,
@@ -568,7 +565,6 @@ mod tests {
             report_id: report.recommendation_report_id,
             kind: ReportKind::TopN,
             status: "published".to_owned(),
-            runtime_mode: QuantRuntimeMode::SemiAuto,
             published_count: 2,
             total_hard_reserved_cash_usd: Usd::new(dec!(500)),
             top3: vec![
@@ -595,7 +591,6 @@ mod tests {
             empty_reason: None,
         };
         let body = notification_body(&report, &payload);
-        assert!(body.contains("mode=semi_auto"), "{body}");
         assert!(body.contains("total_hard_reserved_cash_usd=500"), "{body}");
         assert!(body.contains("0xA"), "top-1 market present: {body}");
         assert!(body.contains("0xB"), "top-2 market present: {body}");

@@ -16,7 +16,6 @@ use std::{
 };
 
 use quant_pivot_error::QuantError;
-use quant_pivot_models::enums::quant::QuantRuntimeMode;
 use strum::IntoStaticStr;
 use tokio::{task::AbortHandle, time::MissedTickBehavior};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -139,17 +138,6 @@ impl ShutdownBudget {
         Self { budgets }
     }
 
-    /// Per-stage drain budget derived from the runtime execution mode.
-    #[must_use]
-    pub const fn for_quant_mode(mode: QuantRuntimeMode) -> Self {
-        match mode {
-            QuantRuntimeMode::ReportOnly => Self::report_only(),
-            QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution => {
-                Self::order_submitting()
-            }
-        }
-    }
-
     #[must_use]
     pub const fn stage(&self, stage: ShutdownStage) -> Duration {
         self.budgets[stage.index()]
@@ -161,18 +149,8 @@ impl ShutdownBudget {
     }
 
     #[must_use]
-    pub const fn report_only() -> Self {
-        Self::from_secs([3, 4, 3, 2, 3, 8, 3, 4, 3, 1])
-    }
-
-    #[must_use]
-    pub const fn order_submitting() -> Self {
+    pub const fn execution() -> Self {
         Self::from_secs([5, 10, 5, 2, 5, 20, 5, 5, 5, 3])
-    }
-
-    #[must_use]
-    pub const fn default_report_only() -> Self {
-        Self::report_only()
     }
 
     #[must_use]
@@ -189,7 +167,7 @@ impl ShutdownBudget {
 
 impl Default for ShutdownBudget {
     fn default() -> Self {
-        Self::report_only()
+        Self::execution()
     }
 }
 
@@ -555,15 +533,10 @@ pub struct AppRunner {
 impl AppRunner {
     #[must_use]
     pub fn new(shutdown: CancellationToken) -> Self {
-        Self::for_quant_mode(shutdown, QuantRuntimeMode::ReportOnly)
-    }
-
-    #[must_use]
-    pub fn for_quant_mode(shutdown: CancellationToken, mode: QuantRuntimeMode) -> Self {
         Self {
             shutdown: shutdown.clone(),
             registry: TaskRegistry::new(shutdown),
-            budget: ShutdownBudget::for_quant_mode(mode),
+            budget: ShutdownBudget::execution(),
             pending_tasks: PendingTaskQueue::default(),
         }
     }
@@ -734,15 +707,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_budget_scales_mode() {
-        let report_only = ShutdownBudget::for_quant_mode(QuantRuntimeMode::ReportOnly);
-        let auto = ShutdownBudget::for_quant_mode(QuantRuntimeMode::AutoExecution);
+    async fn shutdown_budget_drains_execution() {
+        let budget = ShutdownBudget::execution();
         assert_eq!(
-            report_only.stage(ShutdownStage::Execution),
-            Duration::from_secs(8)
-        );
-        assert_eq!(
-            auto.stage(ShutdownStage::Execution),
+            budget.stage(ShutdownStage::Execution),
             Duration::from_secs(20)
         );
     }

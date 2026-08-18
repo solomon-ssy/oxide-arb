@@ -1275,33 +1275,17 @@ impl Default for EntryConditionWorkerConfig {
     }
 }
 
-/// Semi-auto approval policy.
+/// Limits for policy-automatic authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SemiAutoConfig {
-    /// Approval time-to-live in seconds.
-    pub approval_ttl_secs: u64,
-}
-
-impl Default for SemiAutoConfig {
-    fn default() -> Self {
-        Self {
-            approval_ttl_secs: 900,
-        }
-    }
-}
-
-/// Auto-execution policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AutoExecutionConfig {
-    /// Maximum orders auto-created per report.
+pub struct PolicyAutomaticLimits {
+    /// Maximum automatically authorized orders per report.
     pub max_orders_per_report: u32,
-    /// Maximum total USD auto-executed per report.
+    /// Maximum total USD automatically authorized per report.
     pub max_total_usd_per_report: DecimalValue,
 }
 
-impl Default for AutoExecutionConfig {
+impl Default for PolicyAutomaticLimits {
     fn default() -> Self {
         Self {
             max_orders_per_report: 0,

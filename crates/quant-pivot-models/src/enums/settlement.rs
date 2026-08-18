@@ -17,8 +17,8 @@ pg_enum! {
         #[default]
         Disabled => "disabled",
         GovernedCanary => "governed_canary",
-        SemiAuto => "semi_auto",
-        Auto => "auto",
+        OperatorApproval => "operator_approval",
+        PolicyAutomatic => "policy_automatic",
     }
 }
 

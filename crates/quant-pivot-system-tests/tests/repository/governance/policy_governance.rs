@@ -870,9 +870,9 @@ fn persisted_snapshot(snapshot: &DecisionPolicySnapshot) -> NewDecisionPolicySna
             snapshot,
             ConfigResourceKind::OperationsPolicy,
         ),
-        execution_automation_policy_revision_id: required_revision(
+        execution_authorization_policy_revision_id: required_revision(
             snapshot,
-            ConfigResourceKind::ExecutionAutomationPolicy,
+            ConfigResourceKind::ExecutionAuthorizationPolicy,
         ),
         snapshot: snapshot_document,
         source: DecisionPolicySnapshotSource::Activation,

@@ -2,7 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{QpMarketCategory, QpQuantRuntimeMode};
+use super::sea_orm_active_enums::{QpExecutionAuthorityCeiling, QpMarketCategory};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -40,8 +40,8 @@ pub struct Model {
     pub candidate_manifest_hash: String,
     #[sea_orm(column_type = "Text")]
     pub promotion_gate_hash: String,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode[]")"#)]
-    pub allowed_runtime_modes: Vec<QpQuantRuntimeMode>,
+    #[sea_orm(column_type = r#"custom("qp_execution_authority_ceiling")"#)]
+    pub maximum_execution_authority: QpExecutionAuthorityCeiling,
     #[sea_orm(column_type = "Text")]
     pub non_route_policy_hash: String,
     #[sea_orm(column_type = "Text")]

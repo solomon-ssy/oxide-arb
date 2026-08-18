@@ -1,4 +1,4 @@
-//! Atomic runtime-control service for mode, settlement policy, and kill switch.
+//! Atomic runtime-control service for entry authorization, settlement, and kill switch.
 
 use std::{sync::Arc, time::Instant};
 
@@ -12,20 +12,20 @@ use quant_pivot_models::{
             RuntimeControlUpdate, SystemStatus, WsShardConnectivity,
         },
         ports::{
-            CatalogState, CatalogStatusPort, KillSwitchPort, QuantModeTransitionReport,
+            CatalogState, CatalogStatusPort, EntryAuthorizationTransitionReport, KillSwitchPort,
             RuntimeControlPort, SetKillSwitchCommand,
         },
     },
     enums::{
-        execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
+        execution::KillSwitchState, quant::EntryAuthorizationPolicy,
+        settlement::SettlementWritePolicy,
     },
 };
 use quant_pivot_repository::traits::RuntimeControlRepository;
 
 use crate::{
     governance::{
-        ModePreflight, ModeTransitionGate, RuntimeControlsHandle,
-        execution_recovery::ExecutionRecoveryHandle,
+        AuthorizationPreflight, RuntimeControlsHandle, execution_recovery::ExecutionRecoveryHandle,
         operational_phase::operational_phase_from_readiness, system_status::SystemStatusPublisher,
     },
     infra::health_checker::HealthChecker,
@@ -36,8 +36,7 @@ pub struct QuantRuntimeControl {
     controls: RuntimeControlsHandle,
     health_checker: Arc<HealthChecker>,
     repository: Arc<dyn RuntimeControlRepository>,
-    transition_gate: Arc<dyn ModeTransitionGate>,
-    preflight: Arc<dyn ModePreflight>,
+    preflight: Arc<dyn AuthorizationPreflight>,
     metrics: Arc<MetricsHub>,
     status_publisher: Arc<SystemStatusPublisher>,
     execution_recovery: ExecutionRecoveryHandle,
@@ -48,8 +47,7 @@ pub struct QuantRuntimeControlDeps {
     pub controls: RuntimeControlsHandle,
     pub health_checker: Arc<HealthChecker>,
     pub repository: Arc<dyn RuntimeControlRepository>,
-    pub transition_gate: Arc<dyn ModeTransitionGate>,
-    pub preflight: Arc<dyn ModePreflight>,
+    pub preflight: Arc<dyn AuthorizationPreflight>,
     pub metrics: Arc<MetricsHub>,
     pub status_publisher: Arc<SystemStatusPublisher>,
     pub execution_recovery: ExecutionRecoveryHandle,
@@ -59,12 +57,11 @@ impl QuantRuntimeControl {
     #[must_use]
     pub fn new(deps: QuantRuntimeControlDeps) -> Self {
         deps.metrics
-            .set_auto_execution_halted(!deps.controls.kill_switch_state().allows_new_entry());
+            .set_policy_automatic_halted(!deps.controls.kill_switch_state().allows_new_entry());
         Self {
             controls: deps.controls,
             health_checker: deps.health_checker,
             repository: deps.repository,
-            transition_gate: deps.transition_gate,
             preflight: deps.preflight,
             metrics: deps.metrics,
             status_publisher: deps.status_publisher,
@@ -77,7 +74,7 @@ impl QuantRuntimeControl {
         let snapshot = RuntimeControlSnapshot::from(self.repository.compare_and_set(update).await?);
         self.controls.publish_local(snapshot.clone());
         self.metrics
-            .set_auto_execution_halted(!snapshot.kill_switch_state.allows_new_entry());
+            .set_policy_automatic_halted(!snapshot.kill_switch_state.allows_new_entry());
         self.status_publisher.publish();
         Ok(snapshot)
     }
@@ -100,23 +97,22 @@ impl RuntimeControlPort for QuantRuntimeControl {
         self.controls.snapshot()
     }
 
-    async fn switch_quant_mode(
+    async fn switch_entry_authorization_policy(
         &self,
-        target: QuantRuntimeMode,
+        target: EntryAuthorizationPolicy,
         expected_revision: i64,
         actor: &str,
         reason: &str,
-    ) -> QuantResult<QuantModeTransitionReport> {
+    ) -> QuantResult<EntryAuthorizationTransitionReport> {
         let current = self.controls.snapshot();
-        let from = current.quant_runtime_mode;
+        let from = current.entry_authorization_policy;
         let preflight = if from == target {
             None
         } else {
-            self.transition_gate.check(from, target)?;
             if from.is_upgrade_to(target) {
                 let report = self.preflight.run(target).await?;
                 if !report.passed {
-                    return Err(ExecutionError::ModePreflightDenied {
+                    return Err(ExecutionError::AuthorizationPreflightDenied {
                         reason: report.summary(),
                     }
                     .into());
@@ -129,7 +125,7 @@ impl RuntimeControlPort for QuantRuntimeControl {
 
         self.persist(RuntimeControlUpdate {
             expected_revision,
-            quant_runtime_mode: Some(target),
+            entry_authorization_policy: Some(target),
             settlement_write_policy: None,
             kill_switch_state: None,
             kill_switch_requires_ack: None,
@@ -137,7 +133,7 @@ impl RuntimeControlPort for QuantRuntimeControl {
             reason: reason.to_owned(),
         })
         .await?;
-        Ok(QuantModeTransitionReport {
+        Ok(EntryAuthorizationTransitionReport {
             from,
             to: target,
             preflight,
@@ -154,9 +150,12 @@ impl RuntimeControlPort for QuantRuntimeControl {
         let current = self.controls.snapshot();
         if settlement_policy_rank(target) > settlement_policy_rank(current.settlement_write_policy)
         {
-            let report = self.preflight.run(current.quant_runtime_mode).await?;
+            let report = self
+                .preflight
+                .run(current.entry_authorization_policy)
+                .await?;
             if !report.passed {
-                return Err(ExecutionError::ModePreflightDenied {
+                return Err(ExecutionError::AuthorizationPreflightDenied {
                     reason: report.summary(),
                 }
                 .into());
@@ -164,7 +163,7 @@ impl RuntimeControlPort for QuantRuntimeControl {
         }
         self.persist(RuntimeControlUpdate {
             expected_revision,
-            quant_runtime_mode: None,
+            entry_authorization_policy: None,
             settlement_write_policy: Some(target),
             kill_switch_state: None,
             kill_switch_requires_ack: None,
@@ -198,7 +197,7 @@ impl RuntimeControlPort for QuantRuntimeControl {
         );
 
         SystemStatus {
-            quant_runtime_mode: controls.quant_runtime_mode,
+            entry_authorization_policy: controls.entry_authorization_policy,
             uptime_secs: self.started_at.elapsed().as_secs(),
             active_markets,
             catalog,
@@ -241,7 +240,7 @@ impl KillSwitchPort for QuantRuntimeControl {
         let snapshot = self
             .persist(RuntimeControlUpdate {
                 expected_revision: command.expected_revision,
-                quant_runtime_mode: None,
+                entry_authorization_policy: None,
                 settlement_write_policy: None,
                 kill_switch_state: Some(command.target),
                 kill_switch_requires_ack: Some(command.target.is_emergency() || command.latch),
@@ -257,7 +256,7 @@ const fn settlement_policy_rank(policy: SettlementWritePolicy) -> u8 {
     match policy {
         SettlementWritePolicy::Disabled => 0,
         SettlementWritePolicy::GovernedCanary => 1,
-        SettlementWritePolicy::SemiAuto => 2,
-        SettlementWritePolicy::Auto => 3,
+        SettlementWritePolicy::OperatorApproval => 2,
+        SettlementWritePolicy::PolicyAutomatic => 3,
     }
 }

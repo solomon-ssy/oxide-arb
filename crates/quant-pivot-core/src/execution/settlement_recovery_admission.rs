@@ -2,7 +2,7 @@
 //!
 //! A `HoldToResolution + Auto` entry is allowed only when the configured
 //! execution account has a verified current V2 recovery route and the runtime
-//! settlement write policy matches the execution mode. This check runs both
+//! settlement write policy matches entry authorization. This check runs both
 //! when an intent is created and immediately before order submission.
 
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::{
-        quant::{ExecutionWalletKind, ExitSettlementMode, QuantRuntimeMode, RedeemPolicy},
+        quant::{EntryAuthorizationPolicy, ExecutionWalletKind, ExitSettlementMode, RedeemPolicy},
         settlement::{SettlementRoute, SettlementWritePolicy},
     },
     types::{ContentHash, EvmAddress, EvmBlockHash, ExecutionAccountId, ExitPolicySpec},
@@ -23,7 +23,7 @@ use quant_pivot_models::{
 pub struct SettlementRecoveryAdmissionRequest {
     pub execution_account_id: ExecutionAccountId,
     pub route: SettlementRoute,
-    pub runtime_mode: QuantRuntimeMode,
+    pub authorization_policy: EntryAuthorizationPolicy,
     pub write_policy: SettlementWritePolicy,
 }
 
@@ -44,7 +44,7 @@ pub struct SettlementRecoveryAdmissionEvidence {
 pub enum SettlementRecoveryAdmissionBlockReason {
     ExecutionAccountMismatch,
     RuntimePolicyMismatch {
-        runtime_mode: QuantRuntimeMode,
+        authorization_policy: EntryAuthorizationPolicy,
         write_policy: SettlementWritePolicy,
     },
     DeploymentNotReady,
@@ -60,11 +60,11 @@ impl Display for SettlementRecoveryAdmissionBlockReason {
                 formatter.write_str("execution account does not match settlement wallet")
             }
             Self::RuntimePolicyMismatch {
-                runtime_mode,
+                authorization_policy,
                 write_policy,
             } => write!(
                 formatter,
-                "runtime mode {runtime_mode} is incompatible with settlement write policy \
+                "entry authorization {authorization_policy} is incompatible with settlement write policy \
                  {write_policy}"
             ),
             Self::DeploymentNotReady => {

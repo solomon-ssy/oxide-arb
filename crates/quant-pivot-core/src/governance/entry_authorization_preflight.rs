@@ -1,10 +1,8 @@
-//! Mode-upgrade preflight engine.
+//! Entry-authorization preflight engine.
 //!
-//! A read-only, side-effect-free aggregate run before an *upgrade* transition
-//! (`report_only -> semi_auto`, `semi_auto -> auto_execution`). Every check with
-//! a real data source is evaluated against live state; the report is fail-closed
-//! (the transition proceeds only when every hard check passes). Downgrades skip
-//! this engine entirely (tightening is always permitted).
+//! A read-only, side-effect-free aggregate run before enabling
+//! policy-automatic authorization. Every check with a real data source is
+//! evaluated against live state and failure denies the upgrade.
 
 use std::sync::Arc;
 
@@ -14,13 +12,13 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        governance::{PreflightCheck, PreflightReport},
+        governance::{AuthorizationPreflightCheck, AuthorizationPreflightReport},
         ports::DataQualityPort,
         quant::RepresentedRouteSet,
     },
     enums::{
         execution::KillSwitchState,
-        quant::{ExecutionWalletKind, QuantRuntimeMode},
+        quant::{EntryAuthorizationPolicy, ExecutionWalletKind},
     },
     runtime_config::DecisionPolicySnapshot,
     types::ModelVersionId,
@@ -40,19 +38,22 @@ use crate::{
     runtime_config::DecisionPolicyStore,
 };
 
-/// Mode-upgrade preflight boundary.
+/// Entry-authorization upgrade preflight boundary.
 #[async_trait]
-pub trait ModePreflight: Send + Sync {
+pub trait AuthorizationPreflight: Send + Sync {
     /// Aggregate the read-only check list for a target upgrade mode.
     ///
     /// Genuine infrastructure failures (DB down) propagate as typed errors
     /// (mapped to 5xx). Business denials are captured as failed hard checks in
-    /// the returned [`PreflightReport`] (`passed == false`).
-    async fn run(&self, target: QuantRuntimeMode) -> QuantResult<PreflightReport>;
+    /// the returned [`AuthorizationPreflightReport`] (`passed == false`).
+    async fn run(
+        &self,
+        target: EntryAuthorizationPolicy,
+    ) -> QuantResult<AuthorizationPreflightReport>;
 }
 
-/// Read-only dependency bundle for [`DefaultModePreflight`].
-pub struct ModePreflightDeps {
+/// Read-only dependency bundle for [`DefaultAuthorizationPreflight`].
+pub struct AuthorizationPreflightDeps {
     pub deploy: Arc<DeployConfig>,
     pub config_store: Arc<DecisionPolicyStore>,
     pub data_quality: Arc<dyn DataQualityPort>,
@@ -61,25 +62,28 @@ pub struct ModePreflightDeps {
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub runtime_controls: RuntimeControlsHandle,
-    /// Exit-monitor health: `auto_execution` requires a live worker.
+    /// Exit-monitor health: policy-automatic authorization requires a live worker.
     pub exit_monitor_health: ExitMonitorHealthHandle,
 }
 
 /// Spec preflight engine.
-pub struct DefaultModePreflight {
-    deps: ModePreflightDeps,
+pub struct DefaultAuthorizationPreflight {
+    deps: AuthorizationPreflightDeps,
 }
 
-impl DefaultModePreflight {
+impl DefaultAuthorizationPreflight {
     #[must_use]
-    pub const fn new(deps: ModePreflightDeps) -> Self {
+    pub const fn new(deps: AuthorizationPreflightDeps) -> Self {
         Self { deps }
     }
 }
 
 #[async_trait]
-impl ModePreflight for DefaultModePreflight {
-    async fn run(&self, target: QuantRuntimeMode) -> QuantResult<PreflightReport> {
+impl AuthorizationPreflight for DefaultAuthorizationPreflight {
+    async fn run(
+        &self,
+        target: EntryAuthorizationPolicy,
+    ) -> QuantResult<AuthorizationPreflightReport> {
         let config = self.deps.config_store.current();
         let now = Utc::now();
         let mut checks = vec![
@@ -94,7 +98,7 @@ impl ModePreflight for DefaultModePreflight {
             Self::check_runtime_config_valid(&config),
         ];
 
-        if target == QuantRuntimeMode::AutoExecution {
+        if target == EntryAuthorizationPolicy::PolicyAutomatic {
             checks.push(
                 self.check_route_champions(&config, "active_route_models")
                     .await?,
@@ -106,12 +110,12 @@ impl ModePreflight for DefaultModePreflight {
             checks.push(self.check_exit_monitor(now));
         }
 
-        Ok(PreflightReport::new(target, checks))
+        Ok(AuthorizationPreflightReport::new(target, checks))
     }
 }
 
-impl DefaultModePreflight {
-    fn check_credentials(&self) -> PreflightCheck {
+impl DefaultAuthorizationPreflight {
+    fn check_credentials(&self) -> AuthorizationPreflightCheck {
         let key = self.deps.deploy.keys.private_key_present();
         let funder = self
             .deps
@@ -123,7 +127,7 @@ impl DefaultModePreflight {
             .is_some_and(|funder| !funder.trim().is_empty());
         // Proxy / Gnosis Safe topologies move money (e.g. settlement redeem)
         // through the gasless relayer, so the relayer API credentials are a hard
-        // requirement for any upgrade (semi_auto / auto_execution). EOA settles
+        // requirement before policy-automatic authorization. EOA settles
         // on-chain directly and needs none.
         let wallet_kind = self.deps.deploy.quant.account.wallet_kind;
         let relayer_required = matches!(
@@ -151,34 +155,34 @@ impl DefaultModePreflight {
         } else {
             format!("missing {}", missing.join(", "))
         };
-        PreflightCheck::hard("credentials_loaded", passed, detail)
+        AuthorizationPreflightCheck::hard("credentials_loaded", passed, detail)
     }
 
-    fn check_jwt(&self, target: QuantRuntimeMode) -> PreflightCheck {
+    fn check_jwt(&self, target: EntryAuthorizationPolicy) -> AuthorizationPreflightCheck {
         let configured = self.deps.deploy.web.has_jwt_signing_key();
         let detail = if configured {
             "web.jwt HS256 signing key is configured".to_owned()
         } else {
             "web.jwt signing key is missing or invalid".to_owned()
         };
-        if target == QuantRuntimeMode::AutoExecution {
-            PreflightCheck::hard("jwt_signing_key_configured", configured, detail)
+        if target == EntryAuthorizationPolicy::PolicyAutomatic {
+            AuthorizationPreflightCheck::hard("jwt_signing_key_configured", configured, detail)
         } else {
-            PreflightCheck::soft("jwt_signing_key_configured", configured, detail)
+            AuthorizationPreflightCheck::soft("jwt_signing_key_configured", configured, detail)
         }
     }
 
-    fn check_order_client_ready(&self) -> PreflightCheck {
+    fn check_order_client_ready(&self) -> AuthorizationPreflightCheck {
         let keys_ok = self.deps.deploy.keys.private_key_present();
         let url_ok = !self.deps.deploy.polymarket.clob_base_url.trim().is_empty();
-        PreflightCheck::hard(
+        AuthorizationPreflightCheck::hard(
             "order_client_ready",
             keys_ok && url_ok,
             "boot-level keystore and CLOB endpoint are configured; live connectivity is checked by the execution bundle",
         )
     }
 
-    fn check_data_quality(&self, config: &DecisionPolicySnapshot) -> PreflightCheck {
+    fn check_data_quality(&self, config: &DecisionPolicySnapshot) -> AuthorizationPreflightCheck {
         let snapshot = self.deps.data_quality.snapshot();
         let stale_bps = if snapshot.total_tokens == 0 {
             u64::MAX
@@ -199,12 +203,12 @@ impl DefaultModePreflight {
             snapshot.stale,
             snapshot.ingest_lag_exceeded
         );
-        PreflightCheck::hard("data_quality_green", green, detail)
+        AuthorizationPreflightCheck::hard("data_quality_green", green, detail)
     }
 
-    async fn check_no_unresolvable(&self) -> QuantResult<PreflightCheck> {
+    async fn check_no_unresolvable(&self) -> QuantResult<AuthorizationPreflightCheck> {
         let blocked = self.deps.reconciliation.has_unresolvable().await?;
-        Ok(PreflightCheck::hard(
+        Ok(AuthorizationPreflightCheck::hard(
             "no_unresolvable_reconciliation",
             !blocked,
             if blocked {
@@ -215,9 +219,9 @@ impl DefaultModePreflight {
         ))
     }
 
-    async fn check_no_impaired_capital(&self) -> QuantResult<PreflightCheck> {
+    async fn check_no_impaired_capital(&self) -> QuantResult<AuthorizationPreflightCheck> {
         let impaired = self.deps.capital.has_impaired().await?;
-        Ok(PreflightCheck::hard(
+        Ok(AuthorizationPreflightCheck::hard(
             "no_impaired_capital",
             !impaired,
             if impaired {
@@ -228,7 +232,7 @@ impl DefaultModePreflight {
         ))
     }
 
-    fn check_runtime_config_valid(config: &DecisionPolicySnapshot) -> PreflightCheck {
+    fn check_runtime_config_valid(config: &DecisionPolicySnapshot) -> AuthorizationPreflightCheck {
         let report = config.validate_runtime_config();
         let passed = !report.has_errors();
         let detail = if passed {
@@ -236,14 +240,14 @@ impl DefaultModePreflight {
         } else {
             report.to_string()
         };
-        PreflightCheck::hard("runtime_config_valid", passed, detail)
+        AuthorizationPreflightCheck::hard("runtime_config_valid", passed, detail)
     }
 
     async fn check_route_champions(
         &self,
         config: &DecisionPolicySnapshot,
         check_name: &'static str,
-    ) -> QuantResult<PreflightCheck> {
+    ) -> QuantResult<AuthorizationPreflightCheck> {
         let routes = configured_routes(config).map_err(QuantError::config)?;
         let mut failures = Vec::new();
         for route in &routes.routes {
@@ -267,14 +271,16 @@ impl DefaultModePreflight {
         } else {
             failures.join("; ")
         };
-        Ok(PreflightCheck::hard(check_name, passed, detail))
+        Ok(AuthorizationPreflightCheck::hard(
+            check_name, passed, detail,
+        ))
     }
 
     async fn check_shadow_period(
         &self,
         config: &DecisionPolicySnapshot,
         now: DateTime<Utc>,
-    ) -> QuantResult<PreflightCheck> {
+    ) -> QuantResult<AuthorizationPreflightCheck> {
         let routes = configured_routes(config).map_err(QuantError::config)?;
         let required = config
             .profile_artifacts
@@ -328,15 +334,17 @@ impl DefaultModePreflight {
         } else {
             failures.join("; ")
         };
-        Ok(PreflightCheck::hard(
+        Ok(AuthorizationPreflightCheck::hard(
             "shadow_period_complete",
             passed,
             detail,
         ))
     }
 
-    fn check_auto_policy(config: &DecisionPolicySnapshot) -> PreflightCheck {
-        let auto = &config.execution_automation_policy.auto_execution;
+    fn check_auto_policy(config: &DecisionPolicySnapshot) -> AuthorizationPreflightCheck {
+        let auto = &config
+            .execution_authorization_policy
+            .policy_automatic_limits;
         let ok = auto.max_orders_per_report > 0
             && auto.max_total_usd_per_report.value > Decimal::ZERO
             && config
@@ -352,23 +360,23 @@ impl DefaultModePreflight {
                 .exposure_limits
                 .max_open_recommendations
                 > 0;
-        PreflightCheck::hard(
+        AuthorizationPreflightCheck::hard(
             "auto_policy_valid",
             ok,
             "execution automation caps and governed portfolio capital thresholds are positive",
         )
     }
 
-    fn check_kill_switch_closed(&self) -> PreflightCheck {
+    fn check_kill_switch_closed(&self) -> AuthorizationPreflightCheck {
         let state = self.deps.runtime_controls.kill_switch_state();
-        PreflightCheck::hard(
+        AuthorizationPreflightCheck::hard(
             "kill_switch_closed",
             state == KillSwitchState::Closed,
             format!("kill switch state = {}", state.as_str()),
         )
     }
 
-    fn check_capital_budget(config: &DecisionPolicySnapshot) -> PreflightCheck {
+    fn check_capital_budget(config: &DecisionPolicySnapshot) -> AuthorizationPreflightCheck {
         let budget = config
             .execution_risk
             .portfolio
@@ -376,18 +384,18 @@ impl DefaultModePreflight {
             .total_budget_usd
             .value;
         let ok = budget > Decimal::ZERO;
-        PreflightCheck::hard(
+        AuthorizationPreflightCheck::hard(
             "max_capital_budget_set",
             ok,
-            "portfolio.budget.total_budget_usd must be > 0 for auto_execution",
+            "portfolio.budget.total_budget_usd must be > 0 for policy-automatic authorization",
         )
     }
 
-    fn check_exit_monitor(&self, now: DateTime<Utc>) -> PreflightCheck {
-        PreflightCheck::hard(
+    fn check_exit_monitor(&self, now: DateTime<Utc>) -> AuthorizationPreflightCheck {
+        AuthorizationPreflightCheck::hard(
             "exit_monitor_healthy",
             self.deps.exit_monitor_health.is_ready(now),
-            "exit monitor worker must be healthy (recent successful scan) for auto_execution",
+            "exit monitor worker must be healthy for policy-automatic authorization",
         )
     }
 

@@ -288,7 +288,7 @@ impl ExchangeHistoryWorker {
         let mut bootstrap_refs = profiles
             .iter()
             .filter(|profile| {
-                profile.spec.serving_authority == ServingAuthority::ReportOnlyWithLiveL2
+                profile.spec.serving_authority == ServingAuthority::AnalysisOnlyWithLiveL2
             })
             .map(|profile| &profile.profile_ref)
             .collect::<Vec<_>>();

@@ -370,12 +370,12 @@ impl<'a> TradePolicyFixtureContext<'a> {
                     detail: "pooled ResearchProfile cannot own an executable Trade Policy fixture"
                         .to_owned(),
                 })?;
-        if profile.spec.activation_eligibility != ResearchEvaluationTrack::SemiAutoCandidate
+        if profile.spec.activation_eligibility != ResearchEvaluationTrack::ExecutionCandidate
             || !matches!(category, MarketCategory::Crypto | MarketCategory::Weather)
         {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
-                    "ResearchProfile {} is not an executable Crypto/Weather SemiAuto candidate",
+                    "ResearchProfile {} is not an executable Crypto/Weather execution candidate",
                     profile.profile_ref.id
                 ),
             }
@@ -847,7 +847,7 @@ impl PolicyEvidenceFixture {
                             fit_seal_id: context.source_dataset.source_lineage.fit_seal_id,
                             fit_seal_hash: context.source_dataset.source_lineage.fit_seal_hash,
                         },
-                        evaluation_track: ResearchEvaluationTrack::SemiAutoCandidate,
+                        evaluation_track: ResearchEvaluationTrack::ExecutionCandidate,
                         candidates: candidates.to_vec(),
                         reason: "build complete system TradePolicy preimage".to_owned(),
                         idempotency_key: fit_job_id.to_string(),
@@ -982,10 +982,10 @@ impl PolicyEvidenceFixture {
             )?;
         Ok(TradePolicyArtifactPayload {
             format_version: TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
-            activation_target: VerticalActivationTarget::SemiAuto,
+            activation_target: VerticalActivationTarget::OperatorApproval,
             fit_contract: TradePolicyFitContract {
                 profile_ref: context.profile.profile_ref.clone(),
-                evaluation_track: ResearchEvaluationTrack::SemiAutoCandidate,
+                evaluation_track: ResearchEvaluationTrack::ExecutionCandidate,
                 research_program_hash: context.research_program_hash,
                 source_dataset_id: context.source_dataset.training_dataset_id,
                 model_version_id: context.subject.model_version_id,
@@ -1624,7 +1624,7 @@ fn vertical_gate_evidence(
     let evidence = match category {
         MarketCategory::Weather => vec![VerticalGateEvidence {
             gate: VerticalGateKind::WeatherNoaaProxy,
-            target: VerticalActivationTarget::SemiAuto,
+            target: VerticalActivationTarget::OperatorApproval,
             methodology_hash,
             evidence_window_start: now - Duration::days(31),
             evidence_window_end: now,
@@ -1641,7 +1641,7 @@ fn vertical_gate_evidence(
         MarketCategory::Crypto => vec![
             VerticalGateEvidence {
                 gate: VerticalGateKind::CryptoChainlinkResolution,
-                target: VerticalActivationTarget::SemiAuto,
+                target: VerticalActivationTarget::OperatorApproval,
                 methodology_hash,
                 evidence_window_start: now - Duration::days(31),
                 evidence_window_end: now,
@@ -1657,7 +1657,7 @@ fn vertical_gate_evidence(
             },
             VerticalGateEvidence {
                 gate: VerticalGateKind::CryptoBinanceContinuity,
-                target: VerticalActivationTarget::SemiAuto,
+                target: VerticalActivationTarget::OperatorApproval,
                 methodology_hash,
                 evidence_window_start: now - Duration::days(31),
                 evidence_window_end: now,

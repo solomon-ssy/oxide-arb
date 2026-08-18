@@ -80,7 +80,7 @@ use quant_pivot_repository::{
     postgres::{
         PgCalibrationArtifactRepository, PgCatalogLedgerRepository, PgClobMarketInfoRepository,
         PgExchangeHistoryRepository, PgMarketLinkageRepository, PgMarketRepository,
-        PgModelRegistryRepository, PgPositionRepository, PgTradePolicyRepository,
+        PgModelRegistryRepository, PgStrategyPositionLotRepository, PgTradePolicyRepository,
         PgTrainingDatasetRepository,
     },
     traits::{
@@ -1219,7 +1219,7 @@ fn service_selection_linkage(
             market_repo: Arc::new(PgMarketRepository::new(db.clone())),
             artifact_store: store,
             dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
-            position_repo: Arc::new(PgPositionRepository::new(db.clone())),
+            position_repo: Arc::new(PgStrategyPositionLotRepository::new(db.clone())),
             clob_market_info_repo: Arc::new(PgClobMarketInfoRepository::new(db.clone())),
             linkage_repo,
             model_registry: Arc::new(PgModelRegistryRepository::new(db.clone())),

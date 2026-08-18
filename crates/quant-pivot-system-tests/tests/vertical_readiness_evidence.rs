@@ -150,7 +150,7 @@ enum CryptoGateKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum EvidenceRequirement {
-    SemiAutoEligibleImmutableProfile,
+    ExecutionEligibleImmutableProfile,
     CurrentResolutionAndExecutionOutcomes,
     CurrentProfileArtifactBinding,
     CurrentFeedbackCycleLineage,
@@ -261,10 +261,10 @@ struct CanonicalCryptoContract {
     maximum_probability_backtest_overfitting: String,
     required_shadow_window_secs: u64,
     minimum_shadow_decision_overlap: String,
-    chainlink_semi_auto_minimum_days: u32,
-    chainlink_semi_auto_minimum_samples: u64,
-    binance_semi_auto_minimum_days: u32,
-    binance_semi_auto_minimum_samples: u64,
+    chainlink_execution_minimum_days: u32,
+    chainlink_execution_minimum_samples: u64,
+    binance_execution_minimum_days: u32,
+    binance_execution_minimum_samples: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -400,10 +400,10 @@ impl CanonicalCryptoContract {
                 .value()
                 .normalize()
                 .to_string(),
-            chainlink_semi_auto_minimum_days: 14,
-            chainlink_semi_auto_minimum_samples: 2_000,
-            binance_semi_auto_minimum_days: 30,
-            binance_semi_auto_minimum_samples: 100_000,
+            chainlink_execution_minimum_days: 14,
+            chainlink_execution_minimum_samples: 2_000,
+            binance_execution_minimum_days: 30,
+            binance_execution_minimum_samples: 100_000,
         }
     }
 }
@@ -528,7 +528,7 @@ impl CryptoReadinessEvidenceManifest {
             gate: CryptoGateKind::ProfileActivationEligibility,
             current: GateVerdict::Blocked {
                 blocker: GateBlocker::ResearchOnlyProfile,
-                missing_evidence: EvidenceRequirement::SemiAutoEligibleImmutableProfile,
+                missing_evidence: EvidenceRequirement::ExecutionEligibleImmutableProfile,
             },
         }];
         gates.extend(
@@ -697,7 +697,7 @@ impl CryptoReadinessEvidenceManifest {
     ) {
         assert_eq!(
             contract.activation_eligibility,
-            ResearchEvaluationTrack::SemiAutoCandidate
+            ResearchEvaluationTrack::ExecutionCandidate
         );
         assert_eq!(contract.minimum_mature_labels, 500);
         assert_eq!(contract.minimum_coverage, "0.95");
@@ -1571,7 +1571,7 @@ impl WeatherReadinessEvidenceManifest {
         assert_eq!(self.activation_claim, ActivationClaim::NotClaimed);
         assert_eq!(
             self.canonical_contract.activation_eligibility,
-            ResearchEvaluationTrack::SemiAutoCandidate
+            ResearchEvaluationTrack::ExecutionCandidate
         );
         assert_eq!(self.canonical_contract.minimum_mature_labels, 500);
         assert_eq!(self.canonical_contract.minimum_coverage, "0.95");

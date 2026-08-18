@@ -213,7 +213,7 @@ pub(super) struct WeatherReplayRequest<'a> {
 }
 
 /// One replayed Dataset row across every governed candidate at 1× and 2×
-/// `ReportOnly` latency.
+/// Analysis-path latency.
 #[derive(Debug, Clone)]
 pub(super) struct WeatherExampleReplay {
     pub example: TrainingExample,

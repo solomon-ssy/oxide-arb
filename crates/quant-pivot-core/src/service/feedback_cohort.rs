@@ -8,9 +8,7 @@ use quant_pivot_models::{
         FeedbackRecommendationContext, FeedbackResolutionEvidence,
         RecommendationExecutionRollupInfo, RecommendationResolutionOutcomeInfo,
     },
-    enums::quant::{
-        CohortCensorReason, CohortExclusionReason, FeedbackCohort, QuantRuntimeMode, ReportKind,
-    },
+    enums::quant::{CohortCensorReason, CohortExclusionReason, FeedbackCohort, ReportKind},
 };
 
 /// Classify one recommendation without conflating market, execution, and policy truth.
@@ -92,11 +90,6 @@ fn evaluate_execution_learning(
     published_at: DateTime<Utc>,
     execution_rollup: Option<&RecommendationExecutionRollupInfo>,
 ) -> Result<FeedbackCohortDecision, FeedbackCohortContractError> {
-    if context.runtime_mode() == QuantRuntimeMode::ReportOnly {
-        return Ok(FeedbackCohortDecision::Excluded(
-            CohortExclusionReason::ReportOnlyNoExecutionAuthority,
-        ));
-    }
     let Some(evidence) = visible_execution(snapshot, context, published_at, execution_rollup)?
     else {
         return Ok(FeedbackCohortDecision::Censored(
@@ -184,9 +177,6 @@ fn visible_execution(
     if rollup.terminal_at < published_at {
         return Err(FeedbackCohortContractError::ExecutionTerminalBeforePublication);
     }
-    if context.runtime_mode() == QuantRuntimeMode::ReportOnly && rollup.attempt_count > 0 {
-        return Err(FeedbackCohortContractError::ReportOnlyExecutionAttempt);
-    }
     Ok(Some(FeedbackExecutionEvidence {
         intent_count: execution_count(rollup.intent_count)?,
         attempt_count: execution_count(rollup.attempt_count)?,
@@ -242,8 +232,8 @@ mod tests {
         enums::quant::{
             CohortCensorReason, CohortExclusionReason, ExecutionAttemptNoFillReason,
             ExecutionAttemptTerminalState, ExecutionOrderState, FeedbackCohort, OutcomeSide,
-            QuantRuntimeMode, RecommendationReportStatus, RecommendationResolutionKind,
-            RecommendationStatus, ReportKind,
+            RecommendationReportStatus, RecommendationResolutionKind, RecommendationStatus,
+            ReportKind,
         },
         types::{
             CalibrationArtifactId, ContentHash, ExecutionAccountId, ExecutionOrderId,
@@ -283,9 +273,7 @@ mod tests {
         )
     }
 
-    fn recommendation_and_report(
-        runtime_mode: QuantRuntimeMode,
-    ) -> (
+    fn recommendation_and_report() -> (
         RecommendationInfo,
         RecommendationReportInfo,
         ReportRouteRunInfo,
@@ -305,7 +293,6 @@ mod tests {
             ReportKind::TopN,
             RecommendationReportStatus::Published,
         );
-        report.runtime_mode = runtime_mode;
         report.market_selection_id = recommendation.evidence_refs.market_selection_id;
         report.decision_policy_snapshot_id =
             recommendation.evidence_refs.decision_policy_snapshot_id;
@@ -355,8 +342,8 @@ mod tests {
         (recommendation, report, route_run)
     }
 
-    fn context(runtime_mode: QuantRuntimeMode) -> FeedbackRecommendationContext {
-        let (recommendation, report, route_run) = recommendation_and_report(runtime_mode);
+    fn context() -> FeedbackRecommendationContext {
+        let (recommendation, report, route_run) = recommendation_and_report();
         FeedbackRecommendationContext::try_from_report(&recommendation, &report, &route_run)
             .expect("coherent feedback recommendation")
     }
@@ -424,11 +411,10 @@ mod tests {
             order_intent_id,
             entry_execution_order_id,
             entry_reconciliation_id: ReconciliationId::from_v7(),
-            position_id: None,
+            strategy_position_lot_id: None,
             execution_account_id: ExecutionAccountId::from_v7(),
             market_id: context.market_id().clone(),
             token_id: context.token_id().clone(),
-            runtime_mode: context.runtime_mode(),
             terminal_state: ExecutionAttemptTerminalState::Unfilled,
             no_fill_reason: Some(ExecutionAttemptNoFillReason::VenueExpired),
             entry_order_state: ExecutionOrderState::Cancelled,
@@ -458,11 +444,10 @@ mod tests {
             order_intent_id: candidate.order_intent_id,
             entry_execution_order_id: candidate.entry_execution_order_id,
             entry_reconciliation_id: candidate.entry_reconciliation_id,
-            position_id: candidate.position_id,
+            strategy_position_lot_id: candidate.strategy_position_lot_id,
             execution_account_id: candidate.execution_account_id,
             market_id: candidate.market_id,
             token_id: candidate.token_id,
-            runtime_mode: candidate.runtime_mode,
             terminal_state: candidate.terminal_state,
             no_fill_reason: candidate.no_fill_reason,
             entry_order_state: candidate.entry_order_state,
@@ -524,50 +509,9 @@ mod tests {
         }
     }
 
-    fn empty_execution_rollup(
-        context: &FeedbackRecommendationContext,
-        available_at: DateTime<Utc>,
-    ) -> RecommendationExecutionRollupInfo {
-        let terminal_at = context.published_at().expect("published") + Duration::minutes(1);
-        let seal = NewRecommendationExecutionRollup::aggregate(
-            context.recommendation_id(),
-            0,
-            terminal_at,
-            terminal_at,
-            Vec::new(),
-        )
-        .expect("aggregate empty execution rollup");
-        let rollup = seal.rollup;
-        let rollup_hash = rollup
-            .expected_rollup_hash(available_at)
-            .expect("empty execution rollup hash");
-        RecommendationExecutionRollupInfo {
-            recommendation_id: rollup.recommendation_id,
-            intent_count: rollup.intent_count,
-            attempt_count: rollup.attempt_count,
-            unfilled_attempt_count: rollup.unfilled_attempt_count,
-            partially_filled_attempt_count: rollup.partially_filled_attempt_count,
-            fully_filled_attempt_count: rollup.fully_filled_attempt_count,
-            total_requested_shares: rollup.total_requested_shares,
-            total_filled_shares: rollup.total_filled_shares,
-            total_entry_fee_usd: rollup.total_entry_fee_usd,
-            total_exit_fee_usd: rollup.total_exit_fee_usd,
-            total_settlement_payout_usd: rollup.total_settlement_payout_usd,
-            total_realized_pnl_usd: rollup.total_realized_pnl_usd,
-            first_attempt_terminal_at: rollup.first_attempt_terminal_at,
-            last_attempt_terminal_at: rollup.last_attempt_terminal_at,
-            terminal_at: rollup.terminal_at,
-            source_observed_at: rollup.source_observed_at,
-            available_at,
-            attempt_set_hash: rollup.attempt_set_hash,
-            rollup_hash,
-            created_at: available_at,
-        }
-    }
-
     #[test]
     fn cohort_matrix_keeps_orthogonal() {
-        let context = context(QuantRuntimeMode::SemiAuto);
+        let context = context();
         let window = window(&context);
         let resolution = resolution_outcome(&context, window.cutoff() - Duration::minutes(2));
         let execution = execution_rollup(&context, window.cutoff() - Duration::minutes(1));
@@ -633,43 +577,26 @@ mod tests {
     }
 
     #[test]
-    fn report_no_never_negatives() {
-        let report_only = context(QuantRuntimeMode::ReportOnly);
-        let report_only_window = window(&report_only);
-        let report_only_decision = evaluate_feedback_cohort(
+    fn missing_execution_not_attempted() {
+        let context = context();
+        let cohort_window = window(&context);
+        let decision = evaluate_feedback_cohort(
             FeedbackCohort::ExecutionLearning,
-            &report_only_window,
-            &report_only,
+            &cohort_window,
+            &context,
             None,
             None,
         )
-        .expect("report-only classification");
+        .expect("missing execution classification");
         assert_eq!(
-            report_only_decision,
-            FeedbackCohortDecision::Excluded(CohortExclusionReason::ReportOnlyNoExecutionAuthority)
-        );
-
-        let semi_auto = context(QuantRuntimeMode::SemiAuto);
-        let semi_auto_window = window(&semi_auto);
-        let final_no_attempt =
-            empty_execution_rollup(&semi_auto, semi_auto_window.cutoff() - Duration::minutes(1));
-        let no_attempt = evaluate_feedback_cohort(
-            FeedbackCohort::ExecutionLearning,
-            &semi_auto_window,
-            &semi_auto,
-            None,
-            Some(&final_no_attempt),
-        )
-        .expect("unattempted classification");
-        assert_eq!(
-            no_attempt,
+            decision,
             FeedbackCohortDecision::Excluded(CohortExclusionReason::ExecutionNotAttempted)
         );
     }
 
     #[test]
     fn missing_late_without_evaluation() {
-        let context = context(QuantRuntimeMode::SemiAuto);
+        let context = context();
         let window = window(&context);
         let late_resolution = resolution_outcome(&context, window.cutoff() + Duration::minutes(1));
         let model = evaluate_feedback_cohort(
@@ -720,7 +647,7 @@ mod tests {
 
     #[test]
     fn truth_cutoff_follows_decision() {
-        let context = context(QuantRuntimeMode::SemiAuto);
+        let context = context();
         let decision_cutoff = context.published_at().expect("published");
         let decision_window = FeedbackCohortWindow::try_new(
             context.profile_ref().clone(),
@@ -749,8 +676,7 @@ mod tests {
 
     #[test]
     fn publication_kind_window_boundaries() {
-        let (mut recommendation, mut report, route_run) =
-            recommendation_and_report(QuantRuntimeMode::SemiAuto);
+        let (mut recommendation, mut report, route_run) = recommendation_and_report();
         recommendation.status = RecommendationStatus::Prepared;
         report.status = RecommendationReportStatus::Prepared;
         report.published_at = None;
@@ -775,8 +701,7 @@ mod tests {
             );
         }
 
-        let (recommendation, mut report, route_run) =
-            recommendation_and_report(QuantRuntimeMode::SemiAuto);
+        let (recommendation, mut report, route_run) = recommendation_and_report();
         report.report_kind = ReportKind::ShadowTopN;
         let shadow =
             FeedbackRecommendationContext::try_from_report(&recommendation, &report, &route_run)
@@ -793,7 +718,7 @@ mod tests {
             FeedbackCohortDecision::Excluded(CohortExclusionReason::NonPrimaryReport)
         );
 
-        let primary = context(QuantRuntimeMode::SemiAuto);
+        let primary = context();
         let published_at = primary.published_at().expect("published");
         let window_start_after_decision = primary.decision_at() + Duration::seconds(1);
         assert!(window_start_after_decision < published_at);
@@ -837,7 +762,7 @@ mod tests {
 
     #[test]
     fn visible_tamper_rejects_orthogonal() {
-        let context = context(QuantRuntimeMode::SemiAuto);
+        let context = context();
         let window = window(&context);
         let resolution = resolution_outcome(&context, window.cutoff() - Duration::minutes(2));
         let execution = execution_rollup(&context, window.cutoff() - Duration::minutes(1));
@@ -893,38 +818,19 @@ mod tests {
 
     #[test]
     fn final_rollup_governs_execution() {
-        let semi_auto = context(QuantRuntimeMode::SemiAuto);
-        let semi_auto_window = window(&semi_auto);
-        let rollup = execution_rollup(&semi_auto, semi_auto_window.cutoff() - Duration::minutes(1));
+        let context = context();
+        let cohort_window = window(&context);
+        let rollup = execution_rollup(&context, cohort_window.cutoff() - Duration::minutes(1));
         assert!(matches!(
             evaluate_feedback_cohort(
                 FeedbackCohort::ExecutionLearning,
-                &semi_auto_window,
-                &semi_auto,
+                &cohort_window,
+                &context,
                 None,
                 Some(&rollup),
             )
             .expect("final rollup is the only execution authority"),
             FeedbackCohortDecision::Eligible(FeedbackCohortEvidence::ExecutionLearning(_))
-        ));
-
-        let report_only = context(QuantRuntimeMode::ReportOnly);
-        let report_only_window = window(&report_only);
-        let mut impossible_rollup = rollup;
-        impossible_rollup.recommendation_id = report_only.recommendation_id();
-        impossible_rollup.rollup_hash = impossible_rollup
-            .as_new()
-            .expected_rollup_hash(impossible_rollup.available_at)
-            .expect("rebind impossible rollup hash");
-        assert!(matches!(
-            evaluate_feedback_cohort(
-                FeedbackCohort::PolicyEvaluation,
-                &report_only_window,
-                &report_only,
-                None,
-                Some(&impossible_rollup),
-            ),
-            Err(FeedbackCohortContractError::ReportOnlyExecutionAttempt)
         ));
     }
 }

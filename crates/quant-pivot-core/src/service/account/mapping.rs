@@ -1,20 +1,20 @@
-//! Map venue positions into registry-enriched [`PositionSnapshot`]s.
+//! Map venue positions into registry-enriched [`VenuePositionSnapshot`]s.
 
 use quant_pivot_api::data_api::VenuePosition;
 use quant_pivot_models::{
     enums::common::MarketCategory,
-    types::{MarketId, PositionSnapshot, Price, Shares, TokenId, Usd},
+    types::{MarketId, Price, Shares, TokenId, Usd, VenuePositionSnapshot},
 };
 
 use crate::ingest::market_registry::MarketRegistry;
 
-/// Map one venue position to a [`PositionSnapshot`], enriching market metadata
+/// Map one venue position to a [`VenuePositionSnapshot`], enriching market metadata
 /// from the registry.
 ///
 /// Positions in markets the registry does not track get
 /// [`MarketCategory::Other`] and no event — they still count toward equity.
 #[must_use]
-pub fn map_position(venue: &VenuePosition, registry: &MarketRegistry) -> PositionSnapshot {
+pub fn map_position(venue: &VenuePosition, registry: &MarketRegistry) -> VenuePositionSnapshot {
     let market_id = MarketId::new(&venue.condition_id);
     let (event_id, category) =
         registry
@@ -25,7 +25,7 @@ pub fn map_position(venue: &VenuePosition, registry: &MarketRegistry) -> Positio
                     info.categories.primary_category(),
                 )
             });
-    PositionSnapshot {
+    VenuePositionSnapshot {
         token_id: TokenId::new(&venue.asset),
         market_id,
         event_id,

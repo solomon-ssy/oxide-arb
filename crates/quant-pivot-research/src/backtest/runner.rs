@@ -28,7 +28,8 @@ use quant_pivot_models::{
     runtime_config::BuyModelRoute,
     types::{
         Bps, ContentHash, EventId, MarketId, PayoutRatio, PortfolioPlanId,
-        PortfolioRejectionReason, PositionSnapshot, Price, Shares, SignalCandidateId, TokenId, Usd,
+        PortfolioRejectionReason, Price, Shares, SignalCandidateId, TokenId, Usd,
+        VenuePositionSnapshot,
         backtest::{
             BacktestPortfolioFunnel, BacktestReportHashInput, BacktestTierExclusionCount,
             PnlCurvePoint, PnlSimulation,
@@ -605,7 +606,7 @@ impl ReplayLedger {
         let positions = self
             .positions
             .iter()
-            .map(|position| PositionSnapshot {
+            .map(|position| VenuePositionSnapshot {
                 token_id: position.token_id.clone(),
                 market_id: position.market_id.clone(),
                 event_id: Some(position.event_id.clone()),

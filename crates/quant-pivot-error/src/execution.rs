@@ -6,13 +6,9 @@ use thiserror::Error;
 /// execution flows.
 #[derive(Debug, Error)]
 pub enum ExecutionError {
-    /// Report-only mode forbids new entry order submission.
-    #[error("report-only mode forbids order submission")]
-    ReportOnlyMode,
-
-    /// Runtime mode or lifecycle preflight blocks the requested operation.
-    #[error("mode preflight denied: {reason}")]
-    ModePreflightDenied { reason: String },
+    /// Entry-authorization preflight blocks policy-automatic authorization.
+    #[error("entry authorization preflight denied: {reason}")]
+    AuthorizationPreflightDenied { reason: String },
 
     /// Operational kill-switch state blocks the requested execution operation.
     #[error("kill switch blocks execution: state={state}, operation={operation}")]
@@ -59,6 +55,10 @@ pub enum ExecutionError {
     #[error("reconciliation unresolvable: {reason}")]
     ReconciliationUnresolvable { reason: String },
 
+    /// A finalized accepted chain event cannot be projected into account truth.
+    #[error("account chain execution projection failed: {reason}")]
+    AccountChainProjection { reason: String },
+
     /// The canonical finalized resolution source could not be read or verified.
     #[error("outcome reconciliation source failed: {reason}")]
     OutcomeReconciliationSource { reason: String },
@@ -74,10 +74,6 @@ pub enum ExecutionError {
     /// A risk-increasing hold-to-resolution entry has no verified recovery path.
     #[error("automatic settlement recovery is unavailable: {reason}")]
     SettlementRecoveryUnavailable { reason: String },
-
-    /// Runtime-mode transition is not allowed.
-    #[error("mode transition forbidden: {reason}")]
-    ModeTransitionForbidden { reason: String },
 
     /// Operator resolve targeted a reconciliation row that is not blocking.
     #[error("reconciliation `{reconciliation_id}` is not operator-resolvable (result={result})")]

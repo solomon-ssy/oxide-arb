@@ -1,4 +1,4 @@
-//! Entry-execution worker wiring: the `auto_execution` dispatcher
+//! Entry-execution worker wiring: the authorized-intent dispatcher
 //! poll loop, the execution-breaker self-heal tick, and crash recovery.
 //!
 //! Correctness note: the per-intent `SELECT … FOR UPDATE` claim inside
@@ -7,7 +7,7 @@
 //! spawned task. Repository row locks remain the cross-process double-submit
 //! guard, even if the deployment later uses multiple replicas.
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
 use quant_pivot_error::QuantResult;
@@ -20,7 +20,7 @@ use quant_pivot_models::{
     },
     enums::{
         execution::{ReconciliationEvidenceKind, ReconciliationResult},
-        quant::{EntryConditionState, OrderIntentStatus, QuantRuntimeMode},
+        quant::{EntryConditionState, OrderIntentStatus},
         system::CapabilityId,
     },
     types::{ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId},
@@ -29,6 +29,7 @@ use quant_pivot_repository::traits::{
     EntryConditionRepository, ExecutionSubmissionRepository, OrderIntentRepository,
     ReconciliationRepository,
 };
+use tokio_util::sync::CancellationToken;
 
 use super::AppContext;
 use crate::{
@@ -46,11 +47,20 @@ const RECOVER_DANGLING_LIMIT: u64 = 1_024;
 const RECOVERY_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
 impl AppContext {
-    /// Register the `auto_execution` dispatch worker and the breaker self-heal
-    /// tick. Both run regardless of mode and gate internally (mode is hot-swappable).
+    /// Register the authorized-intent dispatch worker and breaker self-heal
+    /// tick. Both gate against the live authorization policy.
     pub fn register_execution_dispatcher(&self, runner: &mut AppRunner) {
         self.register_execution_breaker_tick(runner);
         self.register_auto_dispatch_worker(runner);
+    }
+
+    pub(crate) fn register_execution_recovery(&self, runner: &mut AppRunner) {
+        let submission = Arc::clone(&self.execution.submission);
+        let reconciliation: Arc<dyn ReconciliationRepository> =
+            Arc::clone(&self.infra.repos.reconciliation) as Arc<dyn ReconciliationRepository>;
+        runner.spawn(TaskId::ExecutionRecovery, move |token| async move {
+            recover_until_ready(&submission, &reconciliation, &token).await;
+        });
     }
 
     fn register_execution_breaker_tick(&self, runner: &mut AppRunner) {
@@ -98,31 +108,8 @@ impl AppContext {
             // retry with backoff until it succeeds; the submit loop is not
             // entered (so nothing is auto-submitted) until recovery is durably
             // done. The report plane runs independently and is unaffected.
-            loop {
-                match recover_dangling_orders(&submission, &reconciliation, RECOVER_DANGLING_LIMIT)
-                    .await
-                {
-                    Ok(recovered) => {
-                        if recovered > 0 {
-                            tracing::warn!(
-                                recovered,
-                                "boot recovery enqueued in-flight execution orders",
-                            );
-                        }
-                        break;
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            %error,
-                            "boot recovery failed; auto-execution paused, retrying",
-                        );
-                        tokio::select! {
-                            biased;
-                            () = token.cancelled() => return,
-                            () = tokio::time::sleep(RECOVERY_RETRY_BACKOFF) => {}
-                        }
-                    }
-                }
+            if !recover_until_ready(&submission, &reconciliation, &token).await {
+                return;
             }
 
             loop {
@@ -175,6 +162,37 @@ impl AppContext {
     }
 }
 
+async fn recover_until_ready(
+    submission: &Arc<dyn ExecutionSubmissionRepository>,
+    reconciliation: &Arc<dyn ReconciliationRepository>,
+    token: &CancellationToken,
+) -> bool {
+    loop {
+        match recover_dangling_orders(submission, reconciliation, RECOVER_DANGLING_LIMIT).await {
+            Ok(recovered) => {
+                if recovered > 0 {
+                    tracing::warn!(
+                        recovered,
+                        "boot recovery enqueued in-flight execution orders",
+                    );
+                }
+                return true;
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "boot recovery failed; entry submission remains disabled, retrying",
+                );
+                tokio::select! {
+                    biased;
+                    () = token.cancelled() => return false,
+                    () = tokio::time::sleep(RECOVERY_RETRY_BACKOFF) => {}
+                }
+            }
+        }
+    }
+}
+
 struct ArmedDispatchWorker {
     dispatcher: Arc<dyn ExecutionSubmitPort>,
     intents: Arc<dyn OrderIntentRepository>,
@@ -222,33 +240,16 @@ async fn recover_dangling_orders(
 }
 
 impl ArmedDispatchWorker {
-    /// One auto-dispatch pass: worker-level early-exit unless mode is
-    /// `auto_execution`, the kill-switch admits new entries, and no unresolvable
-    /// reconciliation is outstanding; then pull a bounded batch of
-    /// `ApprovedByPolicy` intents and submit each. Each submit is independently
+    /// One dispatch pass: resolve the submittable status from the live
+    /// authorization policy, require the kill-switch to admit new entries, and
+    /// require no unresolvable reconciliation; then pull a bounded batch of
+    /// authorized intents. Each submit is independently
     /// row-locked + admitted; a per-intent failure never aborts the batch. The
     /// `has_unresolvable` early-exit is a cheap batch-level backstop in addition to
     /// admission `#17`, which denies the same condition per intent.
     async fn armed_dispatch_pass(&self) -> QuantResult<()> {
-        let controls = self.runtime_controls.snapshot();
-        dispatch_for_runtime_mode(controls.quant_runtime_mode, |status| {
-            armed_dispatch_enabled_pass(self, status)
-        })
-        .await
+        armed_dispatch_enabled_pass(self, OrderIntentStatus::Authorized).await
     }
-}
-
-async fn dispatch_for_runtime_mode<F, Fut>(mode: QuantRuntimeMode, dispatch: F) -> QuantResult<()>
-where
-    F: FnOnce(OrderIntentStatus) -> Fut,
-    Fut: Future<Output = QuantResult<()>>,
-{
-    let status = match mode {
-        QuantRuntimeMode::ReportOnly => return Ok(()),
-        QuantRuntimeMode::SemiAuto => OrderIntentStatus::Approved,
-        QuantRuntimeMode::AutoExecution => OrderIntentStatus::ApprovedByPolicy,
-    };
-    dispatch(status).await
 }
 
 async fn armed_dispatch_enabled_pass(
@@ -332,34 +333,7 @@ fn boot_recovery_reconciliation(order: &ExecutionOrderInfo) -> NewReconciliation
         expected_cash_delta_usd: None,
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: None,
-        derived_fee_usd: None,
-        settled_fee_usd: None,
-        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use quant_pivot_models::enums::quant::QuantRuntimeMode;
-
-    use super::dispatch_for_runtime_mode;
-
-    #[tokio::test]
-    async fn report_never_submits() {
-        let calls = AtomicUsize::new(0);
-
-        dispatch_for_runtime_mode(QuantRuntimeMode::ReportOnly, |_| {
-            calls.fetch_add(1, Ordering::Relaxed);
-            async { Ok(()) }
-        })
-        .await
-        .expect("ReportOnly dispatch gate");
-
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 }

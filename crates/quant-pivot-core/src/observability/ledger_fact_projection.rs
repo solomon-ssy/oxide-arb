@@ -6,7 +6,7 @@ use quant_pivot_models::{
         ChPrice, ChShares, ChUsd, QuantCapitalAllocationEventRow, QuantExecutionEventRow,
         QuantPositionEventRow,
     },
-    domain::quant::{CapitalAllocationInfo, ExecutionOrderInfo, PositionInfo},
+    domain::quant::{CapitalAllocationInfo, ExecutionOrderInfo, StrategyPositionLot},
     enums::clickhouse::ChQuantLedgerEventKind,
     types::RecommendationId,
 };
@@ -61,14 +61,16 @@ pub fn project_capital_event(
 /// Project one position-lot ledger event.
 #[must_use]
 pub fn project_position_event(
-    position: &PositionInfo,
+    position: &StrategyPositionLot,
     event_kind: ChQuantLedgerEventKind,
     event_time: DateTime<Utc>,
 ) -> QuantPositionEventRow {
     QuantPositionEventRow {
         event_time: event_time.timestamp_millis(),
-        position_id: position.position_id,
+        strategy_position_lot_id: position.strategy_position_lot_id,
+        origin_kind: position.origin_kind.into(),
         order_intent_id: position.order_intent_id,
+        recovery_incident_id: position.recovery_incident_id,
         market_id: position.market_id.clone(),
         token_id: position.token_id.clone(),
         event_kind,
@@ -88,12 +90,14 @@ mod tests {
         enums::{
             clickhouse::{ChExecutionSide, ChPositionLedgerState, ChQuantLedgerEventKind},
             common::{MarketCategory, OrderType, Side},
-            execution::{ExecutionOrderPhase, OrderTypeKind, PositionLedgerState},
+            execution::{
+                ExecutionOrderPhase, OrderTypeKind, PositionLedgerState, StrategyPositionOriginKind,
+            },
             quant::{AccountSource, ExecutionOrderState, OutcomeSide},
         },
         types::{
-            ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price,
-            Shares, TokenId, Usd, VenueOrderAmount,
+            ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, Price, Shares,
+            StrategyPositionLotId, TokenId, Usd, VenueOrderAmount,
         },
     };
     use rust_decimal_macros::dec;
@@ -147,9 +151,11 @@ mod tests {
     #[test]
     fn position_projection_maps_side() {
         let now = Utc::now();
-        let position = PositionInfo {
-            position_id: PositionId::from_v7(),
-            order_intent_id: OrderIntentId::from_v7(),
+        let position = StrategyPositionLot {
+            strategy_position_lot_id: StrategyPositionLotId::from_v7(),
+            origin_kind: StrategyPositionOriginKind::SystemIntent,
+            order_intent_id: Some(OrderIntentId::from_v7()),
+            recovery_incident_id: None,
             execution_account_id: ExecutionAccountId::from_v7(),
             token_id: TokenId::from("t1"),
             market_id: MarketId::from("m1"),

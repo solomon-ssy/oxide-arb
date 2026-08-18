@@ -19,7 +19,7 @@ use crate::{
     types::{ContentHash, SettlementGovernedActionId, SettlementRedeemId, UserId},
 };
 
-/// Read-only deployment truth plus exact `SemiAuto` authorization mutations.
+/// Read-only deployment truth plus exact operator-authorization mutations.
 ///
 /// Operator-approval and canary preflights are signer-free. A canary token
 /// binds the exact case, payout limit, route, wallet kind, deployment digest,

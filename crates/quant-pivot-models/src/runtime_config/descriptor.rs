@@ -12,7 +12,7 @@ use self::RuntimeFieldUnit::{
 use crate::enums::runtime_config::{
     ConfigResourceKind,
     ConfigResourceKind::{
-        ExecutionAutomationPolicy, ExecutionRiskPolicy, ModelRouting, OperationsPolicy,
+        ExecutionAuthorizationPolicy, ExecutionRiskPolicy, ModelRouting, OperationsPolicy,
         RecommendationPolicy,
     },
     PolicyApplyBoundary,
@@ -363,15 +363,15 @@ const RUNTIME_GROUP_CONTRACTS: &[RuntimeGroupContract] = &[
         risk_level: RuntimeFieldRiskLevel::Critical,
     },
     RuntimeGroupContract {
-        resource: ConfigResourceKind::ExecutionAutomationPolicy,
-        pointer_prefix: "/semi_auto",
-        group: "semi_auto",
+        resource: ConfigResourceKind::ExecutionAuthorizationPolicy,
+        pointer_prefix: "/operator_approval_ttl_secs",
+        group: "operator_approval",
         risk_level: RuntimeFieldRiskLevel::Critical,
     },
     RuntimeGroupContract {
-        resource: ConfigResourceKind::ExecutionAutomationPolicy,
-        pointer_prefix: "/auto_execution",
-        group: "auto_execution",
+        resource: ConfigResourceKind::ExecutionAuthorizationPolicy,
+        pointer_prefix: "/policy_automatic_limits",
+        group: "policy_automatic",
         risk_level: RuntimeFieldRiskLevel::Critical,
     },
 ];
@@ -590,7 +590,7 @@ impl DescriptorCollector {
                 | "/entry_condition/lease_renew_interval_secs"
                 | "/outcome_reconciliation/sweep_secs",
             )
-            | (ExecutionAutomationPolicy, "/semi_auto/approval_ttl_secs") => Some(Seconds),
+            | (ExecutionAuthorizationPolicy, "/operator_approval_ttl_secs") => Some(Seconds),
             (
                 RecommendationPolicy,
                 "/data_quality/max_stale_book_ratio_bps" | "/selection/max_spread_bps",
@@ -630,7 +630,9 @@ impl DescriptorCollector {
                 | "/portfolio/tail_risk/max_drawdown_usd"
                 | "/portfolio/tail_risk/max_scenario_loss_usd",
             )
-            | (ExecutionAutomationPolicy, "/auto_execution/max_total_usd_per_report") => Some(Usd),
+            | (ExecutionAuthorizationPolicy, "/policy_automatic_limits/max_total_usd_per_report") => {
+                Some(Usd)
+            }
             (RecommendationPolicy, "/reports/entry_window_ratio")
             | (ModelRouting, "/model/calibration/ci_confidence" | "/model/shadow_diff_threshold") => {
                 Some(Ratio)
@@ -656,7 +658,9 @@ impl DescriptorCollector {
                 | "/entry_condition/pass_limit"
                 | "/outcome_reconciliation/candidate_batch_size",
             )
-            | (ExecutionAutomationPolicy, "/auto_execution/max_orders_per_report") => Some(Count),
+            | (ExecutionAuthorizationPolicy, "/policy_automatic_limits/max_orders_per_report") => {
+                Some(Count)
+            }
             (ModelRouting, pointer) if pointer.ends_with("/config_revision") => Some(Revision),
             (ModelRouting, pointer) if pointer.ends_with("/generation") => Some(Generation),
             (OperationsPolicy, "/outcome_reconciliation/source_block_span") => Some(Blocks),
@@ -766,7 +770,7 @@ impl DescriptorCollector {
             ConfigResourceKind::OperationsPolicy => {
                 "docs/plans/quant-pivot/06-config-deploy-and-ops.md#operations-policy"
             }
-            ConfigResourceKind::ExecutionAutomationPolicy => {
+            ConfigResourceKind::ExecutionAuthorizationPolicy => {
                 "docs/plans/quant-pivot/06-config-deploy-and-ops.md#execution-automation-policy"
             }
         }

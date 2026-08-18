@@ -973,7 +973,7 @@ fn validate_feedback_profiles(profiles: &[Value]) -> Result<()> {
     let expected = BTreeMap::from([
         (
             "crypto_price_15m",
-            (4, "semi_auto_candidate", Some("crypto")),
+            (4, "execution_candidate", Some("crypto")),
         ),
         (
             "crypto_price_15m_bootstrap_trade",
@@ -986,7 +986,7 @@ fn validate_feedback_profiles(profiles: &[Value]) -> Result<()> {
         ),
         (
             "weather_forecast_24h",
-            (5, "semi_auto_candidate", Some("weather")),
+            (5, "execution_candidate", Some("weather")),
         ),
         (
             "weather_forecast_24h_bootstrap_trade",

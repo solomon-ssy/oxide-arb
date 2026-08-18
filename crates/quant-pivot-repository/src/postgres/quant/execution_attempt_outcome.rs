@@ -12,13 +12,20 @@ use quant_pivot_error::storage::{
 };
 use quant_pivot_models::{
     domain::quant::{
-        ExecutionAttemptBarrier, ExecutionAttemptDeferredReason, ExecutionAttemptDerivation,
-        ExecutionAttemptOutcomeInfo, ExecutionAttemptReconciliationCandidate,
-        ExecutionAttemptReconciliationError, ExecutionAttemptReconciliationResult,
-        ExecutionAttemptSourceGraph, ExecutionAttemptTaskClaim, NewExecutionAttemptOutcome,
-        OrderIntentInfo, OutcomeTaskSettlement, PositionInfo, settlement::SettlementRedeemLotInfo,
+        AccountExecutionFeeFact, ExecutionAttemptBarrier, ExecutionAttemptDeferredReason,
+        ExecutionAttemptDerivation, ExecutionAttemptOutcomeInfo,
+        ExecutionAttemptReconciliationCandidate, ExecutionAttemptReconciliationError,
+        ExecutionAttemptReconciliationResult, ExecutionAttemptSourceGraph,
+        ExecutionAttemptTaskClaim, ExecutionOrderInfo, NewExecutionAttemptOutcome, OrderIntentInfo,
+        OutcomeTaskSettlement, StrategyPositionLot, settlement::SettlementRedeemLotInfo,
     },
     entities::{
+        quant_account_chain_execution::{
+            Column as AccountExecutionColumn, Entity as AccountExecutionEntity,
+        },
+        quant_account_execution_association::{
+            Column as AssociationColumn, Entity as AssociationEntity,
+        },
         quant_execution_attempt_outcome::{
             Column, Entity as QuantExecutionAttemptOutcomeEntity,
             Model as QuantExecutionAttemptOutcomeModel,
@@ -34,13 +41,15 @@ use quant_pivot_models::{
             Column as QuantOrderIntentColumn, Entity as QuantOrderIntentEntity,
             Relation as QuantOrderIntentRelation,
         },
-        quant_position::{Column as QuantPositionColumn, Entity as QuantPositionEntity},
         quant_recommendation::Entity as QuantRecommendationEntity,
         quant_reconciliation::{
             Column as QuantReconciliationColumn, Entity as QuantReconciliationEntity,
         },
         quant_settlement_redeem_lot::{
             Column as QuantSettlementRedeemLotColumn, Entity as QuantSettlementRedeemLotEntity,
+        },
+        quant_strategy_position_lot::{
+            Column as QuantPositionColumn, Entity as QuantPositionEntity,
         },
     },
     enums::{
@@ -431,7 +440,7 @@ impl PgExecutionAttemptOutcomeRepository {
             .ok_or_else(|| {
                 StorageError::not_found(QUANT_RECOMMENDATION, intent.recommendation_id)
             })?;
-        let orders = QuantExecutionOrderEntity::find()
+        let orders: Vec<ExecutionOrderInfo> = QuantExecutionOrderEntity::find()
             .filter(QuantExecutionOrderColumn::OrderIntentId.eq(*order_intent_id))
             .order_by_asc(QuantExecutionOrderColumn::CreatedAt)
             .order_by_asc(QuantExecutionOrderColumn::ExecutionOrderId)
@@ -442,6 +451,57 @@ impl PgExecutionAttemptOutcomeRepository {
             .into_iter()
             .map(Into::into)
             .collect();
+        let execution_order_ids = orders
+            .iter()
+            .map(|order| order.execution_order_id)
+            .collect::<Vec<_>>();
+        let associations = AssociationEntity::find()
+            .filter(AssociationColumn::ExecutionOrderId.is_in(execution_order_ids))
+            .lock_shared()
+            .all(transaction)
+            .await
+            .map_err(StorageError::from)?;
+        let order_by_execution = associations
+            .iter()
+            .filter_map(|association| {
+                association
+                    .execution_order_id
+                    .map(|order_id| (association.account_chain_execution_id, order_id))
+            })
+            .collect::<HashMap<_, _>>();
+        let account_execution_fees = if order_by_execution.is_empty() {
+            Vec::new()
+        } else {
+            AccountExecutionEntity::find()
+                .filter(
+                    AccountExecutionColumn::AccountChainExecutionId
+                        .is_in(order_by_execution.keys().copied()),
+                )
+                .lock_shared()
+                .all(transaction)
+                .await
+                .map_err(StorageError::from)?
+                .into_iter()
+                .map(|execution| {
+                    let execution_order_id = order_by_execution
+                        .get(&execution.account_chain_execution_id)
+                        .copied()
+                        .ok_or_else(|| {
+                            source_invariant("account execution association disappeared")
+                        })?;
+                    let exact_fee_usd = execution.exact_fee_usd.ok_or_else(|| {
+                        source_invariant("system-associated account execution has no exact fee")
+                    })?;
+                    Ok(AccountExecutionFeeFact {
+                        account_chain_execution_id: execution.account_chain_execution_id,
+                        execution_order_id,
+                        exact_fee_usd,
+                        source_event_hash: execution.source_event_hash,
+                        available_at: execution.available_at,
+                    })
+                })
+                .collect::<Result<Vec<_>, StorageError>>()?
+        };
         let reconciliations = QuantReconciliationEntity::find()
             .filter(QuantReconciliationColumn::OrderIntentId.eq(*order_intent_id))
             .order_by_asc(QuantReconciliationColumn::CreatedAt)
@@ -453,7 +513,7 @@ impl PgExecutionAttemptOutcomeRepository {
             .into_iter()
             .map(Into::into)
             .collect();
-        let position: Option<PositionInfo> = QuantPositionEntity::find()
+        let position: Option<StrategyPositionLot> = QuantPositionEntity::find()
             .filter(QuantPositionColumn::OrderIntentId.eq(*order_intent_id))
             .lock_shared()
             .one(transaction)
@@ -480,6 +540,7 @@ impl PgExecutionAttemptOutcomeRepository {
             intent: OrderIntentInfo::from(intent),
             orders,
             reconciliations,
+            account_execution_fees,
             position,
             settlement_lot: settlement_lots
                 .into_iter()

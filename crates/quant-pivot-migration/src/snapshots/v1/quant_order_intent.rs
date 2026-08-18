@@ -3,8 +3,7 @@
 use sea_orm::entity::prelude::*;
 
 use super::sea_orm_active_enums::{
-    QpApprovalStatus, QpExitReason, QpExitState, QpOrderIntentKind, QpOrderIntentStatus,
-    QpQuantRuntimeMode,
+    QpAuthorizationKind, QpExitReason, QpExitState, QpOrderIntentStatus,
 };
 
 #[sea_orm::model]
@@ -15,23 +14,14 @@ pub struct Model {
     pub order_intent_id: Uuid,
     pub recommendation_id: Uuid,
     pub execution_account_id: Uuid,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
-    pub runtime_mode: QpQuantRuntimeMode,
     pub decision_policy_snapshot_id: Uuid,
     pub model_version_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub research_profile_artifact_id: String,
-    pub intent_kind: QpOrderIntentKind,
     pub status: QpOrderIntentStatus,
-    pub approval_status: QpApprovalStatus,
-    pub approved_by: Option<Uuid>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub approval_reason: Option<String>,
-    pub approved_at: Option<DateTimeWithTimeZone>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub policy_id: Option<String>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub policy_hash: Option<String>,
+    pub authorization_kind: Option<QpAuthorizationKind>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub authorization_evidence: Option<Json>,
     #[sea_orm(column_type = "Text", nullable)]
     pub status_reason: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
@@ -84,7 +74,7 @@ pub struct Model {
     #[sea_orm(has_many)]
     pub quant_execution_orders: HasMany<super::quant_execution_order::Entity>,
     #[sea_orm(has_many)]
-    pub quant_execution_fills: HasMany<super::quant_execution_fill::Entity>,
+    pub quant_clob_trade_observations: HasMany<super::quant_clob_trade_observation::Entity>,
     #[sea_orm(
         belongs_to,
         from = "model_version_id",
@@ -94,7 +84,7 @@ pub struct Model {
     )]
     pub quant_model_version: BelongsTo<super::quant_model_version::Entity>,
     #[sea_orm(has_many)]
-    pub quant_positions: HasMany<super::quant_position::Entity>,
+    pub quant_strategy_position_lots: HasMany<super::quant_strategy_position_lot::Entity>,
     #[sea_orm(
         belongs_to,
         from = "recommendation_id",

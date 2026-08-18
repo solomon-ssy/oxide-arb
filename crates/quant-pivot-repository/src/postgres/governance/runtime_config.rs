@@ -212,8 +212,8 @@ fn verify_snapshot_model(model: &SnapshotModel) -> Result<(), StorageError> {
             model.operations_policy_revision_id,
         ),
         (
-            ConfigResourceKind::ExecutionAutomationPolicy,
-            model.execution_automation_policy_revision_id,
+            ConfigResourceKind::ExecutionAuthorizationPolicy,
+            model.execution_authorization_policy_revision_id,
         ),
     ];
     if actual_hash != model.snapshot_hash
@@ -289,7 +289,8 @@ impl PgPolicyRepository {
             model_routing_revision_id: model.model_routing_revision_id,
             report_schedule_revision_id: model.report_schedule_revision_id,
             operations_policy_revision_id: model.operations_policy_revision_id,
-            execution_automation_policy_revision_id: model.execution_automation_policy_revision_id,
+            execution_authorization_policy_revision_id: model
+                .execution_authorization_policy_revision_id,
             source: model.source,
             created_by_kind: model.created_by_kind,
             created_by_user_id: model.created_by_user_id,
@@ -344,8 +345,8 @@ impl PgPolicyRepository {
                     model_routing_revision_id: model.model_routing_revision_id,
                     report_schedule_revision_id: model.report_schedule_revision_id,
                     operations_policy_revision_id: model.operations_policy_revision_id,
-                    execution_automation_policy_revision_id: model
-                        .execution_automation_policy_revision_id,
+                    execution_authorization_policy_revision_id: model
+                        .execution_authorization_policy_revision_id,
                     source: model.source,
                     created_by_kind: model.created_by_kind,
                     created_by_user_id: model.created_by_user_id,
@@ -519,8 +520,8 @@ impl PgPolicyRepository {
                     || existing.report_schedule_revision_id != snapshot.report_schedule_revision_id
                     || existing.operations_policy_revision_id
                         != snapshot.operations_policy_revision_id
-                    || existing.execution_automation_policy_revision_id
-                        != snapshot.execution_automation_policy_revision_id
+                    || existing.execution_authorization_policy_revision_id
+                        != snapshot.execution_authorization_policy_revision_id
                 {
                     return Err(StorageError::state_conflict(
                         "decision_policy_snapshot",
@@ -700,8 +701,8 @@ fn verify_activation_subject(
         || revisions.model_routing.as_ref() != Some(&snapshot.model_routing_revision_id)
         || revisions.report_schedule.as_ref() != Some(&snapshot.report_schedule_revision_id)
         || revisions.operations_policy.as_ref() != Some(&snapshot.operations_policy_revision_id)
-        || revisions.execution_automation_policy.as_ref()
-            != Some(&snapshot.execution_automation_policy_revision_id)
+        || revisions.execution_authorization_policy.as_ref()
+            != Some(&snapshot.execution_authorization_policy_revision_id)
     {
         return Err(StorageError::invariant_violation(
             Some("decision_policy_snapshot"),

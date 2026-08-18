@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     enums::quant::OutcomeSide,
-    types::{MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd},
+    types::{MarketId, OrderIntentId, Price, Shares, StrategyPositionLotId, TokenId, Usd},
 };
 
 /// One realized exit fill on a lot timeline.
@@ -22,7 +22,7 @@ pub struct LotExitEventRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitTrainingLotRow {
     pub order_intent_id: OrderIntentId,
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub outcome_side: OutcomeSide,

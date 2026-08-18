@@ -19,27 +19,28 @@ use crate::{
         pagination::PageRequest,
         quant::{
             EntryConditionArtifactInfo, EntryConditionAuditInfo, EntryConditionInstanceInfo,
-            ExecutionOrderInfo, OrderIntentInfo, PositionInfo,
+            ExecutionOrderInfo, OrderIntentInfo, StrategyPositionLot,
         },
     },
     enums::{
         common::Side,
         execution::{
-            ExecutionOrderPhase, ExitReason, ExitState, OrderIntentKind, OrderTypeKind,
-            PositionLedgerState, VenueOrderStatus,
+            ExecutionOrderPhase, ExitReason, ExitState, OrderTypeKind, PositionLedgerState,
+            StrategyPositionOriginKind, VenueOrderStatus,
         },
         quant::{
-            ApprovalStatus, EntryConditionAuditAction, EntryConditionState, ExecutionOrderState,
-            OrderIntentStatus, QuantRuntimeMode,
+            AuthorizationKind, EntryConditionAuditAction, EntryConditionState, ExecutionOrderState,
+            OrderIntentStatus,
         },
     },
     types::{
-        ConditionLeafEvidence, ConditionNodeEvaluation, ConditionTruth, ConditionUnavailableReason,
-        ContentHash, DecisionPolicySnapshotId, EntryConditionArtifactId, EntryConditionArtifactV1,
+        AccountRecoveryIncidentId, AuthorizationEvidence, ConditionLeafEvidence,
+        ConditionNodeEvaluation, ConditionTruth, ConditionUnavailableReason, ContentHash,
+        DecisionPolicySnapshotId, EntryConditionArtifactId, EntryConditionArtifactV1,
         EntryConditionAuditId, EntryConditionInstanceId, EntryConditionNode, EntryOrderSpec,
         ExecutionOrderId, ExitPolicySpec, ExitReinferenceObservation, MarketId, ModelVersionId,
-        NextScaleOutProjection, OrderAmount, OrderId, OrderIntentId, PositionId, Price,
-        RecommendationId, ScaleOutState, Shares, TokenId, Usd, UserId,
+        NextScaleOutProjection, OrderAmount, OrderId, OrderIntentId, Price, RecommendationId,
+        ScaleOutState, Shares, StrategyPositionLotId, TokenId, Usd,
     },
 };
 
@@ -48,17 +49,11 @@ use crate::{
 pub struct OrderIntentView {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
-    pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
-    pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
-    pub approval_status: ApprovalStatus,
-    pub approved_by: Option<UserId>,
-    pub approval_reason: Option<String>,
-    pub approved_at: Option<DateTime<Utc>>,
-    pub policy_id: Option<String>,
-    pub policy_hash: Option<ContentHash>,
+    pub authorization_kind: Option<AuthorizationKind>,
+    pub authorization_evidence: Option<AuthorizationEvidence>,
     pub status_reason: Option<String>,
     pub admission_trace_ref: Option<String>,
     pub condition_instance_id: EntryConditionInstanceId,
@@ -87,17 +82,11 @@ impl From<OrderIntentInfo> for OrderIntentView {
         Self {
             order_intent_id: info.order_intent_id,
             recommendation_id: info.recommendation_id,
-            runtime_mode: info.runtime_mode,
             decision_policy_snapshot_id: info.decision_policy_snapshot_id,
             model_version_id: info.model_version_id,
-            intent_kind: info.intent_kind,
             status: info.status,
-            approval_status: info.approval_status,
-            approved_by: info.approved_by,
-            approval_reason: info.approval_reason,
-            approved_at: info.approved_at,
-            policy_id: info.policy_id,
-            policy_hash: info.policy_hash,
+            authorization_kind: info.authorization_kind,
+            authorization_evidence: info.authorization_evidence,
             status_reason: info.status_reason,
             admission_trace_ref: info.admission_trace_ref,
             condition_instance_id: info.condition_instance_id,
@@ -370,13 +359,13 @@ impl From<ExecutionOrderInfo> for ExecutionOrderView {
 
 /// Read-port aggregate: one position lot with its originating recommendation.
 ///
-/// The lot row (`PositionInfo`) carries only `order_intent_id`; the read path
+/// The lot row (`StrategyPositionLot`) carries only `order_intent_id`; the read path
 /// joins in `recommendation_id` so the operator can open the originating
 /// recommendation without a second hop through the intent.
 #[derive(Debug, Clone)]
 pub struct PositionSummary {
-    pub position: PositionInfo,
-    pub recommendation_id: RecommendationId,
+    pub position: StrategyPositionLot,
+    pub recommendation_id: Option<RecommendationId>,
 }
 
 /// Outbound projection of one per-intent position lot.
@@ -384,10 +373,12 @@ pub struct PositionSummary {
 pub struct PositionView {
     /// Distinguishes system lot ledger from venue account positions (`/quant/account/*`).
     pub position_plane: &'static str,
-    pub position_id: PositionId,
-    pub order_intent_id: OrderIntentId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
+    pub origin_kind: StrategyPositionOriginKind,
+    pub order_intent_id: Option<OrderIntentId>,
+    pub recovery_incident_id: Option<AccountRecoveryIncidentId>,
     /// Originating recommendation.
-    pub recommendation_id: RecommendationId,
+    pub recommendation_id: Option<RecommendationId>,
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub state: PositionLedgerState,
@@ -408,8 +399,10 @@ impl From<PositionSummary> for PositionView {
         } = summary;
         Self {
             position_plane: "system_lot",
-            position_id: info.position_id,
+            strategy_position_lot_id: info.strategy_position_lot_id,
+            origin_kind: info.origin_kind,
             order_intent_id: info.order_intent_id,
+            recovery_incident_id: info.recovery_incident_id,
             recommendation_id,
             token_id: info.token_id,
             market_id: info.market_id,
@@ -429,7 +422,8 @@ impl From<PositionSummary> for PositionView {
 #[derive(Debug, Clone, Serialize)]
 pub struct PositionDetailView {
     pub position: PositionView,
-    pub exit_monitor_observation: ExitMonitorObservationView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_monitor_observation: Option<ExitMonitorObservationView>,
 }
 
 /// Paginated filter for listing order intents.
@@ -438,16 +432,14 @@ pub struct PositionDetailView {
 /// [`PageRequest`], flattened so the query string stays flat.
 ///
 /// `statuses` is a comma-separated multi-status filter driving the queue
-/// console's triage presets (e.g. `approved,approved_by_policy`). When present
-/// it supersedes the single `status`. `approval_status` narrows the ledger by
-/// human/policy approval provenance.
+/// console's triage presets. When present it supersedes the single `status`.
+/// `authorization_kind` narrows the ledger by authorization provenance.
 #[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct OrderIntentListQuery {
     pub status: Option<OrderIntentStatus>,
     #[serde(default, deserialize_with = "deserialize_statuses_csv")]
     pub statuses: Option<Vec<OrderIntentStatus>>,
-    pub approval_status: Option<ApprovalStatus>,
-    pub runtime_mode: Option<QuantRuntimeMode>,
+    pub authorization_kind: Option<AuthorizationKind>,
     pub recommendation_id: Option<RecommendationId>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
@@ -563,10 +555,10 @@ mod tests {
     #[test]
     fn statuses_csv_decodes_label() {
         assert_eq!(
-            parse_statuses("approved,approved_by_policy"),
+            parse_statuses("pending_authorization,authorized"),
             Some(vec![
-                OrderIntentStatus::Approved,
-                OrderIntentStatus::ApprovedByPolicy,
+                OrderIntentStatus::PendingAuthorization,
+                OrderIntentStatus::Authorized,
             ]),
         );
     }

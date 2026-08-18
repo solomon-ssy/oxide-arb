@@ -38,7 +38,7 @@ use quant_pivot_models::{
         },
     },
     enums::{
-        quant::{ExecutionWalletKind, QuantRuntimeMode},
+        quant::{EntryAuthorizationPolicy, ExecutionWalletKind},
         settlement::{
             SettlementAuthorizationState, SettlementEffectivePolicy, SettlementGovernedActionKind,
             SettlementGovernedActionState, SettlementReadinessStatus, SettlementRoute,
@@ -242,7 +242,7 @@ impl CoreSettlementControlPort {
     }
 
     fn preflight_expiry(&self, checked_at: DateTime<Utc>) -> QuantResult<DateTime<Utc>> {
-        let ttl = i64::try_from(self.config.semi_auto_authorization_ttl_secs).map_err(|error| {
+        let ttl = i64::try_from(self.config.operator_authorization_ttl_secs).map_err(|error| {
             QuantError::config(format!(
                 "settlement action preflight TTL is not representable: {error}"
             ))
@@ -392,10 +392,10 @@ impl SettlementRecoveryAdmissionPort for CoreSettlementControlPort {
                 SettlementRecoveryAdmissionBlockReason::ExecutionAccountMismatch,
             ));
         }
-        if !automatic_recovery_policy_matches(request.runtime_mode, request.write_policy) {
+        if !automatic_recovery_policy_matches(request.authorization_policy, request.write_policy) {
             return Ok(SettlementRecoveryAdmission::Blocked(
                 SettlementRecoveryAdmissionBlockReason::RuntimePolicyMismatch {
-                    runtime_mode: request.runtime_mode,
+                    authorization_policy: request.authorization_policy,
                     write_policy: request.write_policy,
                 },
             ));
@@ -426,18 +426,21 @@ impl SettlementRecoveryAdmissionPort for CoreSettlementControlPort {
             ));
         }
 
-        let confirmed_canary = if request.runtime_mode == QuantRuntimeMode::AutoExecution {
-            self.governance
-                .has_confirmed_canary(
-                    &request.execution_account_id,
-                    request.route,
-                    deployment_digest,
-                )
-                .await?
-        } else {
-            false
-        };
-        if request.runtime_mode == QuantRuntimeMode::AutoExecution && !confirmed_canary {
+        let confirmed_canary =
+            if request.authorization_policy == EntryAuthorizationPolicy::PolicyAutomatic {
+                self.governance
+                    .has_confirmed_canary(
+                        &request.execution_account_id,
+                        request.route,
+                        deployment_digest,
+                    )
+                    .await?
+            } else {
+                false
+            };
+        if request.authorization_policy == EntryAuthorizationPolicy::PolicyAutomatic
+            && !confirmed_canary
+        {
             return Ok(SettlementRecoveryAdmission::Blocked(
                 SettlementRecoveryAdmissionBlockReason::ConfirmedCanaryMissing,
             ));
@@ -470,27 +473,40 @@ const fn approval_state_reason(
     }
 }
 
-const fn runtime_policy_mode_matches(
+const fn authorization_policy_matches(
     policy: SettlementWritePolicy,
-    mode: QuantRuntimeMode,
+    authorization_policy: EntryAuthorizationPolicy,
 ) -> bool {
     match policy {
         SettlementWritePolicy::Disabled => false,
-        SettlementWritePolicy::GovernedCanary | SettlementWritePolicy::SemiAuto => {
-            matches!(mode, QuantRuntimeMode::SemiAuto)
+        SettlementWritePolicy::GovernedCanary | SettlementWritePolicy::OperatorApproval => {
+            matches!(
+                authorization_policy,
+                EntryAuthorizationPolicy::OperatorApprovalRequired
+            )
         }
-        SettlementWritePolicy::Auto => matches!(mode, QuantRuntimeMode::AutoExecution),
+        SettlementWritePolicy::PolicyAutomatic => {
+            matches!(
+                authorization_policy,
+                EntryAuthorizationPolicy::PolicyAutomatic
+            )
+        }
     }
 }
 
 const fn automatic_recovery_policy_matches(
-    mode: QuantRuntimeMode,
+    authorization_policy: EntryAuthorizationPolicy,
     policy: SettlementWritePolicy,
 ) -> bool {
     matches!(
-        (mode, policy),
-        (QuantRuntimeMode::SemiAuto, SettlementWritePolicy::SemiAuto)
-            | (QuantRuntimeMode::AutoExecution, SettlementWritePolicy::Auto)
+        (authorization_policy, policy),
+        (
+            EntryAuthorizationPolicy::OperatorApprovalRequired,
+            SettlementWritePolicy::OperatorApproval
+        ) | (
+            EntryAuthorizationPolicy::PolicyAutomatic,
+            SettlementWritePolicy::PolicyAutomatic
+        )
     )
 }
 
@@ -703,14 +719,14 @@ impl SettlementControlPort for CoreSettlementControlPort {
         let mut preflight = preflight;
         let controls = self.runtime_controls.snapshot();
         if preflight.readiness.settlement_write_policy != controls.settlement_write_policy
-            || !runtime_policy_mode_matches(
+            || !authorization_policy_matches(
                 controls.settlement_write_policy,
-                controls.quant_runtime_mode,
+                controls.entry_authorization_policy,
             )
         {
             push_action_reason(
                 &mut preflight,
-                SettlementGovernedActionBlockReason::RuntimeModeWritePolicyMismatch,
+                SettlementGovernedActionBlockReason::AuthorizationPolicyMismatch,
             );
         }
         if !preflight.allowed {
@@ -746,10 +762,11 @@ impl SettlementControlPort for CoreSettlementControlPort {
             readiness,
         );
         let controls = self.runtime_controls.snapshot();
-        if controls.quant_runtime_mode != QuantRuntimeMode::SemiAuto {
+        if controls.entry_authorization_policy != EntryAuthorizationPolicy::OperatorApprovalRequired
+        {
             push_action_reason(
                 &mut preflight,
-                SettlementGovernedActionBlockReason::RuntimeModeNotSemiAuto,
+                SettlementGovernedActionBlockReason::OperatorAuthorizationRequired,
             );
         }
         if controls.settlement_write_policy != SettlementWritePolicy::GovernedCanary
@@ -757,7 +774,7 @@ impl SettlementControlPort for CoreSettlementControlPort {
         {
             push_action_reason(
                 &mut preflight,
-                SettlementGovernedActionBlockReason::RuntimeModeWritePolicyMismatch,
+                SettlementGovernedActionBlockReason::AuthorizationPolicyMismatch,
             );
         }
         let case = self
@@ -1002,7 +1019,7 @@ mod tests {
             SettlementGovernedActionBlockReason, SettlementGovernedActionScope,
         },
         enums::{
-            quant::{ExecutionWalletKind, QuantRuntimeMode},
+            quant::{EntryAuthorizationPolicy, ExecutionWalletKind},
             settlement::{SettlementRoute, SettlementWritePolicy},
         },
         types::{
@@ -1099,23 +1116,23 @@ mod tests {
     #[test]
     fn automatic_recovery_requires_pair() {
         assert!(automatic_recovery_policy_matches(
-            QuantRuntimeMode::SemiAuto,
-            SettlementWritePolicy::SemiAuto,
+            EntryAuthorizationPolicy::OperatorApprovalRequired,
+            SettlementWritePolicy::OperatorApproval,
         ));
         assert!(automatic_recovery_policy_matches(
-            QuantRuntimeMode::AutoExecution,
-            SettlementWritePolicy::Auto,
+            EntryAuthorizationPolicy::PolicyAutomatic,
+            SettlementWritePolicy::PolicyAutomatic,
         ));
         assert!(!automatic_recovery_policy_matches(
-            QuantRuntimeMode::SemiAuto,
+            EntryAuthorizationPolicy::OperatorApprovalRequired,
             SettlementWritePolicy::GovernedCanary,
         ));
         assert!(!automatic_recovery_policy_matches(
-            QuantRuntimeMode::AutoExecution,
-            SettlementWritePolicy::SemiAuto,
+            EntryAuthorizationPolicy::PolicyAutomatic,
+            SettlementWritePolicy::OperatorApproval,
         ));
         assert!(!automatic_recovery_policy_matches(
-            QuantRuntimeMode::SemiAuto,
+            EntryAuthorizationPolicy::OperatorApprovalRequired,
             SettlementWritePolicy::Disabled,
         ));
     }

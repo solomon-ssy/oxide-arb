@@ -221,6 +221,14 @@ pub enum ChPositionLedgerState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
+pub enum ChStrategyPositionOriginKind {
+    SystemIntent = 1,
+    AccountRecoveryIncident = 2,
+    OpeningInventory = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
 pub enum ChFactorValueState {
     Scored = 1,
     MissingInput = 2,

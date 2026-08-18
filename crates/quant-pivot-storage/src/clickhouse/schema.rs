@@ -31,7 +31,7 @@ pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 31] = [
     "quant_feature_parity_event",
     "quant_model_input_event",
     "quant_market_execution",
-    "quant_position_event",
+    "quant_strategy_position_lot_event",
     "quant_report_recommendation_fact",
     "quant_report_market_funnel",
     "quant_serving_evidence_completion",

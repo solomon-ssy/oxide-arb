@@ -106,10 +106,10 @@ pub use research_catalog::ResearchCatalogPort;
 pub use research_job::{JobSubmitContext, ResearchJobPort};
 pub use research_readiness::{ResearchReadinessPort, ResearchReadinessSnapshot};
 pub use runtime_control::{
-    CatalogState, CatalogStatusPort, CommittedPolicyApplyPort, DataQualityPort, KillSwitchPort,
-    MarketDataPort, MetricsScrapePort, PolicySnapshotPort, PreparedPolicySnapshot,
-    QuantModeTransitionReport, ReadinessPort, RuntimeControlPort, SetKillSwitchCommand,
-    SystemCapabilityPort,
+    CatalogState, CatalogStatusPort, CommittedPolicyApplyPort, DataQualityPort,
+    EntryAuthorizationTransitionReport, KillSwitchPort, MarketDataPort, MetricsScrapePort,
+    PolicySnapshotPort, PreparedPolicySnapshot, ReadinessPort, RuntimeControlPort,
+    SetKillSwitchCommand, SystemCapabilityPort,
 };
 pub use structural_monitor::StructuralMonitorPort;
 pub use trade_policy::TradePolicyPort;

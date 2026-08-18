@@ -17,6 +17,7 @@ pub use governance::{
 };
 pub use market::{CatalogLedgerRepository, ClobMarketInfoRepository, MarketRepository};
 pub use quant::{
+    AccountChainExecutionRepository, AccountPauseRepository, AccountRecoveryRepository,
     AccountSnapshotRepository, AttributionArtifactRepository, AttributionArtifactWriteOutcome,
     BacktestPathSetRepository, BacktestReportRepository, BasisAlertRepository,
     CalibrationArtifactRepository, CapitalAllocationRepository, CpcvPathSetCommit,
@@ -37,7 +38,7 @@ pub use quant::{
     ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRouteBootstrapCommit,
     ModelRouteBootstrapOutcome, ModelRouteBootstrapRepository, ModelRoutePromotionCommit,
     ModelRoutePromotionOutcome, ModelRoutePromotionRepository, ModelRouteShadowBindingRepository,
-    ModelRunRepository, OrderIntentRepository, PortfolioPlanRepository, PositionRepository,
+    ModelRunRepository, OrderIntentRepository, PortfolioPlanRepository,
     PromotionPermitIssueOutcome, PromotionPermitPage, PromotionPermitRepository,
     PromotionPermitRevokeOutcome, QuantFactReadRepository, QuantFactRepository, ReclaimOutcome,
     RecommendationExecutionRollupRepository, RecommendationReportRepository,
@@ -48,8 +49,8 @@ pub use quant::{
     ShadowBindingCancelCommit, ShadowBindingCancelOutcome, ShadowBindingCommit,
     ShadowBindingCommitOutcome, ShadowBindingRejectCommit, ShadowBindingRejectOutcome,
     ShadowComparisonRepository, ShadowComparisonWriteOutcome, ShadowLatencyObservation,
-    SourceSliceRepository, TradePolicyRepository, TrainingDatasetRepository,
-    VenueIncentiveRepository,
+    SourceSliceRepository, StrategyPositionLotRepository, TradePolicyRepository,
+    TrainingDatasetRepository, VenueIncentiveRepository,
 };
 pub use rbac::{
     MenuRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository, UserRepository,

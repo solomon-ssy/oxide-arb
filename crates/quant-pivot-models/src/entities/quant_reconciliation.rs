@@ -28,10 +28,6 @@ pub struct Model {
     pub expected_cash_delta_usd: Option<Usd>,
     pub venue_cash_delta_usd: Option<Usd>,
     pub realized_pnl_usd: Option<Usd>,
-    pub expected_fee_usd: Option<Usd>,
-    pub derived_fee_usd: Option<Usd>,
-    pub settled_fee_usd: Option<Usd>,
-    pub fee_delta_usd: Option<Usd>,
     #[sea_orm(column_type = "Text", nullable)]
     pub resolved_by: Option<String>,
     pub resolved_at: Option<DateTime<Utc>>,

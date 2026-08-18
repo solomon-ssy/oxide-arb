@@ -28,20 +28,19 @@ pub use schedule_preview::{
 use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use sea_orm::FromJsonQueryResult;
 pub use sections::{
-    AutoExecutionConfig, BuyRouteBinding, CapitalTimeBucketLimit, CryptoCrossCheckConfig,
-    CryptoDomainConfig, DataQualityConfig, DomainConfig, EntryConditionWorkerConfig,
-    FactorCrossSectionConfig, FactorHeadConfig, FactorNormalizationConfig,
-    FactorOrthogonalizeConfig, FactorsConfig, FavoriteLongshotConfig, FeaturesConfig,
-    MAX_REPORT_TOP_N, ModelBinding, ModelBindingSource, ModelCalibrationConfig, ModelConfig,
-    MomentumFeaturesConfig, NegRiskStructuralConfig, ParticipantConcentrationConfig,
-    PerFactorNormalization, PolicyValidationConfig, PortfolioAdmission, PortfolioBudget,
-    PortfolioConfig, PortfolioExposureLimits, PortfolioScenarioModelArtifactBinding,
-    PortfolioTailRisk, QualityGateConfig, ReportScheduleConfig, ReportsConfig, ResearchConfig,
-    ResearchTrainingConfig, ResearchValidationConfig, ResearchValidationCpcvConfig,
-    ResearchValidationGatesConfig, ResearchValidationPboConfig, ResearchValidationPurgeConfig,
-    ResearchValidationTrialsConfig, ReversalAfterShockConfig, SelectionConfig,
-    SellQualityGateConfig, SellScorerConfig, SemiAutoConfig, StructuralFactorsConfig,
-    StructuralFeaturesConfig, TrainingConfig, WeatherDomainConfig,
+    BuyRouteBinding, CapitalTimeBucketLimit, CryptoCrossCheckConfig, CryptoDomainConfig,
+    DataQualityConfig, DomainConfig, EntryConditionWorkerConfig, FactorCrossSectionConfig,
+    FactorHeadConfig, FactorNormalizationConfig, FactorOrthogonalizeConfig, FactorsConfig,
+    FavoriteLongshotConfig, FeaturesConfig, MAX_REPORT_TOP_N, ModelBinding, ModelBindingSource,
+    ModelCalibrationConfig, ModelConfig, MomentumFeaturesConfig, NegRiskStructuralConfig,
+    ParticipantConcentrationConfig, PerFactorNormalization, PolicyAutomaticLimits,
+    PolicyValidationConfig, PortfolioAdmission, PortfolioBudget, PortfolioConfig,
+    PortfolioExposureLimits, PortfolioScenarioModelArtifactBinding, PortfolioTailRisk,
+    QualityGateConfig, ReportScheduleConfig, ReportsConfig, ResearchConfig, ResearchTrainingConfig,
+    ResearchValidationConfig, ResearchValidationCpcvConfig, ResearchValidationGatesConfig,
+    ResearchValidationPboConfig, ResearchValidationPurgeConfig, ResearchValidationTrialsConfig,
+    ReversalAfterShockConfig, SelectionConfig, SellQualityGateConfig, SellScorerConfig,
+    StructuralFactorsConfig, StructuralFeaturesConfig, TrainingConfig, WeatherDomainConfig,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Error as SerdeJsonError, Value};
@@ -330,22 +329,22 @@ impl Default for OperationsPolicy {
     }
 }
 
-/// Explicit authorization for semi-automatic and automatic execution.
+/// Explicit authorization policy for recommendation entry intents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionAutomationPolicy {
+pub struct ExecutionAuthorizationPolicy {
     #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
     pub schema_version: SchemaVersion,
-    pub semi_auto: SemiAutoConfig,
-    pub auto_execution: AutoExecutionConfig,
+    pub operator_approval_ttl_secs: u64,
+    pub policy_automatic_limits: PolicyAutomaticLimits,
 }
 
-impl Default for ExecutionAutomationPolicy {
+impl Default for ExecutionAuthorizationPolicy {
     fn default() -> Self {
         Self {
             schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
-            semi_auto: SemiAutoConfig::default(),
-            auto_execution: AutoExecutionConfig::default(),
+            operator_approval_ttl_secs: 900,
+            policy_automatic_limits: PolicyAutomaticLimits::default(),
         }
     }
 }
@@ -364,7 +363,7 @@ pub enum PolicyDocument {
     ModelRouting(ModelRouting),
     ReportSchedule(ReportSchedule),
     OperationsPolicy(OperationsPolicy),
-    ExecutionAutomationPolicy(ExecutionAutomationPolicy),
+    ExecutionAuthorizationPolicy(ExecutionAuthorizationPolicy),
 }
 
 impl PolicyDocument {
@@ -376,7 +375,9 @@ impl PolicyDocument {
             Self::ModelRouting(_) => ConfigResourceKind::ModelRouting,
             Self::ReportSchedule(_) => ConfigResourceKind::ReportSchedule,
             Self::OperationsPolicy(_) => ConfigResourceKind::OperationsPolicy,
-            Self::ExecutionAutomationPolicy(_) => ConfigResourceKind::ExecutionAutomationPolicy,
+            Self::ExecutionAuthorizationPolicy(_) => {
+                ConfigResourceKind::ExecutionAuthorizationPolicy
+            }
         }
     }
 
@@ -388,7 +389,7 @@ impl PolicyDocument {
             Self::ModelRouting(policy) => policy.schema_version,
             Self::ReportSchedule(policy) => policy.schema_version,
             Self::OperationsPolicy(policy) => policy.schema_version,
-            Self::ExecutionAutomationPolicy(policy) => policy.schema_version,
+            Self::ExecutionAuthorizationPolicy(policy) => policy.schema_version,
         }
     }
 }
@@ -464,7 +465,9 @@ impl ConfigResourceKind {
             Self::ModelRouting => PolicyApplyBoundary::ModelEvaluationClaim,
             Self::ReportSchedule => PolicyApplyBoundary::FutureReportRunReconcile,
             Self::OperationsPolicy => PolicyApplyBoundary::OperationalAdmission,
-            Self::ExecutionAutomationPolicy => PolicyApplyBoundary::ExecutionAutomationAdmission,
+            Self::ExecutionAuthorizationPolicy => {
+                PolicyApplyBoundary::ExecutionAuthorizationAdmission
+            }
         }
     }
 
@@ -490,8 +493,8 @@ impl ConfigResourceKind {
                 PolicyConsumer::ExecutionAdmission,
                 PolicyConsumer::AlertDispatcher,
             ],
-            Self::ExecutionAutomationPolicy => &[
-                PolicyConsumer::RuntimeModeGate,
+            Self::ExecutionAuthorizationPolicy => &[
+                PolicyConsumer::OrderIntentService,
                 PolicyConsumer::ExecutionAdmission,
             ],
         }
@@ -746,7 +749,7 @@ pub struct PolicyRevisionBundle {
     #[schemars(with = "Option<String>")]
     pub operations_policy: Option<PolicyRevisionId>,
     #[schemars(with = "Option<String>")]
-    pub execution_automation_policy: Option<PolicyRevisionId>,
+    pub execution_authorization_policy: Option<PolicyRevisionId>,
 }
 
 /// Immutable aggregate read by decision pipelines. Each hot resource is still
@@ -762,7 +765,7 @@ pub struct DecisionPolicySnapshot {
     pub model_routing: ModelRouting,
     pub report_schedule: ReportSchedule,
     pub operations_policy: OperationsPolicy,
-    pub execution_automation_policy: ExecutionAutomationPolicy,
+    pub execution_authorization_policy: ExecutionAuthorizationPolicy,
     pub profile_artifacts: ImmutableProfileArtifacts,
 }
 
@@ -777,7 +780,7 @@ pub struct DecisionPolicySnapshotDocument {
     pub model_routing: ModelRouting,
     pub report_schedule: ReportSchedule,
     pub operations_policy: OperationsPolicy,
-    pub execution_automation_policy: ExecutionAutomationPolicy,
+    pub execution_authorization_policy: ExecutionAuthorizationPolicy,
     pub profile_artifact_refs: ImmutableProfileArtifactReferences,
 }
 
@@ -797,8 +800,8 @@ impl DecisionPolicySnapshotDocument {
             ConfigResourceKind::ModelRouting => self.revisions.model_routing.as_ref(),
             ConfigResourceKind::ReportSchedule => self.revisions.report_schedule.as_ref(),
             ConfigResourceKind::OperationsPolicy => self.revisions.operations_policy.as_ref(),
-            ConfigResourceKind::ExecutionAutomationPolicy => {
-                self.revisions.execution_automation_policy.as_ref()
+            ConfigResourceKind::ExecutionAuthorizationPolicy => {
+                self.revisions.execution_authorization_policy.as_ref()
             }
         }
     }
@@ -821,8 +824,10 @@ impl DecisionPolicySnapshotDocument {
             ConfigResourceKind::OperationsPolicy => {
                 PolicyDocument::OperationsPolicy(self.operations_policy.clone())
             }
-            ConfigResourceKind::ExecutionAutomationPolicy => {
-                PolicyDocument::ExecutionAutomationPolicy(self.execution_automation_policy.clone())
+            ConfigResourceKind::ExecutionAuthorizationPolicy => {
+                PolicyDocument::ExecutionAuthorizationPolicy(
+                    self.execution_authorization_policy.clone(),
+                )
             }
         }
     }
@@ -911,7 +916,7 @@ impl DecisionPolicySnapshotDocument {
             model_routing: self.model_routing,
             report_schedule: self.report_schedule,
             operations_policy: self.operations_policy,
-            execution_automation_policy: self.execution_automation_policy,
+            execution_authorization_policy: self.execution_authorization_policy,
             profile_artifacts: ImmutableProfileArtifacts {
                 features,
                 scoring,
@@ -1069,7 +1074,7 @@ impl DecisionPolicySnapshot {
             model_routing: self.model_routing.clone(),
             report_schedule: self.report_schedule.clone(),
             operations_policy: self.operations_policy.clone(),
-            execution_automation_policy: self.execution_automation_policy.clone(),
+            execution_authorization_policy: self.execution_authorization_policy.clone(),
             profile_artifact_refs: self.profile_artifacts.references()?,
         })
     }
@@ -1087,7 +1092,7 @@ impl DecisionPolicySnapshot {
             self.model_routing.schema_version,
             self.report_schedule.schema_version,
             self.operations_policy.schema_version,
-            self.execution_automation_policy.schema_version,
+            self.execution_authorization_policy.schema_version,
         ]
         .into_iter()
         .all(|version| version == POLICY_RESOURCE_SCHEMA_VERSION)
@@ -1109,8 +1114,8 @@ impl DecisionPolicySnapshot {
             ConfigResourceKind::ModelRouting => self.revisions.model_routing.as_ref(),
             ConfigResourceKind::ReportSchedule => self.revisions.report_schedule.as_ref(),
             ConfigResourceKind::OperationsPolicy => self.revisions.operations_policy.as_ref(),
-            ConfigResourceKind::ExecutionAutomationPolicy => {
-                self.revisions.execution_automation_policy.as_ref()
+            ConfigResourceKind::ExecutionAuthorizationPolicy => {
+                self.revisions.execution_authorization_policy.as_ref()
             }
         }
     }
@@ -1126,8 +1131,8 @@ impl DecisionPolicySnapshot {
             ConfigResourceKind::ModelRouting => &mut self.revisions.model_routing,
             ConfigResourceKind::ReportSchedule => &mut self.revisions.report_schedule,
             ConfigResourceKind::OperationsPolicy => &mut self.revisions.operations_policy,
-            ConfigResourceKind::ExecutionAutomationPolicy => {
-                &mut self.revisions.execution_automation_policy
+            ConfigResourceKind::ExecutionAuthorizationPolicy => {
+                &mut self.revisions.execution_authorization_policy
             }
         };
         *target = Some(revision_id);
@@ -1151,8 +1156,10 @@ impl DecisionPolicySnapshot {
             ConfigResourceKind::OperationsPolicy => {
                 PolicyDocument::OperationsPolicy(self.operations_policy.clone())
             }
-            ConfigResourceKind::ExecutionAutomationPolicy => {
-                PolicyDocument::ExecutionAutomationPolicy(self.execution_automation_policy.clone())
+            ConfigResourceKind::ExecutionAuthorizationPolicy => {
+                PolicyDocument::ExecutionAuthorizationPolicy(
+                    self.execution_authorization_policy.clone(),
+                )
             }
         }
     }
@@ -1174,8 +1181,8 @@ impl DecisionPolicySnapshot {
             PolicyDocument::ModelRouting(policy) => self.model_routing = policy,
             PolicyDocument::ReportSchedule(policy) => self.report_schedule = policy,
             PolicyDocument::OperationsPolicy(policy) => self.operations_policy = policy,
-            PolicyDocument::ExecutionAutomationPolicy(policy) => {
-                self.execution_automation_policy = policy;
+            PolicyDocument::ExecutionAuthorizationPolicy(policy) => {
+                self.execution_authorization_policy = policy;
             }
         }
         if !self.uses_current_resource_schemas() {
@@ -1202,8 +1209,8 @@ impl DecisionPolicySnapshot {
             ConfigResourceKind::OperationsPolicy => {
                 generator.into_root_schema_for::<OperationsPolicy>()
             }
-            ConfigResourceKind::ExecutionAutomationPolicy => {
-                generator.into_root_schema_for::<ExecutionAutomationPolicy>()
+            ConfigResourceKind::ExecutionAuthorizationPolicy => {
+                generator.into_root_schema_for::<ExecutionAuthorizationPolicy>()
             }
         }
     }

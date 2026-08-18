@@ -66,7 +66,7 @@ impl DeployValidationRuleContract {
         ),
         Self::new(
             "deploy.settlement.authorization-ttl",
-            &["polymarket.settlement.semi_auto_authorization_ttl_secs"],
+            &["polymarket.settlement.operator_authorization_ttl_secs"],
             "Always",
             "The authorization TTL must be between 30 and 3600 seconds inclusive.",
         ),
@@ -302,8 +302,8 @@ impl DeployValidationRuleContract {
         Self::new(
             "deploy.account-read-credentials",
             &["keys.private_key", "quant.account.funder"],
-            "Every runtime mode, including report_only",
-            "A private key and non-empty funder address are both required because reports freeze real collateral and position state; report_only is not simulation.",
+            "Whenever the production account is read",
+            "A private key and non-empty funder address are required because reports freeze real collateral and position state; account reads are not simulation.",
         ),
         Self::new(
             "deploy.relayer.credentials",

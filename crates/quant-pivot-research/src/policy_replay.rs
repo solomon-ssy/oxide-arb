@@ -101,7 +101,7 @@ pub struct PolicyReplayObservation {
     pub resolution: Option<PolicyReplayResolution>,
 }
 
-/// `ReportOnly` latency applied to every trigger-to-prepared action.
+/// Analysis-path latency applied to every trigger-to-prepared action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyReplayLatency {
     pub base_delay_ms: u64,

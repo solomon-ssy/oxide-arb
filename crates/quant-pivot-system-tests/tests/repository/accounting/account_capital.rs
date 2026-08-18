@@ -24,14 +24,14 @@ use quant_pivot_models::{
     enums::{
         common::{MarketCategory, OrderType, Side},
         execution::{
-            CapitalAllocationState, ExecutionOrderPhase, KillSwitchState, OrderIntentKind,
-            OrderTypeKind, ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus,
+            CapitalAllocationState, ExecutionOrderPhase, KillSwitchState, OrderTypeKind,
+            ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus,
         },
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, ExecutionOrderState, ExitSettlementMode,
-            FeatureParityLatchState, FeatureParityStateTransition, OrderIntentStatus,
-            QuantRuntimeMode, RedeemPolicy, ReportFactDeliveryStatus,
+            AccountSource, ExecutionOrderState, ExitSettlementMode, FeatureParityLatchState,
+            FeatureParityStateTransition, OrderIntentStatus, RedeemPolicy,
+            ReportFactDeliveryStatus,
         },
         rbac::ResourceType,
     },
@@ -41,12 +41,12 @@ use quant_pivot_models::{
         EntryOrderSpec, EventId, ExecutionAccountId, ExecutionOrderId, ExitPolicySpec,
         ExposureBreakdown, FeatureParityStateId, MarketId, MarketSelectionId, ModelRunId,
         ModelVersionId, OperationDetailDocument, OperationLogId, OpportunisticExitPolicy,
-        OrderAmount, OrderId, OrderIntentId, PortfolioPlanId, PositionSnapshot, Price, Probability,
-        RecommendationId, RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
+        OrderAmount, OrderId, OrderIntentId, PortfolioPlanId, Price, Probability, RecommendationId,
+        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
         ReportTriggerKey, RoleCode, SelectionExclusionSummary, Shares, ThesisInvalidationPolicy,
-        TokenId, TradePolicyCohortProvenance, Usd, VenueOrderAmount, WorkerId,
-        factor::FactorServingPlane,
+        TokenId, TradePolicyCohortProvenance, Usd, VenueOrderAmount, VenuePositionSnapshot,
+        WorkerId, factor::FactorServingPlane,
     },
 };
 use quant_pivot_repository::{
@@ -87,7 +87,7 @@ fn content_hash(seed: char) -> ContentHash {
 }
 
 fn new_account_snapshot() -> NewAccountSnapshot {
-    let positions = vec![PositionSnapshot {
+    let positions = vec![VenuePositionSnapshot {
         token_id: TokenId::new("token-1"),
         market_id: MarketId::new("0xmarket"),
         event_id: Some(EventId::new("evt-1")),
@@ -496,18 +496,12 @@ async fn assert_reserved_tracks_intent(
                 recommendation_id: *recommendation_id,
                 execution_account_id: execution_pg_seed::fixture_execution_account()
                     .execution_account_id,
-                runtime_mode: QuantRuntimeMode::SemiAuto,
                 decision_policy_snapshot_id: *decision_policy_snapshot_id,
                 model_version_id: *model_version_id,
                 research_profile_artifact_id: fixture_profile_ref().artifact_id(),
-                intent_kind: OrderIntentKind::Buy,
-                status: OrderIntentStatus::PendingApproval,
-                approval_status: ApprovalStatus::Pending,
-                approved_by: None,
-                approval_reason: None,
-                approved_at: None,
-                policy_id: None,
-                policy_hash: None,
+                status: OrderIntentStatus::PendingAuthorization,
+                authorization_kind: None,
+                authorization_evidence: None,
                 status_reason: None,
                 admission_trace_ref: None,
                 condition_instance_id: *condition_instance_id,
@@ -578,7 +572,7 @@ async fn assert_reserved_tracks_intent(
         )
         .await
         .expect("reject intent");
-    assert_eq!(rejected.status, OrderIntentStatus::Rejected);
+    assert_eq!(rejected.status, OrderIntentStatus::AuthorizationRejected);
     assert_eq!(
         reserved_repo.sum_reserved_usd().await.expect("sum"),
         Usd::ZERO,
@@ -678,10 +672,6 @@ async fn append_and_resolve_reconciliation(
             expected_cash_delta_usd: None,
             venue_cash_delta_usd: None,
             realized_pnl_usd: None,
-            expected_fee_usd: None,
-            derived_fee_usd: None,
-            settled_fee_usd: None,
-            fee_delta_usd: None,
             resolved_by: None,
             resolved_at: None,
         })
@@ -723,10 +713,6 @@ async fn append_and_resolve_reconciliation(
                 expected_cash_delta_usd: NullablePatch::set(Usd::ZERO),
                 venue_cash_delta_usd: NullablePatch::set(Usd::ZERO),
                 realized_pnl_usd: NullablePatch::Keep,
-                expected_fee_usd: NullablePatch::set(Usd::ZERO),
-                derived_fee_usd: NullablePatch::Keep,
-                settled_fee_usd: NullablePatch::set(Usd::ZERO),
-                fee_delta_usd: NullablePatch::set(Usd::ZERO),
                 resolved_by: NullablePatch::set("operator".to_owned()),
                 resolved_at: NullablePatch::set(Utc::now()),
             },
@@ -770,7 +756,7 @@ pub async fn capital_kill_switch_trip() {
     let control = runtime_control
         .compare_and_set(RuntimeControlUpdate {
             expected_revision: current.revision,
-            quant_runtime_mode: None,
+            entry_authorization_policy: None,
             settlement_write_policy: None,
             kill_switch_state: Some(KillSwitchState::ExitOnly),
             kill_switch_requires_ack: Some(false),
@@ -838,18 +824,12 @@ async fn create_pending_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderIn
                 recommendation_id: ids.recommendation,
                 execution_account_id: execution_pg_seed::fixture_execution_account()
                     .execution_account_id,
-                runtime_mode: QuantRuntimeMode::SemiAuto,
                 decision_policy_snapshot_id: ids.decision_policy_snapshot,
                 model_version_id: ids.model_version,
                 research_profile_artifact_id: fixture_profile_ref().artifact_id(),
-                intent_kind: OrderIntentKind::Buy,
-                status: OrderIntentStatus::PendingApproval,
-                approval_status: ApprovalStatus::Pending,
-                approved_by: None,
-                approval_reason: None,
-                approved_at: None,
-                policy_id: None,
-                policy_hash: None,
+                status: OrderIntentStatus::PendingAuthorization,
+                authorization_kind: None,
+                authorization_evidence: None,
                 status_reason: None,
                 admission_trace_ref: None,
                 condition_instance_id: ids.condition_instance,

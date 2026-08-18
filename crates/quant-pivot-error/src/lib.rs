@@ -376,7 +376,9 @@ mod tests {
 
     #[test]
     fn execution_error_propagates_code() {
-        let err = ExecutionError::ReportOnlyMode;
+        let err = ExecutionError::AuthorizationPreflightDenied {
+            reason: "policy activation is not ready".to_owned(),
+        };
         let oxide_err: QuantError = err.into();
         assert!(matches!(oxide_err, QuantError::Execution(_)));
         assert_eq!(oxide_err.code(), "execution");

@@ -63,6 +63,16 @@ pub const ORDER_FILLED_EVENTS: ClickHouseQueryLimits = ClickHouseQueryLimits::ne
     ONLINE_ROWS,
     128 * MIB,
 );
+pub const ACCOUNT_ORDER_FILLED_EVENTS: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.account_order_filled_events.v1",
+    ONLINE_ROWS,
+    128 * MIB,
+);
+pub const MATCHES_FOR_TAKER_ORDERS: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
+    "ch.repository.matches_for_taker_orders.v1",
+    ONLINE_ROWS,
+    128 * MIB,
+);
 pub const MARKET_EXECUTION_WINDOW: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
     "ch.repository.market_execution_window.v1",
     RESEARCH_ROWS,

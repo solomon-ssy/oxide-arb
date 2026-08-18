@@ -1,6 +1,11 @@
 # quant-pivot 全系统深度审计（2026-08-13）
 
 > **Superseded**：这是日期化历史审计，不再定义 S1 实现合同。涉及旧成交事实、回填窗口或首报 gate 的内容以当前 finalized exchange-history、profile-specific FreshBoot 与运维文档为准。
+>
+> **§4 replacement**：Feedback 闭环、`ReportOnly`、人工/外部成交、break-glass 与 MTM
+> 快速经济反馈的 current 设计和实施状态只认
+> [`../plans/quant-pivot/phase-12/README.md`](../plans/quant-pivot/phase-12/README.md)；
+> 本文 §4/R7/R9/旧路线图只作审计历史，不得恢复为实现合同。
 
 > **范围**：代码质量、优雅性、极致性能、算法、回测、训练、feedback 闭环
 > **方法**：两轮。第一轮 581,626 行 Rust 全量结构化探查 + 业界/学术对标；第二轮逐行交叉验证第一轮的"做得好"结论（统计公式对照原始论文），并补齐第一轮未覆盖的维度（存储层、并发正确性、Polymarket 领域适配）

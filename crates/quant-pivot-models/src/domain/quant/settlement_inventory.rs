@@ -13,8 +13,8 @@ use crate::{
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, ExecutionAccountId, MarketId, OrderIntentId, PositionId,
-        SettlementInventoryLotId, SettlementRedeemId, Shares, TokenId, Usd,
+        ContentHash, ExecutionAccountId, MarketId, OrderIntentId, SettlementInventoryLotId,
+        SettlementRedeemId, Shares, StrategyPositionLotId, TokenId, Usd,
     },
 };
 
@@ -25,7 +25,7 @@ const INVENTORY_SCHEMA_VERSION: u32 = 1;
 /// One open lot joined to its immutable execution account and frozen intent policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettlementDiscoveryLot {
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub order_intent_id: OrderIntentId,
     pub execution_account_id: ExecutionAccountId,
     pub token_id: TokenId,
@@ -77,7 +77,8 @@ struct InventoryDigestScope<'a> {
 impl SettlementDiscoveryCandidate {
     /// Freeze a stable, sorted inventory. Empty or cross-account lots are rejected.
     pub fn freeze(mut self) -> Result<FrozenSettlementInventory, CanonicalDigestError> {
-        self.lots.sort_by_key(|lot| lot.position_id.to_string());
+        self.lots
+            .sort_by_key(|lot| lot.strategy_position_lot_id.to_string());
         if self.lots.is_empty()
             || self.yes_token_id == self.no_token_id
             || self.lots.iter().any(|lot| {
@@ -140,7 +141,7 @@ pub struct SettlementInventoryLotInfo {
     pub inventory_digest: ContentHash,
     pub contributor_lots_digest: ContentHash,
     pub execution_account_id: ExecutionAccountId,
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub side: OutcomeSide,
@@ -162,7 +163,7 @@ info_from_model!(
         inventory_digest,
         contributor_lots_digest,
         execution_account_id,
-        position_id,
+        strategy_position_lot_id,
         order_intent_id,
         token_id,
         side,
@@ -185,7 +186,7 @@ pub struct NewSettlementInventoryLot {
     pub inventory_digest: ContentHash,
     pub contributor_lots_digest: ContentHash,
     pub execution_account_id: ExecutionAccountId,
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub side: OutcomeSide,
@@ -237,7 +238,7 @@ impl FrozenSettlementInventory {
                 inventory_digest: self.inventory_digest,
                 contributor_lots_digest: self.contributor_lots_digest,
                 execution_account_id: lot.execution_account_id,
-                position_id: lot.position_id,
+                strategy_position_lot_id: lot.strategy_position_lot_id,
                 order_intent_id: lot.order_intent_id,
                 token_id: lot.token_id,
                 side: lot.side,
@@ -352,7 +353,7 @@ mod tests {
         redeem_policy: RedeemPolicy,
     ) -> SettlementDiscoveryLot {
         SettlementDiscoveryLot {
-            position_id: PositionId::from_v7(),
+            strategy_position_lot_id: StrategyPositionLotId::from_v7(),
             order_intent_id: OrderIntentId::from_v7(),
             execution_account_id,
             token_id: TokenId::new("101"),

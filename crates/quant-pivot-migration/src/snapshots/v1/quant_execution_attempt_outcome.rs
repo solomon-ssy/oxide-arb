@@ -4,7 +4,7 @@ use sea_orm::entity::prelude::*;
 
 use super::sea_orm_active_enums::{
     QpExecutionAttemptNoFillReason, QpExecutionAttemptTerminalState, QpExecutionOrderState,
-    QpExitReason, QpPositionLedgerState, QpQuantRuntimeMode,
+    QpExitReason, QpPositionLedgerState,
 };
 
 #[sea_orm::model]
@@ -16,14 +16,12 @@ pub struct Model {
     pub order_intent_id: Uuid,
     pub entry_execution_order_id: Uuid,
     pub entry_reconciliation_id: Uuid,
-    pub position_id: Option<Uuid>,
+    pub strategy_position_lot_id: Option<Uuid>,
     pub execution_account_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub market_id: String,
     #[sea_orm(column_type = "Text")]
     pub token_id: String,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
-    pub runtime_mode: QpQuantRuntimeMode,
     pub terminal_state: QpExecutionAttemptTerminalState,
     pub no_fill_reason: Option<QpExecutionAttemptNoFillReason>,
     pub entry_order_state: QpExecutionOrderState,
@@ -75,12 +73,12 @@ pub struct Model {
     pub quant_order_intent: BelongsTo<super::quant_order_intent::Entity>,
     #[sea_orm(
         belongs_to,
-        from = "position_id",
-        to = "position_id",
+        from = "strategy_position_lot_id",
+        to = "strategy_position_lot_id",
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
-    pub quant_position: BelongsTo<Option<super::quant_position::Entity>>,
+    pub quant_strategy_position_lot: BelongsTo<Option<super::quant_strategy_position_lot::Entity>>,
     #[sea_orm(
         belongs_to,
         from = "recommendation_id",

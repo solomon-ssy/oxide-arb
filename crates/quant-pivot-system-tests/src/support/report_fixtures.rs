@@ -25,10 +25,10 @@ use quant_pivot_models::{
         factor::{FactorFamily, FactorValueState, NormalizationSource},
         market::MarketStatus,
         quant::{
-            AccountSource, ExitSettlementMode, FactorDirection, FeatureParityRunKind,
-            FeatureParityRunStatus, IneligibilityReason, OutcomeSide, QuantRuntimeMode,
-            RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
-            ReportFactDeliveryStatus, ReportKind, ResearchJobKind, ResearchJobStatus,
+            AccountSource, ExecutionAuthorityCeiling, ExitSettlementMode, FactorDirection,
+            FeatureParityRunKind, FeatureParityRunStatus, OutcomeSide, RecommendationReportStatus,
+            RecommendationStatus, RedeemPolicy, ReportFactDeliveryStatus, ReportKind,
+            ResearchJobKind, ResearchJobStatus,
         },
     },
     runtime_config::BuyModelRoute,
@@ -158,7 +158,6 @@ pub fn report(
         report_run_id: ReportRunId::from_v7(),
         report_kind: kind,
         decision_at: Utc.timestamp_opt(1_699_999_880, 0).unwrap(),
-        runtime_mode: QuantRuntimeMode::ReportOnly,
         decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
         portfolio_plan_id: PortfolioPlanId::from_v7(),
@@ -219,9 +218,9 @@ pub fn report_summary() -> ReportSummary {
         },
         top_rejection_reasons: Vec::new(),
         execution_eligibility_summary: EligibilitySummary {
-            eligible_report_only: 2,
-            eligible_semi_auto: 0,
-            eligible_auto_execution: 0,
+            analysis_only: 0,
+            operator_approval: 2,
+            policy_automatic: 0,
         },
         empty_reason: None,
         warnings: vec!["thin book on 1 market".to_owned()],
@@ -524,8 +523,6 @@ fn risk_envelope() -> RiskEnvelope {
         cvar_contribution_usd: Usd::new(dec!(40)),
         portfolio_cvar_cap_usd: Usd::new(dec!(500)),
         maximum_scenario_loss_cap_usd: Usd::new(dec!(750)),
-        requires_approval: true,
-        auto_execution_allowed: false,
         risk_notes: vec!["thin book".to_owned()],
         envelope_hash: content_hash(),
     }
@@ -599,9 +596,8 @@ fn evidence_refs() -> EvidenceRefs {
 
 fn execution_eligibility() -> ExecutionEligibility {
     ExecutionEligibility {
-        eligible_modes: vec![QuantRuntimeMode::ReportOnly],
-        ineligibility_reasons: vec![IneligibilityReason::ReportOnlyMode],
-        approval_required: true,
-        auto_policy_id: None,
+        ceiling: ExecutionAuthorityCeiling::OperatorApproval,
+        blockers: Vec::new(),
+        policy_binding: None,
     }
 }

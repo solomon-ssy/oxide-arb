@@ -87,7 +87,7 @@ impl ModelRouteEvidenceService {
     pub async fn current_runtime(&self) -> QuantResult<RuntimeControlInfo> {
         let durable = self.deps.durable_runtime.load().await?;
         let local = self.deps.runtime_controls.snapshot();
-        if durable.quant_runtime_mode != local.quant_runtime_mode
+        if durable.entry_authorization_policy != local.entry_authorization_policy
             || durable.settlement_write_policy != local.settlement_write_policy
             || durable.kill_switch_state != local.kill_switch_state
             || durable.kill_switch_requires_ack != local.kill_switch_requires_ack

@@ -53,8 +53,7 @@ WITH decision_prepared AS (
             ORDER BY EXTRACT(EPOCH FROM (created_at - decision_at)) * 1000
         )::bigint AS p95_ms
     FROM quant_recommendation_report
-    WHERE runtime_mode = 'report_only'
-      AND created_at >= $1 AND created_at < $2
+    WHERE created_at >= $1 AND created_at < $2
       AND decision_at <= created_at
 ), endpoint_rtt AS (
     SELECT

@@ -11,7 +11,11 @@ use quant_pivot_models::{
         PromotionPermitStatus, PromotionPolicyProjection, PromotionPreflight,
         PromotionPreflightInput, PromotionServingConstraints, PromotionServingConstraintsInput,
     },
-    enums::{common::MarketCategory, model::ServingEligibility},
+    enums::{
+        common::MarketCategory,
+        model::ServingEligibility,
+        quant::{EntryAuthorizationPolicy, ExecutionAuthorityCeiling},
+    },
     runtime_config::{ActivePolicyBundle, BuyModelRoute},
     types::{FeedbackCycleId, PromotionPermitId},
 };
@@ -230,7 +234,14 @@ impl PromotionPreflightService {
             candidate_manifest_id: constraints.candidate_manifest_id(),
             candidate_manifest_hash: constraints.candidate_manifest_hash(),
             promotion_gate_hash: constraints.promotion_gate_hash(),
-            allowed_runtime_modes: vec![runtime.quant_runtime_mode],
+            maximum_execution_authority: match runtime.entry_authorization_policy {
+                EntryAuthorizationPolicy::OperatorApprovalRequired => {
+                    ExecutionAuthorityCeiling::OperatorApproval
+                }
+                EntryAuthorizationPolicy::PolicyAutomatic => {
+                    ExecutionAuthorityCeiling::PolicyAutomatic
+                }
+            },
             non_route_policy_hash: projection.non_route_policy_hash(),
             serving_constraints_hash: constraints_hash,
             expires_at,
@@ -249,7 +260,7 @@ impl PromotionPreflightService {
             shadow_contract_hash: evidence.shadow_contract.contract_hash(),
             candidate_recipe_hash: evidence.candidate_recipe_hash,
             serving_constraints: constraints,
-            current_runtime_mode: runtime.quant_runtime_mode,
+            current_entry_authorization_policy: runtime.entry_authorization_policy,
             runtime_control_revision: runtime.revision,
         })?;
         Ok(PromotionPreflightPlan {

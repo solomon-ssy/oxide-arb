@@ -5,7 +5,7 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::quant::{PortfolioScenarioArtifact, PortfolioScenarioVisibility},
     enums::quant::AccountSource,
-    types::{PortfolioScenarioArtifactId, PositionSnapshot, Price, Shares, Usd},
+    types::{PortfolioScenarioArtifactId, Price, Shares, Usd, VenuePositionSnapshot},
 };
 use quant_pivot_research::portfolio::{
     AccountSnapshot, GlobalPortfolioPlanner, SealedPortfolioScenarioArtifact,
@@ -148,7 +148,7 @@ fn existing_position_consumes_capacity() -> QuantResult<()> {
         fixture.account.capital_base_usd,
         fixture.account.available_usd,
         fixture.account.reserved_usd,
-        vec![PositionSnapshot {
+        vec![VenuePositionSnapshot {
             token_id: tier.token_id.clone(),
             market_id: tier.market_id.clone(),
             event_id: Some(tier.event_id.clone()),

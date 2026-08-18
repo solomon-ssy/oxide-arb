@@ -15,7 +15,9 @@ use quant_pivot_models::{
         governance::SystemStatus,
         ports::{PolicySnapshotPort, SystemCapabilityPort},
     },
-    enums::{execution::KillSwitchState, quant::QuantRuntimeMode, system::CapabilityReason},
+    enums::{
+        execution::KillSwitchState, quant::EntryAuthorizationPolicy, system::CapabilityReason,
+    },
     runtime_config::DecisionPolicySnapshot,
 };
 use quant_pivot_repository::traits::{ModelRunRepository, RecommendationReportRepository};
@@ -46,7 +48,7 @@ impl SystemCapabilityService {
             reports,
             capability_tx,
             last_status: ArcSwap::from_pointee(SystemStatus::bootstrap(
-                QuantRuntimeMode::ReportOnly,
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
             )),
             serving_evidence_present: AtomicBool::new(false),
         }
@@ -92,11 +94,6 @@ impl SystemCapabilityService {
         );
 
         let mut entry_reasons = report_reasons.clone();
-        require(
-            status.quant_runtime_mode.allows_order_submission(),
-            CapabilityReason::RuntimeModeReportOnly,
-            &mut entry_reasons,
-        );
         require(
             status.kill_switch.state == KillSwitchState::Closed,
             CapabilityReason::KillSwitchBlocksEntries,

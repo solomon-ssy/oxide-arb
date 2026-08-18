@@ -268,7 +268,7 @@ pub struct MetricsHub {
     // ── Execution governance ───────────────────────────────────────
     /// `1` when the operational kill-switch blocks new auto entries (any
     /// non-`closed` state), `0` when `closed`.
-    pub auto_execution_halted: IntGauge,
+    pub policy_automatic_halted: IntGauge,
 
     // ── Execution admission ────────────────────────────────────────
     /// Admission denials by the check id that determined the `Deny` outcome.
@@ -284,7 +284,7 @@ pub struct MetricsHub {
     /// Entry orders successfully submitted to the venue (write-ahead committed).
     pub execution_orders_submitted: IntCounter,
     /// Venue fills observed on submission (full or partial).
-    pub execution_fills: IntCounter,
+    pub clob_trade_observations: IntCounter,
     /// Execution-breaker kill-switch trips by triggering dimension.
     pub execution_breaker_trips: IntCounterVec,
 
@@ -431,13 +431,13 @@ struct ResearchFeedbackMetrics {
 
 /// Execution, risk, and governance counters.
 struct ExecutionMetrics {
-    auto_execution_halted: IntGauge,
+    policy_automatic_halted: IntGauge,
     admission_denied: IntCounterVec,
     order_intents_created: IntCounterVec,
     order_intents_approved: IntCounterVec,
     order_intents_rejected: IntCounterVec,
     execution_orders_submitted: IntCounter,
-    execution_fills: IntCounter,
+    clob_trade_observations: IntCounter,
     execution_breaker_trips: IntCounterVec,
     reconciliation_unresolvable: IntCounter,
     venue_incentive_reconciliation_total: IntCounterVec,
@@ -944,9 +944,9 @@ fn register_research_feedback_metrics(registry: &Registry) -> ResearchFeedbackMe
 
 fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
     ExecutionMetrics {
-        auto_execution_halted: register_gauge_int!(
+        policy_automatic_halted: register_gauge_int!(
             registry,
-            "quant_auto_execution_halted",
+            "quant_policy_automatic_halted",
             "1 when the operational kill-switch blocks new auto entries, 0 otherwise"
         ),
         admission_denied: register_counter_vec!(
@@ -958,29 +958,29 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
         order_intents_created: register_counter_vec!(
             registry,
             "quant_order_intents_created_total",
-            "Order intents created by runtime mode and intent kind",
-            &["mode", "kind"]
+            "Order intents created by authorization kind",
+            &["authorization_kind"]
         ),
         order_intents_approved: register_counter_vec!(
             registry,
             "quant_order_intents_approved_total",
-            "Order intents approved by runtime mode and intent kind",
-            &["mode", "kind"]
+            "Order intents approved by authorization kind",
+            &["authorization_kind"]
         ),
         order_intents_rejected: register_counter_vec!(
             registry,
             "quant_order_intents_rejected_total",
-            "Order intents rejected by runtime mode and intent kind",
-            &["mode", "kind"]
+            "Order intents rejected by authorization kind",
+            &["authorization_kind"]
         ),
         execution_orders_submitted: register_counter!(
             registry,
             "quant_execution_orders_submitted_total",
             "Entry orders submitted to the venue (write-ahead committed)"
         ),
-        execution_fills: register_counter!(
+        clob_trade_observations: register_counter!(
             registry,
-            "quant_execution_fills_total",
+            "quant_clob_trade_observations_total",
             "Venue fills observed on submission (full or partial)"
         ),
         execution_breaker_trips: register_counter_vec!(
@@ -1208,13 +1208,13 @@ impl MetricsHub {
             feedback_ws_recovery_total: research_feedback.ws_recovery_total,
             research_progress_coalesced_total: research_feedback.progress_coalesced,
             research_heartbeat_total: research_feedback.heartbeat_total,
-            auto_execution_halted: execution.auto_execution_halted,
+            policy_automatic_halted: execution.policy_automatic_halted,
             admission_denied: execution.admission_denied,
             order_intents_created: execution.order_intents_created,
             order_intents_approved: execution.order_intents_approved,
             order_intents_rejected: execution.order_intents_rejected,
             execution_orders_submitted: execution.execution_orders_submitted,
-            execution_fills: execution.execution_fills,
+            clob_trade_observations: execution.clob_trade_observations,
             execution_breaker_trips: execution.execution_breaker_trips,
             reconciliation_unresolvable: execution.reconciliation_unresolvable,
             venue_incentive_reconciliation_total: execution.venue_incentive_reconciliation_total,
@@ -1245,27 +1245,27 @@ impl MetricsHub {
         self.execution_orders_submitted.inc();
     }
 
-    pub fn inc_order_intent_created(&self, mode: &str, kind: &str) {
+    pub fn inc_order_intent_created(&self, authorization_kind: &str) {
         self.order_intents_created
-            .with_label_values(&[mode, kind])
+            .with_label_values(&[authorization_kind])
             .inc();
     }
 
-    pub fn inc_order_intent_approved(&self, mode: &str, kind: &str) {
+    pub fn inc_order_intent_approved(&self, authorization_kind: &str) {
         self.order_intents_approved
-            .with_label_values(&[mode, kind])
+            .with_label_values(&[authorization_kind])
             .inc();
     }
 
-    pub fn inc_order_intent_rejected(&self, mode: &str, kind: &str) {
+    pub fn inc_order_intent_rejected(&self, authorization_kind: &str) {
         self.order_intents_rejected
-            .with_label_values(&[mode, kind])
+            .with_label_values(&[authorization_kind])
             .inc();
     }
 
     /// Count one venue fill observed on submission.
-    pub fn inc_execution_fill(&self) {
-        self.execution_fills.inc();
+    pub fn inc_clob_trade_observation(&self) {
+        self.clob_trade_observations.inc();
     }
 
     /// Count one execution-breaker kill-switch trip for a dimension.
@@ -1383,8 +1383,8 @@ impl MetricsHub {
     }
 
     /// Publish whether the kill-switch currently blocks new auto entries.
-    pub fn set_auto_execution_halted(&self, halted: bool) {
-        self.auto_execution_halted.set(i64::from(halted));
+    pub fn set_policy_automatic_halted(&self, halted: bool) {
+        self.policy_automatic_halted.set(i64::from(halted));
     }
 
     /// Observe one ingest-pipeline-lag sample (enqueue→flush-ack) for a writer.
@@ -1625,13 +1625,13 @@ mod tests {
     #[test]
     fn order_intent_created_increase() {
         let hub = MetricsHub::new();
-        hub.inc_order_intent_created("auto_execution", "buy");
-        hub.inc_order_intent_approved("auto_execution", "buy");
+        hub.inc_order_intent_created("active_policy");
+        hub.inc_order_intent_approved("active_policy");
         let (_, text) = hub.gather_prometheus_text().expect("gather");
         let body = String::from_utf8(text).expect("utf8");
         assert!(body.contains("quant_order_intents_created_total"));
         assert!(body.contains("quant_order_intents_approved_total"));
-        assert!(body.contains(r#"mode="auto_execution""#));
+        assert!(body.contains(r#"authorization_kind="active_policy""#));
     }
 
     #[test]

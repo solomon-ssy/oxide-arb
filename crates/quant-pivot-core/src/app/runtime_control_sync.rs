@@ -107,7 +107,7 @@ async fn refresh_runtime_controls(
             let snapshot = RuntimeControlSnapshot::from(info);
             let kill_switch_state = snapshot.kill_switch_state;
             if controls.publish_if_newer(snapshot) {
-                metrics.set_auto_execution_halted(!kill_switch_state.allows_new_entry());
+                metrics.set_policy_automatic_halted(!kill_switch_state.allows_new_entry());
                 status_publisher.publish();
             }
         }

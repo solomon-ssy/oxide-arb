@@ -97,9 +97,9 @@ use quant_pivot_models::{
         FeatureValue, FeatureVectorId, FeedbackComparisonArtifactId, FeedbackCycleId,
         FeedbackEvaluationUseId, FeedbackLearningStageArtifactId, FeedbackValidationArtifactId,
         MarketId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelTrainingTarget, ModelVersionId, OrderIntentId, POOLED_1H_CONTROL_PROFILE_ID,
-        PositionId, Price, Probability, ResearchEvaluationTrack, ResearchJobId,
-        ResearchJobProgress, ResearchProfileRef, SchemaVersion, Shares, SourceSliceManifest,
+        ModelTrainingTarget, ModelVersionId, OrderIntentId, POOLED_1H_CONTROL_PROFILE_ID, Price,
+        Probability, ResearchEvaluationTrack, ResearchJobId, ResearchJobProgress,
+        ResearchProfileRef, SchemaVersion, Shares, SourceSliceManifest, StrategyPositionLotId,
         TokenId, TradePolicyEvidenceBundleManifest, TrainingDatasetId, TrainingExampleId,
         TrainingSampleSource, TrainingSampleSources, Usd,
         calibration::ModelScoreCalibrationPayload,
@@ -696,7 +696,7 @@ fn exit_examples() -> Vec<TrainingExample> {
             }];
             example.lot_context = Some(LotTrainingContext {
                 order_intent_id: OrderIntentId::from_v7(),
-                position_id: PositionId::from_v7(),
+                strategy_position_lot_id: StrategyPositionLotId::from_v7(),
                 outcome_side: OutcomeSide::Yes,
                 remaining_shares: Shares::new(dec!(100)),
                 avg_price: Price::new(dec!(0.5)),

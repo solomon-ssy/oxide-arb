@@ -17,8 +17,8 @@ use quant_pivot_models::{
         },
     },
     enums::quant::{
-        EmptyReportReason, ExitSettlementMode, FillRequirement, IneligibilityReason, OutcomeSide,
-        QuantRuntimeMode, RecommendationReportStatus, RedeemPolicy, ReportKind,
+        EmptyReportReason, ExecutionAuthorityCeiling, ExitSettlementMode, FillRequirement,
+        IneligibilityReason, OutcomeSide, RecommendationReportStatus, RedeemPolicy, ReportKind,
     },
     types::{
         BookSnapshotRef, Bps, ContentHash, EconomicTierId, EligibilitySummary,
@@ -298,10 +298,9 @@ fn partial_exit_plan() -> ExitPlan {
 
 fn not_auto_eligible() -> ExecutionEligibility {
     ExecutionEligibility {
-        eligible_modes: vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto],
-        ineligibility_reasons: vec![IneligibilityReason::AutomationCapExceeded],
-        approval_required: true,
-        auto_policy_id: None,
+        ceiling: ExecutionAuthorityCeiling::OperatorApproval,
+        blockers: vec![IneligibilityReason::AutomationCapExceeded],
+        policy_binding: None,
     }
 }
 

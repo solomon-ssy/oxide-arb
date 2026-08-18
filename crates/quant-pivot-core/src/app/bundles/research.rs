@@ -22,10 +22,10 @@ use quant_pivot_repository::{
         ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
         ModelRouteBootstrapRepository, ModelRoutePromotionRepository,
         ModelRouteShadowBindingRepository, ModelRunRepository, PolicyRepository,
-        PositionRepository, PromotionPermitRepository, QuantFactReadRepository,
-        RecommendationReportRepository, ResearchJobRepository, ResearchReadinessEvidenceRepository,
-        RuntimeControlRepository, ServingEvidenceRepository, ShadowComparisonRepository,
-        SourceSliceRepository, TradePolicyRepository, TrainingDatasetRepository,
+        PromotionPermitRepository, QuantFactReadRepository, RecommendationReportRepository,
+        ResearchJobRepository, ResearchReadinessEvidenceRepository, RuntimeControlRepository,
+        ServingEvidenceRepository, ShadowComparisonRepository, SourceSliceRepository,
+        StrategyPositionLotRepository, TradePolicyRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -184,7 +184,7 @@ pub struct ResearchBundle {
     /// Frozen market → external-subject linkage ledger.
     pub market_linkage_repo: Arc<dyn MarketLinkageRepository>,
     /// Position ledger for `ExitDecision` lot-timeline training.
-    pub position_repo: Arc<dyn PositionRepository>,
+    pub position_repo: Arc<dyn StrategyPositionLotRepository>,
     /// Unified calibration-artifact ledger port: favorite-longshot bias-table
     /// fitter plus generic catalog read/activate for every artifact kind.
     pub calibration_artifact_fit: Arc<dyn CalibrationArtifactFitPort>,
@@ -521,7 +521,7 @@ impl ResearchBundle {
                 as Arc<dyn ClobMarketInfoRepository>,
             market_repo: Arc::clone(&deps.data.market_repo),
             market_linkage_repo: Arc::clone(&market_linkage_repo),
-            position_repo: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
+            position_repo: Arc::clone(&repos.position) as Arc<dyn StrategyPositionLotRepository>,
             calibration_artifact_fit,
             calibration_artifact_repo: Arc::clone(&repos.calibration_artifact)
                 as Arc<dyn CalibrationArtifactRepository>,

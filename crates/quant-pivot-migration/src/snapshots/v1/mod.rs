@@ -20,6 +20,10 @@ pub mod policy_activation_guard;
 pub mod policy_approval;
 pub mod policy_profile_artifact;
 pub mod policy_revision;
+pub mod quant_account_chain_execution;
+pub mod quant_account_execution_association;
+pub mod quant_account_pause_submission;
+pub mod quant_account_recovery_incident;
 pub mod quant_account_snapshot;
 pub mod quant_attribution_artifact;
 pub mod quant_backtest_path_set;
@@ -28,6 +32,7 @@ pub mod quant_basis_alert;
 pub mod quant_calibration_artifact;
 pub mod quant_calibration_artifact_publication;
 pub mod quant_capital_allocation;
+pub mod quant_clob_trade_observation;
 pub mod quant_crypto_price_projection;
 pub mod quant_domain_event_outbox;
 pub mod quant_domain_source_cursor;
@@ -45,8 +50,6 @@ pub mod quant_exchange_history_quarantine_resolution;
 pub mod quant_execution_account;
 pub mod quant_execution_attempt_outcome;
 pub mod quant_execution_attempt_reconciliation_task;
-pub mod quant_execution_fee_measurement;
-pub mod quant_execution_fill;
 pub mod quant_execution_order;
 pub mod quant_execution_rollup_reconciliation_task;
 pub mod quant_execution_trade_ref;
@@ -86,7 +89,6 @@ pub mod quant_model_spec;
 pub mod quant_model_version;
 pub mod quant_order_intent;
 pub mod quant_portfolio_plan;
-pub mod quant_position;
 pub mod quant_recommendation;
 pub mod quant_recommendation_execution_rollup;
 pub mod quant_recommendation_execution_rollup_attempt;
@@ -114,6 +116,7 @@ pub mod quant_settlement_redeem;
 pub mod quant_settlement_redeem_lot;
 pub mod quant_shadow_comparison;
 pub mod quant_source_slice;
+pub mod quant_strategy_position_lot;
 pub mod quant_trade_policy_artifact;
 pub mod quant_trade_policy_governance_audit;
 pub mod quant_trade_policy_trial_attempt;
@@ -157,6 +160,10 @@ pub const TABLES: &[&str] = &[
     "policy_approval",
     "policy_profile_artifact",
     "policy_revision",
+    "quant_account_chain_execution",
+    "quant_account_execution_association",
+    "quant_account_pause_submission",
+    "quant_account_recovery_incident",
     "quant_account_snapshot",
     "quant_attribution_artifact",
     "quant_backtest_path_set",
@@ -177,8 +184,7 @@ pub const TABLES: &[&str] = &[
     "quant_equity_snapshot",
     "quant_execution_account",
     "quant_execution_attempt_reconciliation_task",
-    "quant_execution_fill",
-    "quant_execution_fee_measurement",
+    "quant_clob_trade_observation",
     "quant_execution_order",
     "quant_execution_trade_ref",
     "quant_execution_transaction_ref",
@@ -221,7 +227,7 @@ pub const TABLES: &[&str] = &[
     "quant_model_version",
     "quant_order_intent",
     "quant_portfolio_plan",
-    "quant_position",
+    "quant_strategy_position_lot",
     "quant_recommendation",
     "quant_execution_attempt_outcome",
     "quant_execution_rollup_reconciliation_task",
@@ -272,8 +278,13 @@ pub const TABLES: &[&str] = &[
 ];
 
 pub const ENUMS: &[&str] = &[
+    "qp_account_chain_execution_role",
+    "qp_account_execution_association_kind",
+    "qp_account_pause_submission_state",
+    "qp_account_recovery_incident_kind",
+    "qp_account_recovery_incident_status",
     "qp_account_source",
-    "qp_approval_status",
+    "qp_authorization_kind",
     "qp_attribution_artifact_kind",
     "qp_attribution_cohort",
     "qp_calibration_kind",
@@ -293,14 +304,15 @@ pub const ENUMS: &[&str] = &[
     "qp_domain_cursor_status",
     "qp_domain_family",
     "qp_domain_source_expectation_status",
+    "qp_entry_authorization_policy",
     "qp_entry_condition_audit_action",
     "qp_entry_condition_state",
     "qp_event_status",
+    "qp_execution_authority_ceiling",
     "qp_execution_order_phase",
     "qp_execution_order_state",
     "qp_execution_wallet_kind",
     "qp_fee_liquidity_role",
-    "qp_fee_measurement_stage",
     "qp_exit_settlement_mode",
     "qp_exit_reason",
     "qp_exit_state",
@@ -348,7 +360,6 @@ pub const ENUMS: &[&str] = &[
     "qp_operation_category",
     "qp_operation_http_method",
     "qp_operation_outcome",
-    "qp_order_intent_kind",
     "qp_order_intent_status",
     "qp_order_type_kind",
     "qp_outcome_side",
@@ -359,7 +370,6 @@ pub const ENUMS: &[&str] = &[
     "qp_profile_artifact_kind",
     "qp_policy_revision_status",
     "qp_position_ledger_state",
-    "qp_quant_runtime_mode",
     "qp_redeem_policy",
     "qp_research_evaluation_track",
     "qp_execution_attempt_no_fill_reason",
@@ -401,6 +411,7 @@ pub const ENUMS: &[&str] = &[
     "qp_settlement_submission_state",
     "qp_side",
     "qp_shadow_binding_status",
+    "qp_strategy_position_origin_kind",
     "qp_source_slice_status",
     "qp_tick_size",
     "qp_exchange_history_chunk_status",
@@ -445,6 +456,10 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("policy_approval.rs"),
     include_bytes!("policy_profile_artifact.rs"),
     include_bytes!("policy_revision.rs"),
+    include_bytes!("quant_account_chain_execution.rs"),
+    include_bytes!("quant_account_execution_association.rs"),
+    include_bytes!("quant_account_pause_submission.rs"),
+    include_bytes!("quant_account_recovery_incident.rs"),
     include_bytes!("quant_account_snapshot.rs"),
     include_bytes!("quant_attribution_artifact.rs"),
     include_bytes!("quant_backtest_path_set.rs"),
@@ -465,8 +480,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_equity_snapshot.rs"),
     include_bytes!("quant_execution_account.rs"),
     include_bytes!("quant_execution_attempt_reconciliation_task.rs"),
-    include_bytes!("quant_execution_fill.rs"),
-    include_bytes!("quant_execution_fee_measurement.rs"),
+    include_bytes!("quant_clob_trade_observation.rs"),
     include_bytes!("quant_execution_order.rs"),
     include_bytes!("quant_execution_trade_ref.rs"),
     include_bytes!("quant_execution_transaction_ref.rs"),
@@ -509,7 +523,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_model_version.rs"),
     include_bytes!("quant_order_intent.rs"),
     include_bytes!("quant_portfolio_plan.rs"),
-    include_bytes!("quant_position.rs"),
+    include_bytes!("quant_strategy_position_lot.rs"),
     include_bytes!("quant_recommendation.rs"),
     include_bytes!("quant_execution_attempt_outcome.rs"),
     include_bytes!("quant_execution_rollup_reconciliation_task.rs"),

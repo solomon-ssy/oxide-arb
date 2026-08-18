@@ -1,14 +1,14 @@
 //! Quant-pivot runtime and report domain enums.
 
 pg_enum! {
-    type_name = "qp_quant_runtime_mode",
-    /// Governed runtime mode for report generation and optional execution.
+    type_name = "qp_entry_authorization_policy",
+    /// Runtime authority for creating and authorizing new entry intents.
+    /// Report generation and kill-switch restrictions are independent.
     @derive(Default, schemars::JsonSchema)
-    pub enum QuantRuntimeMode {
+    pub enum EntryAuthorizationPolicy {
         #[default]
-        ReportOnly => "report_only",
-        SemiAuto => "semi_auto",
-        AutoExecution => "auto_execution",
+        OperatorApprovalRequired => "operator_approval_required",
+        PolicyAutomatic => "policy_automatic",
     }
 }
 
@@ -26,38 +26,60 @@ pg_enum! {
     }
 }
 
-impl QuantRuntimeMode {
-    /// Whether this mode may submit CLOB orders.
+impl EntryAuthorizationPolicy {
+    /// Whether an active policy may create an already-authorized intent.
     #[must_use]
-    pub const fn allows_order_submission(self) -> bool {
-        matches!(self, Self::SemiAuto | Self::AutoExecution)
+    pub const fn allows_policy_automatic(self) -> bool {
+        matches!(self, Self::PolicyAutomatic)
     }
 
-    /// Whether this mode may auto-create order intents without human approval.
-    #[must_use]
-    pub const fn allows_auto_execution(self) -> bool {
-        matches!(self, Self::AutoExecution)
-    }
-
-    /// Monotonic capability rank used to classify a transition as an upgrade
-    /// (more capability) or a downgrade (`ReportOnly` < `SemiAuto` < `AutoExecution`).
+    /// Monotonic authority rank used for preflight classification.
     #[must_use]
     pub const fn rank(self) -> u8 {
         match self {
-            Self::ReportOnly => 0,
-            Self::SemiAuto => 1,
-            Self::AutoExecution => 2,
+            Self::OperatorApprovalRequired => 0,
+            Self::PolicyAutomatic => 1,
         }
     }
 
-    /// Whether transitioning from this mode to `target` increases capability
-    /// (an upgrade requiring preflight).
-    ///
-    /// `self == target` is not an upgrade (handled as a no-op upstream).
-    /// Upgrades must pass mode preflight; downgrades (tightening) skip it.
+    /// Whether `target` grants more entry authority and therefore needs preflight.
     #[must_use]
     pub const fn is_upgrade_to(self, target: Self) -> bool {
         target.rank() > self.rank()
+    }
+}
+
+pg_enum! {
+    type_name = "qp_execution_authority_ceiling",
+    /// Maximum entry authority frozen on a recommendation or governance scope.
+    @derive(Default, schemars::JsonSchema, PartialOrd, Ord)
+    pub enum ExecutionAuthorityCeiling {
+        #[default]
+        AnalysisOnly => "analysis_only",
+        OperatorApproval => "operator_approval",
+        PolicyAutomatic => "policy_automatic",
+    }
+}
+
+impl ExecutionAuthorityCeiling {
+    #[must_use]
+    pub const fn allows_operator(self) -> bool {
+        matches!(self, Self::OperatorApproval | Self::PolicyAutomatic)
+    }
+
+    #[must_use]
+    pub const fn allows_policy(self) -> bool {
+        matches!(self, Self::PolicyAutomatic)
+    }
+}
+
+pg_enum! {
+    type_name = "qp_authorization_kind",
+    /// Immutable source from which an entry intent may receive authority.
+    @derive(schemars::JsonSchema)
+    pub enum AuthorizationKind {
+        OperatorApproval => "operator_approval",
+        ActivePolicy => "active_policy",
     }
 }
 
@@ -422,16 +444,14 @@ pg_enum! {
     @derive(Default, schemars::JsonSchema)
     pub enum OrderIntentStatus {
         #[default]
-        Draft => "draft",
-        PendingApproval => "pending_approval",
-        Approved => "approved",
-        ApprovedByPolicy => "approved_by_policy",
+        PendingAuthorization => "pending_authorization",
+        Authorized => "authorized",
         AdmissionPending => "admission_pending",
         AdmissionRejected => "admission_rejected",
         Submitted => "submitted",
         PartiallyFilled => "partially_filled",
         Filled => "filled",
-        Rejected => "rejected",
+        AuthorizationRejected => "authorization_rejected",
         Cancelled => "cancelled",
         Failed => "failed",
         Expired => "expired",
@@ -445,10 +465,7 @@ impl OrderIntentStatus {
     pub const fn is_pre_submission_active(self) -> bool {
         matches!(
             self,
-            Self::PendingApproval
-                | Self::Approved
-                | Self::ApprovedByPolicy
-                | Self::AdmissionPending
+            Self::PendingAuthorization | Self::Authorized | Self::AdmissionPending
         )
     }
 
@@ -457,9 +474,8 @@ impl OrderIntentStatus {
     pub const fn blocks_sibling_intent_creation(self) -> bool {
         matches!(
             self,
-            Self::PendingApproval
-                | Self::Approved
-                | Self::ApprovedByPolicy
+            Self::PendingAuthorization
+                | Self::Authorized
                 | Self::AdmissionPending
                 | Self::Submitted
                 | Self::PartiallyFilled
@@ -467,18 +483,16 @@ impl OrderIntentStatus {
     }
 
     /// Pre-submission statuses for invalidation cascades (SQL `IN` filters).
-    pub const PRE_SUBMISSION_ACTIVE: [Self; 4] = [
-        Self::PendingApproval,
-        Self::Approved,
-        Self::ApprovedByPolicy,
+    pub const PRE_SUBMISSION_ACTIVE: [Self; 3] = [
+        Self::PendingAuthorization,
+        Self::Authorized,
         Self::AdmissionPending,
     ];
 
     /// Statuses that block sibling intent creation (SQL `IN` filters).
-    pub const SIBLING_INTENT_BLOCKING: [Self; 6] = [
-        Self::PendingApproval,
-        Self::Approved,
-        Self::ApprovedByPolicy,
+    pub const SIBLING_INTENT_BLOCKING: [Self; 5] = [
+        Self::PendingAuthorization,
+        Self::Authorized,
         Self::AdmissionPending,
         Self::Submitted,
         Self::PartiallyFilled,
@@ -487,10 +501,9 @@ impl OrderIntentStatus {
     /// Open (capital-holding or in-flight) statuses used by the admission
     /// concurrency cap (`#21` `MaxOpenIntentsCheck`): reserved-but-unsubmitted
     /// intents plus those in flight at the venue.
-    pub const OPEN: [Self; 6] = [
-        Self::PendingApproval,
-        Self::Approved,
-        Self::ApprovedByPolicy,
+    pub const OPEN: [Self; 5] = [
+        Self::PendingAuthorization,
+        Self::Authorized,
         Self::AdmissionPending,
         Self::Submitted,
         Self::PartiallyFilled,
@@ -499,7 +512,7 @@ impl OrderIntentStatus {
     /// Terminal intent statuses with no venue fill.
     pub const UNFILLED_TERMINAL: [Self; 6] = [
         Self::AdmissionRejected,
-        Self::Rejected,
+        Self::AuthorizationRejected,
         Self::Cancelled,
         Self::Failed,
         Self::Expired,
@@ -515,26 +528,12 @@ impl OrderIntentStatus {
         matches!(
             self,
             Self::AdmissionRejected
-                | Self::Rejected
+                | Self::AuthorizationRejected
                 | Self::Cancelled
                 | Self::Failed
                 | Self::Expired
                 | Self::Invalidated
         )
-    }
-}
-
-pg_enum! {
-    type_name = "qp_approval_status",
-    /// Human or policy approval state attached to an order intent.
-    @derive(Default, schemars::JsonSchema)
-    pub enum ApprovalStatus {
-        #[default]
-        NotRequired => "not_required",
-        Pending => "pending",
-        Approved => "approved",
-        Rejected => "rejected",
-        Expired => "expired",
     }
 }
 
@@ -1197,7 +1196,7 @@ pg_enum! {
     type_name = "qp_execution_attempt_terminal_state",
     /// Fill state after a real execution attempt reaches terminal venue truth.
     ///
-    /// `ReportOnly` and recommendations never submitted to the venue have no
+    /// Recommendations never submitted to the venue have no
     /// execution-outcome row; they are deliberately not represented as zero fill.
     pub enum ExecutionAttemptTerminalState {
         Unfilled => "unfilled",
@@ -1485,7 +1484,6 @@ wire_enum! {
         RecommendationNotPublished => "recommendation_not_published",
         NonPrimaryReport => "non_primary_report",
         OutsideFrozenWindow => "outside_frozen_window",
-        ReportOnlyNoExecutionAuthority => "report_only_no_execution_authority",
         ExecutionNotAttempted => "execution_not_attempted",
     }
 }
@@ -1538,13 +1536,11 @@ wire_enum! {
 }
 
 wire_enum! {
-    /// Why a recommendation is ineligible for execution in a given mode.
+    /// Why a recommendation cannot receive its maximum execution authority.
     @derive(Default, schemars::JsonSchema)
     pub enum IneligibilityReason {
-        /// The runtime mode is report-only.
+        /// The report-level policy-automatic order-count or USD cap was exhausted.
         #[default]
-        ReportOnlyMode => "report_only_mode",
-        /// The report-level order-count or USD automation cap was exhausted.
         AutomationCapExceeded => "automation_cap_exceeded",
     }
 }
@@ -1756,10 +1752,6 @@ mod tests {
                 "outside_frozen_window",
             ),
             (
-                CohortExclusionReason::ReportOnlyNoExecutionAuthority,
-                "report_only_no_execution_authority",
-            ),
-            (
                 CohortExclusionReason::ExecutionNotAttempted,
                 "execution_not_attempted",
             ),
@@ -1768,9 +1760,6 @@ mod tests {
                 CohortExclusionReason::RecommendationNotPublished => "recommendation_not_published",
                 CohortExclusionReason::NonPrimaryReport => "non_primary_report",
                 CohortExclusionReason::OutsideFrozenWindow => "outside_frozen_window",
-                CohortExclusionReason::ReportOnlyNoExecutionAuthority => {
-                    "report_only_no_execution_authority"
-                }
                 CohortExclusionReason::ExecutionNotAttempted => "execution_not_attempted",
             };
             assert_eq!(wire, exhaustive_wire);
@@ -1848,16 +1837,14 @@ mod tests {
     #[test]
     fn order_intent_status_arrays() {
         for status in [
-            OrderIntentStatus::Draft,
-            OrderIntentStatus::PendingApproval,
-            OrderIntentStatus::Approved,
-            OrderIntentStatus::ApprovedByPolicy,
+            OrderIntentStatus::PendingAuthorization,
+            OrderIntentStatus::Authorized,
             OrderIntentStatus::AdmissionPending,
             OrderIntentStatus::AdmissionRejected,
             OrderIntentStatus::Submitted,
             OrderIntentStatus::PartiallyFilled,
             OrderIntentStatus::Filled,
-            OrderIntentStatus::Rejected,
+            OrderIntentStatus::AuthorizationRejected,
             OrderIntentStatus::Cancelled,
             OrderIntentStatus::Failed,
             OrderIntentStatus::Expired,

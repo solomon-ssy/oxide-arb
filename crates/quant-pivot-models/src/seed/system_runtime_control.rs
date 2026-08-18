@@ -8,7 +8,8 @@ use sea_orm::{ActiveValue::Set, DatabaseTransaction, DbErr, EntityTrait, sea_que
 use crate::{
     entities::system_runtime_control::{ActiveModel, Column, Entity},
     enums::{
-        execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
+        execution::KillSwitchState, quant::EntryAuthorizationPolicy,
+        settlement::SettlementWritePolicy,
     },
     seed::{SeedArtifact, SeedConflictPolicy, SeedContext, SeedDependency, SeedSpec},
 };
@@ -33,7 +34,7 @@ pub async fn load(db: &DatabaseTransaction, _ctx: &mut SeedContext) -> Result<u6
     let now = Utc::now();
     Entity::insert(ActiveModel {
         id: Set(SINGLETON_ID),
-        quant_runtime_mode: Set(QuantRuntimeMode::ReportOnly),
+        entry_authorization_policy: Set(EntryAuthorizationPolicy::OperatorApprovalRequired),
         settlement_write_policy: Set(SettlementWritePolicy::Disabled),
         kill_switch_state: Set(KillSwitchState::Closed),
         kill_switch_requires_ack: Set(false),

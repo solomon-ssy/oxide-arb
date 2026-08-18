@@ -34,6 +34,8 @@ macro_rules! run_large_scenarios {
 mod access_control;
 #[path = "repository/accounting/account_capital.rs"]
 mod account_capital;
+#[path = "repository/execution/account_recovery.rs"]
+mod account_recovery;
 #[path = "repository/research/backtest_path_set.rs"]
 mod backtest_path_set;
 #[path = "repository/research/backtest_report.rs"]
@@ -228,6 +230,15 @@ async fn run_execution_scenarios() -> Result<(), String> {
         execution_submission::stale_parity_blocks_ahead,
     );
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_recovery_contracts() {
+    Box::pin(with_postgres_suite(async {
+        account_recovery::unknown_execution_is_idempotent().await;
+    }))
+    .await
+    .expect("start account-recovery PostgreSQL suite");
 }
 
 async fn run_position_scenarios() -> Result<(), String> {

@@ -559,14 +559,14 @@ async fn load_report_lifecycle(
             let page = state
                 .order_intents
                 .list(OrderIntentListQuery {
-                    status: Some(OrderIntentStatus::PendingApproval),
+                    status: Some(OrderIntentStatus::PendingAuthorization),
                     from: Some(from),
                     to: Some(to),
                     page: PageRequest::new(1, 1),
                     ..OrderIntentListQuery::default()
                 })
                 .await?;
-            counts.insert("intent_pending_approval".to_owned(), page.total);
+            counts.insert("intent_pending_authorization".to_owned(), page.total);
         }
         if permissions.allows(DashboardPermission::ReadExecutionOrders) {
             for state_filter in [
@@ -727,7 +727,7 @@ async fn load_execution_runtime(
             state
                 .order_intents
                 .list(OrderIntentListQuery {
-                    status: Some(OrderIntentStatus::PendingApproval),
+                    status: Some(OrderIntentStatus::PendingAuthorization),
                     from: Some(from),
                     to: Some(to),
                     page: PageRequest::new(1, 1),

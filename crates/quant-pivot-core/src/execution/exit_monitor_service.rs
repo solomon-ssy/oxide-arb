@@ -22,7 +22,7 @@ use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     domain::{
         market::book::BookSnapshot,
-        quant::{OrderIntentInfo, PositionInfo, RecommendationInfo},
+        quant::{OrderIntentInfo, RecommendationInfo, StrategyPositionLot},
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
@@ -32,8 +32,8 @@ use quant_pivot_models::{
     types::{ExitReinferenceObservation, OrderIntentId, Price, RecommendationId},
 };
 use quant_pivot_repository::traits::{
-    ExecutionSubmissionRepository, OrderIntentRepository, PositionRepository,
-    RecommendationRepository,
+    ExecutionSubmissionRepository, OrderIntentRepository, RecommendationRepository,
+    StrategyPositionLotRepository,
 };
 
 use crate::{
@@ -59,7 +59,7 @@ const SCAN_BATCH_GUARD: usize = 4_096;
 
 /// Collaborators for [`ExitMonitorService`].
 pub struct ExitMonitorServiceDeps {
-    pub positions: Arc<dyn PositionRepository>,
+    pub positions: Arc<dyn StrategyPositionLotRepository>,
     pub intents: Arc<dyn OrderIntentRepository>,
     pub recommendations: Arc<dyn RecommendationRepository>,
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
@@ -103,7 +103,7 @@ impl ExitMonitorService {
         let recheck =
             Duration::seconds(i64::try_from(policy.signal_recheck_secs).unwrap_or(i64::MAX));
 
-        let lots: Vec<PositionInfo> = self
+        let lots: Vec<StrategyPositionLot> = self
             .deps
             .positions
             .find_open_lots()
@@ -114,7 +114,10 @@ impl ExitMonitorService {
         let (intents, recommendations) = self.preload_lot_context(&lots).await?;
 
         for lot in &lots {
-            let Some(intent) = intents.get(&lot.order_intent_id) else {
+            let Some(intent_id) = lot.order_intent_id else {
+                continue;
+            };
+            let Some(intent) = intents.get(&intent_id) else {
                 continue;
             };
             let recommendation = recommendations.get(&intent.recommendation_id);
@@ -125,7 +128,7 @@ impl ExitMonitorService {
                 tracing::warn!(
                     %error,
                     token_id = %lot.token_id,
-                    order_intent_id = %lot.order_intent_id,
+                    strategy_position_lot_id = %lot.strategy_position_lot_id,
                     "exit-monitor evaluation failed for lot"
                 );
             }
@@ -140,12 +143,13 @@ impl ExitMonitorService {
     /// Batch-load intents + recommendations for the sweep's open lots.
     async fn preload_lot_context(
         &self,
-        lots: &[PositionInfo],
+        lots: &[StrategyPositionLot],
     ) -> QuantResult<(
         HashMap<OrderIntentId, OrderIntentInfo>,
         HashMap<RecommendationId, RecommendationInfo>,
     )> {
-        let intent_ids: Vec<OrderIntentId> = lots.iter().map(|lot| lot.order_intent_id).collect();
+        let intent_ids: Vec<OrderIntentId> =
+            lots.iter().filter_map(|lot| lot.order_intent_id).collect();
         let intents = self.deps.intents.find_by_ids(&intent_ids).await?;
         let intent_map: HashMap<OrderIntentId, OrderIntentInfo> = intents
             .into_iter()
@@ -172,7 +176,7 @@ impl ExitMonitorService {
 
     async fn evaluate_lot(
         &self,
-        lot: &PositionInfo,
+        lot: &StrategyPositionLot,
         intent: &OrderIntentInfo,
         recommendation: Option<&RecommendationInfo>,
         monitor_secs: u64,
@@ -344,7 +348,7 @@ impl ExitMonitorService {
 /// Inputs for rate-limited exit-signal re-inference on one lot.
 struct ExitSignalResolve<'a> {
     intent: &'a OrderIntentInfo,
-    lot: &'a PositionInfo,
+    lot: &'a StrategyPositionLot,
     mark_price: Option<Price>,
     book_fresh: bool,
     market_abnormal: bool,

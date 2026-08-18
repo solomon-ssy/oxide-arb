@@ -1192,13 +1192,37 @@ pub struct ExecutionOrderId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExecutionTradeRefId(Uuid);
 
-/// One immutable authenticated venue fill fact.
+/// One immutable authenticated CLOB trade observation.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ExecutionFillId(Uuid);
+pub struct ClobTradeObservationId(Uuid);
 
-/// One immutable fee-provenance fact attached to an execution fill.
+/// One finalized chain execution projected for a configured account.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ExecutionFeeMeasurementId(Uuid);
+pub struct AccountChainExecutionId(Uuid);
+
+impl AccountChainExecutionId {
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x9e18_6b2b_71d6_48f4_a0c7_bac1_2f78_6c4d);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
+/// One unified account recovery incident.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AccountRecoveryIncidentId(Uuid);
+
+/// One durable per-exchange account pause submission.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AccountPauseSubmissionId(Uuid);
+
+impl AccountPauseSubmissionId {
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x62a9_4d77_63bd_4c88_8daf_ae1f_552c_3e10);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
 
 /// One immutable venue incentive lifecycle event.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1237,7 +1261,7 @@ pub struct SettlementRedeemId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SettlementChainSubmissionId(Uuid);
 
-/// One immutable `SemiAuto` settlement authorization attempt.
+/// One immutable operator settlement-authorization attempt.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SettlementAuthorizationId(Uuid);
 
@@ -1263,7 +1287,7 @@ pub struct SettlementRedeemLotId(Uuid);
 /// key); the surrogate id keeps the entity addressable independent of the
 /// originating intent and lets the per-token aggregate stay a query view.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PositionId(Uuid);
+pub struct StrategyPositionLotId(Uuid);
 
 /// Execution-order reconciliation record identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]

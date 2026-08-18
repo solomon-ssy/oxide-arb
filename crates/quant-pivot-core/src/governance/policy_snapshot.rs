@@ -54,8 +54,8 @@ impl TryFrom<&DecisionPolicySnapshotInfo> for VerifiedPolicySnapshotBinding {
             && revisions.model_routing.as_ref() == Some(&info.model_routing_revision_id)
             && revisions.report_schedule.as_ref() == Some(&info.report_schedule_revision_id)
             && revisions.operations_policy.as_ref() == Some(&info.operations_policy_revision_id)
-            && revisions.execution_automation_policy.as_ref()
-                == Some(&info.execution_automation_policy_revision_id);
+            && revisions.execution_authorization_policy.as_ref()
+                == Some(&info.execution_authorization_policy_revision_id);
         if !revisions_match {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: "policy snapshot revision projections differ from the persisted row"

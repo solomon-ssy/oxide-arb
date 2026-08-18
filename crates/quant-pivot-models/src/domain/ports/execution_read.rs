@@ -12,9 +12,12 @@ use crate::{
             },
         },
         pagination::Paginated,
-        quant::{ExecutionOrderInfo, PositionInfo, ReconciliationInfo},
+        quant::{ExecutionOrderInfo, ReconciliationInfo, StrategyPositionLot},
     },
-    types::{ExecutionOrderId, OrderIntentId, PositionId, ReconciliationId, SettlementRedeemId},
+    types::{
+        ExecutionOrderId, OrderIntentId, ReconciliationId, SettlementRedeemId,
+        StrategyPositionLotId,
+    },
 };
 
 #[async_trait]
@@ -34,12 +37,15 @@ pub trait ExecutionReadPort: Send + Sync {
         query: PositionListQuery,
     ) -> QuantResult<Paginated<PositionSummary>>;
 
-    async fn get_position(&self, id: &PositionId) -> QuantResult<Option<PositionSummary>>;
+    async fn get_position(
+        &self,
+        id: &StrategyPositionLotId,
+    ) -> QuantResult<Option<PositionSummary>>;
 
     async fn get_position_by_intent(
         &self,
         intent_id: &OrderIntentId,
-    ) -> QuantResult<Option<PositionInfo>>;
+    ) -> QuantResult<Option<StrategyPositionLot>>;
 
     async fn list_reconciliations(
         &self,

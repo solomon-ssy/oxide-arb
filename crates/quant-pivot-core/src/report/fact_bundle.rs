@@ -50,7 +50,6 @@ pub async fn prepare_report_fact_bundle(
         notification: ReportFactNotificationV2 {
             kind: composed.notification.kind,
             status: composed.notification.status.clone(),
-            runtime_mode: composed.notification.runtime_mode,
             published_count: composed.notification.published_count,
             total_hard_reserved_cash_usd: composed.notification.total_hard_reserved_cash_usd,
             top3: composed

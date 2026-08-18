@@ -10,16 +10,6 @@ pg_enum! {
 }
 
 pg_enum! {
-    type_name = "qp_fee_measurement_stage",
-    /// Monotone provenance tier for one execution-fill fee measurement.
-    pub enum FeeMeasurementStage {
-        PreparedExpected => "prepared_expected",
-        AuthenticatedTradeDerived => "authenticated_trade_derived",
-        OnChainSettled => "on_chain_settled",
-    }
-}
-
-pg_enum! {
     type_name = "qp_venue_incentive_kind",
     @derive(PartialOrd, Ord, schemars::JsonSchema)
     pub enum VenueIncentiveKind {

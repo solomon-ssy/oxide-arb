@@ -289,28 +289,6 @@ const PROMOTION_PERMIT_CHECK: &str = r"CHECK (
     AND non_route_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text
     AND serving_constraints_hash ~ '^blake3:[0-9a-f]{64}$'::text
     AND preflight_hash ~ '^blake3:[0-9a-f]{64}$'::text
-    AND (
-        allowed_runtime_modes = ARRAY['report_only'::qp_quant_runtime_mode]
-        OR allowed_runtime_modes = ARRAY['semi_auto'::qp_quant_runtime_mode]
-        OR allowed_runtime_modes = ARRAY['auto_execution'::qp_quant_runtime_mode]
-        OR allowed_runtime_modes = ARRAY[
-            'report_only'::qp_quant_runtime_mode,
-            'semi_auto'::qp_quant_runtime_mode
-        ]
-        OR allowed_runtime_modes = ARRAY[
-            'report_only'::qp_quant_runtime_mode,
-            'auto_execution'::qp_quant_runtime_mode
-        ]
-        OR allowed_runtime_modes = ARRAY[
-            'semi_auto'::qp_quant_runtime_mode,
-            'auto_execution'::qp_quant_runtime_mode
-        ]
-        OR allowed_runtime_modes = ARRAY[
-            'report_only'::qp_quant_runtime_mode,
-            'semi_auto'::qp_quant_runtime_mode,
-            'auto_execution'::qp_quant_runtime_mode
-        ]
-    )
     AND octet_length(issued_by_username) >= 1
     AND octet_length(issued_by_username) <= 256
     AND issued_by_username = btrim(issued_by_username)
@@ -1247,10 +1225,28 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK ((finished_at <= created_at) AND ((diagnostic_code IS NULL) OR (char_length(btrim(diagnostic_code)) BETWEEN 1 AND 128)))",
     },
     ConstraintSpec {
+        name: "ck_quant_order_intent_authorization_lifecycle",
+        table: "quant_order_intent",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((authorization_kind IS NULL) = (authorization_evidence IS NULL)) AND ((status NOT IN ('pending_authorization'::qp_order_intent_status, 'authorization_rejected'::qp_order_intent_status)) OR (authorization_evidence IS NULL)) AND ((status NOT IN ('authorized'::qp_order_intent_status, 'admission_pending'::qp_order_intent_status, 'admission_rejected'::qp_order_intent_status, 'submitted'::qp_order_intent_status, 'partially_filled'::qp_order_intent_status, 'filled'::qp_order_intent_status, 'failed'::qp_order_intent_status)) OR (authorization_evidence IS NOT NULL)))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_order_intent_operator_evidence",
+        table: "quant_order_intent",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((authorization_kind IS DISTINCT FROM 'operator_approval'::qp_authorization_kind) OR ((jsonb_typeof(authorization_evidence) = 'object'::text) AND (authorization_evidence ->> 'kind' = 'operator_approval'::text) AND ((authorization_evidence ->> 'authorized_at')::timestamp with time zone < expires_at) AND (authorization_evidence ?& ARRAY['kind'::text, 'operator_id'::text, 'reason'::text, 'authorized_at'::text]) AND ((authorization_evidence - ARRAY['kind'::text, 'operator_id'::text, 'reason'::text, 'authorized_at'::text]) = '{}'::jsonb) AND ((authorization_evidence ->> 'operator_id')::uuid IS NOT NULL) AND (octet_length(authorization_evidence ->> 'reason') >= 1) AND (octet_length(authorization_evidence ->> 'reason') <= 2048) AND (authorization_evidence ->> 'reason' = btrim(authorization_evidence ->> 'reason')) AND (authorization_evidence ->> 'reason' !~ '[[:cntrl:]]'::text)))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_order_intent_policy_evidence",
+        table: "quant_order_intent",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((authorization_kind IS DISTINCT FROM 'active_policy'::qp_authorization_kind) OR ((jsonb_typeof(authorization_evidence) = 'object'::text) AND (authorization_evidence ->> 'kind' = 'active_policy'::text) AND ((authorization_evidence ->> 'authorized_at')::timestamp with time zone < expires_at) AND (authorization_evidence ?& ARRAY['kind'::text, 'decision_policy_snapshot_id'::text, 'policy_hash'::text, 'authorized_at'::text]) AND ((authorization_evidence - ARRAY['kind'::text, 'decision_policy_snapshot_id'::text, 'policy_hash'::text, 'authorized_at'::text]) = '{}'::jsonb) AND ((authorization_evidence ->> 'decision_policy_snapshot_id')::uuid = decision_policy_snapshot_id) AND (authorization_evidence ->> 'policy_hash' ~ '^blake3:[0-9a-f]{64}$'::text)))",
+    },
+    ConstraintSpec {
         name: "uq_quant_order_intent_execution_outcome_lineage",
         table: "quant_order_intent",
         kind: ConstraintKind::Unique,
-        definition: "UNIQUE (order_intent_id, recommendation_id, execution_account_id, runtime_mode)",
+        definition: "UNIQUE (order_intent_id, recommendation_id, execution_account_id)",
     },
     ConstraintSpec {
         name: "uq_quant_execution_order_execution_outcome_lineage",
@@ -1265,10 +1261,10 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "UNIQUE (reconciliation_id, execution_order_id, order_intent_id)",
     },
     ConstraintSpec {
-        name: "uq_quant_position_execution_outcome_lineage",
-        table: "quant_position",
+        name: "uq_quant_strategy_position_lot_execution_outcome_lineage",
+        table: "quant_strategy_position_lot",
         kind: ConstraintKind::Unique,
-        definition: "UNIQUE (position_id, order_intent_id, execution_account_id, market_id, token_id)",
+        definition: "UNIQUE (strategy_position_lot_id, order_intent_id, execution_account_id, market_id, token_id)",
     },
     ConstraintSpec {
         name: "uq_quant_execution_attempt_outcome_entry_order",
@@ -1286,7 +1282,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "uq_quant_execution_attempt_outcome_position",
         table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::Unique,
-        definition: "UNIQUE (position_id)",
+        definition: "UNIQUE (strategy_position_lot_id)",
     },
     ConstraintSpec {
         name: "uq_quant_execution_attempt_outcome_hash",
@@ -1304,7 +1300,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "fk_quant_execution_attempt_outcome_intent_lineage",
         table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::ForeignKey,
-        definition: "FOREIGN KEY (order_intent_id, recommendation_id, execution_account_id, runtime_mode) REFERENCES public.quant_order_intent(order_intent_id, recommendation_id, execution_account_id, runtime_mode) ON UPDATE NO ACTION ON DELETE NO ACTION",
+        definition: "FOREIGN KEY (order_intent_id, recommendation_id, execution_account_id) REFERENCES public.quant_order_intent(order_intent_id, recommendation_id, execution_account_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
         name: "fk_quant_execution_attempt_outcome_entry_order_lineage",
@@ -1322,13 +1318,13 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "fk_quant_execution_attempt_outcome_position_lineage",
         table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::ForeignKey,
-        definition: "FOREIGN KEY (position_id, order_intent_id, execution_account_id, market_id, token_id) REFERENCES public.quant_position(position_id, order_intent_id, execution_account_id, market_id, token_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+        definition: "FOREIGN KEY (strategy_position_lot_id, order_intent_id, execution_account_id, market_id, token_id) REFERENCES public.quant_strategy_position_lot(strategy_position_lot_id, order_intent_id, execution_account_id, market_id, token_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
         name: "ck_quant_execution_attempt_outcome_contract",
         table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((char_length(market_id) > 0) AND (char_length(token_id) > 0) AND (runtime_mode = ANY (ARRAY['semi_auto'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode])) AND (requested_shares > (0)::numeric) AND (filled_shares >= (0)::numeric) AND (filled_shares <= requested_shares) AND ((entry_avg_price IS NULL) OR ((entry_avg_price >= (0)::numeric) AND (entry_avg_price <= (1)::numeric))) AND ((exit_avg_price IS NULL) OR ((exit_avg_price >= (0)::numeric) AND (exit_avg_price <= (1)::numeric))) AND ((entry_fee_usd IS NULL) OR (entry_fee_usd >= (0)::numeric)) AND ((exit_fee_usd IS NULL) OR (exit_fee_usd >= (0)::numeric)) AND ((settlement_payout_usd IS NULL) OR (settlement_payout_usd >= (0)::numeric)) AND (terminal_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (execution_fact_schema_version > 0) AND (source_checkpoint_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (execution_fact_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (outcome_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((terminal_state = 'unfilled'::qp_execution_attempt_terminal_state) AND (filled_shares = (0)::numeric) AND (no_fill_reason IS NOT NULL) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state])) AND (position_id IS NULL) AND (entry_avg_price IS NULL) AND (entry_filled_at IS NULL) AND (position_terminal_state IS NULL) AND (exit_reason IS NULL) AND (exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL) AND (settlement_payout_usd IS NULL) AND (realized_pnl_usd IS NULL)) OR ((terminal_state = ANY (ARRAY['partially_filled'::qp_execution_attempt_terminal_state, 'fully_filled'::qp_execution_attempt_terminal_state])) AND (no_fill_reason IS NULL) AND (position_id IS NOT NULL) AND (entry_avg_price IS NOT NULL) AND (entry_filled_at IS NOT NULL) AND (entry_filled_at <= terminal_at) AND (position_terminal_state = ANY (ARRAY['closed'::qp_position_ledger_state, 'settled'::qp_position_ledger_state])) AND (realized_pnl_usd IS NOT NULL) AND (((terminal_state = 'partially_filled'::qp_execution_attempt_terminal_state) AND (filled_shares > (0)::numeric) AND (filled_shares < requested_shares) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state]))) OR ((terminal_state = 'fully_filled'::qp_execution_attempt_terminal_state) AND (filled_shares = requested_shares) AND (entry_order_state = 'filled'::qp_execution_order_state))) AND (((position_terminal_state = 'closed'::qp_position_ledger_state) AND (exit_reason IS NOT NULL) AND (exit_reason <> 'resolution_redeem'::qp_exit_reason) AND (exit_filled_shares = filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at = terminal_at) AND (settlement_payout_usd IS NULL)) OR ((position_terminal_state = 'settled'::qp_position_ledger_state) AND (exit_reason = 'resolution_redeem'::qp_exit_reason) AND (settlement_payout_usd IS NOT NULL) AND (((exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL)) OR ((exit_filled_shares > (0)::numeric) AND (exit_filled_shares < filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at IS NOT NULL) AND (exit_at <= terminal_at)))))))))",
+        definition: "CHECK (((char_length(market_id) > 0) AND (char_length(token_id) > 0) AND (requested_shares > (0)::numeric) AND (filled_shares >= (0)::numeric) AND (filled_shares <= requested_shares) AND ((entry_avg_price IS NULL) OR ((entry_avg_price >= (0)::numeric) AND (entry_avg_price <= (1)::numeric))) AND ((exit_avg_price IS NULL) OR ((exit_avg_price >= (0)::numeric) AND (exit_avg_price <= (1)::numeric))) AND ((entry_fee_usd IS NULL) OR (entry_fee_usd >= (0)::numeric)) AND ((exit_fee_usd IS NULL) OR (exit_fee_usd >= (0)::numeric)) AND ((settlement_payout_usd IS NULL) OR (settlement_payout_usd >= (0)::numeric)) AND (terminal_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (execution_fact_schema_version > 0) AND (source_checkpoint_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (execution_fact_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (outcome_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((terminal_state = 'unfilled'::qp_execution_attempt_terminal_state) AND (filled_shares = (0)::numeric) AND (no_fill_reason IS NOT NULL) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state])) AND (strategy_position_lot_id IS NULL) AND (entry_avg_price IS NULL) AND (entry_filled_at IS NULL) AND (position_terminal_state IS NULL) AND (exit_reason IS NULL) AND (exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL) AND (settlement_payout_usd IS NULL) AND (realized_pnl_usd IS NULL)) OR ((terminal_state = ANY (ARRAY['partially_filled'::qp_execution_attempt_terminal_state, 'fully_filled'::qp_execution_attempt_terminal_state])) AND (no_fill_reason IS NULL) AND (strategy_position_lot_id IS NOT NULL) AND (entry_avg_price IS NOT NULL) AND (entry_filled_at IS NOT NULL) AND (entry_filled_at <= terminal_at) AND (position_terminal_state = ANY (ARRAY['closed'::qp_position_ledger_state, 'settled'::qp_position_ledger_state])) AND (realized_pnl_usd IS NOT NULL) AND (((terminal_state = 'partially_filled'::qp_execution_attempt_terminal_state) AND (filled_shares > (0)::numeric) AND (filled_shares < requested_shares) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state]))) OR ((terminal_state = 'fully_filled'::qp_execution_attempt_terminal_state) AND (filled_shares = requested_shares) AND (entry_order_state = 'filled'::qp_execution_order_state))) AND (((position_terminal_state = 'closed'::qp_position_ledger_state) AND (exit_reason IS NOT NULL) AND (exit_reason <> 'resolution_redeem'::qp_exit_reason) AND (exit_filled_shares = filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at = terminal_at) AND (settlement_payout_usd IS NULL)) OR ((position_terminal_state = 'settled'::qp_position_ledger_state) AND (exit_reason = 'resolution_redeem'::qp_exit_reason) AND (settlement_payout_usd IS NOT NULL) AND (((exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL)) OR ((exit_filled_shares > (0)::numeric) AND (exit_filled_shares < filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at IS NOT NULL) AND (exit_at <= terminal_at)))))))))",
     },
     ConstraintSpec {
         name: "ck_quant_execution_attempt_task_contract",
@@ -1921,14 +1917,20 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "UNIQUE (order_intent_id, execution_account_id)",
     },
     ConstraintSpec {
-        name: "uq_quant_position_inventory_lineage",
-        table: "quant_position",
+        name: "uq_quant_strategy_position_lot_inventory_lineage",
+        table: "quant_strategy_position_lot",
         kind: ConstraintKind::Unique,
-        definition: "UNIQUE (position_id, order_intent_id, execution_account_id)",
+        definition: "UNIQUE (strategy_position_lot_id, order_intent_id, execution_account_id)",
     },
     ConstraintSpec {
-        name: "fk_quant_position_intent_account",
-        table: "quant_position",
+        name: "ck_quant_strategy_position_lot_origin",
+        table: "quant_strategy_position_lot",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((origin_kind = 'system_intent'::qp_strategy_position_origin_kind) AND (order_intent_id IS NOT NULL) AND (recovery_incident_id IS NULL)) OR ((origin_kind IN ('account_recovery_incident'::qp_strategy_position_origin_kind, 'opening_inventory'::qp_strategy_position_origin_kind)) AND (order_intent_id IS NULL) AND (recovery_incident_id IS NOT NULL))))",
+    },
+    ConstraintSpec {
+        name: "fk_quant_strategy_position_lot_intent_account",
+        table: "quant_strategy_position_lot",
         kind: ConstraintKind::ForeignKey,
         definition: "FOREIGN KEY (order_intent_id, execution_account_id) REFERENCES public.quant_order_intent(order_intent_id, execution_account_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
@@ -1960,7 +1962,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "fk_quant_settlement_inventory_position_lineage",
         table: "quant_settlement_inventory_lot",
         kind: ConstraintKind::ForeignKey,
-        definition: "FOREIGN KEY (position_id, order_intent_id, execution_account_id) REFERENCES public.quant_position(position_id, order_intent_id, execution_account_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+        definition: "FOREIGN KEY (strategy_position_lot_id, order_intent_id, execution_account_id) REFERENCES public.quant_strategy_position_lot(strategy_position_lot_id, order_intent_id, execution_account_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
         name: "fk_quant_settlement_inventory_intent_account",
@@ -2053,28 +2055,61 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK ((((purpose = 'redeem'::qp_settlement_submission_purpose) AND (call_target = target_adapter)) OR ((purpose = ANY (ARRAY['outcome_token_approval'::qp_settlement_submission_purpose, 'outcome_token_revocation'::qp_settlement_submission_purpose])) AND (kind <> 'externally_observed'::qp_settlement_submission_kind) AND (call_target = conditional_tokens))))",
     },
     ConstraintSpec {
+        name: "ck_quant_account_chain_execution_identity",
+        table: "quant_account_chain_execution",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((chain_id = 137) AND (protocol_version = 2) AND (block_number >= 0) AND (transaction_index >= 0) AND (log_index >= 0) AND (exchange_address ~ '^0x[0-9a-f]{40}$'::text) AND (block_hash ~ '^0x[0-9a-f]{64}$'::text) AND (transaction_hash ~ '^0x[0-9a-f]{64}$'::text) AND (maker_address ~ '^0x[0-9a-f]{40}$'::text) AND (taker_address ~ '^0x[0-9a-f]{40}$'::text) AND (char_length(order_id) >= 1) AND (char_length(order_id) <= 256) AND (char_length(order_token_id) >= 1) AND (maker_amount_raw ~ '^[0-9]+$'::text) AND (taker_amount_raw ~ '^[0-9]+$'::text) AND (source_event_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (availability_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_account_chain_execution_economics",
+        table: "quant_account_chain_execution",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((observed_at <= available_at) AND (account_side IS NOT NULL) AND (account_token_id IS NOT NULL) AND (shares > 0) AND (principal_usd >= 0) AND (exact_fee_usd >= 0))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_account_execution_association_owner",
+        table: "quant_account_execution_association",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((kind = 'system_order'::qp_account_execution_association_kind) AND (execution_order_id IS NOT NULL) AND (recovery_incident_id IS NULL)) OR ((kind IN ('recovery_incident'::qp_account_execution_association_kind, 'opening_inventory'::qp_account_execution_association_kind)) AND (execution_order_id IS NULL) AND (recovery_incident_id IS NOT NULL))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_account_pause_submission_contract",
+        table: "quant_account_pause_submission",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((exchange_address ~ '^0x[0-9a-f]{40}$'::text) AND (requested_block >= 0) AND (interval_blocks >= 0) AND (effective_block = requested_block + interval_blocks) AND (prepared_block_number >= 0) AND (prepared_block_hash ~ '^0x[0-9a-f]{64}$'::text) AND (calldata_hash ~ '^0x[0-9a-f]{64}$'::text) AND (deployment_digest ~ '^blake3:[0-9a-f]{64}$'::text) AND (octet_length(signed_envelope) > 0) AND (signed_envelope_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((kind = 'direct_eoa'::qp_settlement_submission_kind) AND (transaction_hash IS NOT NULL) AND (relayer_transaction_id IS NULL) AND (gas_limit IS NOT NULL)) OR ((kind = 'relayer'::qp_settlement_submission_kind) AND (transaction_hash IS NULL))) AND (((confirmation_block_number IS NULL) AND (confirmation_block_hash IS NULL) AND (confirmation_transaction_hash IS NULL) AND (confirmation_log_index IS NULL)) OR ((confirmation_block_number >= 0) AND (confirmation_block_hash ~ '^0x[0-9a-f]{64}$'::text) AND (confirmation_transaction_hash ~ '^0x[0-9a-f]{64}$'::text) AND (confirmation_log_index >= 0))) AND (((state = 'prepared'::qp_account_pause_submission_state) AND (dispatched_at IS NULL) AND (confirmed_at IS NULL) AND (confirmation_block_number IS NULL)) OR ((state IN ('dispatched'::qp_account_pause_submission_state, 'ambiguous'::qp_account_pause_submission_state)) AND (dispatched_at IS NOT NULL) AND (confirmed_at IS NULL) AND (confirmation_block_number IS NULL)) OR ((state = 'confirmed'::qp_account_pause_submission_state) AND (dispatched_at IS NOT NULL) AND (confirmed_at IS NOT NULL) AND (confirmation_block_number IS NOT NULL)) OR ((state = 'failed'::qp_account_pause_submission_state) AND (failure_detail IS NOT NULL))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_account_recovery_incident_lifecycle",
+        table: "quant_account_recovery_incident",
+        kind: ConstraintKind::Check,
+        definition: concat!(
+            "CHECK ((octet_length(reason) >= 1) AND (octet_length(reason) <= 2048) ",
+            "AND (reason = btrim(reason)) AND (reason !~ '[[:cntrl:]]'::text) ",
+            "AND (revision >= 0) AND (opened_at <= created_at) AND (created_at <= updated_at) ",
+            "AND (((status IN ('open'::qp_account_recovery_incident_status, 'reconciling'::qp_account_recovery_incident_status)) ",
+            "AND seal_hash IS NULL AND sealed_by IS NULL AND sealed_at IS NULL) ",
+            "OR ((status = 'sealed'::qp_account_recovery_incident_status) ",
+            "AND seal_hash ~ '^blake3:[0-9a-f]{64}$'::text AND sealed_by IS NOT NULL ",
+            "AND sealed_at IS NOT NULL AND opened_at <= sealed_at)))",
+        ),
+    },
+    ConstraintSpec {
         name: "ck_quant_execution_trade_ref_identity",
         table: "quant_execution_trade_ref",
         kind: ConstraintKind::Check,
         definition: "CHECK (((char_length(venue_trade_id) >= 1) AND (char_length(venue_trade_id) <= 256) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND ((trade_status IS NULL) OR (trade_status <> 'mined'::qp_venue_trade_status) OR (transaction_hash IS NOT NULL))))",
     },
     ConstraintSpec {
-        name: "ck_quant_execution_fill_economics",
-        table: "quant_execution_fill",
+        name: "ck_quant_clob_trade_observation_economics",
+        table: "quant_clob_trade_observation",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((char_length(venue_trade_id) >= 1) AND (char_length(venue_trade_id) <= 256) AND (venue_bucket_index >= 0) AND (char_length(venue_order_id) >= 1) AND (char_length(venue_order_id) <= 256) AND (shares > 0) AND (price > 0) AND (price <= 1) AND (principal_usd = round(shares * price, 28)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= matched_at))",
-    },
-    ConstraintSpec {
-        name: "ck_quant_execution_fee_measurement_evidence",
-        table: "quant_execution_fee_measurement",
-        kind: ConstraintKind::Check,
-        definition: "CHECK ((fee_usd >= 0) AND (char_length(source_identity) BETWEEN 1 AND 512) AND ((fee_rate_bps IS NULL) OR (fee_rate_bps >= 0)) AND ((exchange_address IS NULL) OR (exchange_address ~ '^0x[0-9a-f]{40}$'::text)) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= observed_at) AND (((stage = 'on_chain_settled'::qp_fee_measurement_stage) AND (chain_id > 0) AND (protocol_version = 2) AND (exchange_address IS NOT NULL) AND (transaction_hash IS NOT NULL) AND (log_index >= 0)) OR ((stage <> 'on_chain_settled'::qp_fee_measurement_stage) AND (chain_id IS NULL) AND (protocol_version IS NULL) AND (exchange_address IS NULL) AND (log_index IS NULL))))",
+        definition: "CHECK ((char_length(venue_trade_id) >= 1) AND (char_length(venue_trade_id) <= 256) AND (venue_bucket_index >= 0) AND (char_length(venue_order_id) >= 1) AND (char_length(venue_order_id) <= 256) AND (shares > 0) AND (price > 0) AND (price <= 1) AND (principal_usd = round(shares * price, 28)) AND (provisional_fee_usd >= 0) AND (provisional_fee_rate_bps >= 0) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= matched_at))",
     },
     ConstraintSpec {
         name: "ck_quant_venue_incentive_event_evidence",
         table: "quant_venue_incentive_event",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((amount_usd >= 0) AND (char_length(source_partition) BETWEEN 1 AND 512) AND (char_length(source_identity) BETWEEN 1 AND 600) AND ((source_terms_hash IS NULL) OR (source_terms_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= observed_at) AND (((stage = 'estimated_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NOT NULL) AND (market_id IS NOT NULL) AND (source_terms_hash IS NOT NULL)) OR ((stage = 'venue_reported_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (execution_fill_id IS NULL) AND (market_id IS NOT NULL) AND (source_terms_hash IS NULL)) OR ((stage = 'wallet_credited'::qp_venue_incentive_stage) AND (execution_fill_id IS NULL) AND (source_terms_hash IS NULL))))",
+        definition: "CHECK ((amount_usd >= 0) AND (char_length(source_partition) BETWEEN 1 AND 512) AND (char_length(source_identity) BETWEEN 1 AND 600) AND ((source_terms_hash IS NULL) OR (source_terms_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (available_at >= observed_at) AND (((stage = 'estimated_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (clob_trade_observation_id IS NOT NULL) AND (market_id IS NOT NULL) AND (source_terms_hash IS NOT NULL)) OR ((stage = 'venue_reported_accrual'::qp_venue_incentive_stage) AND (kind = 'maker_rebate'::qp_venue_incentive_kind) AND (clob_trade_observation_id IS NULL) AND (market_id IS NOT NULL) AND (source_terms_hash IS NULL)) OR ((stage = 'wallet_credited'::qp_venue_incentive_stage) AND (clob_trade_observation_id IS NULL) AND (source_terms_hash IS NULL))))",
     },
     ConstraintSpec {
         name: "ck_quant_venue_incentive_scan_result",
@@ -2778,7 +2813,6 @@ mod tests {
             "crypto_price_15m",
             "weather_forecast_24h",
             "expected_policy_generation > 0",
-            "allowed_runtime_modes =",
             "revoked_by_user_id IS NULL",
             "revoked_by_user_id IS NOT NULL",
             "revision = 0",
@@ -2803,11 +2837,9 @@ mod tests {
     }
 
     #[test]
-    fn permit_check_dump_stable() {
+    fn permit_uses_native_authority() {
         let permit = constraint("ck_quant_feedback_promotion_permit").definition;
         assert!(!permit.contains(" BETWEEN "));
-        assert!(!permit.contains("allowed_runtime_modes IN"));
-        assert_eq!(permit.matches("allowed_runtime_modes =").count(), 7);
     }
 
     #[test]

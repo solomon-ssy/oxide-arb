@@ -35,6 +35,7 @@ use self::SettlementAdapterWrite::redeemPositionsCall;
 use super::{
     contracts::VerifiedSettlementDeployment,
     typed::{IntoEvmUint, SettlementValueError},
+    wallet_call::PreparedWalletCall,
 };
 
 const POLYGON_CHAIN_ID: u64 = 137;
@@ -176,6 +177,32 @@ impl PreparedSettlementCall {
     #[must_use]
     pub const fn verified_block_hash(&self) -> &EvmBlockHash {
         &self.verified_block_hash
+    }
+}
+
+impl PreparedWalletCall for PreparedSettlementCall {
+    fn funder(&self) -> &EvmAddress {
+        self.funder()
+    }
+
+    fn call_target(&self) -> &EvmAddress {
+        self.call_target()
+    }
+
+    fn calldata(&self) -> &[u8] {
+        self.calldata()
+    }
+
+    fn target_adapter(&self) -> &EvmAddress {
+        self.target_adapter()
+    }
+
+    fn deployment_digest(&self) -> ContentHash {
+        self.deployment_digest()
+    }
+
+    fn calldata_hash(&self) -> &EvmCalldataHash {
+        self.calldata_hash()
     }
 }
 

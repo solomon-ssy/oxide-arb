@@ -28,7 +28,7 @@ use super::{DataBundle, InfraBundle, PgRepositories};
 use crate::{
     execution::ExitMonitorHealthHandle,
     governance::{
-        BiasTableApplicator, DefaultModePreflight, DefaultModeTransitionGate, ModePreflightDeps,
+        AuthorizationPreflightDeps, BiasTableApplicator, DefaultAuthorizationPreflight,
         PromotionPermitService, RuntimeControlsHandle, SystemCapabilityService,
         SystemStatusPublisher,
         execution_recovery::{ExecutionRecoveryCoordinator, ExecutionRecoveryHandle},
@@ -347,27 +347,27 @@ fn wire_operations_policys(deps: &OperationsPolicysDeps<'_>) -> OperationsPolicy
     let reconciliation_repo = deps.reconciliation_repo;
     let repos = &infra.repos;
     let execution_recovery_handle = ExecutionRecoveryHandle::new(
-        SystemStatus::bootstrap(runtime_controls.quant_runtime_mode()).execution_recovery,
+        SystemStatus::bootstrap(runtime_controls.entry_authorization_policy()).execution_recovery,
     );
     let exit_monitor_health = ExitMonitorHealthHandle::new();
-    let transition_gate = Arc::new(DefaultModeTransitionGate::new());
-    let preflight = Arc::new(DefaultModePreflight::new(ModePreflightDeps {
-        deploy: Arc::clone(deploy),
-        config_store: Arc::clone(runtime_config),
-        data_quality: Arc::clone(&deps.data.data_quality) as Arc<dyn DataQualityPort>,
-        model_registry: Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>,
-        shadow_comparison: Arc::clone(&repos.shadow_comparison)
-            as Arc<dyn ShadowComparisonRepository>,
-        reconciliation: Arc::clone(reconciliation_repo),
-        capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
-        runtime_controls: runtime_controls.clone(),
-        exit_monitor_health: exit_monitor_health.clone(),
-    }));
+    let preflight = Arc::new(DefaultAuthorizationPreflight::new(
+        AuthorizationPreflightDeps {
+            deploy: Arc::clone(deploy),
+            config_store: Arc::clone(runtime_config),
+            data_quality: Arc::clone(&deps.data.data_quality) as Arc<dyn DataQualityPort>,
+            model_registry: Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>,
+            shadow_comparison: Arc::clone(&repos.shadow_comparison)
+                as Arc<dyn ShadowComparisonRepository>,
+            reconciliation: Arc::clone(reconciliation_repo),
+            capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
+            runtime_controls: runtime_controls.clone(),
+            exit_monitor_health: exit_monitor_health.clone(),
+        },
+    ));
     let runtime_control = Arc::new(QuantRuntimeControl::new(QuantRuntimeControlDeps {
         controls: runtime_controls.clone(),
         health_checker: Arc::clone(health_checker),
         repository: Arc::clone(&repos.runtime_control) as Arc<dyn RuntimeControlRepository>,
-        transition_gate,
         preflight,
         metrics: Arc::clone(metrics),
         status_publisher: Arc::clone(status_publisher),

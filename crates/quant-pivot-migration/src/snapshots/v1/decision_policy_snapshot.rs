@@ -19,7 +19,7 @@ pub struct Model {
     pub model_routing_revision_id: Uuid,
     pub report_schedule_revision_id: Uuid,
     pub operations_policy_revision_id: Uuid,
-    pub execution_automation_policy_revision_id: Uuid,
+    pub execution_authorization_policy_revision_id: Uuid,
     pub source: QpDecisionPolicySnapshotSource,
     pub created_by_kind: QpPolicyActorKind,
     pub created_by_user_id: Option<Uuid>,

@@ -599,9 +599,9 @@ impl PgModelRouteShadowBindingRepository {
                 document.revisions.operations_policy,
                 ConfigResourceKind::OperationsPolicy,
             )?,
-            execution_automation_policy_revision_id: required(
-                document.revisions.execution_automation_policy,
-                ConfigResourceKind::ExecutionAutomationPolicy,
+            execution_authorization_policy_revision_id: required(
+                document.revisions.execution_authorization_policy,
+                ConfigResourceKind::ExecutionAuthorizationPolicy,
             )?,
             snapshot: document,
             source: DecisionPolicySnapshotSource::Activation,

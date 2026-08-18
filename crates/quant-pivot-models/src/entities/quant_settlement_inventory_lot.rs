@@ -3,12 +3,15 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::{quant_execution_account, quant_order_intent, quant_position, quant_settlement_redeem};
+use super::{
+    quant_execution_account, quant_order_intent, quant_settlement_redeem,
+    quant_strategy_position_lot,
+};
 use crate::{
     enums::quant::{ExitSettlementMode, OutcomeSide, RedeemPolicy},
     types::{
-        ContentHash, ExecutionAccountId, OrderIntentId, PositionId, SettlementInventoryLotId,
-        SettlementRedeemId, Shares, TokenId, Usd,
+        ContentHash, ExecutionAccountId, OrderIntentId, SettlementInventoryLotId,
+        SettlementRedeemId, Shares, StrategyPositionLotId, TokenId, Usd,
     },
 };
 
@@ -22,7 +25,7 @@ pub struct Model {
     pub inventory_digest: ContentHash,
     pub contributor_lots_digest: ContentHash,
     pub execution_account_id: ExecutionAccountId,
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub side: OutcomeSide,
@@ -51,10 +54,10 @@ pub struct Model {
     #[sea_orm(
         belongs_to,
         relation_enum = "Position",
-        from = "position_id",
-        to = "position_id"
+        from = "strategy_position_lot_id",
+        to = "strategy_position_lot_id"
     )]
-    pub position: BelongsTo<quant_position::Entity>,
+    pub position: BelongsTo<quant_strategy_position_lot::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "OrderIntent",

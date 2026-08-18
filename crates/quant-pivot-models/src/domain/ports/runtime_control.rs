@@ -13,15 +13,16 @@ use crate::{
         api::{ReadinessReport, SystemCapabilities},
         data_plane::DataQualitySnapshot,
         governance::{
+            entry_authorization::AuthorizationPreflightReport,
             kill_switch::KillSwitchView,
-            mode::PreflightReport,
             runtime_control::RuntimeControlSnapshot,
             system::{HealthReport, SystemStatus},
         },
         market::book::BookSnapshot,
     },
     enums::{
-        execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
+        execution::KillSwitchState, quant::EntryAuthorizationPolicy,
+        settlement::SettlementWritePolicy,
     },
     runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot, PolicyApplyReadiness},
     types::TokenId,
@@ -59,31 +60,31 @@ pub trait SystemCapabilityPort: Send + Sync {
     async fn capabilities(&self, status: &SystemStatus) -> QuantResult<SystemCapabilities>;
 }
 
-/// Outcome of a successful governed quant runtime mode transition.
+/// Outcome of a successful governed entry-authorization transition.
 #[derive(Debug, Clone, Serialize)]
-pub struct QuantModeTransitionReport {
-    pub from: QuantRuntimeMode,
-    pub to: QuantRuntimeMode,
+pub struct EntryAuthorizationTransitionReport {
+    pub from: EntryAuthorizationPolicy,
+    pub to: EntryAuthorizationPolicy,
     /// Preflight evidence for an upgrade transition; `None` for no-ops and
     /// downgrades (which skip business preflight).
-    pub preflight: Option<PreflightReport>,
+    pub preflight: Option<AuthorizationPreflightReport>,
 }
 
 #[async_trait]
 pub trait RuntimeControlPort: Send + Sync {
     fn snapshot(&self) -> RuntimeControlSnapshot;
 
-    /// Run the transition gate + (upgrade-only) preflight and persist the new
-    /// mode fail-closed. Forbidden edges / failed preflight return a typed
+    /// Run the upgrade-only preflight and persist the new policy fail-closed.
+    /// Failed preflight returns a typed
     /// [`ExecutionError`](quant_pivot_error::execution::ExecutionError) and do
     /// **not** mutate state.
-    async fn switch_quant_mode(
+    async fn switch_entry_authorization_policy(
         &self,
-        target: QuantRuntimeMode,
+        target: EntryAuthorizationPolicy,
         expected_revision: i64,
         actor: &str,
         reason: &str,
-    ) -> QuantResult<QuantModeTransitionReport>;
+    ) -> QuantResult<EntryAuthorizationTransitionReport>;
 
     async fn switch_settlement_write_policy(
         &self,

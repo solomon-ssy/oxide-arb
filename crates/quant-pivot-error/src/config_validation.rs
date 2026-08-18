@@ -43,11 +43,8 @@ pub enum ConfigValidationError {
         field_high: &'static str,
         value_high: Decimal,
     },
-    #[error("[{mode}] missing required credentials: {}", .missing.join(", "))]
-    MissingCredentials {
-        mode: String,
-        missing: Vec<&'static str>,
-    },
+    #[error("missing required credentials: {}", .missing.join(", "))]
+    MissingCredentials { missing: Vec<&'static str> },
     #[error("{field}: {detail}")]
     InvalidValue { field: &'static str, detail: String },
 }

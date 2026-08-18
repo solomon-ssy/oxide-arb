@@ -4,20 +4,19 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    quant_execution_order, quant_order_intent, quant_position, quant_recommendation,
+    quant_execution_order, quant_order_intent, quant_recommendation,
     quant_recommendation_execution_rollup_attempt, quant_reconciliation,
+    quant_strategy_position_lot,
 };
 use crate::{
     enums::{
         execution::{ExitReason, PositionLedgerState},
-        quant::{
-            ExecutionAttemptNoFillReason, ExecutionAttemptTerminalState, ExecutionOrderState,
-            QuantRuntimeMode,
-        },
+        quant::{ExecutionAttemptNoFillReason, ExecutionAttemptTerminalState, ExecutionOrderState},
     },
     types::{
-        ContentHash, ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, PositionId,
-        Price, RecommendationId, ReconciliationId, SchemaVersion, Shares, TokenId, Usd,
+        ContentHash, ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, Price,
+        RecommendationId, ReconciliationId, SchemaVersion, Shares, StrategyPositionLotId, TokenId,
+        Usd,
     },
 };
 
@@ -30,12 +29,10 @@ pub struct Model {
     pub order_intent_id: OrderIntentId,
     pub entry_execution_order_id: ExecutionOrderId,
     pub entry_reconciliation_id: ReconciliationId,
-    pub position_id: Option<PositionId>,
+    pub strategy_position_lot_id: Option<StrategyPositionLotId>,
     pub execution_account_id: ExecutionAccountId,
     pub market_id: MarketId,
     pub token_id: TokenId,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
-    pub runtime_mode: QuantRuntimeMode,
     pub terminal_state: ExecutionAttemptTerminalState,
     pub no_fill_reason: Option<ExecutionAttemptNoFillReason>,
     pub entry_order_state: ExecutionOrderState,
@@ -92,10 +89,10 @@ pub struct Model {
     #[sea_orm(
         belongs_to,
         relation_enum = "Position",
-        from = "position_id",
-        to = "position_id"
+        from = "strategy_position_lot_id",
+        to = "strategy_position_lot_id"
     )]
-    pub position: BelongsTo<Option<quant_position::Entity>>,
+    pub position: BelongsTo<Option<quant_strategy_position_lot::Entity>>,
     #[sea_orm(has_one, relation_enum = "RollupAttempt")]
     pub rollup_attempt: HasOne<quant_recommendation_execution_rollup_attempt::Entity>,
 }

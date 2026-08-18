@@ -29,7 +29,6 @@ use quant_pivot_models::{
     types::{
         ContentHash, EvmBlockHash, EvmTransactionHash, PayoutRatio, RecommendationId,
         ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId, Shares, TokenId,
-        Usd,
     },
 };
 use quant_pivot_repository::{
@@ -458,10 +457,6 @@ async fn seed_unfilled_execution_rollup(
             expected_cash_delta_usd: None,
             venue_cash_delta_usd: None,
             realized_pnl_usd: None,
-            expected_fee_usd: None,
-            derived_fee_usd: None,
-            settled_fee_usd: Some(Usd::ZERO),
-            fee_delta_usd: None,
             resolved_by: Some("feedback-cohort-contract".to_owned()),
             resolved_at: Some(terminal_at),
         }
@@ -476,7 +471,7 @@ async fn seed_unfilled_execution_rollup(
         .expect("read submitted intent")
         .expect("submitted intent");
     let mut active: QuantOrderIntentActiveModel = intent.into_active_model();
-    active.status = ActiveValue::Set(OrderIntentStatus::Rejected);
+    active.status = ActiveValue::Set(OrderIntentStatus::AuthorizationRejected);
     active.updated_at = ActiveValue::Set(terminal_at);
     active.update(db).await.expect("mark intent rejected");
 

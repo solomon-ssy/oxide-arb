@@ -3,10 +3,62 @@
 use crate::enums::common::OrderType;
 
 pg_enum! {
-    type_name = "qp_order_intent_kind",
-    @derive(schemars::JsonSchema)
-    pub enum OrderIntentKind {
-        Buy => "buy",
+    type_name = "qp_account_chain_execution_role",
+    /// Whether the account-owned order was resting, active, or self-matched.
+    pub enum AccountChainExecutionRole {
+        Maker => "maker",
+        Taker => "taker",
+        SelfMatch => "self_match",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_strategy_position_origin_kind",
+    /// Exclusive authority that created one strategy-owned position lot.
+    pub enum StrategyPositionOriginKind {
+        SystemIntent => "system_intent",
+        AccountRecoveryIncident => "account_recovery_incident",
+        OpeningInventory => "opening_inventory",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_account_execution_association_kind",
+    /// Exclusive owner assigned to one immutable account chain execution.
+    pub enum AccountExecutionAssociationKind {
+        SystemOrder => "system_order",
+        RecoveryIncident => "recovery_incident",
+        OpeningInventory => "opening_inventory",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_account_recovery_incident_kind",
+    pub enum AccountRecoveryIncidentKind {
+        UnknownExternalExecution => "unknown_external_execution",
+        BreakGlassRestart => "break_glass_restart",
+        OpeningInventory => "opening_inventory",
+        AccountMismatch => "account_mismatch",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_account_recovery_incident_status",
+    pub enum AccountRecoveryIncidentStatus {
+        Open => "open",
+        Reconciling => "reconciling",
+        Sealed => "sealed",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_account_pause_submission_state",
+    pub enum AccountPauseSubmissionState {
+        Prepared => "prepared",
+        Dispatched => "dispatched",
+        Ambiguous => "ambiguous",
+        Confirmed => "confirmed",
+        Failed => "failed",
     }
 }
 
@@ -216,7 +268,7 @@ wire_enum! {
         IntentState => "intent_state",
         RecommendationFreshness => "recommendation_freshness",
         ReportStatus => "report_status",
-        RuntimeMode => "runtime_mode",
+        AuthorizationPolicy => "authorization_policy",
         SettlementRecovery => "settlement_recovery",
         ModelRouteBinding => "model_route_binding",
         DataQuality => "data_quality",
@@ -239,7 +291,7 @@ wire_enum! {
         ExitMonitorReadiness => "exit_monitor_readiness",
         /// Defense-in-depth re-check: the frozen model artifact's
         /// return model must still be `Calibrated` at submission time, even
-        /// though `report/composer.rs` already denied `SemiAuto`/`AutoExecution`
+        /// though `report/composer.rs` already denied executable authority
         /// eligibility for uncalibrated candidates at report-build time.
         CalibratedReturnModel => "calibrated_return_model",
     }
@@ -276,16 +328,6 @@ pg_enum! {
         RiskEnvelopeBreached => "risk_envelope_breached",
         MarketAbnormal => "market_abnormal",
         DataStale => "data_stale",
-    }
-}
-
-wire_enum! {
-    pub enum ModeDenialReason {
-        ReportOnly => "report_only",
-        RecommendationIneligible => "recommendation_ineligible",
-        RiskEnvelopeInvalid => "risk_envelope_invalid",
-        KillSwitchBlocksEntry => "kill_switch_blocks_entry",
-        AutoExecutionNotAllowed => "auto_execution_not_allowed",
     }
 }
 

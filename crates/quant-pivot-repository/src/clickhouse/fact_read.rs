@@ -9,14 +9,14 @@ use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookLedgerReplayAnchor, BookMicrostructureRow, BookStreamSessionRow,
         CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
-        ExchangeEventRow, ExecutionParticipantFactRow, ExecutionParticipantRow, MarketExecutionRow,
-        MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
-        WeatherForecastFactRow, WeatherObservationFactRow,
+        ExchangeEventRow, ExchangeMatchRow, ExecutionParticipantFactRow, ExecutionParticipantRow,
+        MarketExecutionRow, MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow,
+        ReportMarketFunnelRow, WeatherForecastFactRow, WeatherObservationFactRow,
     },
-    domain::data_plane::HistorySealChunkRef,
+    domain::{data_plane::HistorySealChunkRef, quant::AccountChainEventCursor},
     types::{
-        ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
-        OrderId, RecommendationReportId, TokenId,
+        ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, EvmAddress,
+        MarketId, OrderId, RecommendationReportId, TokenId,
     },
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
@@ -26,16 +26,16 @@ use crate::{
     clickhouse::{
         query_batch::{UUID_INLINE_BYTES, canonical_values, extend_rows, query_chunks},
         query_limits::{
-            BOOK_LEDGER_BETWEEN, BOOK_LEDGER_FROM, BOOK_LEDGER_REPLAY_FROM,
-            BOOK_LEDGER_SNAPSHOT_AT, BOOK_LEDGER_SNAPSHOTS_AT, BOOK_LEDGER_SNAPSHOTS_BETWEEN,
-            BOOK_STREAM_SESSION_AT, BOOK_STREAM_SESSIONS, CRYPTO_REPORT_AT,
-            CRYPTO_REPORTS_AVAILABLE, CRYPTO_REPORTS_BETWEEN, DOMAIN_OBSERVATION_AT,
-            DOMAIN_OBSERVATIONS_BETWEEN, ENTRY_EVALUATION_LATEST, EXECUTION_PARTICIPANTS_BETWEEN,
-            LAST_EXECUTIONS, MARKET_EXECUTION_WINDOW, MARKET_EXECUTIONS_BETWEEN,
-            MICROSTRUCTURE_SERIES, MICROSTRUCTURE_WINDOW, MID_PRICE_SERIES,
-            OBSERVED_MARKETS_BETWEEN, ORDER_FILLED_EVENTS, REPORT_FUNNEL_BETWEEN,
-            REPORT_FUNNEL_COUNT, REPORT_FUNNEL_COUNTS, REPORT_FUNNEL_PAGE, RESOLUTION_AT,
-            RESOLUTION_BY_CHECKPOINT, RESOLUTION_BY_MARKET, RESOLUTIONS_BETWEEN,
+            ACCOUNT_ORDER_FILLED_EVENTS, BOOK_LEDGER_BETWEEN, BOOK_LEDGER_FROM,
+            BOOK_LEDGER_REPLAY_FROM, BOOK_LEDGER_SNAPSHOT_AT, BOOK_LEDGER_SNAPSHOTS_AT,
+            BOOK_LEDGER_SNAPSHOTS_BETWEEN, BOOK_STREAM_SESSION_AT, BOOK_STREAM_SESSIONS,
+            CRYPTO_REPORT_AT, CRYPTO_REPORTS_AVAILABLE, CRYPTO_REPORTS_BETWEEN,
+            DOMAIN_OBSERVATION_AT, DOMAIN_OBSERVATIONS_BETWEEN, ENTRY_EVALUATION_LATEST,
+            EXECUTION_PARTICIPANTS_BETWEEN, LAST_EXECUTIONS, MARKET_EXECUTION_WINDOW,
+            MARKET_EXECUTIONS_BETWEEN, MATCHES_FOR_TAKER_ORDERS, MICROSTRUCTURE_SERIES,
+            MICROSTRUCTURE_WINDOW, MID_PRICE_SERIES, OBSERVED_MARKETS_BETWEEN, ORDER_FILLED_EVENTS,
+            REPORT_FUNNEL_BETWEEN, REPORT_FUNNEL_COUNT, REPORT_FUNNEL_COUNTS, REPORT_FUNNEL_PAGE,
+            RESOLUTION_AT, RESOLUTION_BY_CHECKPOINT, RESOLUTION_BY_MARKET, RESOLUTIONS_BETWEEN,
             WEATHER_FORECASTS_BETWEEN, WEATHER_OBSERVATIONS_BETWEEN,
         },
     },
@@ -140,6 +140,100 @@ fn validate_market_resolution(row: &MarketResolutionRow) -> Result<(), StorageEr
 
 #[async_trait]
 impl QuantFactReadRepository for ChQuantFactReadRepository {
+    async fn account_order_filled_events(
+        &self,
+        funder: &EvmAddress,
+        cursor: Option<AccountChainEventCursor>,
+        limit: u64,
+    ) -> Result<Vec<ExchangeEventRow>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let address = funder.as_str().to_owned();
+        let base = "SELECT ?fields FROM quant_exchange_event \
+                    WHERE maker = ? \
+                    AND event_kind = 'OrderFilled' \
+                    AND exchange_version = 'V2' \
+                    AND chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1)";
+        let page = if let Some(cursor) = cursor {
+            ACCOUNT_ORDER_FILLED_EVENTS
+                .query(
+                    self.pool.client(),
+                    &format!(
+                        "{base} AND (block_number > ? \
+                         OR (block_number = ? AND transaction_index > ?) \
+                         OR (block_number = ? AND transaction_index = ? AND log_index > ?)) \
+                         ORDER BY block_number, transaction_index, log_index LIMIT ?"
+                    ),
+                )
+                .bind(address)
+                .bind(cursor.block_number)
+                .bind(cursor.block_number)
+                .bind(cursor.transaction_index)
+                .bind(cursor.block_number)
+                .bind(cursor.transaction_index)
+                .bind(cursor.log_index)
+                .bind(limit)
+                .fetch_all::<ExchangeEventRow>()
+                .await?
+        } else {
+            ACCOUNT_ORDER_FILLED_EVENTS
+                .query(
+                    self.pool.client(),
+                    &format!("{base} ORDER BY block_number, transaction_index, log_index LIMIT ?"),
+                )
+                .bind(address)
+                .bind(limit)
+                .fetch_all::<ExchangeEventRow>()
+                .await?
+        };
+        let mut rows = Vec::new();
+        extend_rows(
+            &mut rows,
+            page,
+            ACCOUNT_ORDER_FILLED_EVENTS,
+            "quant_exchange_event",
+        )?;
+        Ok(rows)
+    }
+
+    async fn matches_for_taker_orders(
+        &self,
+        order_ids: Vec<OrderId>,
+    ) -> Result<Vec<ExchangeMatchRow>, StorageError> {
+        let order_ids = canonical_values(
+            order_ids
+                .into_iter()
+                .map(|order_id| order_id.as_str().to_owned())
+                .collect(),
+        );
+        if order_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut rows = Vec::new();
+        for order_chunk in query_chunks(&order_ids, String::len, "quant_exchange_match")? {
+            let page = MATCHES_FOR_TAKER_ORDERS
+                .query(
+                    self.pool.client(),
+                    "SELECT ?fields FROM quant_exchange_match \
+                     WHERE taker_order_hash IN ? \
+                     AND exchange_version = 'V2' \
+                     AND chunk_id IN (SELECT chunk_id FROM quant_exchange_history_acceptance GROUP BY chunk_id HAVING argMax(active, state_revision) = 1) \
+                     ORDER BY taker_order_hash, block_number, transaction_hash",
+                )
+                .bind(order_chunk.to_vec())
+                .fetch_all::<ExchangeMatchRow>()
+                .await?;
+            extend_rows(
+                &mut rows,
+                page,
+                MATCHES_FOR_TAKER_ORDERS,
+                "quant_exchange_match",
+            )?;
+        }
+        Ok(rows)
+    }
+
     async fn order_filled_events(
         &self,
         order_ids: Vec<OrderId>,

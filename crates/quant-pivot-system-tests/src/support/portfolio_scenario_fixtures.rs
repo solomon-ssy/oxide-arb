@@ -127,10 +127,10 @@ impl FixtureRouteContract {
                     .context("execution scenario Route serving contract has no Trade Policy")?
                     .content_hash
             }
-            ServingAuthority::ReportOnlyWithLiveL2 => {
+            ServingAuthority::AnalysisOnlyWithLiveL2 => {
                 ensure!(
                     bindings.trade_policy.is_none(),
-                    "ReportOnly scenario Route must not bind a Trade Policy"
+                    "AnalysisOnly scenario Route must not bind a Trade Policy"
                 );
                 CanonicalDigest::content_hash_typed(
                     "quant-pivot/bootstrap-recommendation-contract",

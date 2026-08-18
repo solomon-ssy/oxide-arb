@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::{api::ReconciliationView, governance::KillSwitchView},
-    enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
+    enums::{execution::KillSwitchState, quant::EntryAuthorizationPolicy},
 };
 
 /// Ordered recovery step for unresolvable reconciliation / latched kill-switch.
@@ -13,7 +13,7 @@ use crate::{
 pub enum ExecutionRecoveryStep {
     ResolveUnresolvableReconciliations,
     AcknowledgeKillSwitch,
-    VerifyModePreflight,
+    VerifyAuthorizationPreflight,
 }
 
 /// Lightweight recovery summary embedded in [`SystemStatus`](crate::domain::governance::SystemStatus).
@@ -23,8 +23,8 @@ pub struct ExecutionRecoverySummary {
     pub unresolvable_count: u64,
     pub kill_switch_requires_ack: bool,
     pub kill_switch_state: KillSwitchState,
-    pub quant_runtime_mode: QuantRuntimeMode,
-    pub auto_execution_blocked: bool,
+    pub entry_authorization_policy: EntryAuthorizationPolicy,
+    pub policy_automatic_blocked: bool,
     pub next_steps: Vec<ExecutionRecoveryStep>,
 }
 

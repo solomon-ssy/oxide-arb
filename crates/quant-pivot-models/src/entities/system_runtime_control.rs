@@ -5,7 +5,7 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::enums::{
-    execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
+    execution::KillSwitchState, quant::EntryAuthorizationPolicy, settlement::SettlementWritePolicy,
 };
 
 #[sea_orm::model]
@@ -14,8 +14,8 @@ use crate::enums::{
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: i32,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
-    pub quant_runtime_mode: QuantRuntimeMode,
+    #[sea_orm(column_type = r#"custom("qp_entry_authorization_policy")"#)]
+    pub entry_authorization_policy: EntryAuthorizationPolicy,
     pub settlement_write_policy: SettlementWritePolicy,
     pub kill_switch_state: KillSwitchState,
     pub kill_switch_requires_ack: bool,

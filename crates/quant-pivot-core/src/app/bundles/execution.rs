@@ -14,15 +14,16 @@ use crate::{
         CoreSettlementControlPort, CoreSettlementControlPortDeps, settlement_credentials,
     },
     execution::{
-        AdmissionInputBuilder, AdmissionInputBuilderDeps, ClobOrderClient,
+        AccountChainExecutionProjector, AccountChainExecutionProjectorDeps,
+        AccountPauseCoordinator, AdmissionInputBuilder, AdmissionInputBuilderDeps, ClobOrderClient,
         ClobReconciliationReader, CompositeExitSignalEvaluator, CoreExecutionDispatcher,
         CoreExitDispatcher, DefaultAdmissionEngine, DispatchWake, EvidenceCollector,
         ExecutionBreaker, ExecutionDispatcherDeps, ExecutionOrderLifecyclePublisher,
         ExitDispatcherDeps, ExitMonitorHealthHandle, ExitMonitorService, ExitMonitorServiceDeps,
-        ExitSignalEvaluator, IntentLifecyclePublisher, OnChainFeeSettlementService,
-        OutcomeReconciliationService, OutcomeReconciliationServiceDeps, PolymarketOrderClient,
-        ReconciliationService, ReconciliationServiceDeps, SettlementLifecyclePublisher,
-        VenueEvidenceCollector, VenueReconciliationReader,
+        ExitSignalEvaluator, IntentLifecyclePublisher, OutcomeReconciliationService,
+        OutcomeReconciliationServiceDeps, PolymarketOrderClient, ReconciliationService,
+        ReconciliationServiceDeps, SettlementLifecyclePublisher, VenueEvidenceCollector,
+        VenueReconciliationReader,
         settlement_discovery::SettlementDiscoveryService,
         settlement_discovery_wake::SettlementDiscoveryWake,
         settlement_executor::ProductionSettlementExecutor,
@@ -74,14 +75,15 @@ use quant_pivot_models::{
     types::WorkerId,
 };
 use quant_pivot_repository::traits::{
+    AccountChainExecutionRepository, AccountPauseRepository, AccountRecoveryRepository,
     CapitalAllocationRepository, ClobMarketInfoRepository, DomainSourceCursorRepository,
     EntryConditionRepository, ExchangeHistoryRepository, ExecutionAttemptOutcomeRepository,
     ExecutionOrderRepository, ExecutionSubmissionRepository, FactorRepository,
     FeatureParityRepository, MarketRepository, ModelRegistryRepository, OperationLogRepository,
-    OrderIntentRepository, PolicyRepository, PositionRepository,
-    RecommendationExecutionRollupRepository, RecommendationReportRepository,
-    RecommendationRepository, RecommendationResolutionOutcomeRepository, ReconciliationRepository,
-    ResolutionObservationRepository, TradePolicyRepository,
+    OrderIntentRepository, PolicyRepository, RecommendationExecutionRollupRepository,
+    RecommendationReportRepository, RecommendationRepository,
+    RecommendationResolutionOutcomeRepository, ReconciliationRepository,
+    ResolutionObservationRepository, StrategyPositionLotRepository, TradePolicyRepository,
     quant::{
         settlement_governance::{
             SettlementExternalCursorRepository, SettlementGovernanceRepository,
@@ -118,8 +120,8 @@ pub struct ExecutionBundle {
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
     /// Reconciliation engine: resolves in-flight orders to venue truth.
     pub reconciliation: Arc<ReconciliationService>,
-    /// Independent late-arriving finalized fee upgrade path.
-    pub fee_settlement: Arc<OnChainFeeSettlementService>,
+    pub account_chain_projector: Arc<AccountChainExecutionProjector>,
+    pub account_pause: Arc<AccountPauseCoordinator>,
     /// Produces orthogonal resolution and execution outcome truth.
     pub outcome_reconciliation: Arc<OutcomeReconciliationService>,
     /// Exit-monitor engine: scans open lots and drives the exit ladder.
@@ -172,6 +174,24 @@ impl ExecutionBundle {
 
         let submission: Arc<dyn ExecutionSubmissionRepository> =
             Arc::clone(&repos.execution_submission) as Arc<dyn ExecutionSubmissionRepository>;
+        let account_pause = Arc::new(AccountPauseCoordinator::connect(
+            &deps.deploy.polymarket.onchain,
+            Arc::clone(&settlement.wallet_executor),
+            Arc::clone(&repos.account_pause) as Arc<dyn AccountPauseRepository>,
+        )?);
+        let account_chain_projector = Arc::new(AccountChainExecutionProjector::new(
+            AccountChainExecutionProjectorDeps {
+                execution_account_id: deps.account.execution_account.execution_account_id,
+                funder: deps.account.execution_account.funder_address.clone(),
+                facts: Arc::clone(&infra.quant_fact_read),
+                executions: Arc::clone(&repos.account_chain_execution)
+                    as Arc<dyn AccountChainExecutionRepository>,
+                recovery: Arc::clone(&repos.account_recovery) as Arc<dyn AccountRecoveryRepository>,
+                kill_switch: Arc::clone(&deps.governance.kill_switch),
+                alerts: Arc::clone(&deps.governance.alerts),
+                pause: Arc::clone(&account_pause),
+            },
+        ));
         let intents: Arc<dyn OrderIntentRepository> =
             Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>;
 
@@ -213,7 +233,7 @@ impl ExecutionBundle {
                 as Arc<dyn ExecutionOrderRepository>,
             intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
             recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
-            positions: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
+            positions: Arc::clone(&repos.position) as Arc<dyn StrategyPositionLotRepository>,
             reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
             submission: Arc::clone(&submission),
             catalog_ledger: Arc::clone(&deps.data.catalog_ledger_repo),
@@ -230,12 +250,6 @@ impl ExecutionBundle {
             order_lifecycle: Arc::clone(&order_lifecycle),
             events: deps.intent_lifecycle.publisher(),
         }));
-        let fee_settlement = Arc::new(OnChainFeeSettlementService::new(
-            Arc::clone(&submission),
-            Arc::clone(&infra.quant_fact_read),
-            deps.account.execution_account.funder_address.clone(),
-        ));
-
         // Exit-monitor engine: model-driven signal seam + exit dispatcher
         // + per-lot sweep service.
         let exit_monitor = build_exit_monitor(
@@ -261,7 +275,8 @@ impl ExecutionBundle {
             breaker,
             submission,
             reconciliation,
-            fee_settlement,
+            account_chain_projector,
+            account_pause,
             outcome_reconciliation,
             exit_monitor,
             exit_monitor_health,
@@ -286,6 +301,7 @@ struct SettlementRuntime {
     external: Arc<SettlementExternalObservationService>,
     control: Arc<dyn SettlementControlPort>,
     recovery_admission: Arc<dyn SettlementRecoveryAdmissionPort>,
+    wallet_executor: Arc<ProductionSettlementExecutor>,
 }
 
 fn build_settlement_runtime(deps: &ExecutionBundleDeps<'_>) -> QuantResult<SettlementRuntime> {
@@ -311,7 +327,8 @@ fn build_settlement_runtime(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Settl
         credentials,
     )?);
     let executor = Arc::clone(&production_executor) as Arc<dyn SettlementSubmissionExecutor>;
-    let governed_action_executor = production_executor as Arc<dyn SettlementGovernedActionExecutor>;
+    let governed_action_executor =
+        Arc::clone(&production_executor) as Arc<dyn SettlementGovernedActionExecutor>;
     let governance_repository = Arc::clone(&deps.infra.repos.settlement_governance)
         as Arc<dyn SettlementGovernanceRepository>;
     let adapter_reader = AlloySettlementAdapterReader::connect(&deps.deploy.polymarket.onchain)
@@ -336,7 +353,7 @@ fn build_settlement_runtime(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Settl
     let service = Arc::new(SettlementService::new(SettlementServiceDeps {
         repository: Arc::clone(&repository),
         governance: Arc::clone(&governance_repository),
-        positions: Arc::clone(&deps.infra.repos.position) as Arc<dyn PositionRepository>,
+        positions: Arc::clone(&deps.infra.repos.position) as Arc<dyn StrategyPositionLotRepository>,
         executor,
         runtime_controls: deps.governance.runtime_controls.clone(),
         config: deps.deploy.polymarket.settlement.clone(),
@@ -393,6 +410,7 @@ fn build_settlement_runtime(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Settl
         external,
         control,
         recovery_admission,
+        wallet_executor: production_executor,
     })
 }
 
@@ -568,7 +586,7 @@ fn build_exit_monitor(
         order_lifecycle: Arc::clone(order_lifecycle),
     }));
     Arc::new(ExitMonitorService::new(ExitMonitorServiceDeps {
-        positions: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
+        positions: Arc::clone(&repos.position) as Arc<dyn StrategyPositionLotRepository>,
         intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
         recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
         submission: Arc::clone(submission),

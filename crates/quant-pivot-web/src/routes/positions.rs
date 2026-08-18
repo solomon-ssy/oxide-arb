@@ -10,7 +10,7 @@ use quant_pivot_models::{
         pagination::Paginated,
     },
     enums::rbac::{Operation, ResourceType},
-    types::PositionId,
+    types::StrategyPositionLotId,
 };
 
 use crate::{
@@ -54,26 +54,23 @@ async fn list_positions(
 
 async fn get_position(
     state: Data<AppState>,
-    id: Path<PositionId>,
+    id: Path<StrategyPositionLotId>,
 ) -> Result<WebResponse<PositionDetailView>, WebError> {
     let summary = state
         .execution_read
         .get_position(&id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("position not found: {id}")))?;
-    let intent = state
-        .order_intents
-        .find(&summary.position.order_intent_id)
-        .await?
-        .ok_or_else(|| {
-            WebError::NotFound(format!(
-                "order intent not found: {}",
-                summary.position.order_intent_id
-            ))
-        })?;
-    let intent_view = OrderIntentView::from(intent);
-    let exit_monitor_observation =
-        exit_monitor_observation(&state, &intent_view, &summary.position).await?;
+    let exit_monitor_observation = if let Some(intent_id) = summary.position.order_intent_id {
+        let intent =
+            state.order_intents.find(&intent_id).await?.ok_or_else(|| {
+                WebError::NotFound(format!("order intent not found: {intent_id}"))
+            })?;
+        let intent_view = OrderIntentView::from(intent);
+        Some(exit_monitor_observation(&state, &intent_view, &summary.position).await?)
+    } else {
+        None
+    };
     Ok(WebResponse::ok(PositionDetailView {
         position: PositionView::from(summary),
         exit_monitor_observation,

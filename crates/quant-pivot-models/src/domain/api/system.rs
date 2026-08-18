@@ -19,8 +19,8 @@ use crate::{
     enums::{
         execution::KillSwitchState,
         quant::{
-            FreshBootBlockedReason, FreshBootEventKind, FreshBootRetryReason, FreshBootStage,
-            FreshBootStatus, QuantRuntimeMode, TrainingDatasetStatus,
+            EntryAuthorizationPolicy, FreshBootBlockedReason, FreshBootEventKind,
+            FreshBootRetryReason, FreshBootStage, FreshBootStatus, TrainingDatasetStatus,
         },
         settlement::SettlementWritePolicy,
         system::{CapabilityId, CapabilityReason},
@@ -454,12 +454,12 @@ pub struct SupersedeFreshBootRunRequest {
     pub reason: String,
 }
 
-/// Governed quant runtime mode transition request.
+/// Governed entry-authorization policy transition request.
 #[derive(Debug, Deserialize, Validate)]
-pub struct SwitchQuantModeRequest {
+pub struct SetEntryAuthorizationPolicyRequest {
     #[validate(range(min = 0))]
     pub expected_revision: i64,
-    pub mode: QuantRuntimeMode,
+    pub policy: EntryAuthorizationPolicy,
     #[validate(length(min = 1, max = 1024))]
     pub reason: String,
 }

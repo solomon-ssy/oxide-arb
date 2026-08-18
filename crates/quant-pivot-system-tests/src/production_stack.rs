@@ -400,7 +400,7 @@ impl SuccessorRouteVerifier<'_> {
             model_learning_eligible_count: u32::try_from(model_candidates.len())?,
             policy_evaluation_eligible_count: u32::try_from(policy_candidates.len())?,
             execution_learning_excluded_count: u32::try_from(execution_candidates.len())?,
-            execution_exclusion_reason: CohortExclusionReason::ReportOnlyNoExecutionAuthority,
+            execution_exclusion_reason: CohortExclusionReason::ExecutionNotAttempted,
         })
     }
 
@@ -495,9 +495,9 @@ impl SuccessorRouteVerifier<'_> {
             ensure!(
                 decision
                     == FeedbackCohortDecision::Excluded(
-                        CohortExclusionReason::ReportOnlyNoExecutionAuthority,
+                        CohortExclusionReason::ExecutionNotAttempted,
                     ),
-                "ReportOnly recommendation {} fabricated execution feedback: {decision:?}",
+                "unattempted recommendation {} fabricated execution feedback: {decision:?}",
                 candidate.context().recommendation_id()
             );
         }

@@ -20,7 +20,7 @@ use quant_pivot_models::{
         data_plane::{DecisionBoundary, DecisionClock, DecisionSource, ExchangeHistoryFrontier},
         quant::{
             LatestFactorSnapshotBundleInfo, LatestFactorSnapshotValueInfo, ModelVersionInfo,
-            OrderIntentInfo, PositionInfo,
+            OrderIntentInfo, StrategyPositionLot,
         },
     },
     enums::{
@@ -151,7 +151,7 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
     async fn reinfer(
         &self,
         intent: &OrderIntentInfo,
-        lot: &PositionInfo,
+        lot: &StrategyPositionLot,
         _mark_price: Option<Price>,
         now: DateTime<Utc>,
     ) -> QuantResult<Option<FreshSignal>> {
@@ -572,7 +572,7 @@ pub(crate) fn exit_model_load_ok(version: &ModelVersionInfo) -> Result<(), Strin
 /// Project a position lot into a [`SelectedMarket`] for feature / model scoring.
 pub fn selected_market_for_lot(
     snapshot: &ResolvedMarketSnapshot,
-    lot: &PositionInfo,
+    lot: &StrategyPositionLot,
 ) -> QuantResult<SelectedMarket> {
     if snapshot.boundary.decision_at() < lot.opened_at {
         return Err(QuantError::config(format!(
@@ -737,7 +737,7 @@ pub(crate) fn liquidity_score_cap(config: &DecisionPolicySnapshot) -> Option<Usd
 #[must_use]
 pub fn find_lot_candidate<'a>(
     candidates: &'a [SignalCandidate],
-    lot: &PositionInfo,
+    lot: &StrategyPositionLot,
 ) -> Option<&'a SignalCandidate> {
     let token = lot.token_id.as_str();
     let side = lot.side;
@@ -781,20 +781,20 @@ mod tests {
                 fee::MarketMakerRebateEvidence,
                 registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
             },
-            quant::PositionInfo,
+            quant::StrategyPositionLot,
         },
         enums::{
             catalog::{CatalogFilterReasonSet, CatalogTimestampQuality},
             common::{CategorySet, MarketCategory, TickSize},
-            execution::PositionLedgerState,
+            execution::{PositionLedgerState, StrategyPositionOriginKind},
             market::{EventStatus, MarketStatus},
             quant::{AccountSource, OutcomeSide},
         },
         runtime_config::DecisionPolicySnapshot,
         types::{
             CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, EventId,
-            ExecutionAccountId, MarketId, ModelRunId, OrderIntentId, PositionId, Price,
-            Probability, Shares, SignalCandidateId, TokenId, Usd,
+            ExecutionAccountId, MarketId, ModelRunId, OrderIntentId, Price, Probability, Shares,
+            SignalCandidateId, StrategyPositionLotId, TokenId, Usd,
         },
     };
     use quant_pivot_research::{
@@ -839,9 +839,11 @@ mod tests {
 
     #[test]
     fn find_lot_matches_side() {
-        let lot = PositionInfo {
-            position_id: PositionId::from_v7(),
-            order_intent_id: OrderIntentId::from_v7(),
+        let lot = StrategyPositionLot {
+            strategy_position_lot_id: StrategyPositionLotId::from_v7(),
+            origin_kind: StrategyPositionOriginKind::SystemIntent,
+            order_intent_id: Some(OrderIntentId::from_v7()),
+            recovery_incident_id: None,
             execution_account_id: ExecutionAccountId::from_v7(),
             token_id: TokenId::new("yes"),
             market_id: MarketId::new("m1"),
@@ -945,9 +947,11 @@ mod tests {
             event_effective_at: now,
             event_available_at: now,
         };
-        let lot = PositionInfo {
-            position_id: PositionId::from_v7(),
-            order_intent_id: OrderIntentId::from_v7(),
+        let lot = StrategyPositionLot {
+            strategy_position_lot_id: StrategyPositionLotId::from_v7(),
+            origin_kind: StrategyPositionOriginKind::SystemIntent,
+            order_intent_id: Some(OrderIntentId::from_v7()),
+            recovery_incident_id: None,
             execution_account_id: ExecutionAccountId::from_v7(),
             token_id: TokenId::new("no"),
             market_id: MarketId::new("m1"),

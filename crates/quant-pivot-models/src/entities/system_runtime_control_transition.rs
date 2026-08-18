@@ -5,7 +5,8 @@ use sea_orm::entity::prelude::*;
 
 use crate::{
     enums::{
-        execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
+        execution::KillSwitchState, quant::EntryAuthorizationPolicy,
+        settlement::SettlementWritePolicy,
     },
     types::RuntimeControlTransitionId,
 };
@@ -18,10 +19,10 @@ pub struct Model {
     pub runtime_control_transition_id: RuntimeControlTransitionId,
     pub from_revision: i64,
     pub to_revision: i64,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
-    pub from_quant_runtime_mode: QuantRuntimeMode,
-    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
-    pub to_quant_runtime_mode: QuantRuntimeMode,
+    #[sea_orm(column_type = r#"custom("qp_entry_authorization_policy")"#)]
+    pub from_entry_authorization_policy: EntryAuthorizationPolicy,
+    #[sea_orm(column_type = r#"custom("qp_entry_authorization_policy")"#)]
+    pub to_entry_authorization_policy: EntryAuthorizationPolicy,
     pub from_settlement_write_policy: SettlementWritePolicy,
     pub to_settlement_write_policy: SettlementWritePolicy,
     pub from_kill_switch_state: KillSwitchState,

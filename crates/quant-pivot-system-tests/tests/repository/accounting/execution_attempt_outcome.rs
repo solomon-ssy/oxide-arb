@@ -6,31 +6,32 @@ use quant_pivot_models::{
     domain::quant::{
         ExecutionAttemptDeferredReason, ExecutionAttemptOutcomeInfo,
         ExecutionAttemptReconciliationResult, NewExecutionAttemptOutcome, NewExecutionOrder,
-        NewPosition, NewReconciliation, OutcomeTaskSettlement,
+        NewReconciliation, NewStrategyPositionLot, OutcomeTaskSettlement,
     },
     entities::{
         quant_execution_order::Entity as QuantExecutionOrderEntity,
         quant_order_intent::{
             ActiveModel as QuantOrderIntentActiveModel, Entity as QuantOrderIntentEntity,
         },
-        quant_position::Entity as QuantPositionEntity,
         quant_reconciliation::Entity as QuantReconciliationEntity,
+        quant_strategy_position_lot::Entity as QuantPositionEntity,
     },
     enums::{
         common::{MarketCategory, OrderType, Side},
         execution::{
             ExecutionOrderPhase, ExitReason, ExitState, OrderTypeKind, PositionLedgerState,
-            ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus,
+            ReconciliationEvidenceKind, ReconciliationResult, StrategyPositionOriginKind,
+            VenueOrderStatus,
         },
         quant::{
             AccountSource, ExecutionAttemptNoFillReason, ExecutionAttemptTerminalState,
-            ExecutionOrderState, OrderIntentStatus, OutcomeSide, QuantRuntimeMode,
+            ExecutionOrderState, OrderIntentStatus, OutcomeSide,
         },
     },
     types::{
-        ContentHash, EventId, ExecutionOrderId, MarketId, OrderId, OrderIntentId, PositionId,
-        Price, ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
-        SchemaVersion, Shares, TokenId, Usd, VenueOrderAmount, WorkerId,
+        ContentHash, EventId, ExecutionOrderId, MarketId, OrderId, OrderIntentId, Price,
+        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId, SchemaVersion,
+        Shares, StrategyPositionLotId, TokenId, Usd, VenueOrderAmount, WorkerId,
     },
 };
 use quant_pivot_repository::{
@@ -71,7 +72,7 @@ impl SourceShape {
     const fn contract(self) -> SourceShapeContract {
         match self {
             Self::Unfilled => SourceShapeContract {
-                intent_status: OrderIntentStatus::Rejected,
+                intent_status: OrderIntentStatus::AuthorizationRejected,
                 order_state: ExecutionOrderState::Failed,
                 venue_status: VenueOrderStatus::Rejected,
                 reconciliation_result: ReconciliationResult::NotFilled,
@@ -103,7 +104,7 @@ struct ExecutionSourceFixture {
     order_intent_id: OrderIntentId,
     entry_execution_order_id: ExecutionOrderId,
     entry_reconciliation_id: ReconciliationId,
-    position_id: Option<PositionId>,
+    strategy_position_lot_id: Option<StrategyPositionLotId>,
     terminal_at: DateTime<Utc>,
 }
 
@@ -134,7 +135,7 @@ pub async fn terminal_preserve_zero_semantics() {
     );
     assert_eq!(unfilled.entry_fee_usd, Some(Usd::ZERO));
     assert_eq!(unfilled.realized_pnl_usd, None);
-    assert_eq!(unfilled.position_id, None);
+    assert_eq!(unfilled.strategy_position_lot_id, None);
 
     let partial = (SourceShape::PartiallyFilled).persist_shape().await;
     assert_eq!(
@@ -172,12 +173,6 @@ pub async fn invalid_state_report_rejects() {
     fake_pnl
         .validate()
         .expect_err("an unfilled attempt has no PnL value, including zero");
-
-    let mut report_only = new_outcome(&source, SourceShape::Unfilled);
-    report_only.runtime_mode = QuantRuntimeMode::ReportOnly;
-    report_only
-        .validate()
-        .expect_err("ReportOnly cannot produce an execution outcome");
 
     let mut wrong_fill_shape = new_outcome(&source, SourceShape::PartiallyFilled);
     wrong_fill_shape.filled_shares = wrong_fill_shape.requested_shares;
@@ -246,11 +241,13 @@ pub async fn reconcile_idempotent_worm_evident() {
     };
     assert_eq!(duplicate.outcome_hash, inserted.outcome_hash);
 
-    let position = QuantPositionEntity::find_by_id(source.position_id.expect("terminal position"))
-        .one(&db)
-        .await
-        .expect("load terminal position")
-        .expect("terminal position exists");
+    let position = QuantPositionEntity::find_by_id(
+        source.strategy_position_lot_id.expect("terminal position"),
+    )
+    .one(&db)
+    .await
+    .expect("load terminal position")
+    .expect("terminal position exists");
     let mut conflicting_position = position.into_active_model();
     conflicting_position.realized_pnl_usd = ActiveValue::Set(Usd::new(dec!(1)));
     conflicting_position.updated_at = ActiveValue::Set(Utc::now());
@@ -505,11 +502,10 @@ fn new_outcome(source: &ExecutionSourceFixture, shape: SourceShape) -> NewExecut
         order_intent_id: source.order_intent_id,
         entry_execution_order_id: source.entry_execution_order_id,
         entry_reconciliation_id: source.entry_reconciliation_id,
-        position_id: source.position_id,
+        strategy_position_lot_id: source.strategy_position_lot_id,
         execution_account_id: source.ids.execution_account,
         market_id: source.ids.market.as_str().into(),
         token_id: source.ids.token.as_str().into(),
-        runtime_mode: QuantRuntimeMode::AutoExecution,
         terminal_state,
         no_fill_reason,
         entry_order_state,
@@ -552,7 +548,7 @@ async fn seed_execution_source(
     };
     let (entry_execution_order_id, entry_reconciliation_id) = seed.persist_entry().await;
     seed.persist_exit().await;
-    let position_id = seed.persist_position().await;
+    let strategy_position_lot_id = seed.persist_position().await;
     seed.mark_intent_terminal().await;
 
     ExecutionSourceFixture {
@@ -560,7 +556,7 @@ async fn seed_execution_source(
         order_intent_id,
         entry_execution_order_id,
         entry_reconciliation_id,
-        position_id,
+        strategy_position_lot_id,
         terminal_at,
     }
 }
@@ -605,10 +601,6 @@ impl ExecutionSourceSeed<'_> {
                 expected_cash_delta_usd: None,
                 venue_cash_delta_usd: None,
                 realized_pnl_usd: None,
-                expected_fee_usd: None,
-                derived_fee_usd: None,
-                settled_fee_usd: Some(Usd::ZERO),
-                fee_delta_usd: None,
                 resolved_by: Some("repository-contract".to_owned()),
                 resolved_at: Some(self.terminal_at),
             }
@@ -680,10 +672,6 @@ impl ExecutionSourceSeed<'_> {
                 expected_cash_delta_usd: None,
                 venue_cash_delta_usd: None,
                 realized_pnl_usd: Some(Usd::ZERO),
-                expected_fee_usd: Some(Usd::ZERO),
-                derived_fee_usd: None,
-                settled_fee_usd: Some(Usd::ZERO),
-                fee_delta_usd: Some(Usd::ZERO),
                 resolved_by: Some("repository-contract".to_owned()),
                 resolved_at: Some(self.terminal_at),
             }
@@ -694,15 +682,17 @@ impl ExecutionSourceSeed<'_> {
         .expect("persist terminal exit reconciliation");
     }
 
-    async fn persist_position(&self) -> Option<PositionId> {
+    async fn persist_position(&self) -> Option<StrategyPositionLotId> {
         if matches!(self.shape, SourceShape::Unfilled) {
             return None;
         }
-        let position_id = PositionId::from_v7();
+        let strategy_position_lot_id = StrategyPositionLotId::from_v7();
         QuantPositionEntity::insert(
-            NewPosition {
-                position_id,
-                order_intent_id: self.order_intent_id,
+            NewStrategyPositionLot {
+                strategy_position_lot_id,
+                origin_kind: StrategyPositionOriginKind::SystemIntent,
+                order_intent_id: Some(self.order_intent_id),
+                recovery_incident_id: None,
                 execution_account_id: self.ids.execution_account,
                 token_id: self.ids.token.as_str().into(),
                 market_id: self.ids.market.as_str().into(),
@@ -723,7 +713,7 @@ impl ExecutionSourceSeed<'_> {
         .exec(self.db)
         .await
         .expect("persist terminal position");
-        Some(position_id)
+        Some(strategy_position_lot_id)
     }
 
     async fn mark_intent_terminal(&self) {

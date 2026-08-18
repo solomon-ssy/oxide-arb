@@ -142,8 +142,8 @@ pub struct SettlementDeployConfig {
     /// Exclusive case-claim lease duration. A crashed worker may be replaced
     /// only after this database-backed lease expires.
     pub claim_lease_secs: u64,
-    /// Fixed TTL for a `SemiAuto` settlement authorization challenge.
-    pub semi_auto_authorization_ttl_secs: u64,
+    /// Fixed TTL for an operator settlement-authorization challenge.
+    pub operator_authorization_ttl_secs: u64,
     /// Durable discovery cadence; catalog events may only wake this poll early.
     pub discovery_poll_secs: u64,
     /// Recovery/submission polling cadence.
@@ -168,7 +168,7 @@ impl Default for SettlementDeployConfig {
     fn default() -> Self {
         Self {
             claim_lease_secs: 30,
-            semi_auto_authorization_ttl_secs: 300,
+            operator_authorization_ttl_secs: 300,
             discovery_poll_secs: 30,
             submission_poll_secs: 5,
             max_claims_per_tick: 32,
@@ -305,7 +305,7 @@ rpc_endpoint = { source = "protected", url = "https://provider.invalid/v2/privat
     fn settlement_governance_durations_defaults() {
         let config = PolymarketConfig::default().settlement;
         assert_eq!(config.claim_lease_secs, 30);
-        assert_eq!(config.semi_auto_authorization_ttl_secs, 300);
+        assert_eq!(config.operator_authorization_ttl_secs, 300);
         assert_eq!(config.readiness_ui_cache_secs, 10);
     }
 }

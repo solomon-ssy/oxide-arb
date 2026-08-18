@@ -231,7 +231,11 @@ impl QuantFactRepository for ChQuantFactRepository {
         rows: Vec<QuantPositionEventRow>,
     ) -> Result<(), StorageError> {
         self.write_manager
-            .write_batch(self.pool.client(), "quant_position_event", rows)
+            .write_batch(
+                self.pool.client(),
+                "quant_strategy_position_lot_event",
+                rows,
+            )
             .await
     }
 

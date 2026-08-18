@@ -17,8 +17,8 @@ use crate::{
         common::MarketCategory,
         quant::{
             CohortCensorReason, CohortExclusionReason, FeedbackCohort, OutcomeSide,
-            QuantRuntimeMode, RecommendationReportStatus, RecommendationResolutionKind,
-            RecommendationStatus, ReportKind,
+            RecommendationReportStatus, RecommendationResolutionKind, RecommendationStatus,
+            ReportKind,
         },
     },
     runtime_config::BuyModelRoute,
@@ -161,7 +161,6 @@ pub struct FeedbackRecommendationContext {
     profile_ref: ResearchProfileRef,
     route: BuyModelRoute,
     report_kind: ReportKind,
-    runtime_mode: QuantRuntimeMode,
     category: MarketCategory,
     market_id: MarketId,
     event_id: EventId,
@@ -243,7 +242,6 @@ impl FeedbackRecommendationContext {
             profile_ref: lineage.research_profile_ref.clone(),
             route: recommendation.route,
             report_kind: report.report_kind,
-            runtime_mode: report.runtime_mode,
             category: recommendation.identity.category,
             market_id: recommendation.market_id.clone(),
             event_id: recommendation.event_id.clone(),
@@ -302,11 +300,6 @@ impl FeedbackRecommendationContext {
     #[must_use]
     pub const fn report_kind(&self) -> ReportKind {
         self.report_kind
-    }
-
-    #[must_use]
-    pub const fn runtime_mode(&self) -> QuantRuntimeMode {
-        self.runtime_mode
     }
 
     #[must_use]
@@ -821,8 +814,6 @@ pub enum FeedbackCohortContractError {
     ExecutionTerminalBeforePublication,
     #[error("execution rollup count cannot be represented by the feedback contract")]
     ExecutionCountOverflow,
-    #[error("ReportOnly recommendation contains attempted execution")]
-    ReportOnlyExecutionAttempt,
 }
 
 #[cfg(test)]
@@ -845,8 +836,7 @@ mod tests {
             common::{MarketCategory, TickSize},
             market::MarketStatus,
             quant::{
-                CohortCensorReason, CohortExclusionReason, FeedbackCohort, OutcomeSide,
-                QuantRuntimeMode, ReportKind,
+                CohortCensorReason, CohortExclusionReason, FeedbackCohort, OutcomeSide, ReportKind,
             },
         },
         runtime_config::BuyModelRoute,
@@ -875,7 +865,6 @@ mod tests {
             profile_ref,
             route: BuyModelRoute::Crypto,
             report_kind: ReportKind::TopN,
-            runtime_mode: QuantRuntimeMode::SemiAuto,
             category: MarketCategory::Crypto,
             market_id: MarketId::new("feedback-page-market"),
             event_id: EventId::new("feedback-page-event"),
@@ -1032,12 +1021,12 @@ mod tests {
     fn decision_wire_preserves_codes() {
         assert_eq!(
             serde_json::to_value(FeedbackCohortDecision::Excluded(
-                CohortExclusionReason::ReportOnlyNoExecutionAuthority,
+                CohortExclusionReason::ExecutionNotAttempted,
             ))
             .expect("excluded decision"),
             json!({
                 "status": "excluded",
-                "detail": "report_only_no_execution_authority",
+                "detail": "execution_not_attempted",
             })
         );
         assert_eq!(

@@ -4,15 +4,18 @@ use sea_orm::entity::prelude::*;
 
 use super::sea_orm_active_enums::{
     QpAccountSource, QpMarketCategory, QpOutcomeSide, QpPositionLedgerState,
+    QpStrategyPositionOriginKind,
 };
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "quant_position")]
+#[sea_orm(table_name = "quant_strategy_position_lot")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub position_id: Uuid,
-    pub order_intent_id: Uuid,
+    pub strategy_position_lot_id: Uuid,
+    pub origin_kind: QpStrategyPositionOriginKind,
+    pub order_intent_id: Option<Uuid>,
+    pub recovery_incident_id: Option<Uuid>,
     pub execution_account_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub token_id: String,
@@ -55,7 +58,16 @@ pub struct Model {
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
-    pub quant_order_intent: BelongsTo<super::quant_order_intent::Entity>,
+    pub quant_order_intent: BelongsTo<Option<super::quant_order_intent::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        from = "recovery_incident_id",
+        to = "account_recovery_incident_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_account_recovery_incident:
+        BelongsTo<Option<super::quant_account_recovery_incident::Entity>>,
     #[sea_orm(
         belongs_to,
         from = "execution_account_id",

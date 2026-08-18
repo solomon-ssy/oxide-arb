@@ -49,10 +49,6 @@ use quant_pivot_models::{
             Relation as QuantExecutionOrderRelation,
         },
         quant_order_intent::{Column as QuantOrderIntentColumn, Entity as QuantOrderIntentEntity},
-        quant_position::{
-            Column as QuantPositionColumn, Entity as QuantPositionEntity,
-            Relation as QuantPositionRelation,
-        },
         quant_settlement_authorization::{
             Column as QuantSettlementAuthorizationColumn,
             Entity as QuantSettlementAuthorizationEntity,
@@ -78,6 +74,10 @@ use quant_pivot_models::{
         quant_settlement_redeem_lot::{
             Column as QuantSettlementRedeemLotColumn, Entity as QuantSettlementRedeemLotEntity,
         },
+        quant_strategy_position_lot::{
+            Column as QuantPositionColumn, Entity as QuantPositionEntity,
+            Relation as QuantPositionRelation,
+        },
     },
     enums::{
         execution::{ExitReason, ExitState, PositionLedgerState},
@@ -92,8 +92,8 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, EvmAddress, ExecutionAccountId, ExitPolicySpec, MarketId, OrderIntentId,
-        PositionId, SettlementAuthorizationId, SettlementChainSubmissionId, SettlementRedeemId,
-        Shares, TokenId, Usd, WorkerId,
+        SettlementAuthorizationId, SettlementChainSubmissionId, SettlementRedeemId, Shares,
+        StrategyPositionLotId, TokenId, Usd, WorkerId,
         settlement_payload::{
             SettlementChainReceiptEvidence, SettlementFailureEvidence, SettlementPayoutVector,
             SettlementReadinessEvidence,
@@ -111,7 +111,8 @@ use crate::{
     postgres::{
         error,
         quant::{
-            capital_allocation::PgCapitalAllocationRepository, position::PgPositionRepository,
+            capital_allocation::PgCapitalAllocationRepository,
+            strategy_position_lot::PgStrategyPositionLotRepository,
         },
         query::paginate_mapped,
         write::insert_many_chunked,
@@ -145,7 +146,7 @@ struct SettlementDiscoveryScopeRow {
 
 #[derive(Debug, FromQueryResult)]
 struct SettlementDiscoveryRow {
-    position_id: PositionId,
+    strategy_position_lot_id: StrategyPositionLotId,
     order_intent_id: OrderIntentId,
     execution_account_id: ExecutionAccountId,
     intent_execution_account_id: ExecutionAccountId,
@@ -183,7 +184,7 @@ impl PgSettlementRedeemRepository {
         .filter(MarketColumn::Outcome.is_not_null())
         .filter(MarketColumn::ResolvedAt.is_not_null())
         .filter(Expr::cust(
-            "NOT EXISTS (SELECT 1 FROM quant_settlement_redeem AS redeem WHERE redeem.market_id = quant_position.market_id AND redeem.execution_account_id = quant_position.execution_account_id)",
+            "NOT EXISTS (SELECT 1 FROM quant_settlement_redeem AS redeem WHERE redeem.market_id = quant_strategy_position_lot.market_id AND redeem.execution_account_id = quant_strategy_position_lot.execution_account_id)",
         ))
         .group_by(QuantPositionColumn::MarketId)
         .group_by(QuantPositionColumn::ExecutionAccountId)
@@ -223,8 +224,11 @@ impl PgSettlementRedeemRepository {
             .join(JoinType::InnerJoin, QuantPositionRelation::Market.def())
             .select_only()
             .column_as(
-                Expr::col((QuantPositionEntity, QuantPositionColumn::PositionId)),
-                "position_id",
+                Expr::col((
+                    QuantPositionEntity,
+                    QuantPositionColumn::StrategyPositionLotId,
+                )),
+                "strategy_position_lot_id",
             )
             .column_as(
                 Expr::col((QuantPositionEntity, QuantPositionColumn::OrderIntentId)),
@@ -304,7 +308,7 @@ impl PgSettlementRedeemRepository {
             .filter(MarketColumn::ResolvedAt.is_not_null())
             .order_by_asc(QuantPositionColumn::MarketId)
             .order_by_asc(QuantPositionColumn::ExecutionAccountId)
-            .order_by_asc(QuantPositionColumn::PositionId)
+            .order_by_asc(QuantPositionColumn::StrategyPositionLotId)
             .into_model::<SettlementDiscoveryRow>()
             .all(db)
             .await
@@ -362,7 +366,7 @@ fn assemble_discovery_candidates(
             ));
         }
         candidate.lots.push(SettlementDiscoveryLot {
-            position_id: row.position_id,
+            strategy_position_lot_id: row.strategy_position_lot_id,
             order_intent_id: row.order_intent_id,
             execution_account_id: row.execution_account_id,
             token_id: row.token_id,
@@ -600,7 +604,9 @@ fn validate_inventory_rows(
             || row.execution_account_id != execution_account_id
             || row.inventory_digest != inventory_digest
             || row.contributor_lots_digest != contributor_lots_digest
-            || by_position.insert(row.position_id, row).is_some()
+            || by_position
+                .insert(row.strategy_position_lot_id, row)
+                .is_some()
         {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
@@ -609,12 +615,14 @@ fn validate_inventory_rows(
         }
     }
     for lot in frozen_lots {
-        let row = by_position.get(&lot.position_id).ok_or_else(|| {
-            StorageError::invariant_violation(
-                Some(QUANT_SETTLEMENT_REDEEM),
-                "settlement inventory omitted a durable open lot",
-            )
-        })?;
+        let row = by_position
+            .get(&lot.strategy_position_lot_id)
+            .ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some(QUANT_SETTLEMENT_REDEEM),
+                    "settlement inventory omitted a durable open lot",
+                )
+            })?;
         if row.order_intent_id != lot.order_intent_id
             || row.execution_account_id != lot.execution_account_id
             || row.token_id != lot.token_id
@@ -1742,7 +1750,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         QuantSettlementInventoryLotEntity::find()
             .filter(QuantSettlementInventoryLotColumn::SettlementRedeemId.eq(*settlement_redeem_id))
             .filter(QuantSettlementInventoryLotColumn::InventoryDigest.eq(redeem.inventory_digest))
-            .order_by_asc(QuantSettlementInventoryLotColumn::PositionId)
+            .order_by_asc(QuantSettlementInventoryLotColumn::StrategyPositionLotId)
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -2633,7 +2641,8 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                 .exec(&txn)
                 .await
                 .map_err(StorageError::from)?;
-            PgPositionRepository::apply_exit(&txn, &intent_id, lot_write.position_exit).await?;
+            PgStrategyPositionLotRepository::apply_exit(&txn, &intent_id, lot_write.position_exit)
+                .await?;
             PgCapitalAllocationRepository::complete_exit_capital(
                 &txn,
                 &intent_id,

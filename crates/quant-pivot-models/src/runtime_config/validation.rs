@@ -1293,21 +1293,20 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
         });
     }
     if config
-        .execution_automation_policy
-        .semi_auto
-        .approval_ttl_secs
+        .execution_authorization_policy
+        .operator_approval_ttl_secs
         == 0
     {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.semi_auto.approval_ttl_secs",
+            field: "execution.operator_approval_ttl_secs",
             detail: "must be greater than zero".to_owned(),
         });
     }
     non_negative_decimal(
-        "execution.auto_execution.max_total_usd_per_report",
+        "execution.policy_automatic_limits.max_total_usd_per_report",
         &config
-            .execution_automation_policy
-            .auto_execution
+            .execution_authorization_policy
+            .policy_automatic_limits
             .max_total_usd_per_report,
         report,
     );

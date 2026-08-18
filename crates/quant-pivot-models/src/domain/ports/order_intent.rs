@@ -2,11 +2,11 @@
 //!
 //! Dependency-inversion boundary between the HTTP handlers and the core
 //! `CoreOrderIntentService`. Handlers depend only on this trait — never on a
-//! repository, the mode gate, or a venue client directly. Implemented in
+//! repository, authorization policy implementation, or venue client directly. Implemented in
 //! `quant-pivot-core` and injected into `quant_pivot_web::state::AppState`.
 //!
 //! Every mutation is governed and audited: `create` turns a published
-//! recommendation into an `OrderIntent` via the runtime mode gate; `approve` /
+//! recommendation into an `OrderIntent` via the authorization policy; `approve` /
 //! `reject` / `cancel` drive the intent + capital FSM in one transaction. The
 //! commands carry the acting operator identity so the service can stamp
 //! `approved_by` and the operation log.
@@ -25,9 +25,8 @@ use crate::{
 
 /// Create an order intent from a published recommendation.
 ///
-/// The runtime mode gate decides the outcome: `report_only` is rejected,
-/// `semi_auto` yields a `PendingApproval` intent, `auto_execution` yields an
-/// `ApprovedByPolicy` intent. `operator_id` / `acting_role` / `reason` are
+/// The live authorization policy decides whether the intent starts as
+/// `PendingAuthorization` or `Authorized`. `operator_id` / `acting_role` / `reason` are
 /// recorded in the operation log.
 #[derive(Debug, Clone)]
 pub struct CreateIntentCommand {
@@ -37,7 +36,7 @@ pub struct CreateIntentCommand {
     pub reason: String,
 }
 
-/// Approve a `PendingApproval` intent.
+/// Approve a `PendingAuthorization` intent.
 ///
 /// Approval may only **narrow** the tagged amount and side-aware price. The
 /// reserved capital is atomically shrunk to the final frozen order notional.
@@ -51,7 +50,7 @@ pub struct ApproveIntentCommand {
     pub override_price: Option<Price>,
 }
 
-/// Reject a `PendingApproval` intent and release its reserved capital.
+/// Reject a `PendingAuthorization` intent and release its reserved capital.
 ///
 /// Both `operator` and `risk_owner` may reject (risk may veto but not approve).
 #[derive(Debug, Clone)]
@@ -62,8 +61,7 @@ pub struct RejectIntentCommand {
     pub reason: String,
 }
 
-/// Cancel a not-yet-submitted intent (`PendingApproval` / `Approved` /
-/// `ApprovedByPolicy`) and release its reserved capital.
+/// Cancel a not-yet-submitted intent and release its reserved capital.
 #[derive(Debug, Clone)]
 pub struct CancelIntentCommand {
     pub order_intent_id: OrderIntentId,
@@ -75,7 +73,7 @@ pub struct CancelIntentCommand {
 /// Read + governed-mutation port for order intents.
 #[async_trait]
 pub trait OrderIntentPort: Send + Sync {
-    /// Create an intent from a recommendation (mode-gated, reserves capital).
+    /// Create an intent from a recommendation (authorization-gated, reserves capital).
     async fn create(&self, command: CreateIntentCommand) -> QuantResult<OrderIntentInfo>;
 
     /// Approve a pending intent (re-checks invalidation, optional downscale).
@@ -87,7 +85,7 @@ pub trait OrderIntentPort: Send + Sync {
     /// Cancel a not-yet-submitted intent and release its capital.
     async fn cancel(&self, command: CancelIntentCommand) -> QuantResult<OrderIntentInfo>;
 
-    /// Page intents filtered by status / mode / `created_at` window.
+    /// Page intents filtered by status / authorization / `created_at` window.
     async fn list(&self, query: OrderIntentListQuery) -> QuantResult<Paginated<OrderIntentInfo>>;
 
     /// Load one intent by id.

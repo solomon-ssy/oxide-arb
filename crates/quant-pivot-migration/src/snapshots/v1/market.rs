@@ -63,7 +63,7 @@ pub struct Model {
     #[sea_orm(has_many)]
     pub quant_market_selection_members: HasMany<super::quant_market_selection_member::Entity>,
     #[sea_orm(has_many)]
-    pub quant_positions: HasMany<super::quant_position::Entity>,
+    pub quant_strategy_position_lots: HasMany<super::quant_strategy_position_lot::Entity>,
     #[sea_orm(has_many)]
     pub quant_recommendations: HasMany<super::quant_recommendation::Entity>,
     #[sea_orm(has_many)]

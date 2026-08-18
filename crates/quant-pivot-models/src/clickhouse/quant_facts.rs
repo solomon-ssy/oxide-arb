@@ -10,15 +10,16 @@ use crate::{
         ChCapitalAllocationState, ChExecutionSide, ChExitSignalEvaluatorKind, ChExitSignalVerdict,
         ChFactorDirection, ChFactorValueState, ChFeatureCellState, ChFeatureSourceKind,
         ChFeatureValueKind, ChNormalizationSource, ChOutcomeSide, ChPositionLedgerState,
-        ChQuantLedgerEventKind,
+        ChQuantLedgerEventKind, ChStrategyPositionOriginKind,
     },
     hashing::CanonicalDigest,
     types::{
-        CapitalAllocationId, ContentHash, DecisionPolicySnapshotId, EconomicTierId, EventId,
-        ExecutionOrderId, FeatureParityEventId, FeatureParityRunId, FeatureVectorId, MarketId,
-        MarketSelectionId, ModelRunId, ModelVersionId, OrderId, OrderIntentId, PositionId,
-        RecommendationId, RecommendationReportId, ReportFunnelDiagnostics, ReportFunnelReason,
-        ReportFunnelStage, ReportRouteRunId, SignalCandidateId, TokenId, TrainingDatasetId,
+        AccountRecoveryIncidentId, CapitalAllocationId, ContentHash, DecisionPolicySnapshotId,
+        EconomicTierId, EventId, ExecutionOrderId, FeatureParityEventId, FeatureParityRunId,
+        FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, OrderId,
+        OrderIntentId, RecommendationId, RecommendationReportId, ReportFunnelDiagnostics,
+        ReportFunnelReason, ReportFunnelStage, ReportRouteRunId, SignalCandidateId,
+        StrategyPositionLotId, TokenId, TrainingDatasetId,
     },
 };
 
@@ -400,8 +401,10 @@ pub struct QuantCapitalAllocationEventRow {
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct QuantPositionEventRow {
     pub event_time: i64,
-    pub position_id: PositionId,
-    pub order_intent_id: OrderIntentId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
+    pub origin_kind: ChStrategyPositionOriginKind,
+    pub order_intent_id: Option<OrderIntentId>,
+    pub recovery_incident_id: Option<AccountRecoveryIncidentId>,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub event_kind: ChQuantLedgerEventKind,
@@ -425,7 +428,7 @@ pub struct QuantPositionEventRow {
 pub struct QuantExitSignalEvaluationEventRow {
     pub event_time: i64,
     pub order_intent_id: OrderIntentId,
-    pub position_id: PositionId,
+    pub strategy_position_lot_id: StrategyPositionLotId,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub evaluator_kind: ChExitSignalEvaluatorKind,

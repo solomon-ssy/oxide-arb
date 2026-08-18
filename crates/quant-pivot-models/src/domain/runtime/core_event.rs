@@ -22,8 +22,8 @@ use crate::{
         execution::{ExecutionOrderPhase, ReconciliationResult},
         quant::{
             EmptyReportReason, EntryConditionState, ExecutionOrderState, OrderIntentStatus,
-            QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportRunStatus,
-            ReportRunTerminalReason, ResearchJobKind, ResearchJobStatus, TrainingDatasetStatus,
+            RecommendationReportStatus, ReportKind, ReportRunStatus, ReportRunTerminalReason,
+            ResearchJobKind, ResearchJobStatus, TrainingDatasetStatus,
         },
         settlement::{
             SettlementAuthorizationState, SettlementCaseState, SettlementReadinessStatus,
@@ -87,7 +87,6 @@ pub struct ReportLifecycleEvent {
     pub recommendation_report_id: String,
     pub represented_routes: RepresentedRouteSet,
     pub report_kind: ReportKind,
-    pub runtime_mode: QuantRuntimeMode,
     pub status: RecommendationReportStatus,
     pub decision_at: DateTime<Utc>,
     pub published_at: Option<DateTime<Utc>>,
@@ -152,7 +151,6 @@ impl ReportLifecycleEvent {
             recommendation_report_id: report.recommendation_report_id.to_string(),
             represented_routes: report.represented_routes_json.clone(),
             report_kind: report.report_kind,
-            runtime_mode: report.runtime_mode,
             status: report.status,
             decision_at: report.decision_at,
             published_at: report.published_at,
@@ -301,10 +299,8 @@ mod intent_event_kind_tests {
     #[test]
     fn pre_submission_no_event() {
         for status in [
-            OrderIntentStatus::Draft,
-            OrderIntentStatus::PendingApproval,
-            OrderIntentStatus::Approved,
-            OrderIntentStatus::ApprovedByPolicy,
+            OrderIntentStatus::PendingAuthorization,
+            OrderIntentStatus::Authorized,
             OrderIntentStatus::AdmissionPending,
         ] {
             assert_eq!(IntentEventKind::for_execution_status(status), None);
@@ -322,7 +318,6 @@ pub struct IntentLifecycleEvent {
     pub event: IntentEventKind,
     pub order_intent_id: String,
     pub recommendation_id: String,
-    pub runtime_mode: QuantRuntimeMode,
     pub status: OrderIntentStatus,
     pub reason: Option<String>,
     pub occurred_at: DateTime<Utc>,
@@ -340,12 +335,12 @@ impl IntentLifecycleEvent {
             event,
             order_intent_id: info.order_intent_id.to_string(),
             recommendation_id: info.recommendation_id.to_string(),
-            runtime_mode: info.runtime_mode,
             status: info.status,
-            reason: info
-                .status_reason
-                .clone()
-                .or_else(|| info.approval_reason.clone()),
+            reason: info.status_reason.clone().or_else(|| {
+                info.authorization_evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.operator_reason().map(str::to_owned))
+            }),
             occurred_at,
         }
     }

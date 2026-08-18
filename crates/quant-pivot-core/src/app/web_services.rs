@@ -24,13 +24,14 @@ use quant_pivot_repository::{
         FeatureRepository, FeedbackCycleRepository, FeedbackOutboxRepository,
         FeedbackSchedulerRepository, FreshBootRepository, MenuRepository,
         ModelRouteShadowBindingRepository, OperationLogRepository, OrderIntentRepository,
-        PolicyRepository, PortfolioPlanRepository, PositionRepository, PromotionPermitRepository,
+        PolicyRepository, PortfolioPlanRepository, PromotionPermitRepository,
         RecommendationExecutionRollupRepository, RecommendationReportRepository,
         RecommendationRepository, ReconciliationRepository, ReportRunRepository,
         ResolutionObservationRepository, RoleMenuRepository, RolePermissionRepository,
         RoleRepository, RuntimeActivityRepository, ServingEvidenceRepository,
-        TradePolicyRepository, TrainingDatasetRepository, UserRepository, UserRoleRepository,
-        VenueIncentiveRepository, quant::settlement_redeem::SettlementRedeemRepository,
+        StrategyPositionLotRepository, TradePolicyRepository, TrainingDatasetRepository,
+        UserRepository, UserRoleRepository, VenueIncentiveRepository,
+        quant::settlement_redeem::SettlementRedeemRepository,
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -436,7 +437,7 @@ impl AppContext {
         let repos = &self.infra.repos;
         let execution_read = Arc::new(CoreExecutionReadPort::new(
             Arc::clone(&repos.execution_order) as Arc<dyn ExecutionOrderRepository>,
-            Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
+            Arc::clone(&repos.position) as Arc<dyn StrategyPositionLotRepository>,
             Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
             Arc::clone(&repos.settlement_redeem) as Arc<dyn SettlementRedeemRepository>,
         ));

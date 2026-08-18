@@ -183,7 +183,7 @@ pub use system::{
     FreshBootBlockerScope, FreshBootBlockerView, FreshBootProfileProgressView,
     FreshBootProgressView, FreshBootRecommendedAction, FreshBootRunDetailView,
     FreshBootRunEventView, FreshBootRunProgressView, RetryFreshBootRunRequest,
-    SetKillSwitchRequest, SupersedeFreshBootRunRequest, SwitchQuantModeRequest,
+    SetEntryAuthorizationPolicyRequest, SetKillSwitchRequest, SupersedeFreshBootRunRequest,
     SwitchSettlementWritePolicyRequest, SystemCapabilities, SystemStatusView,
 };
 pub use trade_policy::{

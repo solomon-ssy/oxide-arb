@@ -37,7 +37,7 @@ use quant_pivot_models::{
     domain::{
         api::settlement_redeem::SettlementRedeemListQuery,
         quant::{
-            ExecutionAttemptReconciliationResult, NewExecutionAccount, PositionInfo,
+            ExecutionAttemptReconciliationResult, NewExecutionAccount, StrategyPositionLot,
             settlement::{
                 ApproveSettlementAuthorization, BeginSettlementDispatch,
                 NewSettlementChainSubmission, NewSettlementRedeem,
@@ -61,7 +61,6 @@ use quant_pivot_models::{
             Column as QuantExecutionOrderColumn, Entity as QuantExecutionOrderEntity,
         },
         quant_order_intent::Entity as QuantOrderIntentEntity,
-        quant_position::{Column as QuantPositionColumn, Entity as QuantPositionEntity},
         quant_settlement_authorization::{
             Column as QuantSettlementAuthorizationColumn,
             Entity as QuantSettlementAuthorizationEntity,
@@ -69,13 +68,16 @@ use quant_pivot_models::{
         quant_settlement_chain_submission::Entity as QuantSettlementChainSubmissionEntity,
         quant_settlement_inventory_lot::Entity as QuantSettlementInventoryLotEntity,
         quant_settlement_redeem::Entity as QuantSettlementRedeemEntity,
+        quant_strategy_position_lot::{
+            Column as QuantPositionColumn, Entity as QuantPositionEntity,
+        },
     },
     enums::{
         common::MarketCategory,
         execution::{CapitalAllocationState, ExitState, KillSwitchState, PositionLedgerState},
         market::MarketStatus,
         quant::{
-            ExecutionOrderState, ExecutionWalletKind, ExitSettlementMode, QuantRuntimeMode,
+            EntryAuthorizationPolicy, ExecutionOrderState, ExecutionWalletKind, ExitSettlementMode,
             RedeemPolicy,
         },
         settlement::{
@@ -104,7 +106,7 @@ use quant_pivot_repository::{
     postgres::{
         PgCapitalAllocationRepository, PgEventRepository, PgExecutionAccountRepository,
         PgExecutionAttemptOutcomeRepository, PgExecutionSubmissionRepository, PgMarketRepository,
-        PgOrderIntentRepository, PgPositionRepository, PgUserRepository,
+        PgOrderIntentRepository, PgStrategyPositionLotRepository, PgUserRepository,
         quant::{
             settlement_governance::PgSettlementGovernanceRepository,
             settlement_redeem::PgSettlementRedeemRepository,
@@ -113,7 +115,7 @@ use quant_pivot_repository::{
     traits::{
         CapitalAllocationRepository, EventRepository, ExecutionAccountRepository,
         ExecutionAttemptOutcomeRepository, MarketRepository, OrderIntentRepository,
-        PositionRepository, UserRepository,
+        StrategyPositionLotRepository, UserRepository,
         quant::{
             settlement_governance::{
                 SettlementExternalCursorRepository, SettlementGovernanceRepository,
@@ -265,7 +267,7 @@ async fn manual_only_inventory_scenario() {
             })
             .await
             .is_err(),
-        "manual-only inventory cannot stage a SemiAuto authorization"
+        "manual-only inventory cannot stage operator authorization"
     );
     assert!(
         repository
@@ -594,7 +596,7 @@ async fn settlement_orchestration_scenario() {
     let service = SettlementService::new(SettlementServiceDeps {
         repository: Arc::clone(&repository) as Arc<dyn SettlementRedeemRepository>,
         governance: governance as Arc<dyn SettlementGovernanceRepository>,
-        positions: Arc::new(PgPositionRepository::new(db)),
+        positions: Arc::new(PgStrategyPositionLotRepository::new(db)),
         executor: Arc::clone(&executor) as Arc<dyn SettlementSubmissionExecutor>,
         runtime_controls: runtime_controls.clone(),
         config: SettlementDeployConfig::default(),
@@ -604,11 +606,11 @@ async fn settlement_orchestration_scenario() {
     });
     let now = Utc::now();
 
-    let report_only = Box::pin(service.run_once(now))
+    let operator_policy = Box::pin(service.run_once(now))
         .await
         .expect("report-only pass is read-only");
     assert!(matches!(
-        report_only,
+        operator_policy,
         SettlementPassOutcome::NewSubmissionBlocked { .. }
     ));
     assert_eq!(executor.preparations.load(Ordering::SeqCst), 0);
@@ -616,8 +618,8 @@ async fn settlement_orchestration_scenario() {
 
     let mut controls = runtime_controls.snapshot();
     controls.revision += 1;
-    controls.quant_runtime_mode = QuantRuntimeMode::SemiAuto;
-    controls.settlement_write_policy = SettlementWritePolicy::SemiAuto;
+    controls.entry_authorization_policy = EntryAuthorizationPolicy::OperatorApprovalRequired;
+    controls.settlement_write_policy = SettlementWritePolicy::OperatorApproval;
     runtime_controls.publish_local(controls);
     let authorization_started_at = now + TimeDelta::seconds(6);
     let pending = Box::pin(service.run_once(authorization_started_at))
@@ -638,7 +640,7 @@ async fn settlement_orchestration_scenario() {
 
     let mut controls = runtime_controls.snapshot();
     controls.revision += 1;
-    controls.quant_runtime_mode = QuantRuntimeMode::ReportOnly;
+    controls.entry_authorization_policy = EntryAuthorizationPolicy::OperatorApprovalRequired;
     controls.kill_switch_state = KillSwitchState::EmergencyHalted;
     controls.kill_switch_requires_ack = true;
     runtime_controls.publish_local(controls);
@@ -715,7 +717,7 @@ async fn governed_action_worker_scenario() {
     let controls = RuntimeControlsHandle::default();
     let mut enabled = controls.snapshot();
     enabled.revision += 1;
-    enabled.quant_runtime_mode = QuantRuntimeMode::SemiAuto;
+    enabled.entry_authorization_policy = EntryAuthorizationPolicy::OperatorApprovalRequired;
     enabled.settlement_write_policy = SettlementWritePolicy::GovernedCanary;
     controls.publish_local(enabled);
     let executor = Arc::new(ProbeGovernedActionExecutor::default());
@@ -748,7 +750,7 @@ async fn governed_action_worker_scenario() {
 
     let mut halted = controls.snapshot();
     halted.revision += 1;
-    halted.quant_runtime_mode = QuantRuntimeMode::ReportOnly;
+    halted.entry_authorization_policy = EntryAuthorizationPolicy::OperatorApprovalRequired;
     halted.settlement_write_policy = SettlementWritePolicy::Disabled;
     halted.kill_switch_state = KillSwitchState::EmergencyHalted;
     controls.publish_local(halted);
@@ -958,7 +960,7 @@ async fn settlement_confirmation_scenario() {
     let db = pool.connection().clone();
     let fixture = Box::pin(prepare_confirmation_fixture(&db)).await;
     let confirmed_at = db.statement_time().await;
-    let position_repository = PgPositionRepository::new(db.clone());
+    let position_repository = PgStrategyPositionLotRepository::new(db.clone());
     let settlement = PgSettlementRedeemRepository::new(db.clone());
     let confirmation_worker = WorkerId::from_v7();
     settlement
@@ -1071,7 +1073,7 @@ async fn partial_exchange_resolution_scenario() {
 
 struct SettlementConfirmationFixture {
     intent_id: OrderIntentId,
-    positions: Vec<PositionInfo>,
+    positions: Vec<StrategyPositionLot>,
     redeem: SettlementRedeemInfo,
     submission: SettlementChainSubmissionInfo,
     confirmation: VerifiedSettlementConfirmation,
@@ -1138,7 +1140,7 @@ async fn prepare_confirmation_fixture_shape(
             Usd::new(MIXED_SETTLEMENT_PAYOUT_USD),
         ),
     };
-    let position_repository = PgPositionRepository::new(db.clone());
+    let position_repository = PgStrategyPositionLotRepository::new(db.clone());
     let market = MarketEntity::find_by_id(MarketId::new(&ids.market))
         .one(db)
         .await
@@ -1211,7 +1213,7 @@ async fn prepare_confirmation_fixture_shape(
 async fn insert_confirmation_inventory(
     db: &DatabaseConnection,
     redeem: &SettlementRedeemInfo,
-    positions: &[PositionInfo],
+    positions: &[StrategyPositionLot],
 ) {
     let position = positions.first().expect("one frozen settlement position");
     QuantSettlementInventoryLotEntity::insert(
@@ -1221,8 +1223,10 @@ async fn insert_confirmation_inventory(
             inventory_digest: redeem.inventory_digest,
             contributor_lots_digest: redeem.contributor_lots_digest,
             execution_account_id: redeem.execution_account_id,
-            position_id: position.position_id,
-            order_intent_id: position.order_intent_id,
+            strategy_position_lot_id: position.strategy_position_lot_id,
+            order_intent_id: position
+                .order_intent_id
+                .expect("settlement fixture system lot"),
             token_id: position.token_id.clone(),
             side: position.side,
             shares: position.shares,
@@ -1264,7 +1268,7 @@ async fn assert_mismatch_holds_accounting(
         SettlementCaseState::ReconciliationRequired
     );
     assert_eq!(
-        PgPositionRepository::new(db.clone())
+        PgStrategyPositionLotRepository::new(db.clone())
             .find_by_intent(intent_id)
             .await
             .expect("reload held position")
@@ -1293,7 +1297,7 @@ async fn assert_mismatch_holds_accounting(
 async fn assert_confirmed_accounting(
     db: &DatabaseConnection,
     settlement: &PgSettlementRedeemRepository,
-    positions: &PgPositionRepository,
+    positions: &PgStrategyPositionLotRepository,
     redeem: &SettlementRedeemInfo,
     submission: &SettlementChainSubmissionInfo,
     intent_id: &OrderIntentId,

@@ -1,7 +1,7 @@
 //! Governed settlement submission orchestration.
 //!
 //! Recovery of an existing durable identity is deliberately separate from
-//! admission of a new money-moving submission. Runtime mode, kill switch and
+//! admission of a new money-moving submission. Runtime authorization policy, kill switch and
 //! rollout changes may deny the latter but can never strand the former.
 
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use quant_pivot_models::{
     },
     enums::{
         execution::KillSwitchState,
-        quant::QuantRuntimeMode,
+        quant::EntryAuthorizationPolicy,
         settlement::{
             SettlementAuthorizationState, SettlementEffectivePolicy, SettlementFailureCode,
             SettlementReadinessStatus, SettlementSubmissionState, SettlementWritePolicy,
@@ -39,7 +39,7 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    PositionRepository,
+    StrategyPositionLotRepository,
     quant::{
         settlement_governance::SettlementGovernanceRepository,
         settlement_redeem::SettlementRedeemRepository,
@@ -60,8 +60,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettlementAdmissionBlockReason {
     SettlementWritePolicyDisabled,
-    RuntimeModeWritePolicyMismatch,
-    ReportOnly,
+    AuthorizationPolicyMismatch,
     KillSwitchHalted,
     ManualOnlyInventory,
     ExecutionNotQuiescent,
@@ -78,13 +77,13 @@ pub enum SettlementAdmissionBlockReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettlementAdmissionDecision {
     Admit,
-    StageSemiAutoAuthorization,
+    StageOperatorAuthorization,
     Blocked(SettlementAdmissionBlockReason),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SettlementAdmissionContext {
-    mode: QuantRuntimeMode,
+    authorization_policy: EntryAuthorizationPolicy,
     canary_action_id: Option<SettlementGovernedActionId>,
 }
 
@@ -187,7 +186,7 @@ pub trait SettlementSubmissionExecutor: Send + Sync {
 pub struct SettlementServiceDeps {
     pub repository: Arc<dyn SettlementRedeemRepository>,
     pub governance: Arc<dyn SettlementGovernanceRepository>,
-    pub positions: Arc<dyn PositionRepository>,
+    pub positions: Arc<dyn StrategyPositionLotRepository>,
     pub executor: Arc<dyn SettlementSubmissionExecutor>,
     pub runtime_controls: RuntimeControlsHandle,
     pub config: SettlementDeployConfig,
@@ -200,7 +199,7 @@ pub struct SettlementServiceDeps {
 pub struct SettlementService {
     repository: Arc<dyn SettlementRedeemRepository>,
     governance: Arc<dyn SettlementGovernanceRepository>,
-    positions: Arc<dyn PositionRepository>,
+    positions: Arc<dyn StrategyPositionLotRepository>,
     executor: Arc<dyn SettlementSubmissionExecutor>,
     runtime_controls: RuntimeControlsHandle,
     config: SettlementDeployConfig,
@@ -257,7 +256,7 @@ impl SettlementService {
         };
         match decision {
             SettlementAdmissionDecision::Admit => self.prepare_and_dispatch(claim, context).await,
-            SettlementAdmissionDecision::StageSemiAutoAuthorization => {
+            SettlementAdmissionDecision::StageOperatorAuthorization => {
                 self.stage_authorization(claim, now).await
             }
             SettlementAdmissionDecision::Blocked(reason) => {
@@ -283,8 +282,8 @@ impl SettlementService {
     ) -> QuantResult<SettlementPassOutcome> {
         let expires_at = deadline(
             now,
-            self.config.semi_auto_authorization_ttl_secs,
-            "polymarket.settlement.semi_auto_authorization_ttl_secs",
+            self.config.operator_authorization_ttl_secs,
+            "polymarket.settlement.operator_authorization_ttl_secs",
         )?;
         let scope = authorization_scope(&claim.redeem, expires_at)?;
         let digest = scope.digest()?;
@@ -358,7 +357,8 @@ impl SettlementService {
             return Ok(outcome);
         }
         prepared.canary_action_id = admitted.canary_action_id;
-        let expected_authorization_digest = (admitted.mode == QuantRuntimeMode::SemiAuto)
+        let expected_authorization_digest = (admitted.authorization_policy
+            == EntryAuthorizationPolicy::OperatorApprovalRequired)
             .then_some(claim.redeem.authorization_digest)
             .flatten();
         let persisted = self
@@ -383,14 +383,14 @@ impl SettlementService {
         now: DateTime<Utc>,
     ) -> QuantResult<(SettlementAdmissionContext, SettlementAdmissionDecision)> {
         let controls = self.runtime_controls.snapshot();
-        let mode = controls.quant_runtime_mode;
+        let authorization_policy = controls.entry_authorization_policy;
         let mut context = SettlementAdmissionContext {
-            mode,
+            authorization_policy,
             canary_action_id: None,
         };
         let decision = evaluate_new_submission_admission(
             redeem,
-            mode,
+            authorization_policy,
             controls.settlement_write_policy,
             controls.kill_switch_state,
             now,
@@ -450,7 +450,7 @@ impl SettlementService {
                 };
                 context.canary_action_id = Some(canary.settlement_governed_action_id);
             }
-            SettlementWritePolicy::Auto => {
+            SettlementWritePolicy::PolicyAutomatic => {
                 let deployment_digest = redeem.deployment_digest.ok_or_else(|| {
                     invariant("auto settlement admission has no deployment digest")
                 })?;
@@ -471,7 +471,7 @@ impl SettlementService {
                     ));
                 }
             }
-            SettlementWritePolicy::Disabled | SettlementWritePolicy::SemiAuto => {}
+            SettlementWritePolicy::Disabled | SettlementWritePolicy::OperatorApproval => {}
         }
         Ok((context, decision))
     }
@@ -488,7 +488,7 @@ impl SettlementService {
         }
         let reason = match decision {
             SettlementAdmissionDecision::Blocked(reason) => reason,
-            SettlementAdmissionDecision::StageSemiAutoAuthorization => {
+            SettlementAdmissionDecision::StageOperatorAuthorization => {
                 SettlementAdmissionBlockReason::AuthorizationPending
             }
             SettlementAdmissionDecision::Admit => {
@@ -1044,7 +1044,7 @@ fn bounded_detail(detail: &str) -> String {
 #[must_use]
 pub fn evaluate_new_submission_admission(
     redeem: &SettlementRedeemInfo,
-    mode: QuantRuntimeMode,
+    authorization_policy: EntryAuthorizationPolicy,
     write_policy: SettlementWritePolicy,
     kill_switch: KillSwitchState,
     now: DateTime<Utc>,
@@ -1053,9 +1053,6 @@ pub fn evaluate_new_submission_admission(
         return SettlementAdmissionDecision::Blocked(
             SettlementAdmissionBlockReason::SettlementWritePolicyDisabled,
         );
-    }
-    if mode == QuantRuntimeMode::ReportOnly {
-        return SettlementAdmissionDecision::Blocked(SettlementAdmissionBlockReason::ReportOnly);
     }
     if !kill_switch.allows_settlement_recovery_submission() {
         return SettlementAdmissionDecision::Blocked(
@@ -1087,19 +1084,19 @@ pub fn evaluate_new_submission_admission(
         SettlementWritePolicy::Disabled => SettlementAdmissionDecision::Blocked(
             SettlementAdmissionBlockReason::SettlementWritePolicyDisabled,
         ),
-        SettlementWritePolicy::GovernedCanary | SettlementWritePolicy::SemiAuto
-            if mode != QuantRuntimeMode::SemiAuto =>
+        SettlementWritePolicy::GovernedCanary | SettlementWritePolicy::OperatorApproval
+            if authorization_policy != EntryAuthorizationPolicy::OperatorApprovalRequired =>
         {
             SettlementAdmissionDecision::Blocked(
-                SettlementAdmissionBlockReason::RuntimeModeWritePolicyMismatch,
+                SettlementAdmissionBlockReason::AuthorizationPolicyMismatch,
             )
         }
-        SettlementWritePolicy::GovernedCanary | SettlementWritePolicy::SemiAuto => {
+        SettlementWritePolicy::GovernedCanary | SettlementWritePolicy::OperatorApproval => {
             match redeem.authorization_state {
                 SettlementAuthorizationState::NotRequired
                 | SettlementAuthorizationState::Expired
                 | SettlementAuthorizationState::Revoked => {
-                    SettlementAdmissionDecision::StageSemiAutoAuthorization
+                    SettlementAdmissionDecision::StageOperatorAuthorization
                 }
                 SettlementAuthorizationState::Pending => SettlementAdmissionDecision::Blocked(
                     SettlementAdmissionBlockReason::AuthorizationPending,
@@ -1120,12 +1117,14 @@ pub fn evaluate_new_submission_admission(
                 ),
             }
         }
-        SettlementWritePolicy::Auto if mode != QuantRuntimeMode::AutoExecution => {
+        SettlementWritePolicy::PolicyAutomatic
+            if authorization_policy != EntryAuthorizationPolicy::PolicyAutomatic =>
+        {
             SettlementAdmissionDecision::Blocked(
-                SettlementAdmissionBlockReason::RuntimeModeWritePolicyMismatch,
+                SettlementAdmissionBlockReason::AuthorizationPolicyMismatch,
             )
         }
-        SettlementWritePolicy::Auto => {
+        SettlementWritePolicy::PolicyAutomatic => {
             if matches!(
                 redeem.authorization_state,
                 SettlementAuthorizationState::NotRequired
@@ -1204,7 +1203,7 @@ mod tests {
         },
         enums::{
             execution::KillSwitchState,
-            quant::{ExecutionWalletKind, QuantRuntimeMode},
+            quant::{EntryAuthorizationPolicy, ExecutionWalletKind},
             settlement::{
                 SettlementAuthorizationState, SettlementCaseState, SettlementEffectivePolicy,
                 SettlementReadinessStatus, SettlementReconciliationState, SettlementRoute,
@@ -1223,25 +1222,27 @@ mod tests {
         evaluate_new_submission_admission,
     };
     #[test]
-    fn submission_admission_mode_rejects() {
+    fn submission_rejects_policy_mismatch() {
         let now = timestamp(1_000);
         let redeem = ready_redeem(now);
 
         assert_eq!(
             evaluate_new_submission_admission(
                 &redeem,
-                QuantRuntimeMode::ReportOnly,
-                SettlementWritePolicy::Auto,
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
+                SettlementWritePolicy::PolicyAutomatic,
                 KillSwitchState::Closed,
                 now,
             ),
-            SettlementAdmissionDecision::Blocked(SettlementAdmissionBlockReason::ReportOnly)
+            SettlementAdmissionDecision::Blocked(
+                SettlementAdmissionBlockReason::AuthorizationPolicyMismatch
+            )
         );
         assert_eq!(
             evaluate_new_submission_admission(
                 &redeem,
-                QuantRuntimeMode::AutoExecution,
-                SettlementWritePolicy::Auto,
+                EntryAuthorizationPolicy::PolicyAutomatic,
+                SettlementWritePolicy::PolicyAutomatic,
                 KillSwitchState::ExecutionHalted,
                 now,
             ),
@@ -1250,7 +1251,7 @@ mod tests {
         assert_eq!(
             evaluate_new_submission_admission(
                 &redeem,
-                QuantRuntimeMode::AutoExecution,
+                EntryAuthorizationPolicy::PolicyAutomatic,
                 SettlementWritePolicy::Disabled,
                 KillSwitchState::Closed,
                 now,
@@ -1262,8 +1263,8 @@ mod tests {
         assert_eq!(
             evaluate_new_submission_admission(
                 &redeem,
-                QuantRuntimeMode::AutoExecution,
-                SettlementWritePolicy::Auto,
+                EntryAuthorizationPolicy::PolicyAutomatic,
+                SettlementWritePolicy::PolicyAutomatic,
                 KillSwitchState::ExitOnly,
                 now,
             ),
@@ -1285,12 +1286,12 @@ mod tests {
         assert_eq!(
             evaluate_new_submission_admission(
                 &redeem,
-                QuantRuntimeMode::SemiAuto,
-                SettlementWritePolicy::SemiAuto,
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
+                SettlementWritePolicy::OperatorApproval,
                 KillSwitchState::ExitOnly,
                 now,
             ),
-            SettlementAdmissionDecision::StageSemiAutoAuthorization
+            SettlementAdmissionDecision::StageOperatorAuthorization
         );
 
         redeem.authorization_state = SettlementAuthorizationState::Approved;
@@ -1299,8 +1300,8 @@ mod tests {
         assert_eq!(
             evaluate_new_submission_admission(
                 &redeem,
-                QuantRuntimeMode::SemiAuto,
-                SettlementWritePolicy::SemiAuto,
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
+                SettlementWritePolicy::OperatorApproval,
                 KillSwitchState::ExitOnly,
                 now,
             ),
@@ -1311,8 +1312,8 @@ mod tests {
         assert_eq!(
             evaluate_new_submission_admission(
                 &redeem,
-                QuantRuntimeMode::SemiAuto,
-                SettlementWritePolicy::SemiAuto,
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
+                SettlementWritePolicy::OperatorApproval,
                 KillSwitchState::Closed,
                 now,
             ),
@@ -1335,8 +1336,8 @@ mod tests {
             assert_eq!(
                 evaluate_new_submission_admission(
                     &redeem,
-                    QuantRuntimeMode::AutoExecution,
-                    SettlementWritePolicy::Auto,
+                    EntryAuthorizationPolicy::PolicyAutomatic,
+                    SettlementWritePolicy::PolicyAutomatic,
                     KillSwitchState::Closed,
                     now,
                 ),
@@ -1352,8 +1353,8 @@ mod tests {
             assert_eq!(
                 evaluate_new_submission_admission(
                     &redeem,
-                    QuantRuntimeMode::AutoExecution,
-                    SettlementWritePolicy::Auto,
+                    EntryAuthorizationPolicy::PolicyAutomatic,
+                    SettlementWritePolicy::PolicyAutomatic,
                     KillSwitchState::Closed,
                     now,
                 ),
@@ -1373,18 +1374,24 @@ mod tests {
         redeem.authorization_digest = Some(ContentHash::from_bytes([0x45; 32]));
         redeem.authorization_expires_at = Some(timestamp(4_300));
 
-        for (mode, write_policy) in [
+        for (authorization_policy, write_policy) in [
             (
-                QuantRuntimeMode::SemiAuto,
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
                 SettlementWritePolicy::GovernedCanary,
             ),
-            (QuantRuntimeMode::SemiAuto, SettlementWritePolicy::SemiAuto),
-            (QuantRuntimeMode::AutoExecution, SettlementWritePolicy::Auto),
+            (
+                EntryAuthorizationPolicy::OperatorApprovalRequired,
+                SettlementWritePolicy::OperatorApproval,
+            ),
+            (
+                EntryAuthorizationPolicy::PolicyAutomatic,
+                SettlementWritePolicy::PolicyAutomatic,
+            ),
         ] {
             assert_eq!(
                 evaluate_new_submission_admission(
                     &redeem,
-                    mode,
+                    authorization_policy,
                     write_policy,
                     KillSwitchState::Closed,
                     now,

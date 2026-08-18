@@ -608,6 +608,76 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
+        name: "uq_quant_account_chain_execution_source",
+        table: "quant_account_chain_execution",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "execution_account_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "source_event_hash",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_account_pause_incident_exchange",
+        table: "quant_account_pause_submission",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "recovery_incident_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "exchange_address",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_account_recovery_incident_active",
+        table: "quant_account_recovery_incident",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "execution_account_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("status <> 'sealed'"),
+    },
+    IndexSpec {
+        name: "idx_quant_account_chain_execution_cursor",
+        table: "quant_account_chain_execution",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "execution_account_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "block_number",
+                direction: IndexDirection::Desc,
+            },
+            IndexColumnSpec {
+                name: "transaction_index",
+                direction: IndexDirection::Desc,
+            },
+            IndexColumnSpec {
+                name: "log_index",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
         name: "idx_quant_account_snapshot_as_of",
         table: "quant_account_snapshot",
         method: IndexMethod::BTree,
@@ -1032,8 +1102,8 @@ const INDEXES: &[IndexSpec] = &[
         predicate: Some("transaction_hash IS NOT NULL"),
     },
     IndexSpec {
-        name: "idx_quant_execution_fill_order",
-        table: "quant_execution_fill",
+        name: "idx_quant_clob_trade_observation_order",
+        table: "quant_clob_trade_observation",
         method: IndexMethod::BTree,
         unique: false,
         columns: &[
@@ -1049,8 +1119,8 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_execution_fill_account",
-        table: "quant_execution_fill",
+        name: "idx_quant_clob_trade_observation_account",
+        table: "quant_clob_trade_observation",
         method: IndexMethod::BTree,
         unique: false,
         columns: &[
@@ -1061,23 +1131,6 @@ const INDEXES: &[IndexSpec] = &[
             IndexColumnSpec {
                 name: "matched_at",
                 direction: IndexDirection::Desc,
-            },
-        ],
-        predicate: None,
-    },
-    IndexSpec {
-        name: "uq_quant_execution_fee_measurement_stage",
-        table: "quant_execution_fee_measurement",
-        method: IndexMethod::BTree,
-        unique: true,
-        columns: &[
-            IndexColumnSpec {
-                name: "execution_fill_id",
-                direction: IndexDirection::Asc,
-            },
-            IndexColumnSpec {
-                name: "stage",
-                direction: IndexDirection::Asc,
             },
         ],
         predicate: None,
@@ -2387,8 +2440,8 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_position_account_market_state",
-        table: "quant_position",
+        name: "idx_quant_strategy_position_lot_account_market_state",
+        table: "quant_strategy_position_lot",
         method: IndexMethod::BTree,
         unique: false,
         columns: &[
@@ -2408,8 +2461,8 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_position_state",
-        table: "quant_position",
+        name: "idx_quant_strategy_position_lot_state",
+        table: "quant_strategy_position_lot",
         method: IndexMethod::BTree,
         unique: false,
         columns: &[IndexColumnSpec {
@@ -2419,8 +2472,8 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_position_token",
-        table: "quant_position",
+        name: "idx_quant_strategy_position_lot_token",
+        table: "quant_strategy_position_lot",
         method: IndexMethod::BTree,
         unique: false,
         columns: &[IndexColumnSpec {
@@ -2430,8 +2483,8 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "uq_quant_position_intent_account",
-        table: "quant_position",
+        name: "uq_quant_strategy_position_lot_intent_account",
+        table: "quant_strategy_position_lot",
         method: IndexMethod::BTree,
         unique: true,
         columns: &[
@@ -2444,7 +2497,24 @@ const INDEXES: &[IndexSpec] = &[
                 direction: IndexDirection::Asc,
             },
         ],
-        predicate: None,
+        predicate: Some("origin_kind = 'system_intent'"),
+    },
+    IndexSpec {
+        name: "uq_quant_strategy_position_lot_recovery_token",
+        table: "quant_strategy_position_lot",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "recovery_incident_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "token_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("origin_kind IN ('account_recovery_incident', 'opening_inventory')"),
     },
     IndexSpec {
         name: "idx_quant_recommendation_market_status",
@@ -3277,7 +3347,7 @@ const INDEXES: &[IndexSpec] = &[
                 direction: IndexDirection::Asc,
             },
             IndexColumnSpec {
-                name: "position_id",
+                name: "strategy_position_lot_id",
                 direction: IndexDirection::Asc,
             },
         ],
@@ -3486,7 +3556,7 @@ const INDEXES: &[IndexSpec] = &[
         method: IndexMethod::BTree,
         unique: true,
         columns: &[IndexColumnSpec {
-            name: "position_id",
+            name: "strategy_position_lot_id",
             direction: IndexDirection::Asc,
         }],
         predicate: None,

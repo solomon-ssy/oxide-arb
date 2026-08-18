@@ -55,25 +55,25 @@ impl GateSubject {
 pub enum GateIntent {
     Candidate,
     RouteActivation,
-    AutoExecution,
+    PolicyAutomatic,
 }
 
 impl GateIntent {
     #[must_use]
     pub const fn requires_shadow_stability(self) -> bool {
-        matches!(self, Self::RouteActivation | Self::AutoExecution)
+        matches!(self, Self::RouteActivation | Self::PolicyAutomatic)
     }
 
     #[must_use]
     pub const fn requires_liquidity_feasibility(self) -> bool {
-        matches!(self, Self::AutoExecution)
+        matches!(self, Self::PolicyAutomatic)
     }
 
     #[must_use]
     pub const fn requires_validation_evidence(self) -> bool {
         matches!(
             self,
-            Self::Candidate | Self::RouteActivation | Self::AutoExecution
+            Self::Candidate | Self::RouteActivation | Self::PolicyAutomatic
         )
     }
 
@@ -82,7 +82,7 @@ impl GateIntent {
         match self {
             Self::Candidate => "candidate",
             Self::RouteActivation => "route_activation",
-            Self::AutoExecution => "auto_execution",
+            Self::PolicyAutomatic => "policy_automatic",
         }
     }
 }

@@ -3,24 +3,113 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_account_chain_execution_role"
+)]
+pub enum QpAccountChainExecutionRole {
+    #[sea_orm(string_value = "maker")]
+    Maker,
+    #[sea_orm(string_value = "taker")]
+    Taker,
+    #[sea_orm(string_value = "self_match")]
+    SelfMatch,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_account_execution_association_kind"
+)]
+pub enum QpAccountExecutionAssociationKind {
+    #[sea_orm(string_value = "system_order")]
+    SystemOrder,
+    #[sea_orm(string_value = "recovery_incident")]
+    RecoveryIncident,
+    #[sea_orm(string_value = "opening_inventory")]
+    OpeningInventory,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_account_pause_submission_state"
+)]
+pub enum QpAccountPauseSubmissionState {
+    #[sea_orm(string_value = "prepared")]
+    Prepared,
+    #[sea_orm(string_value = "dispatched")]
+    Dispatched,
+    #[sea_orm(string_value = "ambiguous")]
+    Ambiguous,
+    #[sea_orm(string_value = "confirmed")]
+    Confirmed,
+    #[sea_orm(string_value = "failed")]
+    Failed,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_account_recovery_incident_kind"
+)]
+pub enum QpAccountRecoveryIncidentKind {
+    #[sea_orm(string_value = "unknown_external_execution")]
+    UnknownExternalExecution,
+    #[sea_orm(string_value = "break_glass_restart")]
+    BreakGlassRestart,
+    #[sea_orm(string_value = "opening_inventory")]
+    OpeningInventory,
+    #[sea_orm(string_value = "account_mismatch")]
+    AccountMismatch,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_account_recovery_incident_status"
+)]
+pub enum QpAccountRecoveryIncidentStatus {
+    #[sea_orm(string_value = "open")]
+    Open,
+    #[sea_orm(string_value = "reconciling")]
+    Reconciling,
+    #[sea_orm(string_value = "sealed")]
+    Sealed,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_strategy_position_origin_kind"
+)]
+pub enum QpStrategyPositionOriginKind {
+    #[sea_orm(string_value = "system_intent")]
+    SystemIntent,
+    #[sea_orm(string_value = "account_recovery_incident")]
+    AccountRecoveryIncident,
+    #[sea_orm(string_value = "opening_inventory")]
+    OpeningInventory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_account_source")]
 pub enum QpAccountSource {
     #[sea_orm(string_value = "polymarket")]
     Polymarket,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
-#[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_approval_status")]
-pub enum QpApprovalStatus {
-    #[sea_orm(string_value = "not_required")]
-    NotRequired,
-    #[sea_orm(string_value = "pending")]
-    Pending,
-    #[sea_orm(string_value = "approved")]
-    Approved,
-    #[sea_orm(string_value = "rejected")]
-    Rejected,
-    #[sea_orm(string_value = "expired")]
-    Expired,
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_authorization_kind"
+)]
+pub enum QpAuthorizationKind {
+    #[sea_orm(string_value = "operator_approval")]
+    OperatorApproval,
+    #[sea_orm(string_value = "active_policy")]
+    ActivePolicy,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
@@ -205,8 +294,8 @@ pub enum QpConfigResourceKind {
     ReportSchedule,
     #[sea_orm(string_value = "operations_policy")]
     OperationsPolicy,
-    #[sea_orm(string_value = "execution_automation_policy")]
-    ExecutionAutomationPolicy,
+    #[sea_orm(string_value = "execution_authorization_policy")]
+    ExecutionAuthorizationPolicy,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
@@ -393,20 +482,6 @@ pub enum QpFeeLiquidityRole {
     Taker,
     #[sea_orm(string_value = "maker")]
     Maker,
-}
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
-#[sea_orm(
-    rs_type = "Enum",
-    db_type = "Enum",
-    enum_name = "qp_fee_measurement_stage"
-)]
-pub enum QpFeeMeasurementStage {
-    #[sea_orm(string_value = "prepared_expected")]
-    PreparedExpected,
-    #[sea_orm(string_value = "authenticated_trade_derived")]
-    AuthenticatedTradeDerived,
-    #[sea_orm(string_value = "on_chain_settled")]
-    OnChainSettled,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
@@ -1161,26 +1236,16 @@ pub enum QpOperationOutcome {
     Denied,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
-#[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_order_intent_kind")]
-pub enum QpOrderIntentKind {
-    #[sea_orm(string_value = "buy")]
-    Buy,
-}
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
     enum_name = "qp_order_intent_status"
 )]
 pub enum QpOrderIntentStatus {
-    #[sea_orm(string_value = "draft")]
-    Draft,
-    #[sea_orm(string_value = "pending_approval")]
-    PendingApproval,
-    #[sea_orm(string_value = "approved")]
-    Approved,
-    #[sea_orm(string_value = "approved_by_policy")]
-    ApprovedByPolicy,
+    #[sea_orm(string_value = "pending_authorization")]
+    PendingAuthorization,
+    #[sea_orm(string_value = "authorized")]
+    Authorized,
     #[sea_orm(string_value = "admission_pending")]
     AdmissionPending,
     #[sea_orm(string_value = "admission_rejected")]
@@ -1191,8 +1256,8 @@ pub enum QpOrderIntentStatus {
     PartiallyFilled,
     #[sea_orm(string_value = "filled")]
     Filled,
-    #[sea_orm(string_value = "rejected")]
-    Rejected,
+    #[sea_orm(string_value = "authorization_rejected")]
+    AuthorizationRejected,
     #[sea_orm(string_value = "cancelled")]
     Cancelled,
     #[sea_orm(string_value = "failed")]
@@ -1312,15 +1377,27 @@ pub enum QpPositionLedgerState {
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
-    enum_name = "qp_quant_runtime_mode"
+    enum_name = "qp_entry_authorization_policy"
 )]
-pub enum QpQuantRuntimeMode {
-    #[sea_orm(string_value = "report_only")]
-    ReportOnly,
-    #[sea_orm(string_value = "semi_auto")]
-    SemiAuto,
-    #[sea_orm(string_value = "auto_execution")]
-    AutoExecution,
+pub enum QpEntryAuthorizationPolicy {
+    #[sea_orm(string_value = "operator_approval_required")]
+    OperatorApprovalRequired,
+    #[sea_orm(string_value = "policy_automatic")]
+    PolicyAutomatic,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_execution_authority_ceiling"
+)]
+pub enum QpExecutionAuthorityCeiling {
+    #[sea_orm(string_value = "analysis_only")]
+    AnalysisOnly,
+    #[sea_orm(string_value = "operator_approval")]
+    OperatorApproval,
+    #[sea_orm(string_value = "policy_automatic")]
+    PolicyAutomatic,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
@@ -1595,8 +1672,8 @@ pub enum QpReportTriggerKind {
 pub enum QpResearchEvaluationTrack {
     #[sea_orm(string_value = "research_only")]
     ResearchOnly,
-    #[sea_orm(string_value = "semi_auto_candidate")]
-    SemiAutoCandidate,
+    #[sea_orm(string_value = "execution_candidate")]
+    ExecutionCandidate,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_research_job_kind")]
@@ -1899,10 +1976,10 @@ pub enum QpSettlementWritePolicy {
     Disabled,
     #[sea_orm(string_value = "governed_canary")]
     GovernedCanary,
-    #[sea_orm(string_value = "semi_auto")]
-    SemiAuto,
-    #[sea_orm(string_value = "auto")]
-    Auto,
+    #[sea_orm(string_value = "operator_approval")]
+    OperatorApproval,
+    #[sea_orm(string_value = "policy_automatic")]
+    PolicyAutomatic,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
